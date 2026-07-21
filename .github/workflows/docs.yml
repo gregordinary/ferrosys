@@ -1,0 +1,76 @@
+name: Docs
+
+# Builds one Pages site: the mdbook guide at the root, the rustdoc API reference
+# under /api. Requires the repository's Pages source to be set to "GitHub
+# Actions" (Settings -> Pages).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; let an in-progress deploy finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # 0.5.x is required for `[rust] edition = 2024`.
+  MDBOOK_VERSION: "0.5.4"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show
+
+      - name: Install mdbook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build guide
+        run: mdbook build book   # renders to book/book (default build-dir)
+
+      - name: Build API reference
+        run: cargo doc --no-deps --all-features   # include the `tar` archive source
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Assemble combined site
+        run: |
+          rm -rf site
+          mkdir -p site/api
+          cp -r book/book/. site/
+          cp -r target/doc/. site/api/
+          # /api lands on the crate's module root.
+          printf '<!doctype html><meta http-equiv="refresh" content="0; url=ferrosys/index.html">\n' > site/api/index.html
+          # rustdoc uses underscore paths; keep Jekyll from mangling them.
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

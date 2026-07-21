@@ -1,0 +1,47 @@
+[package]
+name = "ferrosys"
+description = "Pure-Rust, general-purpose ext2/3/4 filesystem implementation (formatter, reader, resize-safe geometry)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["ext2", "ext3", "ext4", "filesystem", "mkfs"]
+categories = ["filesystem", "os"]
+# The crate's front page on a registry. Its example is compiled as a doctest, so what
+# a reader sees there is what the API accepts.
+readme = "README.md"
+documentation = "https://docs.rs/ferrosys"
+
+[features]
+# On by default. Without it the crate root carries only the family-agnostic substrate —
+# the `crc32c` primitive and the `Filesystem` / `detect` selector — and the `ext` module,
+# with the feature model, formatter, reader, and scan taxonomy, is absent.
+default = ["ext"]
+# The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
+# structures, reached through the `ext` module.
+ext = []
+# The tar/PAX archive `Source`. Off by default so the base build carries only
+# `thiserror`; enabling it pulls in the `tar` crate (no default features, so no
+# host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
+# and SCHILY ACL records. The archive source feeds the ext writer, so it enables `ext`.
+tar = ["dep:tar", "ext"]
+
+[dependencies]
+# Typed error enums. Build-time proc-macro only; no runtime footprint.
+thiserror = { workspace = true }
+# The archive `Source`, behind the `tar` feature.
+tar = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Scratch image files for the host-tool validation gates; never shipped.
+tempfile = { workspace = true }
+# Building test archives for the archive-source tests; exercised with `--features tar`.
+tar = { workspace = true }
+# The writer property gate: generates source trees and geometries, and shrinks a
+# failing case to a minimal one. Never shipped.
+proptest = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the archive source on docs.rs.
+all-features = true

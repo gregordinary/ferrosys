@@ -1,0 +1,10 @@
+# Pins a recent stable toolchain so local and CI builds are reproducible and get
+# current diagnostics, lints, and compile-speed improvements. This is the build
+# toolchain, not the support floor: the minimum supported Rust version is
+# declared separately as `rust-version` in Cargo.toml and enforced by its own CI
+# job. Bump this deliberately -- CI denies warnings, so a newer toolchain can
+# introduce a lint that turns a green build red. `rustfmt` and `clippy` back the
+# formatting and lint gates.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

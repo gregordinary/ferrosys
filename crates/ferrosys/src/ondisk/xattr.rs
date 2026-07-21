@@ -1,0 +1,704 @@
+//! Extended attributes (`struct ext4_xattr_*`), in both the in-inode and the
+//! external-block forms.
+//!
+//! An extended attribute is a name/value pair attached to an inode. ext4 stores a
+//! small set of them inline in the inode's extra area and spills the rest to a
+//! dedicated block pointed at by `i_file_acl`. Both forms share the same
+//! [`ext4_xattr_entry`] record and the same value packing: fixed-size entry headers
+//! grow up from a header while values grow down from the end of the region, meeting
+//! in the middle.
+//!
+//! This module is pure: it turns a set of [`Xattr`] pairs into the bytes of an
+//! inline region or a block and parses them back, computing the name/value hash the
+//! block form carries. It allocates nothing and performs no I/O.
+//!
+//! Two layout details are load-bearing and differ between the forms. The value
+//! offset (`e_value_offs`) is measured from the first entry for the inline form and
+//! from the start of the block for the block form. And the per-entry hash
+//! (`e_hash`) is zero for inline entries but is computed for block entries, where
+//! `e2fsck` validates it regardless of whether metadata checksums are enabled. The
+//! block hash (`h_hash`) folds the entry hashes together; the kernel uses it only
+//! as a cache key when deciding whether identical blocks can be shared, so it is
+//! written to the same recipe `e2fsprogs` uses but no checker verifies it.
+
+use super::{ParseError, get_u8, get_u16, get_u32, put_u16, put_u32};
+
+/// The magic identifying an xattr region, in both the inline header and the block
+/// header (`h_magic`).
+pub(crate) const XATTR_MAGIC: u32 = 0xEA02_0000;
+
+/// The inline (in-inode) header: just the 4-byte magic.
+const IBODY_HEADER_LEN: usize = 4;
+/// The external block header (`struct ext4_xattr_header`): magic, refcount, block
+/// count, hash, checksum, and three reserved words.
+const BLOCK_HEADER_LEN: usize = 32;
+/// The fixed part of one entry (`struct ext4_xattr_entry`) before its name.
+const ENTRY_HEADER_LEN: usize = 16;
+
+/// Round `n` up to the 4-byte boundary entries and values are aligned to
+/// (`EXT4_XATTR_PAD`).
+const fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+/// One extended attribute: a fully-qualified name (namespace prefix included, e.g.
+/// `b"security.capability"`) and its raw value bytes.
+///
+/// The name carries its namespace as text; the on-disk form splits a known prefix
+/// into the compact `e_name_index` and stores only the remainder, which this type
+/// hides from callers.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Xattr {
+    /// The attribute's full name, namespace prefix included.
+    pub name: Vec<u8>,
+    /// The attribute's raw value.
+    pub value: Vec<u8>,
+}
+
+/// The namespace prefixes ext4 encodes as an `e_name_index`, longest first so
+/// `system.posix_acl_access` matches before the bare `system.` prefix.
+///
+/// Indices 2 and 3 are whole names, not prefixes: they stand for
+/// `system.posix_acl_access` and `system.posix_acl_default` with an empty stored
+/// name.
+///
+/// The rarely used indices (5 Lustre, 9 encryption, 10 Hurd) are not listed. A name
+/// this crate writes always maps to a listed prefix or to index 0 with its whole self
+/// stored; a foreign attribute carrying an unlisted index reads back by its stored
+/// name without the namespace prefix expanded.
+const PREFIXES: &[(u8, &[u8])] = &[
+    (2, b"system.posix_acl_access"),
+    (3, b"system.posix_acl_default"),
+    (8, b"system.richacl"),
+    (1, b"user."),
+    (7, b"system."),
+    (4, b"trusted."),
+    (6, b"security."),
+];
+
+/// Split a full name into its `e_name_index` and the remainder stored on disk.
+///
+/// A name matching no known prefix uses index 0 and stores its whole self.
+fn split_name(name: &[u8]) -> (u8, &[u8]) {
+    for &(index, prefix) in PREFIXES {
+        // Indices 2, 3, and 8 are exact whole names (no per-attribute suffix);
+        // the others are true prefixes.
+        if matches!(index, 2 | 3 | 8) {
+            if name == prefix {
+                return (index, b"");
+            }
+        } else if let Some(rest) = name.strip_prefix(prefix) {
+            return (index, rest);
+        }
+    }
+    (0, name)
+}
+
+/// Whether an attribute's on-disk name would be empty — a zero-length `e_name_len`.
+///
+/// For the whole-name indices (2, 3, 8: an ACL or richacl attribute *is* its namespace,
+/// with nothing stored after it) an empty stored name is correct. For every other name
+/// it is an attribute with no name at all: under index 0 the entry's header is all
+/// zeros, which is exactly the end-of-list terminator that stops the parse and hides
+/// every attribute after it; under any other index it is an entry no kernel handler can
+/// address, since the syscall boundary needs a name past the namespace prefix.
+pub(crate) fn has_empty_name(name: &[u8]) -> bool {
+    let (index, stored) = split_name(name);
+    stored.is_empty() && !matches!(index, 2 | 3 | 8)
+}
+
+/// Rejoin an `e_name_index` and stored name into the full name.
+fn join_name(index: u8, stored: &[u8]) -> Vec<u8> {
+    for &(i, prefix) in PREFIXES {
+        if i == index {
+            let mut out = prefix.to_vec();
+            out.extend_from_slice(stored);
+            return out;
+        }
+    }
+    stored.to_vec()
+}
+
+/// Hash one attribute's name and value (`ext4_xattr_hash_entry`).
+///
+/// The name bytes (the stored remainder, not the namespace prefix) are folded one
+/// byte at a time, then the value is folded as little-endian 32-bit words over its
+/// 4-byte-padded length. This is the hash `e2fsck` recomputes for every block
+/// entry, so the shifts and word count match `e2fsprogs` exactly.
+///
+/// `signed` selects how a name byte at or above `0x80` is folded: sign-extended, as the
+/// host `char` `ext2fs_ext_attr_hash_entry` reads (signed on x86, unsigned on arm64), or
+/// zero-extended. It follows the same choice the directory-name hashes take, so one
+/// signedness governs every name hash in the image. The two agree for an ASCII name.
+fn hash_entry(name: &[u8], value: &[u8], signed: bool) -> u32 {
+    const NAME_HASH_SHIFT: u32 = 5;
+    const VALUE_HASH_SHIFT: u32 = 16;
+    let mut hash: u32 = 0;
+    for &b in name {
+        let nb = if signed { b as i8 as u32 } else { u32::from(b) };
+        hash = (hash << NAME_HASH_SHIFT) ^ (hash >> (32 - NAME_HASH_SHIFT)) ^ nb;
+    }
+    // The value is hashed over its padded length: whole 4-byte little-endian words,
+    // the final word zero-filled past the value's end.
+    let words = value.len().div_ceil(4);
+    for i in 0..words {
+        let start = i * 4;
+        let mut word = [0u8; 4];
+        let end = (start + 4).min(value.len());
+        word[..end - start].copy_from_slice(&value[start..end]);
+        let v = u32::from_le_bytes(word);
+        hash = (hash << VALUE_HASH_SHIFT) ^ (hash >> (32 - VALUE_HASH_SHIFT)) ^ v;
+    }
+    hash
+}
+
+/// Fold the per-entry hashes into the block hash (`ext4_xattr_rehash`). A zero
+/// entry hash forces the block hash to zero, marking the block unshareable, exactly
+/// as `e2fsprogs` does.
+fn block_hash(entry_hashes: &[u32]) -> u32 {
+    const BLOCK_HASH_SHIFT: u32 = 16;
+    let mut hash: u32 = 0;
+    for &e in entry_hashes {
+        if e == 0 {
+            return 0;
+        }
+        hash = (hash << BLOCK_HASH_SHIFT) ^ (hash >> (32 - BLOCK_HASH_SHIFT)) ^ e;
+    }
+    hash
+}
+
+/// Storage an attribute set occupies past its header: the entry records (each
+/// header-plus-name padded to 4 bytes), the 4-byte end-of-list marker, and the
+/// padded values.
+fn packed_len(attrs: &[Xattr]) -> usize {
+    // Four bytes for the zero entry that terminates the list.
+    let mut total = 4;
+    for x in attrs {
+        let (_, stored) = split_name(&x.name);
+        total += align4(ENTRY_HEADER_LEN + stored.len());
+        total += align4(x.value.len());
+    }
+    total
+}
+
+/// The number of bytes an external xattr block needs to hold `attrs`: the 32-byte
+/// header plus the packed entries and values. Used to reject a set too large to
+/// store in one block.
+pub(crate) fn block_len(attrs: &[Xattr]) -> usize {
+    BLOCK_HEADER_LEN + packed_len(attrs)
+}
+
+/// The storage one attribute occupies in either region: its entry record
+/// (header plus stored name, padded) and its padded value.
+fn attr_len(x: &Xattr) -> usize {
+    let (_, stored) = split_name(&x.name);
+    align4(ENTRY_HEADER_LEN + stored.len()) + align4(x.value.len())
+}
+
+/// Partition `attrs` between the inode's inline region of `region_len` bytes and an
+/// external block, returning `(inline, spilled)`.
+///
+/// Placement is deterministic in the set: the attributes are taken in the canonical
+/// on-disk order ([`sorted`]) and each is placed inline when it still fits the
+/// region's remaining space — the region less its 4-byte magic and the 4-byte
+/// terminating entry — and spilled to the block otherwise. A later, smaller
+/// attribute may therefore go inline after a larger one has spilled. The split is
+/// exhaustive: every attribute lands in one of the two vectors, and whether the
+/// spilled side fits a block is the caller's check, via [`block_len`].
+pub(crate) fn split_for_storage(attrs: &[Xattr], region_len: usize) -> (Vec<Xattr>, Vec<Xattr>) {
+    let mut inline_free = region_len.saturating_sub(IBODY_HEADER_LEN + 4);
+    let mut inline = Vec::new();
+    let mut spilled = Vec::new();
+    for x in sorted(attrs) {
+        let need = attr_len(&x);
+        if need <= inline_free {
+            inline_free -= need;
+            inline.push(x);
+        } else {
+            spilled.push(x);
+        }
+    }
+    (inline, spilled)
+}
+
+/// The longest stored name (the remainder after the namespace prefix) across
+/// `attrs`, which must fit the single-byte `e_name_len`.
+pub(crate) fn longest_stored_name(attrs: &[Xattr]) -> usize {
+    attrs
+        .iter()
+        .map(|x| split_name(&x.name).1.len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Sort attributes by `(name_index, stored-name length, stored name)`, the order
+/// the block form requires and a deterministic order for the inline form.
+fn sorted(attrs: &[Xattr]) -> Vec<Xattr> {
+    let mut v = attrs.to_vec();
+    v.sort_by(|a, b| {
+        let (ia, na) = split_name(&a.name);
+        let (ib, nb) = split_name(&b.name);
+        ia.cmp(&ib).then(na.len().cmp(&nb.len())).then(na.cmp(nb))
+    });
+    v
+}
+
+/// Encode `attrs` into the inline region of `region_len` bytes that follows the
+/// inode's extra fields, or `None` if they do not fit and must spill to a block.
+///
+/// The returned buffer is exactly `region_len` bytes: the 4-byte magic, the entry
+/// records growing up from offset 4, and the values growing down from the end.
+/// Inline entries carry a zero `e_hash` and their `e_value_offs` is measured from
+/// the first entry (offset 4).
+pub(crate) fn encode_inline(attrs: &[Xattr], region_len: usize) -> Option<Vec<u8>> {
+    if attrs.is_empty() {
+        return Some(vec![0u8; region_len]);
+    }
+    let attrs = sorted(attrs);
+    if IBODY_HEADER_LEN + packed_len(&attrs) > region_len {
+        return None;
+    }
+    let mut buf = vec![0u8; region_len];
+    put_u32(&mut buf, 0, XATTR_MAGIC);
+    // Values grow down from the region end; e_value_offs is relative to the first
+    // entry, which begins right after the 4-byte header.
+    let base = IBODY_HEADER_LEN;
+    let mut entry_off = base;
+    let mut value_off = region_len;
+    for x in &attrs {
+        let (index, stored) = split_name(&x.name);
+        value_off -= align4(x.value.len());
+        buf[value_off..value_off + x.value.len()].copy_from_slice(&x.value);
+        // An empty value occupies no bytes, so it records offset 0 rather than the
+        // cursor's position, matching how `mke2fs` writes `e_value_offs` for one.
+        let value_offs = if x.value.is_empty() {
+            0
+        } else {
+            value_off - base
+        };
+        write_entry(
+            &mut buf,
+            entry_off,
+            index,
+            stored,
+            x.value.len(),
+            value_offs,
+            0,
+        );
+        entry_off += align4(ENTRY_HEADER_LEN + stored.len());
+    }
+    // Bytes [entry_off, value_off) are already zero, terminating the entry list.
+    Some(buf)
+}
+
+/// Encode `attrs` into a full external xattr block of `block_size` bytes.
+///
+/// The block carries the 32-byte header (refcount 1, one block, the folded block
+/// hash, a zero checksum written through the checksum seam elsewhere), sorted entry
+/// records with their computed `e_hash`, and the values packed from the block end.
+/// `e_value_offs` is measured from the start of the block.
+///
+/// The entry records grow up from the header while the values grow down from the end,
+/// so the caller must ensure the attributes fit: [`xattr_block_len`] gives the bytes a
+/// set needs, and a set exceeding `block_size` is a contract violation the debug build
+/// catches.
+///
+/// `signed` selects the name-byte signedness the per-entry `e_hash` folds with, matching
+/// the image's directory-name-hash choice; see [`hash_entry`].
+pub(crate) fn encode_block(attrs: &[Xattr], block_size: usize, signed: bool) -> Vec<u8> {
+    let attrs = sorted(attrs);
+    let mut buf = vec![0u8; block_size];
+    let mut entry_off = BLOCK_HEADER_LEN;
+    let mut value_off = block_size;
+    let mut hashes = Vec::with_capacity(attrs.len());
+    for x in &attrs {
+        let (index, stored) = split_name(&x.name);
+        value_off -= align4(x.value.len());
+        buf[value_off..value_off + x.value.len()].copy_from_slice(&x.value);
+        let e_hash = hash_entry(stored, &x.value, signed);
+        hashes.push(e_hash);
+        // Block value offsets are absolute from the block start; an empty value records
+        // offset 0 rather than the cursor's position, as `mke2fs` writes it.
+        let value_offs = if x.value.is_empty() { 0 } else { value_off };
+        write_entry(
+            &mut buf,
+            entry_off,
+            index,
+            stored,
+            x.value.len(),
+            value_offs,
+            e_hash,
+        );
+        entry_off += align4(ENTRY_HEADER_LEN + stored.len());
+        // The entry records and the values must not have crossed, or one has silently
+        // overwritten the other; the terminating zero entry needs its four bytes too.
+        debug_assert!(
+            entry_off + 4 <= value_off,
+            "xattr entries and values overflow the block"
+        );
+    }
+    put_u32(&mut buf, 0, XATTR_MAGIC);
+    put_u32(&mut buf, 4, 1); // h_refcount: this inode alone
+    put_u32(&mut buf, 8, 1); // h_blocks: one block
+    put_u32(&mut buf, 12, block_hash(&hashes));
+    // h_checksum (offset 16) stays zero: written through the checksum seam only
+    // when metadata checksums are on.
+    buf
+}
+
+/// Write one `ext4_xattr_entry` record: the header at `off` and the stored name
+/// after it.
+fn write_entry(
+    buf: &mut [u8],
+    off: usize,
+    name_index: u8,
+    stored: &[u8],
+    value_size: usize,
+    value_offs: usize,
+    e_hash: u32,
+) {
+    // The stored name length is one byte on disk; the model rejects names past 255, so
+    // a longer one here is a contract violation rather than a value to truncate.
+    debug_assert!(
+        stored.len() <= 255,
+        "an xattr stored name is at most 255 bytes"
+    );
+    buf[off] = stored.len() as u8;
+    buf[off + 1] = name_index;
+    put_u16(buf, off + 2, value_offs as u16);
+    put_u32(buf, off + 4, 0); // e_value_inum: value is in this region
+    put_u32(buf, off + 8, value_size as u32);
+    put_u32(buf, off + 12, e_hash);
+    buf[off + ENTRY_HEADER_LEN..off + ENTRY_HEADER_LEN + stored.len()].copy_from_slice(stored);
+}
+
+/// Parse the inline xattr region (the bytes after the inode's extra fields) back
+/// into attributes. An absent magic means the inode carries no inline attributes.
+///
+/// # Errors
+///
+/// [`ParseError`] if an entry or value reference runs outside the region.
+pub(crate) fn parse_inline(region: &[u8]) -> Result<Vec<Xattr>, ParseError> {
+    if region.len() < IBODY_HEADER_LEN || get_u32(region, 0) != XATTR_MAGIC {
+        return Ok(Vec::new());
+    }
+    parse_entries(region, IBODY_HEADER_LEN, IBODY_HEADER_LEN)
+}
+
+/// Parse an external xattr block back into attributes. An absent magic yields no
+/// attributes.
+///
+/// # Errors
+///
+/// [`ParseError`] if an entry or value reference runs outside the block.
+pub(crate) fn parse_block(block: &[u8]) -> Result<Vec<Xattr>, ParseError> {
+    if block.len() < BLOCK_HEADER_LEN || get_u32(block, 0) != XATTR_MAGIC {
+        return Ok(Vec::new());
+    }
+    parse_entries(block, BLOCK_HEADER_LEN, 0)
+}
+
+/// Walk the entry list starting at `first_entry`, resolving each value at
+/// `value_base + e_value_offs`. The list ends at an all-zero entry header — its
+/// name length, name index, and value offset all zero. A zero name length alone is
+/// *not* the end: an attribute whose whole name is its namespace prefix (an ACL,
+/// stored under name index 2 or 3) has an empty stored name and so a zero name
+/// length, while its non-zero name index keeps its header word non-zero.
+fn parse_entries(
+    buf: &[u8],
+    first_entry: usize,
+    value_base: usize,
+) -> Result<Vec<Xattr>, ParseError> {
+    let mut out = Vec::new();
+    let mut off = first_entry;
+    loop {
+        if off + ENTRY_HEADER_LEN > buf.len() {
+            return Err(ParseError::TooShort {
+                structure: "XattrEntry",
+                need: off + ENTRY_HEADER_LEN,
+                got: buf.len(),
+            });
+        }
+        if get_u32(buf, off) == 0 {
+            break; // the all-zero entry header ends the list
+        }
+        let name_len = get_u8(buf, off) as usize;
+        let name_index = get_u8(buf, off + 1);
+        let value_offs = get_u16(buf, off + 2) as usize;
+        let value_inum = get_u32(buf, off + 4);
+        let value_size = get_u32(buf, off + 8) as usize;
+        let name_end = off + ENTRY_HEADER_LEN + name_len;
+        let stored = buf
+            .get(off + ENTRY_HEADER_LEN..name_end)
+            .ok_or(ParseError::TooShort {
+                structure: "XattrName",
+                need: name_end,
+                got: buf.len(),
+            })?;
+        // An attribute whose value lives in a separate inode (`e_value_inum != 0`, the
+        // `ea_inode` form) keeps no value in this region. This crate never writes that
+        // form and cannot resolve the external inode from these bytes, so its value reads
+        // back empty rather than as the unrelated bytes at `value_base + e_value_offs`
+        // (which a large `e_value_size` could also carry past the region). The name is
+        // preserved either way.
+        let value = if value_inum != 0 {
+            Vec::new()
+        } else {
+            let vstart = value_base + value_offs;
+            buf.get(vstart..vstart + value_size)
+                .ok_or(ParseError::InvalidField {
+                    structure: "XattrEntry",
+                    field: "e_value_offs",
+                    value: value_offs as u64,
+                })?
+                .to_vec()
+        };
+        out.push(Xattr {
+            name: join_name(name_index, stored),
+            value,
+        });
+        off = name_end.next_multiple_of(4);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attrs() -> Vec<Xattr> {
+        vec![
+            Xattr {
+                name: b"security.capability".to_vec(),
+                value: vec![0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00],
+            },
+            Xattr {
+                name: b"user.comment".to_vec(),
+                value: b"hello".to_vec(),
+            },
+        ]
+    }
+
+    #[test]
+    fn name_index_split_and_join_round_trip() {
+        for name in [
+            &b"security.capability"[..],
+            b"user.comment",
+            b"system.posix_acl_access",
+            b"system.posix_acl_default",
+            b"trusted.overlay.opaque",
+            b"btrfs.something", // no known prefix -> index 0
+        ] {
+            let (index, stored) = split_name(name);
+            assert_eq!(
+                join_name(index, stored),
+                name,
+                "{name:?} did not round-trip"
+            );
+        }
+        assert_eq!(split_name(b"security.capability").0, 6);
+        assert_eq!(split_name(b"system.posix_acl_access"), (2, &b""[..]));
+        assert_eq!(split_name(b"nope").0, 0);
+    }
+
+    #[test]
+    fn inline_round_trips() {
+        let region_len = 96; // a 256-byte inode with i_extra_isize = 32
+        let region = encode_inline(&attrs(), region_len).expect("fits inline");
+        assert_eq!(region.len(), region_len);
+        assert_eq!(get_u32(&region, 0), XATTR_MAGIC);
+        let back = parse_inline(&region).unwrap();
+        // Order is normalized on encode; compare as sets.
+        assert_eq!(back.len(), 2);
+        for a in attrs() {
+            assert!(back.contains(&a), "missing {a:?}");
+        }
+    }
+
+    #[test]
+    fn inline_returns_none_when_it_does_not_fit() {
+        let big = vec![Xattr {
+            name: b"user.big".to_vec(),
+            value: vec![0x55; 200],
+        }];
+        assert!(encode_inline(&big, 96).is_none());
+        // An empty set always fits and yields a zeroed region.
+        assert_eq!(encode_inline(&[], 96), Some(vec![0u8; 96]));
+    }
+
+    #[test]
+    fn an_empty_value_records_offset_zero() {
+        // `mke2fs` writes `e_value_offs = 0` for a zero-length value, not the value
+        // cursor's position. `e_value_offs` sits two bytes into the entry header, and the
+        // sole entry begins right after the region header.
+        let attrs = vec![Xattr {
+            name: b"user.empty".to_vec(),
+            value: Vec::new(),
+        }];
+
+        let block = encode_block(&attrs, 4096, false);
+        assert_eq!(
+            get_u16(&block, BLOCK_HEADER_LEN + 2),
+            0,
+            "block: an empty value records offset 0"
+        );
+        assert_eq!(parse_block(&block).unwrap(), attrs, "block round-trips");
+
+        let region = encode_inline(&attrs, 96).expect("fits inline");
+        assert_eq!(
+            get_u16(&region, IBODY_HEADER_LEN + 2),
+            0,
+            "inline: an empty value records offset 0"
+        );
+        assert_eq!(parse_inline(&region).unwrap(), attrs, "inline round-trips");
+    }
+
+    #[test]
+    fn block_round_trips_with_a_stable_nonzero_hash() {
+        let block = encode_block(&attrs(), 4096, false);
+        assert_eq!(get_u32(&block, 0), XATTR_MAGIC);
+        assert_eq!(get_u32(&block, 4), 1, "refcount");
+        assert_eq!(get_u32(&block, 8), 1, "blocks");
+        let h = get_u32(&block, 12);
+        assert_ne!(h, 0, "block hash is set");
+        // Deterministic: the same input hashes the same.
+        assert_eq!(get_u32(&encode_block(&attrs(), 4096, false), 12), h);
+        let back = parse_block(&block).unwrap();
+        assert_eq!(back.len(), 2);
+        for a in attrs() {
+            assert!(back.contains(&a), "missing {a:?}");
+        }
+    }
+
+    #[test]
+    fn empty_value_and_empty_name_hash_to_defined_values() {
+        // An empty name and value fold to zero (no bytes, no words).
+        assert_eq!(hash_entry(b"", b"", false), 0);
+        // A value shorter than a word is zero-padded, not skipped.
+        assert_ne!(hash_entry(b"x", b"a", false), hash_entry(b"x", b"", false));
+    }
+
+    #[test]
+    fn a_name_hash_follows_the_signedness_only_for_high_bytes() {
+        // The name-hash signedness follows the image's directory-hash choice. An ASCII
+        // name folds the same either way; a byte at or above 0x80 sign-extends under
+        // Signed, so the two diverge there, matching how `mke2fs` folds a host `char`.
+        assert_eq!(
+            hash_entry(b"user", b"v", true),
+            hash_entry(b"user", b"v", false),
+            "an ASCII name is identical under either signedness"
+        );
+        assert_ne!(
+            hash_entry(b"\xff", b"v", true),
+            hash_entry(b"\xff", b"v", false),
+            "a high name byte sign-extends under Signed and diverges"
+        );
+    }
+
+    #[test]
+    fn the_split_places_first_fit_in_canonical_order() {
+        // Region 96 leaves 88 free bytes past the magic and the terminator. The big
+        // value cannot fit them, but the smaller attribute after it still can: the
+        // split is first-fit, not a prefix cut at the first spill.
+        let attrs = vec![
+            Xattr {
+                name: b"user.big".to_vec(),
+                value: vec![0x55; 200],
+            },
+            Xattr {
+                name: b"user.tiny".to_vec(),
+                value: vec![0x66; 4],
+            },
+        ];
+        let (inline, spilled) = split_for_storage(&attrs, 96);
+        assert_eq!(inline.len(), 1);
+        assert_eq!(inline[0].name, b"user.tiny");
+        assert_eq!(spilled.len(), 1);
+        assert_eq!(spilled[0].name, b"user.big");
+        // An empty set splits into two empty sides.
+        let (inline, spilled) = split_for_storage(&[], 96);
+        assert!(inline.is_empty() && spilled.is_empty());
+    }
+
+    #[test]
+    fn the_split_capacity_counts_the_magic_and_the_terminator() {
+        // A 96-byte region holds 88 bytes of entries and values: 4 for the magic, 4
+        // for the terminating zero entry. `user.x` stores a one-byte name, so its
+        // entry record pads to 20 bytes, leaving exactly 68 for a value.
+        let attr = |len| {
+            vec![Xattr {
+                name: b"user.x".to_vec(),
+                value: vec![0x77; len],
+            }]
+        };
+        let exact = split_for_storage(&attr(68), 96);
+        assert!(exact.1.is_empty(), "an exact fill stays inline");
+        // The split and the encoder must agree on the arithmetic.
+        assert!(encode_inline(&exact.0, 96).is_some());
+        let over = split_for_storage(&attr(69), 96);
+        assert!(over.0.is_empty(), "one value byte more spills");
+        assert_eq!(over.1.len(), 1);
+    }
+
+    #[test]
+    fn parse_ignores_a_region_without_magic() {
+        assert!(parse_inline(&[0u8; 96]).unwrap().is_empty());
+        assert!(parse_block(&[0u8; 4096]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_external_value_inode_entry_reads_an_empty_value_not_garbage() {
+        // A foreign `ea_inode` attribute keeps its value in a separate inode: e_value_inum
+        // is non-zero and e_value_size can be large. Its value must read back empty with
+        // the name preserved — never the unrelated bytes at e_value_offs, and never a
+        // parse failure from a declared size larger than the region.
+        let mut block = vec![0u8; 4096];
+        put_u32(&mut block, 0, XATTR_MAGIC);
+        let off = BLOCK_HEADER_LEN;
+        block[off] = 4; // e_name_len: "test"
+        block[off + 1] = 1; // e_name_index: user
+        put_u16(&mut block, off + 2, 0); // e_value_offs
+        put_u32(&mut block, off + 4, 42); // e_value_inum: value lives in inode 42
+        put_u32(&mut block, off + 8, 1_000_000); // e_value_size: larger than the block
+        block[off + ENTRY_HEADER_LEN..off + ENTRY_HEADER_LEN + 4].copy_from_slice(b"test");
+
+        let attrs = parse_block(&block).expect("an ea_inode entry does not fail the parse");
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].name, b"user.test");
+        assert!(
+            attrs[0].value.is_empty(),
+            "the external value is not read as inline bytes"
+        );
+    }
+
+    #[test]
+    fn empty_stored_name_attributes_round_trip() {
+        // system.posix_acl_access and _default map to name indices 2 and 3 with an
+        // empty stored name, so their entry header has a zero name length. That must
+        // not be mistaken for the end-of-list marker, which is an all-zero header.
+        let attrs = vec![
+            Xattr {
+                name: b"system.posix_acl_access".to_vec(),
+                value: vec![0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x07, 0x00],
+            },
+            Xattr {
+                name: b"security.selinux".to_vec(),
+                value: b"unconfined_u:object_r:etc_t:s0\0".to_vec(),
+            },
+        ];
+        let region = encode_inline(&attrs, 96).expect("fits inline");
+        let back = parse_inline(&region).unwrap();
+        assert_eq!(
+            back.len(),
+            2,
+            "the empty-named ACL entry is not the terminator"
+        );
+        assert!(back.contains(&attrs[0]));
+        assert!(back.contains(&attrs[1]));
+        // Same through the block form.
+        let block = encode_block(&attrs, 4096, false);
+        let back = parse_block(&block).unwrap();
+        assert_eq!(back.len(), 2);
+        assert!(back.contains(&attrs[0]));
+    }
+}

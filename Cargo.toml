@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/ferrosys-cli", "crates/ferrosys"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Minimum supported Rust version: the floor a consumer must have. Development
+# builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
+# checks the crate still builds on this floor, so dev on the newer pin cannot
+# silently raise it.
+rust-version = "1.88"
+# Permissive dual-license, the Rust-ecosystem norm for a library meant to be
+# depended on widely.
+license = "MIT OR Apache-2.0"
+# Both crates come from one repository, so the URL is declared once here and
+# inherited. A registry links it from every crate's page.
+repository = "https://github.com/gregordinary/ferrosys"
+
+[workspace.dependencies]
+# Versions are pinned here; a crate lists one in its own [dependencies] only when
+# a module actually uses it.
+thiserror = "2"
+# default-features off: archive parsing (incl. PAX xattrs), no host-side xattr writes.
+tar = { version = "0.4", default-features = false }
+tempfile = "3"
+proptest = "1"
+# The version is required alongside the path so `cargo publish` accepts the
+# dependency: a published crate cannot carry a path-only dependency. At `0.x` the
+# minor is the breaking axis, so `"0.1"` resolves `>=0.1.0, <0.2.0` — the published
+# `ferrosys` a released `ferrosys-cli` builds against.
+ferrosys = { path = "crates/ferrosys", version = "0.1" }

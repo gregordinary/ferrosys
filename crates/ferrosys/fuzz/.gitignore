@@ -1,0 +1,12 @@
+target/
+# The fuzzer's working corpus: libFuzzer rewrites and grows it on every run, so it is a
+# build artifact, not a source. The committed inputs live in `seeds/`, which a run given
+# `corpus/<target>` first reads without modifying.
+corpus/
+artifacts/
+coverage/
+# Only the curated `.img` seeds are sources. A run mistakenly pointed at `seeds/` as its
+# working corpus scatters sha1-named discoveries there; those are artifacts and must not
+# be committable.
+seeds/*/*
+!seeds/*/*.img

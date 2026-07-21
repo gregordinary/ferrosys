@@ -1,0 +1,32 @@
+# Fuzz targets for the reader, built and run with cargo-fuzz on a nightly
+# toolchain. This is a standalone package with its own `[workspace]`, so the
+# crate's ordinary build never compiles it.
+[package]
+name = "ferrosys-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ferrosys = { path = ".." }
+
+[[bin]]
+name = "reader_scan"
+path = "fuzz_targets/reader_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reader_inspect"
+path = "fuzz_targets/reader_inspect.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the crate's workspace: cargo-fuzz builds this package on its own.
+[workspace]

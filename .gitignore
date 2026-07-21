@@ -1,0 +1,5 @@
+/target
+# mdbook render output (book/ is the source; book/book/ is generated)
+/book/book
+# Assembled Pages site (mdbook guide + rustdoc), produced only in CI
+/site

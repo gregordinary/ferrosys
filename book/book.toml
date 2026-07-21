@@ -1,0 +1,20 @@
+[book]
+title = "ferrosys"
+description = "A pure-Rust, rootless, cross-platform library for building and reading ext2/3/4 images deterministically."
+authors = ["The ferrosys Authors"]
+language = "en"
+src = "src"
+
+# `mdbook test` compiles the guide's Rust code blocks against the crate, so the
+# examples stay in step with the API. The edition here matches the crate's.
+[rust]
+edition = "2024"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/gregordinary/ferrosys"
+
+[output.html.playground]
+# Examples link against the crate and cannot run in the browser sandbox.
+runnable = false

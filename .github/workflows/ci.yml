@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test / doc
+    runs-on: ubuntu-latest
+    # Warnings are errors here (style guide: fmt/clippy/rustdoc clean). Scoped to
+    # this job so the MSRV build check is not failed by version-specific lints.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and the rustfmt/clippy components;
+      # rustup installs them on first use.
+      - name: Toolchain
+        run: rustup show
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # The host-tool validation gates (e2fsck, the dumpe2fs differential oracle,
+      # the resize2fs matrix) treat e2fsprogs as ground truth, and its geometry
+      # defaults and e2fsck strictness are version- and build-dependent. Pin the exact
+      # upstream release instead of the runner's rolling package: build it from a
+      # sha256-pinned source tarball (cached across runs) and read the pinned
+      # ci/mke2fs.conf, so a distro rebuild cannot re-baseline the gates silently.
+      - name: Cache pinned e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/e2fsprogs
+          key: e2fsprogs-${{ hashFiles('ci/build-e2fsprogs.sh') }}
+
+      - name: Build e2fsprogs, put it on PATH, pin its config, assert the version
+        run: |
+          bash ci/build-e2fsprogs.sh
+          # Derive the prefix from the script, so the version lives in one place.
+          prefix="$(bash ci/build-e2fsprogs.sh --print-prefix)"
+          echo "$prefix/sbin" >> "$GITHUB_PATH"
+          echo "MKE2FS_CONFIG=$PWD/ci/mke2fs.conf" >> "$GITHUB_ENV"
+          # Assert every tool a gate uses reports the pinned version, not mke2fs alone.
+          for t in mke2fs e2fsck dumpe2fs resize2fs debugfs; do
+            "$prefix/sbin/$t" -V 2>&1 | grep -qF "$t 1.47.0 " \
+              || { echo "::error::e2fsprogs pin mismatch for $t"; exit 1; }
+          done
+
+      # The archive round-trip gate cross-checks a surviving xattr with `getfattr`
+      # (the `attr` package), which the require-env below turns from a soft skip into a
+      # hard requirement. Install it so that gate actually runs rather than failing as
+      # a missing tool.
+      - name: Install attr for the getfattr xattr gate
+        run: sudo apt-get update && sudo apt-get install -y attr
+
+      # `--all-features` builds the `tar` archive source, so its PAX/xattr/ACL
+      # surface is tested, linted, and doc-checked rather than shipping unexercised.
+      # `--release` because the host-tool gates build multi-gigabyte images and the
+      # >2^32-block tier streams a 9 TiB filesystem: ~13 s optimized, ~3 min
+      # unoptimized. Correctness is identical either way; this is CI wall-clock.
+      - name: Test
+        run: cargo test --workspace --all-features --release
+        env:
+          FERROSYS_REQUIRE_HOST_TOOLS: "1"
+
+      # The CLI depends on ferrosys with the `tar` feature on, so every build that
+      # includes it has that feature enabled. Nothing else would then ever build the
+      # library on its own, and the claim that its base build carries only `thiserror`
+      # would stop being checked. This checks it.
+      - name: Base library builds without the archive source
+        run: cargo check -p ferrosys --no-default-features
+
+      # The fuzz package sets its own `[workspace]`, so `cargo test --workspace` never
+      # compiles it: a target that stopped matching the reader's API would rot silently
+      # and the never-panic contract would go unfuzzed without anything failing. Type-check
+      # it here. This needs no nightly and no sanitizer — running the fuzzer does, but
+      # keeping the targets compiling is what a per-commit gate can guarantee.
+      - name: Fuzz targets still type-check
+        run: cargo check --manifest-path crates/ferrosys/fuzz/Cargo.toml --all-targets
+
+      # A seed that no longer opens is a seed that fuzzes nothing, and the corpus is the
+      # one part of the fuzzing setup with no compiler to catch its drift. `inspect`
+      # exits 0 or 4 (a bad image is still a described image); anything else — an
+      # operational failure, a usage error, a panic — means the seed is unreadable.
+      - name: Fuzz seeds are still readable images
+        run: |
+          cargo build -p ferrosys-cli
+          for seed in crates/ferrosys/fuzz/seeds/*/*.img; do
+            # `inspect` exits 4 on a readable-but-unsound image, which this gate
+            # accepts. The step runs under `set -e`, so capture the status through
+            # `|| status=$?` -- a bare call that returned 4 would abort the step
+            # before the `case` could accept it.
+            status=0
+            ./target/debug/ferrosys inspect "$seed" > /dev/null 2>&1 || status=$?
+            case $status in
+              0|4) ;;
+              *) echo "::error::seed $seed is not a readable image (exit $status)"; exit 1 ;;
+            esac
+          done
+
+      - name: Rustdoc
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  msrv:
+    name: MSRV 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Verify the crate still builds on the declared floor (Cargo.toml
+      # `rust-version`). Keep this toolchain version in lockstep with that field.
+      # The explicit `+toolchain` selector overrides rust-toolchain.toml.
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+
+      - name: cargo check on MSRV
+        run: cargo +1.88.0 check --all-targets --all-features
+
+  book:
+    name: mdbook build + test
+    runs-on: ubuntu-latest
+    env:
+      # Pinned; bump deliberately. 0.5.x is required for `[rust] edition = 2024`.
+      MDBOOK_VERSION: "0.5.4"
+    steps:
+      - uses: actions/checkout@v4
+
+      # `mdbook test` spawns `rustdoc` from a temporary directory, where rustup's
+      # directory-based override does not apply — so it would pick the runner's default
+      # toolchain while cargo builds the crate with the pinned one, and every guide
+      # example would fail to link against a crate "compiled by an incompatible version
+      # of rustc". Naming the toolchain explicitly for the whole job settles it, and
+      # reading the name out of rust-toolchain.toml keeps the pin in one place.
+      - name: Toolchain
+        run: |
+          rustup show
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$channel" || { echo "::error::no channel in rust-toolchain.toml"; exit 1; }
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+
+      - name: Install mdbook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The guide's Rust code blocks link against the crate, so build it first.
+      - name: Build crate
+        run: cargo build
+
+      - name: Build book
+        run: mdbook build book
+
+      # Each Rust block opens with a hidden `extern crate ferrosys;`: rustdoc links a
+      # crate it finds through `-L` only when a doctest names it that way, and mdbook
+      # passes no `--extern`. Without the line the examples compile against nothing and
+      # this gate passes while verifying nothing.
+      - name: Test guide examples against the crate
+        run: mdbook test book -L target/debug/deps
