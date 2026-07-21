@@ -5,8 +5,8 @@
 //! in the URI dialect a SARIF consumer requires.
 //!
 //! This module is pure and has no calendar of its own: [`iso8601`] computes a civil date
-//! from a count of seconds arithmetically, so a timestamp renders the same everywhere,
-//! with no clock, no time zone, and no locale. Every time this tool prints is UTC.
+//! from a count of seconds arithmetically, so a timestamp renders the same everywhere.
+//! Every time this tool prints is UTC, computed rather than looked up.
 
 use std::fmt::Write as _;
 use std::path::Path;

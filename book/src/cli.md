@@ -16,15 +16,15 @@ Install it from the workspace:
 $ cargo install --path crates/ferrosys-cli
 ```
 
-## The tool reads no clock and no random source
+## Everything the image depends on is an input
 
 Everything an image's bytes depend on is an input you supply, so two runs given the same
-inputs write the same image, byte for byte. There is no reproducibility mode to switch
-on, because there is no other mode.
+inputs write the same image, byte for byte. Reproducibility is the only mode the tool
+has; it is always on.
 
 That has one consequence worth stating plainly: `--uuid` is required and `--time` is
-required. The tool mints no UUID, so pipe in one from a tool that does — of whatever
-version you like — and pass the time explicitly or set `SOURCE_DATE_EPOCH`:
+required. The tool takes its UUID as an input, so pipe one in from a tool that mints them
+— of whatever version you like — and pass the time explicitly or set `SOURCE_DATE_EPOCH`:
 
 ```console
 $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 rootfs.img
@@ -32,7 +32,7 @@ $ SOURCE_DATE_EPOCH=1700000000 ferrosys format --size 512M --uuid "$(uuidgen)" r
 ```
 
 The directory-hash seed defaults to the UUID's bytes, so it too is an identity you
-supplied rather than one the tool invented. `--hash-seed` overrides it.
+supplied. `--hash-seed` overrides it.
 
 ## Streams and exit codes
 

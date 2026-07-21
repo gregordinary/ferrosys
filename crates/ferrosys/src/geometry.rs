@@ -5,7 +5,7 @@
 //! disk blocks. It decides every placement an external checker verifies: how many
 //! block groups there are, which groups carry superblock and descriptor backups
 //! (the `sparse_super` rule), how many group-descriptor-table blocks to reserve
-//! for growth (sized to the grow target, not a fixed multiplier), how the block
+//! for growth (sized to the grow target), how the block
 //! bitmaps and inode tables of a flex block group pack into its first group, how
 //! dense the inodes are, and how large the final, possibly partial, group is.
 //!

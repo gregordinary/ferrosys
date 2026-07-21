@@ -90,6 +90,11 @@ ACL records. Without it, the crate depends only on `thiserror`.
 [`ferrosys-cli`](https://crates.io/crates/ferrosys-cli) puts this crate on the command
 line as the `ferrosys` binary: `format`, `inspect`, and `extract`.
 
+## Documentation
+
+The [guide](https://gregordinary.github.io/ferrosys/) is a narrative introduction, and the
+[API reference](https://gregordinary.github.io/ferrosys/api/) documents every public item.
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or the MIT license, at your option.

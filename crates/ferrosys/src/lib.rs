@@ -1,8 +1,8 @@
 //! `ferrosys` — pure-Rust, userspace filesystem tooling.
 //!
-//! The crate creates and reads filesystem images entirely in userspace: no kernel mount,
-//! no FUSE, no C dependencies, and no `unsafe`. On-disk types serialize through explicit
-//! little-endian byte accessors, never transmutes.
+//! The crate creates and reads filesystem images entirely in userspace, over ordinary byte
+//! streams, in self-contained, safe Rust. On-disk types serialize through explicit
+//! little-endian byte accessors, so the byte layout is spelled out at every field.
 //!
 //! # Structure
 //!

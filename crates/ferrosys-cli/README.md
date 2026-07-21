@@ -47,6 +47,11 @@ about a filesystem could be formed at all:
 | `8`  | The command could not be carried out: the host got in the way, or the bytes are not an ext filesystem at all. |
 | `16` | The command line could not be understood.                                   |
 
+## Documentation
+
+The guide's [command-line chapter](https://gregordinary.github.io/ferrosys/cli.html) covers
+every subcommand and option.
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or the MIT license, at your option.

@@ -17,9 +17,8 @@ or by editing `Cargo.toml`:
 ferrosys = "0.1"
 ```
 
-The default build has no required system dependencies and pulls in no C
-libraries. The archive source (`format --from-tar`) lives behind the `tar`
-feature:
+The default build is pure Rust and needs only the Rust toolchain. The archive
+source (`format --from-tar`) lives behind the `tar` feature:
 
 ```toml
 [dependencies]
@@ -43,5 +42,5 @@ or from a checkout of the workspace:
 cargo install --path crates/ferrosys-cli
 ```
 
-It writes to a regular file, reads neither the clock nor a random source, and
+It writes to a regular file, takes its identifiers and timestamps as inputs, and
 exits as `e2fsck` does. The [command-line chapter](./cli.md) covers it.

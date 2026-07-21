@@ -26,9 +26,10 @@
 //!
 //! # Determinism
 //!
-//! The tool reads neither the clock nor a random source. A format's UUID is required, its
-//! time is required (or comes from `SOURCE_DATE_EPOCH`), and its hash seed defaults to
-//! the UUID's bytes — so two runs given the same inputs write the same bytes, always.
+//! Everything an image's bytes depend on is an input the tool is given. A format's UUID is
+//! required, its time is required (or comes from `SOURCE_DATE_EPOCH`), and its hash seed
+//! defaults to the UUID's bytes — so two runs given the same inputs write the same bytes,
+//! always.
 
 // The tool inherits the library's bar: there is no `unsafe` here, ever.
 #![forbid(unsafe_code)]

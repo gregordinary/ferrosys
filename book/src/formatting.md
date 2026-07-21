@@ -170,8 +170,9 @@ assert_eq!(reader.read_data(&file).unwrap(), b"hello\n");
 
 ### Filesystems other tools made
 
-The reader is not limited to images this crate wrote. It reads what the format
-allows, not what this formatter happens to emit:
+The reader reads any conformant ext image, whatever tool wrote it. It follows the
+on-disk format, so an image `mke2fs` or the kernel produced reads the same as one
+this crate wrote:
 
 - **Any inode size.** The 128-byte inode has no extended area, so it carries no
   creation time, no sub-second timestamps, and no `i_checksum_hi`; every field past
