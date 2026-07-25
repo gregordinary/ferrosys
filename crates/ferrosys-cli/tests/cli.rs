@@ -532,6 +532,61 @@ fn e2fsck_clean(image: &Path) {
 }
 
 #[test]
+fn an_image_built_from_a_directory_holds_what_the_tree_held() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch();
+    let tree = at(&dir, "staging");
+    std::fs::create_dir(&tree).expect("staging");
+    std::fs::create_dir(tree.join("etc")).expect("etc");
+    std::fs::write(tree.join("etc/hostname"), b"ferrosys\n").expect("hostname");
+    let init = tree.join("etc/init");
+    std::fs::write(&init, b"#!/bin/sh\n").expect("init");
+    std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::os::unix::fs::symlink("/proc/self/mounts", tree.join("etc/mtab")).expect("mtab");
+
+    let image = at(&dir, "fs.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+        // A test run does not run as root, so without this the image would be owned by
+        // whoever ran it.
+        "--owner",
+        "0:0",
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let image = image.to_str().expect("a text path");
+    // The contents are the tree's.
+    assert_eq!(
+        ok(&["extract", image, "--cat", "/etc/hostname"]),
+        b"ferrosys\n"
+    );
+    // The mode survived, and the ownership override reached the inode.
+    let stat = String::from_utf8(ok(&["extract", image, "--stat", "/etc/init", "--json"]))
+        .expect("the report is text");
+    assert!(stat.contains("\"mode_octal\":\"0755\""), "{stat}");
+    assert!(stat.contains("\"uid\":0"), "{stat}");
+    assert!(stat.contains("\"gid\":0"), "{stat}");
+    // A symlink is the link it is, not what it points at.
+    let stat = String::from_utf8(ok(&["extract", image, "--stat", "/etc/mtab", "--json"]))
+        .expect("the report is text");
+    assert!(stat.contains("\"target\":\"/proc/self/mounts\""), "{stat}");
+
+    if available("e2fsck") {
+        e2fsck_clean(Path::new(image));
+    }
+}
+
+#[test]
 fn format_writes_the_selected_base_profile() {
     // `-t` makes ext2 and ext3 first-class on the command line: one flag seeds the base
     // feature set, the image checks clean, and `inspect` reads the profile back as the one
@@ -581,6 +636,247 @@ fn format_refuses_a_destination_that_is_not_a_regular_file() {
         "the refusal says why: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn a_failed_format_leaves_the_destination_exactly_as_it_was() {
+    // The destination must read as zero where the filesystem does not write, so creating or
+    // truncating it is part of formatting. That makes the *order* load-bearing: a run that
+    // truncated first and then failed on its source would destroy an image while writing no
+    // filesystem — and re-running a format line with one option edited, over the image you
+    // already have, is exactly how that happens.
+    let dir = scratch();
+    let image = at(&dir, "keep.img");
+    assert_eq!(code(&format(&image, "16M", None)), OK);
+    let sound = std::fs::read(&image).expect("read the image that must survive");
+
+    // Every failure mode that is not the destination's own I/O, one per line of defence:
+    // a source that does not parse, a geometry too small to hold its own metadata, a
+    // feature set that contradicts itself, and a size below the journal's minimum.
+    let bad_archive = at(&dir, "bad.tar");
+    std::fs::write(&bad_archive, b"not a tar, just bytes").expect("write");
+    let failures: [Vec<&str>; 4] = [
+        vec!["--from-tar", bad_archive.to_str().unwrap()],
+        vec!["--size", "4M", "--grow", "8T"],
+        vec!["-O", "metadata_csum_seed,^metadata_csum"],
+        vec!["--size", "4M"],
+    ];
+    for extra in failures {
+        let mut args = vec!["format", "--size", "16M", "--uuid", UUID, "--time", TIME];
+        args.extend_from_slice(&extra);
+        let path = image.to_str().unwrap().to_string();
+        args.push(&path);
+        let out = run(&args);
+        assert_ne!(code(&out), OK, "{extra:?} must fail");
+        assert_eq!(
+            std::fs::read(&image).expect("the destination still exists"),
+            sound,
+            "{extra:?} changed the destination of a format that wrote no filesystem"
+        );
+    }
+}
+
+#[test]
+fn atomic_publishes_the_image_only_once_it_is_whole() {
+    // The opt-in guarantee is that the destination holds either the image that was there
+    // before or the whole new one. What can be tested without killing the process
+    // mid-write is the two halves that make it true: a successful run leaves the new image
+    // in place and no temporary file beside it, and a failing one leaves neither a changed
+    // destination nor a stray temporary.
+    let dir = scratch();
+    let image = at(&dir, "atomic.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--atomic",
+        image.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        std::fs::metadata(&image)
+            .expect("the image is in place")
+            .len(),
+        16 << 20
+    );
+    // Byte-identical to the in-place write: how the bytes reach the destination is not
+    // allowed to change what they are.
+    let in_place = at(&dir, "in-place.img");
+    assert_eq!(code(&format(&in_place, "16M", None)), OK);
+    assert_eq!(
+        std::fs::read(&image).expect("read"),
+        std::fs::read(&in_place).expect("read")
+    );
+    assert!(
+        temp_siblings(dir.path()).is_empty(),
+        "no temporary left behind"
+    );
+
+    // A failing atomic run cleans up after itself, and the destination is untouched.
+    let bad_archive = at(&dir, "bad.tar");
+    std::fs::write(&bad_archive, b"not a tar").expect("write");
+    let out = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--atomic",
+        "--from-tar",
+        bad_archive.to_str().unwrap(),
+        image.to_str().unwrap(),
+    ]);
+    assert_ne!(code(&out), OK);
+    assert_eq!(
+        std::fs::read(&image).expect("read"),
+        std::fs::read(&in_place).expect("read"),
+        "a failed atomic run changed the destination"
+    );
+    assert!(
+        temp_siblings(dir.path()).is_empty(),
+        "no temporary left behind"
+    );
+}
+
+/// The temporary files `--atomic` writes through, by name, so a gate can assert there are
+/// none.
+fn temp_siblings(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read the scratch directory")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".ferrosys-") && n.ends_with(".tmp"))
+        .collect()
+}
+
+#[test]
+fn a_dry_run_reports_the_geometry_and_writes_nothing() {
+    // The safe way to discover what a format would cost: the layout reported is the same
+    // value the write would use, so it is exact — and the destination is never opened, so
+    // a dry run over an image you already have cannot touch it.
+    let dir = scratch();
+    let image = at(&dir, "never-written.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--dry-run",
+        image.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!image.exists(), "a dry run created the destination");
+    let report = fields(&String::from_utf8_lossy(&out.stderr));
+    assert_eq!(report["Block count"], "4096");
+    // The reservation is what a dry run is worth reading for: it is the one cost nothing
+    // else in the summary would show.
+    assert_eq!(report["Reserved GDT blocks"], "64");
+
+    // And the geometry it reported is the geometry a real format then realizes.
+    let real = at(&dir, "real.img");
+    let written = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        real.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&written), OK);
+    let after = fields(&String::from_utf8_lossy(&written.stderr));
+    for key in [
+        "Block count",
+        "Inode count",
+        "Reserved GDT blocks",
+        "Grows online to",
+    ] {
+        assert_eq!(
+            report[key], after[key],
+            "{key} differs between the dry run and the write"
+        );
+    }
+    // What only a written filesystem can report: what it has left.
+    assert!(
+        !report.contains_key("Free blocks"),
+        "a dry run has no free count to report"
+    );
+    assert_eq!(after["Free blocks"], "2710");
+}
+
+#[test]
+fn a_small_filesystem_formats_at_the_defaults() {
+    // The growth reservation is bounded by the filesystem it is reserved from, so `Max` —
+    // the default — cannot be the reason a small image fails to format. Each of these
+    // sizes was unformattable when the reservation was the resize inode's whole map.
+    let dir = scratch();
+    for (size, profile, reserved) in [
+        ("1M", "ext2", "4"),
+        ("4M", "ext2", "16"),
+        ("8M", "ext4", "32"),
+        ("16M", "ext4", "64"),
+    ] {
+        let image = at(&dir, &format!("small-{size}.img"));
+        let out = run(&[
+            "format",
+            "--size",
+            size,
+            "-t",
+            profile,
+            "--uuid",
+            UUID,
+            "--time",
+            TIME,
+            image.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            code(&out),
+            OK,
+            "{size} {profile} must format at the defaults: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report = fields(&String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            report["Reserved GDT blocks"], reserved,
+            "{size} reservation"
+        );
+        if available("e2fsck") {
+            e2fsck_clean(&image);
+        }
+    }
+
+    // Below the journal's own minimum an ext4 filesystem still cannot be built — that is a
+    // journal's 1024 blocks, not the reservation — and the failure says so and names the
+    // way out. This is the message a first-time user gets, so it is worth pinning.
+    let image = at(&dir, "too-small.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "4M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        image.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no room for a journal"), "{stderr}");
+    assert!(
+        stderr.contains("hint:"),
+        "the failure names the option to change: {stderr}"
+    );
+    assert!(stderr.contains("-t ext2"), "{stderr}");
 }
 
 #[test]
@@ -871,7 +1167,10 @@ fn inspect_json_parses_as_json() {
     let judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["version"] == 1, doc["version"]
+# Every document this tool emits names its shape with the same field, so a consumer
+# reads one key wherever it looks.
+assert doc["schema"] == 1, doc["schema"]
+assert "version" not in doc, "the envelope field is `schema` in every document"
 sb = doc["superblock"]
 assert sb["uuid"] == "f0e17055-0000-4000-8000-000000000000", sb["uuid"]
 assert sb["block_size"] == 4096, sb["block_size"]
@@ -1267,6 +1566,230 @@ fn extract_writes_one_artifact_and_nothing_else() {
     assert!(
         listing.contains("/lost+found"),
         "a listing describes the filesystem, and /lost+found is in it"
+    );
+}
+
+#[test]
+fn stat_reports_one_path_with_its_attributes_and_acls() {
+    // The forensic question — what is this file's mode, and what is in its attributes — was
+    // answerable only by writing a whole archive and unpacking it. `--stat` is the answer for
+    // one path, and the attributes and decoded ACLs are the part no other output carried.
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "128M", Some(&archive))), OK);
+    let path = image.to_str().expect("a text path");
+
+    let report =
+        String::from_utf8(ok(&["extract", path, "--stat", "/etc/hostname"])).expect("text");
+    let stat = fields(&report);
+    assert_eq!(stat["Type"], "file");
+    // The mode in both spellings: octal, which is how a mode is written, and symbolic.
+    assert_eq!(stat["Mode"], "0644 (-rw-r--r--)");
+    assert_eq!(stat["Owner"], "1000:1000");
+    assert_eq!(stat["Size"], "9");
+    // The attribute is the point of the command.
+    assert_eq!(stat["Xattr user.note"], "hello");
+    // And the sub-second time the archive carried survives into the report.
+    assert!(
+        stat["Modified"].contains("123456789 ns"),
+        "{}",
+        stat["Modified"]
+    );
+
+    // An ACL is stored in ext's compact form, which nothing else can read: it is decoded to
+    // the text `getfacl` prints, or it is not really reported at all.
+    let report = String::from_utf8(ok(&["extract", path, "--stat", "/home"])).expect("text");
+    let stat = fields(&report);
+    assert_eq!(stat["Type"], "directory");
+    let acl = &stat["Xattr system.posix_acl_access"];
+    assert!(acl.contains("user:1000:rw-"), "{acl}");
+    assert!(acl.contains("mask::rwx"), "{acl}");
+    assert!(
+        stat.contains_key("Xattr system.posix_acl_default"),
+        "a directory's default ACL is reported too"
+    );
+
+    // A path naming a symlink describes the link, not what it points at: a question about a
+    // path is a question about that path.
+    let report = String::from_utf8(ok(&["extract", path, "--stat", "/etc/mtab"])).expect("text");
+    let stat = fields(&report);
+    assert_eq!(stat["Type"], "symlink");
+    assert_eq!(stat["Symlink target"], "/proc/self/mounts");
+
+    // A path the filesystem does not have is an operational failure, as `--cat`'s is.
+    let out = run(&["extract", path, "--stat", "/nowhere"]);
+    assert_eq!(code(&out), OPERATIONAL);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn the_json_documents_carry_attributes_and_both_spellings_of_a_mode() {
+    // A machine reading the listing had no way to see an attribute at all, which for the
+    // forensic use is the headline field. And a mode in JSON has to be decimal, since JSON
+    // has no octal literal — so the octal spelling is carried beside it rather than left for
+    // the reader to convert and get wrong.
+    if !available("python3") {
+        return;
+    }
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "128M", Some(&archive))), OK);
+    let path = image.to_str().expect("a text path");
+
+    let judge = r#"
+import json, sys
+doc = json.load(sys.stdin)
+assert doc["schema"] == 1, doc["schema"]
+by_path = {e["path"]: e for e in doc["entries"]}
+h = by_path["/etc/hostname"]
+assert h["mode"] == 0o644 and h["mode_octal"] == "0644", h
+assert h["uid"] == 1000 and h["type"] == "file", h
+# The attribute a listing never carried.
+names = {x["name"]: x for x in h["xattrs"]}
+assert names["user.note"]["value"] == "hello", names
+# An ACL comes with the decoded text beside its stored bytes: the bytes are ext's compact
+# form, which no consumer of this document would otherwise be able to read.
+home = by_path["/home"]
+acls = {x["name"]: x for x in home["xattrs"]}
+acl = acls["system.posix_acl_access"]
+assert "user:1000:rw-" in acl["acl"], acl
+assert acl["value_hex"], acl
+# An entry with no attributes carries no xattrs key rather than an empty one.
+assert "xattrs" not in by_path["/etc"], by_path["/etc"]
+"#;
+    let listing = ok(&["extract", path, "--list", "--json"]);
+    assert_json(judge, &listing);
+
+    // The same fields, for one path, out of --stat --json.
+    let stat_judge = r#"
+import json, sys
+doc = json.load(sys.stdin)
+assert doc["schema"] == 1, doc["schema"]
+e = doc["entry"]
+assert e["path"] == "/etc/hostname" and e["mode_octal"] == "0644", e
+assert e["crtime"] == e["mtime"], e
+assert {x["name"] for x in e["xattrs"]} == {"user.note"}, e
+"#;
+    let stat = ok(&["extract", path, "--stat", "/etc/hostname", "--json"]);
+    assert_json(stat_judge, &stat);
+}
+
+/// Judge a JSON document with a `python3` program, which fails the gate by assertion.
+fn assert_json(program: &str, document: &[u8]) {
+    let mut child = tool("python3")
+        .args(["-c", program])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn python3");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(document)
+        .expect("write the document");
+    let out = child.wait_with_output().expect("python3 finishes");
+    assert!(
+        out.status.success(),
+        "python3 rejected the document or its values:\n{}\n{}",
+        String::from_utf8_lossy(document),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_read_is_bounded_by_the_cap_it_is_given() {
+    // `--cat` on a hostile image would allocate whatever `i_size` claims, and the library's
+    // bound was not reachable from the command line at all. Over the cap the read is refused,
+    // because a truncated file returned as a success is the failure that matters: a caller
+    // would write an incomplete file and see nothing wrong.
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "128M", Some(&archive))), OK);
+    let path = image.to_str().expect("a text path");
+
+    // /etc/big is 5000 bytes in the fidelity archive.
+    let out = run(&[
+        "extract",
+        path,
+        "--max-file-bytes",
+        "1K",
+        "--cat",
+        "/etc/big",
+    ]);
+    assert_ne!(code(&out), OK, "a file over the cap must not be written");
+    assert!(
+        out.stdout.is_empty(),
+        "no bytes are written before the refusal"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("5000"),
+        "the message names the size: {stderr}"
+    );
+    assert!(stderr.contains("1024"), "and the cap: {stderr}");
+
+    // Under the cap the same file reads whole, so the bound is a bound and not a break.
+    let out = run(&[
+        "extract",
+        path,
+        "--max-file-bytes",
+        "8K",
+        "--cat",
+        "/etc/big",
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout.len(), 5000);
+}
+
+#[test]
+fn detect_says_what_an_image_is_and_where() {
+    // The question a carving pipeline asks. It is deliberately not `inspect`: the answer is
+    // one word, and an image that is recognizably ext still classifies even where a strict
+    // read would refuse it.
+    let dir = scratch();
+    for profile in ["ext2", "ext3", "ext4"] {
+        let image = at(&dir, &format!("{profile}.img"));
+        let out = run(&[
+            "format",
+            "--size",
+            "64M",
+            "-t",
+            profile,
+            "--uuid",
+            UUID,
+            "--time",
+            TIME,
+            image.to_str().unwrap(),
+        ]);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        let answer = ok(&["detect", image.to_str().unwrap()]);
+        assert_eq!(
+            String::from_utf8_lossy(&answer).trim(),
+            profile,
+            "detect names the family the feature words classify to"
+        );
+    }
+
+    // A filesystem inside a larger image is found where it is, and not where it is not.
+    let ext4 = at(&dir, "ext4.img");
+    let disk = at(&dir, "disk.img");
+    let mut bytes = vec![0u8; 1 << 20];
+    bytes.extend_from_slice(&std::fs::read(&ext4).expect("read"));
+    std::fs::write(&disk, &bytes).expect("write the disk image");
+    let answer = ok(&["detect", "--offset", "1M", disk.to_str().unwrap()]);
+    assert_eq!(String::from_utf8_lossy(&answer).trim(), "ext4");
+
+    let out = run(&["detect", disk.to_str().unwrap()]);
+    assert_eq!(code(&out), OPERATIONAL, "nothing is at offset zero");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "unrecognized",
+        "the negative answer is still the run's artifact"
     );
 }
 

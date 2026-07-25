@@ -3,14 +3,15 @@
 //! A source yields a flat list of entries — a path, a kind, and the ownership,
 //! mode, and timestamp to record — that the model turns into an inode tree. This
 //! module defines that vocabulary and one source, the in-memory [`TreeBuilder`];
-//! an archive source is a separate, feature-gated implementation of the same
-//! trait.
+//! the archive and host-directory sources are separate, feature-gated
+//! implementations of the same trait.
 //!
 //! A source states what it wants written; whether the current feature profile can
 //! represent it is decided when the model consumes it. An input the profile cannot
 //! hold — a name over 255 bytes, an unresolvable hard link — becomes a typed error
 //! there, never a silently dropped or truncated entry.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -61,15 +62,20 @@ impl FileContent {
 
     /// The file's bytes, reading them from the host if they are not already in memory.
     ///
+    /// Bytes already held are borrowed, not copied: reading an [`Owned`](Self::Owned)
+    /// entry costs nothing, so a caller that reads every entry in turn never holds two
+    /// copies of one file. Only a [`Range`](Self::Range) allocates, and only for as long
+    /// as the caller keeps what it returned.
+    ///
     /// # Errors
     ///
     /// [`std::io::Error`] if the backing file cannot be read — including the case where
     /// it is shorter than the range claims, which means the file changed after the source
-    /// that named it was built.
-    pub fn read(&self) -> std::io::Result<Vec<u8>> {
+    /// that named it was built. An owned entry cannot fail.
+    pub fn read(&self) -> std::io::Result<Cow<'_, [u8]>> {
         match self {
-            Self::Owned(bytes) => Ok(bytes.clone()),
-            Self::Range(range) => range.read(),
+            Self::Owned(bytes) => Ok(Cow::Borrowed(bytes)),
+            Self::Range(range) => Ok(Cow::Owned(range.read()?)),
         }
     }
 }
@@ -86,26 +92,66 @@ impl From<FileRange> for FileContent {
     }
 }
 
-/// A range of bytes within a file on the host, held open for the length of a format.
+// The borrowed forms of a file's bytes, each copied into an owned buffer. A caller writing
+// a small file writes it as a literal — `b"ferrosys\n"`, `"#!/bin/sh\n"` — and having to
+// spell `.to_vec()` on every one of them is noise that says nothing about the filesystem
+// being built. `String` and `&str` are here because a text file is text; the bytes stored
+// are the UTF-8 the string already holds, with no re-encoding.
+impl From<&[u8]> for FileContent {
+    fn from(bytes: &[u8]) -> Self {
+        Self::Owned(bytes.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for FileContent {
+    fn from(bytes: &[u8; N]) -> Self {
+        Self::Owned(bytes.to_vec())
+    }
+}
+
+impl From<&str> for FileContent {
+    fn from(text: &str) -> Self {
+        Self::Owned(text.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for FileContent {
+    fn from(text: String) -> Self {
+        Self::Owned(text.into_bytes())
+    }
+}
+
+/// A range of bytes within a file on the host, read at the moment the content is placed.
 ///
-/// The handle owns its share of the open file, so an entry carrying one is a plain owned
-/// value: no lifetime parameter reaches [`SourceEntry`], and a caller may hold, clone,
-/// sort, and splice a list of them freely.
+/// The handle is a plain owned value: no lifetime parameter reaches [`SourceEntry`], and a
+/// caller may hold, clone, sort, and splice a list of them freely.
+///
+/// # Two forms, and what each costs
+///
+/// [`new`](Self::new) carries an open descriptor, shared, so a whole archive's worth of
+/// ranges into one file costs one descriptor. [`at_path`](Self::at_path) carries only the
+/// path and opens it for each read, which is what lets a source name a range in each of a
+/// hundred thousand separate files without holding a descriptor for every one.
 ///
 /// # The file must not change while the source is alive
 ///
-/// The bytes are read when the file is placed, not when the source is built, so an edit
-/// in between reaches the image. Holding the descriptor open narrows this usefully: a
+/// The bytes are read when the file is placed, not when the source is built, so an edit in
+/// between reaches the image — as wrong bytes rather than as an error, unless the file
+/// shrank enough for the read to run short.
+///
+/// Which edits reach it depends on the form. A held descriptor names an inode: a
 /// replacement written to a new file and renamed into place leaves the original inode
-/// readable and the format unaffected. What does reach the image is an **in-place**
-/// modification or a truncation of the same inode — and it reaches it as wrong bytes
-/// rather than as an error, unless the file shrank enough for the read to run short.
+/// readable and the format unaffected, and only an **in-place** modification or a
+/// truncation of that inode is seen. A path is resolved afresh at each read, so whatever
+/// the name resolves to then is what reaches the image.
 #[derive(Clone)]
 pub struct FileRange {
-    /// The open file. Shared so a handle is owned rather than borrowed, and so a whole
-    /// archive's worth of handles costs one descriptor.
-    file: Arc<File>,
-    /// The path it was opened from, for diagnostics and identity.
+    /// The open file, when the range was built from one. Shared so a handle is owned
+    /// rather than borrowed. `None` for a range named by path alone, which opens `path`
+    /// when it is read.
+    file: Option<Arc<File>>,
+    /// The path the bytes come from: what a range built from a descriptor names for
+    /// diagnostics and identity, and what one built by path opens.
     path: Arc<PathBuf>,
     offset: u64,
     len: u64,
@@ -119,7 +165,24 @@ impl FileRange {
     #[must_use]
     pub fn new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self {
         Self {
-            file,
+            file: Some(file),
+            path: Arc::new(path.into()),
+            offset,
+            len,
+        }
+    }
+
+    /// A handle to `len` bytes at `offset` in the file at `path`, opened when the range is
+    /// read rather than now.
+    ///
+    /// This is the form for a source that names ranges in many separate files: it holds no
+    /// descriptor, so the number of files it can name is unbounded. The cost is that the
+    /// path is resolved at each read, so a file replaced under that name between building
+    /// the source and formatting reaches the image.
+    #[must_use]
+    pub fn at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self {
+        Self {
+            file: None,
             path: Arc::new(path.into()),
             offset,
             len,
@@ -152,11 +215,31 @@ impl FileRange {
 
     /// Read the range's bytes.
     ///
+    /// Every failure names the path, the offset, and the length, since that is what a
+    /// caller has to act on: the error surfaces through a transparent
+    /// [`FormatError::Io`](crate::materialize::FormatError::Io), so what this message
+    /// says is the whole of what a person sees. A short read in particular — the file
+    /// changed after the source was built — is otherwise indistinguishable from any
+    /// other truncation, and names neither the file that changed nor the range that was
+    /// lost.
+    ///
     /// # Errors
     ///
-    /// [`std::io::Error`] if the file cannot be read, or if it is shorter than the range
-    /// claims — which is what a file edited after the source was built looks like.
+    /// [`std::io::Error`] if the file cannot be opened or read, or if it is shorter than
+    /// the range claims — which is what a file edited after the source was built looks
+    /// like.
     pub fn read(&self) -> std::io::Result<Vec<u8>> {
+        let context = |e: std::io::Error| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{}: reading {} bytes at offset {}: {e}",
+                    self.path.display(),
+                    self.len,
+                    self.offset
+                ),
+            )
+        };
         let len = usize::try_from(self.len).map_err(|_| {
             std::io::Error::other(format!(
                 "{}: {} bytes at offset {} is more than this platform addresses",
@@ -166,11 +249,15 @@ impl FileRange {
             ))
         })?;
         // An independent descriptor, so the read carries its own cursor: a shared one
-        // would make two handles into the same file interfere.
-        let mut handle = self.file.try_clone()?;
-        handle.seek(SeekFrom::Start(self.offset))?;
+        // would make two handles into the same file interfere. A range named by path
+        // alone opens it here, which is the whole of what it defers.
+        let mut handle = match &self.file {
+            Some(file) => file.try_clone().map_err(context)?,
+            None => File::open(self.path.as_path()).map_err(context)?,
+        };
+        handle.seek(SeekFrom::Start(self.offset)).map_err(context)?;
         let mut buf = vec![0u8; len];
-        handle.read_exact(&mut buf)?;
+        handle.read_exact(&mut buf).map_err(context)?;
         Ok(buf)
     }
 }
@@ -313,8 +400,20 @@ pub struct SourceEntry {
 
 /// Something that produces the entries to write into a filesystem.
 ///
-/// The model consumes a source once. An archive parser and the in-memory
-/// [`TreeBuilder`] are both sources; the model does not care which.
+/// The model consumes a source once. An archive parser, a walk of a host directory, and
+/// the in-memory [`TreeBuilder`] are all sources; the model does not care which.
+///
+/// # Why the entries are a `Vec` and not an iterator
+///
+/// Inode numbers are assigned in sorted path order, which is what makes two formats of the
+/// same tree byte-identical — so the model sorts the whole list before it places anything.
+/// The list is therefore materialized whatever a source hands over, and an iterator would
+/// be collected on arrival rather than streamed.
+///
+/// What that costs is bounded by the entry *count*, not by the bytes: a regular file's
+/// contents may be a [`FileContent::Range`], which is a path, an offset, and a length until
+/// the file is placed. A tree of a million entries is tens of megabytes of entry records
+/// however large the files in it are.
 pub trait Source {
     /// Produce the entries, consuming the source.
     fn into_entries(self) -> Vec<SourceEntry>;
@@ -357,6 +456,11 @@ impl TreeBuilder {
     }
 
     /// Add a regular file at `path` with `contents`.
+    ///
+    /// `contents` is anything that converts into a [`FileContent`]: an owned `Vec<u8>` or
+    /// `String`, a borrowed `&[u8]`, `&[u8; N]`, or `&str` — each copied into the entry —
+    /// or a [`FileRange`], which names bytes on the host and reads them when the file is
+    /// placed rather than now.
     #[must_use]
     pub fn file(
         mut self,
@@ -554,6 +658,75 @@ mod tests {
             .xattr(b"user.orphan".to_vec(), b"v".to_vec())
             .into_entries();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn every_borrowed_form_of_a_files_bytes_converts() {
+        // A caller writing a small file writes it as a literal. Each of these is a shape a
+        // literal takes, and every one must reach the same owned entry — an argument that
+        // has to be spelled `.to_vec()` is a bound that lost a caller nothing but noise.
+        let want = EntryKind::File(FileContent::Owned(b"hi".to_vec()));
+        let entries = TreeBuilder::new()
+            .file(b"/vec".to_vec(), b"hi".to_vec(), meta())
+            .file(b"/array".to_vec(), b"hi", meta())
+            .file(b"/slice".to_vec(), &b"hi"[..], meta())
+            .file(b"/str".to_vec(), "hi", meta())
+            .file(b"/string".to_vec(), String::from("hi"), meta())
+            .into_entries();
+        assert_eq!(entries.len(), 5);
+        for entry in &entries {
+            assert_eq!(
+                entry.kind,
+                want,
+                "{} converted to something else",
+                String::from_utf8_lossy(&entry.path)
+            );
+        }
+    }
+
+    #[test]
+    fn reading_owned_contents_borrows_rather_than_copies() {
+        // The whole point of holding contents by value is that a format pays for them
+        // once. A read that cloned would double the largest file's cost at exactly the
+        // moment its blocks are being chunked, which is the peak the type exists to
+        // lower. Pointer identity is what proves no copy happened.
+        let content = FileContent::Owned(vec![9u8; 64]);
+        let FileContent::Owned(held) = &content else {
+            unreachable!("the content is owned")
+        };
+        let read = content.read().expect("an owned read cannot fail");
+        assert!(matches!(read, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(read.as_ptr(), held.as_ptr()));
+    }
+
+    #[test]
+    fn a_short_backing_file_names_itself_and_the_range() {
+        // A file replaced in place between building the source and formatting is what
+        // this error means, and the message is all a caller gets: `FormatError::Io` is
+        // transparent, so a bare "failed to fill whole buffer" would name neither the
+        // file that changed nor the bytes that went missing.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("shrunk.tar");
+        std::fs::write(&path, b"only eight").expect("write the backing file");
+        let file = Arc::new(File::open(&path).expect("open the backing file"));
+
+        let range = FileRange::new(Arc::clone(&file), &path, 4, 4096);
+        let err = range
+            .read()
+            .expect_err("a range past the end cannot be read");
+        let text = err.to_string();
+        assert!(text.contains("shrunk.tar"), "{text}");
+        assert!(text.contains("4096"), "{text}");
+        assert!(text.contains("offset 4"), "{text}");
+        // The kind survives the added context, so a caller can still tell a truncation
+        // from a permission failure without matching on the message.
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+
+        // A range the file does hold reads its bytes, and reading allocates.
+        let content = FileContent::Range(FileRange::new(file, &path, 5, 5));
+        let read = content.read().expect("read the range");
+        assert!(matches!(read, std::borrow::Cow::Owned(_)));
+        assert_eq!(read.as_ref(), b"eight");
     }
 
     #[test]

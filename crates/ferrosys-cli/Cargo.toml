@@ -22,9 +22,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-# The filesystem itself. The `tar` feature carries the archive source `format
-# --from-tar` reads.
-ferrosys = { workspace = true, features = ["tar"] }
+# The filesystem itself. The `tar` feature carries the archive source `format --from-tar`
+# reads, and `dir` the directory walk behind `format --from-dir`.
+ferrosys = { workspace = true, features = ["tar", "dir"] }
 # Writing the archive `extract --to-tar` produces. Reading one is the library's job.
 tar = { workspace = true }
 # Typed error enums. Build-time proc-macro only; no runtime footprint. Argument

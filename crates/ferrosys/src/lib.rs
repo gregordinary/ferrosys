@@ -9,8 +9,10 @@
 //! The crate root holds the family-agnostic substrate — the vocabulary a detector and a
 //! scan speak, independent of which family answers them:
 //!
-//! - [`detect`] reads an image and reports the [`Filesystem`] family it holds;
-//!   [`DetectError`] tells an unreadable source from an unrecognized one.
+//! - [`detect`] reads an image and reports the [`Filesystem`] family it holds, and
+//!   [`detect_with`] does the same at an offset within the source, for a partition or a
+//!   region a carver located; [`DetectError`] tells an unreadable source from an
+//!   unrecognized one.
 //! - [`crc32c`] is the reflected CRC-32C primitive filesystem metadata checksums are
 //!   built from.
 #![cfg_attr(
@@ -21,6 +23,20 @@ source, the [`TreeBuilder`](ext::TreeBuilder) source, and the byte-exact on-disk
 structures — and is on by default. Its images are byte-reproducible: the UUID, hash seed, \
 and timestamps are inputs, never read from the clock or a random source."
 )]
+//!
+//! # Features
+//!
+//! `ext` is on by default and is the whole filesystem surface. Three more are off by
+//! default, so a build that wants none of them depends only on `thiserror`:
+//!
+//! - **`tar`** adds the tar/PAX archive source and sink: a filesystem built from an
+//!   archive, and one written back out as one. It depends on `tar`.
+//! - **`dir`** adds the host-directory source: a filesystem built by walking a tree on
+//!   this machine, with its modes, ownership, times, hard links, special files, and
+//!   extended attributes. It depends on `rustix` for the two extended-attribute calls the
+//!   standard library has no equivalent of, and is present on Linux.
+//! - **`serde`** adds `Serialize` to the scan taxonomy, the planned geometry, and the
+//!   feature model, for embedding them in a document of your own. It depends on `serde`.
 // The crate is safe by construction: on-disk types serialize through explicit
 // little-endian byte accessors, never transmutes or `zerocopy`.
 #![forbid(unsafe_code)]
@@ -45,7 +61,7 @@ pub use crc32c::crc32c;
 // Image detection and the family selector it returns. `Filesystem` and `DetectError` are
 // always present; `detect` dispatches across whichever families are compiled in.
 mod detect;
-pub use detect::{DetectError, Filesystem, detect};
+pub use detect::{DetectError, DetectOptions, Filesystem, detect, detect_with};
 
 // ── The ext family: the `ext` module, behind the default-on `ext` feature ──
 //
@@ -71,6 +87,8 @@ mod feature;
 mod geometry;
 #[cfg(feature = "ext")]
 mod hash;
+#[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+mod host;
 #[cfg(feature = "ext")]
 mod journal;
 #[cfg(feature = "ext")]

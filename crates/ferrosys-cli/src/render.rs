@@ -11,7 +11,8 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::acl::{EXEC, READ, WRITE};
+use ferrosys::ext::{Acl, AclQualifier};
 
 use crate::args::os;
 
@@ -168,42 +169,35 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// A timestamp as a PAX record's value: decimal seconds, with a fractional part when the
-/// time carries one.
+/// A POSIX ACL as `getfacl` writes it: one `tag:qualifier:perms` entry per line, in the
+/// order the ACL stores them.
 ///
-/// A negative time floors its seconds and carries the fraction up towards the next
-/// second — the same convention the archive source reads back — so
-/// `Timestamp { secs: -6, nanos: 750_000_000 }` is written `-5.250000000`, which is the
-/// instant it names.
-///
-/// An inode's stored fraction is a thirty-bit field, so a filesystem this crate did not
-/// write can name more nanoseconds than there are in a second. Such a fraction is carried
-/// into the seconds before anything is written, so the record names the instant the two
-/// fields describe and always holds a nine-digit fraction — rather than a ten-digit one a
-/// reader would scale wrongly.
+/// The on-disk form is ext's compact encoding, which is neither what a person reads nor what
+/// any other tool speaks, so an ACL that is only ever shown as bytes is an ACL nobody can
+/// check. Named users and groups carry their numeric id, since a filesystem records ids and
+/// this tool resolves no names — the host's `/etc/passwd` has nothing to do with the image's.
 #[must_use]
-pub fn pax_time(t: Timestamp) -> String {
-    // Normalize first: every case below assumes a fraction smaller than a second.
-    let t = Timestamp {
-        secs: t
-            .secs
-            .saturating_add(i64::from(t.nanos / Timestamp::NANOS_PER_SEC)),
-        nanos: t.nanos % Timestamp::NANOS_PER_SEC,
-    };
-    if t.nanos == 0 {
-        return t.secs.to_string();
-    }
-    if t.secs < 0 {
-        let whole = t.secs + 1;
-        let frac = Timestamp::NANOS_PER_SEC - t.nanos;
-        // A time inside the last second before the epoch has no negative whole part to
-        // carry the sign, so the sign is written onto the zero.
-        if whole == 0 {
-            return format!("-0.{frac:09}");
+pub fn acl(acl: &Acl) -> String {
+    let mut out = String::new();
+    for entry in acl.entries() {
+        if !out.is_empty() {
+            out.push(',');
         }
-        return format!("{whole}.{frac:09}");
+        let (tag, qualifier) = match entry.who {
+            AclQualifier::UserObj => ("user", String::new()),
+            AclQualifier::User(uid) => ("user", uid.to_string()),
+            AclQualifier::GroupObj => ("group", String::new()),
+            AclQualifier::Group(gid) => ("group", gid.to_string()),
+            AclQualifier::Mask => ("mask", String::new()),
+            AclQualifier::Other => ("other", String::new()),
+        };
+        let bits = [(READ, 'r'), (WRITE, 'w'), (EXEC, 'x')]
+            .iter()
+            .map(|&(bit, ch)| if entry.perm & bit != 0 { ch } else { '-' })
+            .collect::<String>();
+        out.push_str(&format!("{tag}:{qualifier}:{bits}"));
     }
-    format!("{}.{:09}", t.secs, t.nanos)
+    out
 }
 
 #[cfg(test)]
@@ -319,70 +313,5 @@ mod tests {
         // The ends of the range an ext4 timestamp reaches.
         assert_eq!(iso8601(-2_147_483_648), "1901-12-13T20:45:52Z");
         assert_eq!(iso8601(15_032_385_535), "2446-05-10T22:38:55Z");
-    }
-
-    #[test]
-    fn a_pax_time_is_the_instant_it_names() {
-        assert_eq!(pax_time(Timestamp::from_secs(1_700_000_000)), "1700000000");
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: 1_700_000_000,
-                nanos: 123_456_789
-            }),
-            "1700000000.123456789"
-        );
-        // A negative time stores the floored second and the fraction up to the next one;
-        // the decimal form is the instant itself.
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: -6,
-                nanos: 750_000_000
-            }),
-            "-5.250000000"
-        );
-        // Inside the last second before the epoch there is no negative whole part, so the
-        // sign is written onto the zero.
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: -1,
-                nanos: 500_000_000
-            }),
-            "-0.500000000"
-        );
-        assert_eq!(pax_time(Timestamp::from_secs(-1)), "-1");
-    }
-
-    #[test]
-    fn a_pax_time_carries_an_over_long_fraction_into_the_seconds() {
-        // An inode's fraction is a thirty-bit field, so an image this crate did not write
-        // can name more nanoseconds than a second holds. The record still names the
-        // instant the two fields describe, with a nine-digit fraction: writing the raw
-        // value would make a ten-digit one, which a reader scales as a tenth of what was
-        // meant.
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: 100,
-                nanos: 1_073_741_823 // the largest the field holds
-            }),
-            "101.073741823"
-        );
-        // The same on the negative side, where the fraction is written as the distance to
-        // the next second — the subtraction that an over-long fraction would otherwise
-        // take below zero.
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: -6,
-                nanos: 1_073_741_823
-            }),
-            "-4.926258177"
-        );
-        // A whole number of extra seconds leaves no fraction at all.
-        assert_eq!(
-            pax_time(Timestamp {
-                secs: 10,
-                nanos: 2_000_000_000
-            }),
-            "12"
-        );
     }
 }

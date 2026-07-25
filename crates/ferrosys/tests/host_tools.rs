@@ -17,11 +17,10 @@ use util::{available, e2fsck_clean, tool};
 
 use ferrosys::ext::acl::{EXEC, READ, WRITE};
 use ferrosys::ext::ondisk::Timestamp;
-use ferrosys::ext::source::{Metadata, Source};
 use ferrosys::ext::{
     Acl, AclEntry, AclQualifier, Compat, FormatOptions, GrowReservation, Image, Incompat,
-    InodeCount, OpenOptions, Profile, Reader, ReservedRatio, RoCompat, TreeBuilder, format,
-    format_to,
+    InodeCount, Metadata, OpenOptions, Profile, Reader, ReservedRatio, RoCompat, Source,
+    TreeBuilder, format, format_to,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -425,19 +424,27 @@ fn every_grow_reservation_passes_e2fsck() {
         return;
     }
     // The reservation sizes the resize inode's map. Each variant threads a different
-    // amount through it, so each must reach the foreign checker. `Max` — the shipped
-    // default — fills the 4 KiB map to 1024 reserved blocks, the case no other gate
-    // exercises; `None` leaves it empty; `UpTo` sizes it to a target.
+    // amount through it, so each must reach the foreign checker. `None` leaves it empty;
+    // `UpTo` sizes it to a target; `Max` is the shipped default, and it is exercised on both
+    // sides of the knee at which the whole map becomes affordable — 256 MiB, where the map's
+    // 1024 blocks are a sixty-fourth of the filesystem. Filling the map is the case no other
+    // gate reaches, and the share below it is what every small image gets.
     let base = FormatOptions::new(UUID, Timestamp::from_secs(FAKE_TIME as i64), [0u8; 16]);
     let cases = [
-        ("None", GrowReservation::None, 0u32),
-        ("Max", GrowReservation::Max, 1024),
-        ("UpTo(32 GiB)", GrowReservation::UpTo(GROW_TARGET), 3),
+        ("None", 64 * MIB, GrowReservation::None, 0u32),
+        ("Max below the knee", 64 * MIB, GrowReservation::Max, 256),
+        ("Max at the knee", 256 * MIB, GrowReservation::Max, 1024),
+        (
+            "UpTo(32 GiB)",
+            64 * MIB,
+            GrowReservation::UpTo(GROW_TARGET),
+            3,
+        ),
     ];
-    for (label, grow, expect_reserved) in cases {
+    for (label, size, grow, expect_reserved) in cases {
         let mut o = base;
         o.grow = grow;
-        let image = format(populated(), 64 * MIB, o).expect("format");
+        let image = format(populated(), size, o).expect("format");
         assert_eq!(
             image.layout().reserved_gdt_blocks,
             expect_reserved,
@@ -1468,8 +1475,9 @@ fn deep_extent_tree_reads_back_and_passes_e2fsck() {
     if !available("e2fsck") || !available("debugfs") {
         return;
     }
+    use ferrosys::ext::ExtentNode;
     use ferrosys::ext::Reader;
-    use ferrosys::ext::extent::{ExtentNode, parse_node};
+    use ferrosys::ext::extent::parse_node;
 
     for (name, has_csum, opts) in [
         ("metadata_csum", true, options()),

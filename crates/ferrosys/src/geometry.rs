@@ -20,6 +20,7 @@ use crate::feature::FeatureSet;
 
 /// A contiguous run of blocks, `[start, start + len)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct BlockRange {
     /// First block in the run.
     pub start: u64,
@@ -47,13 +48,26 @@ impl BlockRange {
 pub enum GeometryError {
     /// The filesystem is smaller than the minimum that can hold group 0's fixed
     /// overhead (superblock, descriptor table, bitmaps, inode table, root).
-    #[error("filesystem of {blocks} blocks is too small: group 0 needs {overhead} for metadata")]
+    ///
+    /// The growth reservation is part of that overhead, and on a small filesystem it can be
+    /// most of it, so it is named separately: the two ways out of this are a smaller
+    /// [`GrowReservation`] and a larger filesystem, and the number says which is worth
+    /// trying. [`GrowReservation::Max`] never contributes here — it is bounded by the
+    /// filesystem it is reserved from — so a non-zero share of the overhead is always a
+    /// reservation the caller asked for by name.
+    #[error(
+        "filesystem of {blocks} blocks is too small: group 0 needs {overhead} for metadata, \
+         {reserved_gdt_blocks} of them reserved to grow into"
+    )]
     #[non_exhaustive]
     TooSmall {
         /// Total blocks requested.
         blocks: u64,
         /// Blocks group 0's metadata requires.
         overhead: u64,
+        /// How many of those blocks are the descriptor blocks reserved for online growth —
+        /// the part of the overhead a [`GrowReservation`] decides.
+        reserved_gdt_blocks: u64,
     },
     /// The grow target is smaller than the filesystem being created.
     #[error("grow target {target} blocks is below the initial size {initial} blocks")]
@@ -196,6 +210,7 @@ pub enum GeometryError {
 /// packed tables.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GroupLayout {
     /// Group number.
     pub index: u32,
@@ -232,6 +247,7 @@ pub struct GroupLayout {
 /// a caller inspecting a plan all do.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Layout {
     /// The feature set this layout is planned for.
     pub feature: FeatureSet,
@@ -274,6 +290,18 @@ pub const MAX_32BIT_BLOCKS: u64 = u32::MAX as u64;
 /// a physical block number in 48 bits, so a block past this could hold no file data
 /// however wide the group descriptors are.
 pub const MAX_EXTENT_BLOCKS: u64 = 1 << 48;
+
+/// The share of a filesystem [`GrowReservation::Max`] will spend on growth headroom: at
+/// most one block in this many.
+///
+/// This is policy rather than a property of the format, and it is what makes `Max` a
+/// defensible default at every size. Filling the resize inode's map costs a fixed number
+/// of blocks — 1024 at a 4096-byte block — whatever the filesystem's size, which is
+/// negligible on a large image and a quarter of a 16 MiB one. Sixty-four puts the whole
+/// map within reach from 256 MiB up while holding the cost below 1.6% beneath that, under
+/// the 5% [`ReservedRatio`] reserves by default. An explicit [`GrowReservation::UpTo`]
+/// target is not held to it.
+const GROW_MAX_SHARE: u64 = 64;
 
 /// Blocks of superblock-plus-descriptor overhead at the start of a group that
 /// carries a copy: one superblock block, the descriptor table, and the reserved
@@ -452,17 +480,35 @@ pub enum GrowReservation {
     /// 32-bit map cannot address is rejected with
     /// [`GeometryError::ReservationNeeds32BitBlocks`].
     UpTo(u64),
-    /// Reserve as much online headroom as the format physically allows: the resize
-    /// inode's double-indirect map filled, or the last block that map can name,
-    /// whichever comes first. The fail-safe default — an image built without a known
-    /// target still grows onto any device up to that ceiling.
+    /// Reserve as much online headroom as the format allows without spending more than
+    /// one block in sixty-four of the filesystem on it. The fail-safe default — an image
+    /// built without a known target still grows onto any device the format can address,
+    /// as soon as that costs a fraction of the filesystem rather than a quarter of it.
     ///
-    /// It never fails. On a filesystem already at the ceiling, and on one whose blocks
-    /// the resize inode's 32-bit map cannot address, it reserves nothing; such a
-    /// filesystem is grown offline by `resize2fs` instead. The feature set is still
-    /// written as it was named, so `resize_inode` stays set over an inode that maps
-    /// nothing — the state a filesystem is in once a resize has consumed every block it
-    /// had reserved. [`Layout::reserved_gdt_blocks`] reports what was actually reserved.
+    /// Three bounds, and the smallest wins: the resize inode's double-indirect map
+    /// filled, the last block that map can name, and one sixty-fourth of the filesystem.
+    /// The first two are the format's own ceiling — at a 4096-byte block the map holds
+    /// 1024 descriptor blocks, each describing about 8 GiB, so the reach is about 8 TiB.
+    /// The third is what keeps the ceiling from dominating a small filesystem: reaching
+    /// 8 TiB costs 1024 blocks whatever the image's size, which is a quarter of a 16 MiB
+    /// image and a sixty-fourth of a 256 MiB one. So a filesystem of 256 MiB or more takes
+    /// the whole map, and a smaller one takes the share it can spare — a 16 MiB image
+    /// reserves 64 blocks and still grows online to 512 GiB, which is past any device such
+    /// an image is flashed to. Growth headroom therefore never costs more than 1.6% of a
+    /// filesystem, comfortably under the 5% [`ReservedRatio`] holds back by default.
+    ///
+    /// It never fails, and it never turns a filesystem that would format into one that
+    /// does not. On a filesystem already at the ceiling, and on one whose blocks the resize
+    /// inode's 32-bit map cannot address, it reserves nothing; such a filesystem is grown
+    /// offline by `resize2fs` instead. The feature set is still written as it was named, so
+    /// `resize_inode` stays set over an inode that maps nothing — the state a filesystem is
+    /// in once a resize has consumed every block it had reserved.
+    /// [`Layout::reserved_gdt_blocks`] reports what was actually reserved, and
+    /// [`Layout::max_grow_blocks`] how far it reaches.
+    ///
+    /// A larger reservation than this buys exactly one thing, a higher online-grow
+    /// ceiling, and it is [`UpTo`](Self::UpTo) that buys it: an explicit target is honored
+    /// to the format's ceiling and never reduced to fit this share.
     #[default]
     Max,
 }
@@ -795,7 +841,15 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
                 want
             }
             GrowReservation::Max if !can_reserve => 0,
-            GrowReservation::Max => reserved_limit.min(ceiling_gdt.saturating_sub(gdt)),
+            // The format's own ceiling, bounded by the share of the filesystem a
+            // reservation may occupy. Filling the map costs the same 1024 blocks (at a
+            // 4 KiB block) whatever the size, which is a quarter of a 16 MiB filesystem
+            // and nothing at all on a large one — so past the knee this is the ceiling
+            // and below it the share, and `Max` cannot make a format fail for lack of the
+            // room its own headroom took.
+            GrowReservation::Max => reserved_limit
+                .min(ceiling_gdt.saturating_sub(gdt))
+                .min(total_blocks / GROW_MAX_SHARE),
         };
 
         // Spread the inode count for the current block count across the groups. A group's
@@ -926,6 +980,7 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
         return Err(GeometryError::TooSmall {
             blocks: total_blocks,
             overhead: group0_overhead,
+            reserved_gdt_blocks: u64::from(reserved_gdt_blocks),
         });
     }
 
@@ -1684,14 +1739,102 @@ mod tests {
     }
 
     #[test]
-    fn max_reserves_the_resize_inode_ceiling() {
-        // Max reserves as many descriptor blocks as the resize inode addresses:
-        // block_size / 4 (1024 at 4 KiB), the meta_bg-free ceiling. With gdt 1 that
-        // table describes 1025 blocks' worth of groups — roughly 8 TiB.
-        let l = plan_geo(64 * MIB, GrowReservation::Max, FeatureSet::default()).unwrap();
+    fn max_reserves_the_ceiling_it_can_afford() {
+        // Max takes the resize inode's whole map — block_size / 4, so 1024 at a 4 KiB
+        // block, the meta_bg-free ceiling — as soon as that costs no more than a
+        // sixty-fourth of the filesystem, and the share it can spare below that. The knee
+        // is where the two meet: 1024 blocks is a sixty-fourth of 65536, which is 256 MiB.
+        let at =
+            |mib: u64| plan_geo(mib * MIB, GrowReservation::Max, FeatureSet::default()).unwrap();
+
+        // At and above the knee: the whole map. With gdt 1 that table describes 1025
+        // blocks' worth of groups — roughly 8 TiB.
+        let l = at(256);
         assert_eq!(l.gdt_blocks, 1);
         assert_eq!(l.reserved_gdt_blocks, 1024);
         assert_eq!(l.max_grow_blocks, 1025 * 64 * 32768);
+        assert_eq!(at(1024).reserved_gdt_blocks, 1024);
+        assert_eq!(at(16 * 1024).reserved_gdt_blocks, 1024);
+
+        // Below it, the share — pinned per size, since the numbers are what a small image
+        // actually pays. Each still grows online far past any device it would be written
+        // to: one reserved descriptor block describes about 8 GiB.
+        for (mib, expect) in [(16u64, 64u32), (32, 128), (64, 256), (128, 512)] {
+            let l = at(mib);
+            assert_eq!(l.reserved_gdt_blocks, expect, "{mib} MiB");
+            assert!(
+                u64::from(l.reserved_gdt_blocks) <= l.total_blocks / 64,
+                "{mib} MiB spends more than a sixty-fourth on headroom"
+            );
+            assert!(
+                l.max_grow_blocks > 32 * l.total_blocks,
+                "{mib} MiB grow reach"
+            );
+        }
+    }
+
+    #[test]
+    fn max_never_makes_a_small_filesystem_unplannable() {
+        // The share is what keeps `Max` from being most of a small filesystem: filling the
+        // map costs 1024 blocks, which is four times a one-megabyte filesystem, so an
+        // unbounded `Max` is exactly why such a size failed to plan at all. Nothing here
+        // may fail. ext2 is the profile a filesystem this small carries, since a journal
+        // needs 1024 blocks of its own whatever the reservation does.
+        for mib in [1u64, 2, 4, 8, 16] {
+            let l = plan_geo(mib * MIB, GrowReservation::Max, FeatureSet::EXT2)
+                .unwrap_or_else(|e| panic!("{mib} MiB must plan under Max: {e}"));
+            assert!(
+                u64::from(l.reserved_gdt_blocks) <= l.total_blocks / 64,
+                "{mib} MiB spends more than a sixty-fourth on headroom"
+            );
+            assert!(l.max_grow_blocks > l.total_blocks, "{mib} MiB still grows");
+        }
+    }
+
+    #[test]
+    fn an_explicit_target_is_not_held_to_the_share() {
+        // The share bounds `Max`, which is a default, and not `UpTo`, which is a stated
+        // intent: a 16 MiB image told to reserve for 8 TiB spends a quarter of itself on
+        // headroom, because that is what was asked for. Silently reserving less is the one
+        // outcome the reservation vocabulary exists to prevent.
+        let l = plan_geo(
+            16 * MIB,
+            GrowReservation::UpTo(8 * 1024 * 1024 * MIB),
+            FeatureSet::default(),
+        )
+        .expect("an explicit target at the format's ceiling is honored");
+        assert_eq!(l.reserved_gdt_blocks, 1023);
+        assert!(u64::from(l.reserved_gdt_blocks) > l.total_blocks / 64);
+    }
+
+    #[test]
+    fn a_reservation_that_cannot_fit_names_its_share_of_the_overhead() {
+        // An explicit target too large for the filesystem holding it is refused, and the
+        // error says how much of the overhead the reservation is — which is what tells a
+        // caller that the size is not the thing to change.
+        let err = plan_geo(
+            4 * MIB,
+            GrowReservation::UpTo(8 * 1024 * 1024 * MIB),
+            FeatureSet::default(),
+        )
+        .expect_err("a 4 MiB filesystem cannot reserve 1023 descriptor blocks");
+        let GeometryError::TooSmall {
+            reserved_gdt_blocks,
+            overhead,
+            ..
+        } = err
+        else {
+            panic!("expected TooSmall, got {err:?}");
+        };
+        assert_eq!(reserved_gdt_blocks, 1023);
+        assert!(overhead > reserved_gdt_blocks);
+        // And it reaches the rendered message, which is the whole of what a caller sees
+        // through a transparent error.
+        let text = err.to_string();
+        assert!(
+            text.contains("1023 of them reserved to grow into"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -7,15 +7,14 @@
 
 mod util;
 
-use std::io::{self, Write};
+use std::io::{self, Seek, Write};
 
 use tar::{Builder, EntryType, Header};
 
-use ferrosys::ext::acl::{Acl, AclQualifier};
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    ArchiveError, ArchiveSource, EntryKind, FileContent, FormatOptions, GrowReservation, Reader,
-    Source, format,
+    Acl, AclQualifier, ArchiveError, ArchiveSource, EntryKind, FileContent, FormatOptions,
+    GrowReservation, Reader, Source, format,
 };
 use util::{available, e2fsck_clean};
 
@@ -265,7 +264,10 @@ fn an_archive_opened_by_path_leaves_its_file_contents_on_disk() {
     );
     // The length is known without reading, which is what the model's size check needs.
     assert_eq!(content.len(), b"ferrosys\n".len() as u64);
-    assert_eq!(content.read().expect("read the range"), b"ferrosys\n");
+    assert_eq!(
+        content.read().expect("read the range").as_ref(),
+        b"ferrosys\n"
+    );
 
     // Read whole, the same member's contents are owned.
     let owned = ArchiveSource::from_reader(&tar_bytes[..])
@@ -894,4 +896,187 @@ fn a_truncated_archive_is_refused() {
         Err(e) => e,
     };
     assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
+}
+
+#[test]
+fn a_compressed_archive_is_named_by_its_format() {
+    // Every real rootfs archive arrives compressed, so handing one to a tar parser is the
+    // commonest mistake there is — and the parser's own vocabulary has nothing useful to say
+    // about it, since the fault is not in tar framing the caller never wrote. Each format
+    // announces itself in its first bytes, and naming it is the difference between a message
+    // that leads somewhere and one that does not.
+    //
+    // Both a stream long enough to fill a block (where the header checksum fails) and one
+    // too short to (where the framing runs out) reach it, since a compressed archive can be
+    // either.
+    let cases: [(&[u8], &str); 6] = [
+        (&[0x1f, 0x8b, 0x08, 0x00], "gzip"),
+        (&[0x28, 0xb5, 0x2f, 0xfd, 0x00], "zstd"),
+        (&[0xfd, b'7', b'z', b'X', b'Z', 0x00], "xz"),
+        (b"BZh9", "bzip2"),
+        (&[0x04, 0x22, 0x4d, 0x18], "lz4"),
+        (&[0x1f, 0x9d, 0x90], "compress"),
+    ];
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    for (magic, format) in cases {
+        for len in [magic.len(), 4096] {
+            let mut bytes = magic.to_vec();
+            bytes.resize(len.max(magic.len()), 0x5a);
+            let err = ArchiveSource::from_reader(&bytes[..])
+                .err()
+                .unwrap_or_else(|| panic!("{format} at {len} bytes must be refused"));
+            assert!(
+                matches!(err, ArchiveError::Compressed { format: f, .. } if f == format),
+                "{format} at {len} bytes: {err:?}"
+            );
+            // The message is the whole of what a caller sees, so it has to carry the name.
+            assert!(err.to_string().contains(format), "{err}");
+
+            // The seeking parser reads the same head and must agree: a caller choosing
+            // `from_path` for its memory behaviour does not thereby get a worse diagnosis.
+            file.as_file().set_len(0).unwrap();
+            file.as_file_mut().rewind().unwrap();
+            file.write_all(&bytes).unwrap();
+            file.flush().unwrap();
+            let err = ArchiveSource::from_path(file.path())
+                .err()
+                .unwrap_or_else(|| panic!("{format} at {len} bytes must be refused by path"));
+            assert!(
+                matches!(err, ArchiveError::Compressed { format: f, .. } if f == format),
+                "{format} at {len} bytes by path: {err:?}"
+            );
+        }
+    }
+
+    // And a valid archive whose first member's name begins with one of those bytes is not
+    // mislabelled: the magic is consulted only where a block has already failed to be a tar
+    // block. `]` opens the lzma magic, which is the weakest of them.
+    let mut b = Builder::new(Vec::new());
+    let mut h = file_header(0o644, 0, 0, 1);
+    h.set_path("]").unwrap();
+    h.set_cksum();
+    b.append(&h, &b"x"[..]).unwrap();
+    let source = ArchiveSource::from_reader(&b.into_inner().unwrap()[..])
+        .expect("a member named `]` is a member, not an lzma stream");
+    assert_eq!(source.len(), 1);
+}
+
+#[test]
+fn a_declared_size_no_offset_can_hold_is_refused_by_both_parsers() {
+    // A PAX `size` record carries a full `u64`, and the seeking parser turns one into an
+    // offset: the body's start plus its length rounded up to a whole block. Near the top
+    // of the range that round-up is not representable, and computing it with wrapping
+    // arithmetic would name a zero-length padded body — which passes the bound that
+    // exists to reject exactly this member and hands back a range of `u64::MAX` bytes.
+    // Both parsers must refuse it, by whichever route each frames the stream.
+    let mut b = Builder::new(Vec::new());
+    let mut h = file_header(0o644, 0, 0, 0);
+    h.set_path("big").unwrap();
+    h.set_cksum();
+    b.append_pax_extensions([("size", u64::MAX.to_string().as_bytes())])
+        .unwrap();
+    b.append(&h, io::empty()).unwrap();
+    let tar_bytes = b.into_inner().unwrap();
+
+    // `ArchiveSource` is not `Debug`, so each `Result` is matched rather than unwrapped.
+    let err = match ArchiveSource::from_reader(&tar_bytes[..]) {
+        Ok(_) => panic!("a size no offset can hold must be refused"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&tar_bytes).unwrap();
+    file.flush().unwrap();
+    let err = match ArchiveSource::from_path(file.path()) {
+        Ok(_) => panic!("a size no offset can hold must be refused by path too"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
+}
+
+#[test]
+fn an_archive_truncated_under_the_format_names_itself_in_the_error() {
+    // The documented hazard of parsing by path: the archive is checked to hold every
+    // body at parse time, but an in-place truncation between then and placement reaches
+    // the format. It surfaces as an I/O error, and `FormatError::Io` is transparent — so
+    // the message the `FileRange` builds is the whole of what a person sees, and it has
+    // to say which archive changed and which bytes were lost.
+    let tar_bytes = build_archive();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&tar_bytes).unwrap();
+    file.flush().unwrap();
+
+    let source = ArchiveSource::from_path(file.path()).expect("parse by path");
+    // The same inode the source's handles hold open, cut to nothing.
+    file.as_file().set_len(0).unwrap();
+
+    let err = match format(source, 64 * MIB, opts()) {
+        Ok(_) => panic!("a truncated archive must not format silently"),
+        Err(e) => e,
+    };
+    let text = err.to_string();
+    let name = file.path().file_name().unwrap().to_string_lossy();
+    assert!(text.contains(name.as_ref()), "{text}");
+    assert!(text.contains("offset"), "{text}");
+}
+
+#[test]
+fn a_mangled_archive_never_panics() {
+    // The never-panic contract for the input this crate does not produce: every mangled
+    // archive is a returned error or a parse that yields entries, never a crash. A
+    // deterministic smoke test over truncations, byte flips, and spliced-in sizes; the
+    // cargo-fuzz `archive_parse` target in fuzz/ is the exhaustive version.
+    let base = build_archive();
+
+    let mut cases: Vec<Vec<u8>> = Vec::new();
+    // Truncations at every block boundary and one byte off each.
+    for cut in (0..base.len()).step_by(512) {
+        cases.push(base[..cut].to_vec());
+        cases.push(base[..cut + 1].to_vec());
+    }
+    // A flipped bit in each of the first few blocks: header fields, checksums, and a
+    // body byte, so the framing is driven from a header it cannot trust.
+    for byte in (0..base.len().min(4096)).step_by(37) {
+        let mut m = base.clone();
+        m[byte] ^= 0xff;
+        cases.push(m);
+    }
+    // Sizes a member cannot be framed from, declared through PAX. Each is spliced into a
+    // fresh archive so the header checksum stays valid and the record is what is tested.
+    for size in [u64::MAX, u64::MAX - 511, u64::MAX / 2, 0, 1] {
+        let mut b = Builder::new(Vec::new());
+        b.append_pax_extensions([("size", size.to_string().as_bytes())])
+            .unwrap();
+        let mut h = file_header(0o644, 0, 0, 0);
+        h.set_path("m").unwrap();
+        h.set_cksum();
+        b.append(&h, io::empty()).unwrap();
+        cases.push(b.into_inner().unwrap());
+    }
+    // Not a tar at all.
+    cases.push(vec![0xff; 4096]);
+    cases.push(Vec::new());
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    for case in &cases {
+        // Whatever each parser returns, neither may panic and neither may allocate from
+        // a length the archive merely claims.
+        if let Ok(source) = ArchiveSource::from_reader(&case[..]) {
+            let _ = source.len();
+        }
+        file.as_file().set_len(0).unwrap();
+        file.as_file_mut().rewind().unwrap();
+        file.write_all(case).unwrap();
+        file.flush().unwrap();
+        if let Ok(source) = ArchiveSource::from_path(file.path()) {
+            for entry in source.into_entries() {
+                // Reading a located body is what turns a bad offset or length into an
+                // allocation, so every one the parser handed back is read.
+                if let EntryKind::File(content) = &entry.kind {
+                    let _ = content.read();
+                }
+            }
+        }
+    }
 }

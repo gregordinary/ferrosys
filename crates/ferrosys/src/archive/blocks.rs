@@ -1,9 +1,12 @@
 //! The tar block layer: framing a tar stream into members and parsing the PAX
 //! extended-header records that decorate them.
 //!
-//! Reading is sequential and eager — the stream is consumed once, front to back,
-//! and each member's body is held as owned bytes. No seeking is required, so the
-//! peak memory is the sum of the members' bodies rather than the archive's size.
+//! Framing walks the stream once, front to back, in one of two modes. [`read_members`]
+//! is eager: it reads each member's body as owned bytes, so no seeking is required and
+//! the peak memory is the sum of the members' bodies rather than the archive's size.
+//! [`read_members_seeking`] instead records where each body lies and seeks past it,
+//! which needs a seekable source and leaves the peak memory independent of what the
+//! archive holds.
 //!
 //! A tar stream is a sequence of 512-byte blocks. Each member is one header block
 //! followed by its body padded up to a block boundary. Four header types carry no
@@ -116,9 +119,14 @@ pub(super) fn read_members_seeking<R: Read + Seek>(
         let offset = r.stream_position()?;
         // Bodies are padded to a whole block, and the padding is part of the framing:
         // skipping only the body would read the next header from the wrong offset.
-        let padded = size.next_multiple_of(BLOCK as u64);
-        let next = offset
-            .checked_add(padded)
+        //
+        // Both steps are checked. A PAX `size` record carries a full `u64`, so rounding
+        // one near the top of the range up to a block is not representable — and a
+        // wrapped round-up would name a body of zero padded bytes, passing the bound
+        // below that exists to reject exactly this member.
+        let next = size
+            .checked_next_multiple_of(BLOCK as u64)
+            .and_then(|padded| offset.checked_add(padded))
             .filter(|&next| next <= end)
             .ok_or(ArchiveError::Malformed {
                 reason: "archive ends inside a member body",
@@ -139,6 +147,7 @@ fn read_members_with<R: Read>(
     let mut records: Vec<PaxRecord> = Vec::new();
     let mut long_path: Option<Vec<u8>> = None;
     let mut long_link: Option<Vec<u8>> = None;
+    let mut first_block = true;
 
     while let Some(block) = read_block(&mut reader)? {
         // A zero block is the end-of-archive marker. The trailing blocks after it
@@ -146,7 +155,17 @@ fn read_members_with<R: Read>(
         if block.iter().all(|&b| b == 0) {
             break;
         }
-        verify_cksum(&block)?;
+        if let Err(e) = verify_cksum(&block) {
+            // The head of the stream is where a compressed archive is recognizable, and the
+            // first block failing its checksum is what a compressed one looks like from
+            // here. Later blocks are past any wrapper's header, so a failure there is
+            // corruption and is reported as such.
+            if first_block && let Some(format) = compression(&block) {
+                return Err(ArchiveError::Compressed { format });
+            }
+            return Err(e);
+        }
+        first_block = false;
         let header = Header::from_byte_slice(&block);
         let stored = header.entry_size().map_err(|_| ArchiveError::Malformed {
             reason: "unreadable member size",
@@ -238,10 +257,39 @@ fn read_block<R: Read>(reader: &mut R) -> Result<Option<[u8; BLOCK]>, ArchiveErr
     match filled {
         0 => Ok(None),
         BLOCK => Ok(Some(block)),
-        _ => Err(ArchiveError::Malformed {
-            reason: "archive ends inside a block",
-        }),
+        // A stream too short to hold one block is often a compressed archive small enough
+        // to fit in one, and its magic says which — a far more useful thing to be told than
+        // that tar framing the caller never wrote is incomplete.
+        _ => Err(compression(&block[..filled]).map_or(
+            ArchiveError::Malformed {
+                reason: "archive ends inside a block",
+            },
+            |format| ArchiveError::Compressed { format },
+        )),
     }
+}
+
+/// The compression format the bytes at the head of a stream identify, if any.
+///
+/// A compressed archive is the commonest thing handed to a tar parser by mistake, and every
+/// format that wraps one announces itself in its first bytes. The check is made only where a
+/// block has already failed to be a tar block, so a valid archive whose first member's name
+/// happens to begin with one of these bytes is never mislabelled.
+fn compression(head: &[u8]) -> Option<&'static str> {
+    const MAGIC: &[(&[u8], &str)] = &[
+        (&[0x1f, 0x8b], "gzip"),
+        (&[0x28, 0xb5, 0x2f, 0xfd], "zstd"),
+        (&[0xfd, b'7', b'z', b'X', b'Z', 0x00], "xz"),
+        (b"BZh", "bzip2"),
+        (&[0x04, 0x22, 0x4d, 0x18], "lz4"),
+        (&[0x5d, 0x00, 0x00], "lzma"),
+        (b"\x89LZO", "lzop"),
+        (&[0x1f, 0x9d], "compress"),
+    ];
+    MAGIC
+        .iter()
+        .find(|(magic, _)| head.starts_with(magic))
+        .map(|&(_, format)| format)
 }
 
 /// Read a body of `size` bytes and consume the padding up to the next block
@@ -404,5 +452,116 @@ mod tests {
             Err(ArchiveError::Malformed { .. })
         ));
         assert!(read_block(&mut &[][..]).unwrap().is_none());
+    }
+
+    /// A one-member archive whose `x` header declares `size` for the member that follows.
+    /// The member's own header records a size of zero and carries no body, so everything
+    /// the framing does with the declared size comes from the PAX record.
+    fn pax_sized_archive(size: &str) -> Vec<u8> {
+        let payload = format!("size={size}\n");
+        // The length prefix counts itself, so it is solved for rather than measured.
+        let mut len = payload.len() + 2;
+        while format!("{len} ").len() + payload.len() != len {
+            len += 1;
+        }
+        let records = format!("{len} {payload}");
+
+        let mut out = Vec::new();
+        let mut push_block = |bytes: &[u8]| {
+            out.extend_from_slice(bytes);
+            out.resize(out.len().next_multiple_of(BLOCK), 0);
+        };
+
+        let mut x = Header::new_gnu();
+        x.set_entry_type(EntryType::XHeader);
+        x.set_size(records.len() as u64);
+        x.set_cksum();
+        push_block(x.as_bytes());
+        push_block(records.as_bytes());
+
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Regular);
+        h.set_size(0);
+        h.set_path("big").unwrap();
+        h.set_cksum();
+        push_block(h.as_bytes());
+
+        // The end-of-archive marker.
+        out.resize(out.len() + 2 * BLOCK, 0);
+        out
+    }
+
+    #[test]
+    fn a_pax_size_no_offset_can_hold_is_malformed() {
+        // Framing a declared size computes the body's start plus its length rounded up to
+        // a whole block, and each step of that has a size it cannot represent. All three
+        // are one verdict — the archive does not hold the body it declares — so each is
+        // named here beside the size that reaches it, since a single unchecked step is
+        // enough to hand back a range the archive cannot back.
+        //
+        // The member's body begins 1536 bytes in, after the `x` header, its records, and
+        // the member's own header.
+        let cases = [
+            // The round-up: no multiple of 512 at or above these fits a `u64`.
+            (u64::MAX, "the round-up"),
+            (u64::MAX - 510, "the round-up"),
+            // Block-aligned already, so the round-up is the identity — and the sum with
+            // the body's offset is what overflows.
+            (u64::MAX - 511, "the sum with the offset"),
+            (u64::MAX - 1000, "the sum with the offset"),
+            // Both steps succeed; the body simply runs far past the end of the archive.
+            (u64::MAX / 2 + 1, "the bound against the archive's length"),
+        ];
+        for (size, step) in cases {
+            let archive = pax_sized_archive(&size.to_string());
+            assert!(
+                matches!(
+                    read_members_seeking(std::io::Cursor::new(&archive)),
+                    Err(ArchiveError::Malformed { .. })
+                ),
+                "size {size} framed successfully; {step} did not refuse it"
+            );
+            // The eager parser bounds its read by the bytes the stream holds, so it
+            // reaches the same verdict by a different route.
+            assert!(
+                matches!(
+                    read_members(&archive[..]),
+                    Err(ArchiveError::Malformed { .. })
+                ),
+                "size {size} read successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seeking_parser_records_a_body_the_archive_holds() {
+        // The refusals above are worth nothing if they also refuse a sound archive. A size
+        // the archive genuinely holds is recorded as a range rather than read, at the
+        // offset the framing computed.
+        let mut archive = pax_sized_archive("512");
+        // Splice a body block in after the member's header, which is the third block.
+        archive.splice(3 * BLOCK..3 * BLOCK, [0xab; BLOCK]);
+        let members = read_members_seeking(std::io::Cursor::new(&archive)).unwrap();
+        assert_eq!(members.len(), 1);
+        assert!(matches!(
+            members[0].body,
+            MemberBody::Range {
+                offset: 1536,
+                len: 512
+            }
+        ));
+
+        // A body shorter than its padding is framed from the padded length: the range is
+        // the body, and the next header is read from the block boundary after it.
+        let mut archive = pax_sized_archive("8");
+        archive.splice(3 * BLOCK..3 * BLOCK, [0xcd; BLOCK]);
+        let members = read_members_seeking(std::io::Cursor::new(&archive)).unwrap();
+        assert!(matches!(
+            members[0].body,
+            MemberBody::Range {
+                offset: 1536,
+                len: 8
+            }
+        ));
     }
 }

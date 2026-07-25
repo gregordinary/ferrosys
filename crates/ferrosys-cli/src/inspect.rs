@@ -340,7 +340,7 @@ fn json(
 ) -> String {
     let mut out = String::new();
     let mut o = Obj::new(&mut out);
-    o.u64("version", 1);
+    o.u64("schema", crate::json::SCHEMA_VERSION);
 
     let mut s = o.obj("superblock");
     s.bytes("volume_name", cstr(&sb.volume_name));

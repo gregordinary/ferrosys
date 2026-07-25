@@ -14,22 +14,29 @@ $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 \
       --from-tar rootfs.tar rootfs.img
 $ ferrosys inspect rootfs.img
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
+$ ferrosys detect rootfs.img
+ext4
 ```
 
-## The three subcommands
+## The four subcommands
 
-- **`format`** writes a filesystem, from a tar archive or empty. The size, UUID, and
-  timestamps are inputs; the tool reads neither the clock nor a random source, so the
-  same inputs write the same image every time. Grow reservation, block size, inode
-  count, reserved percentage, volume label, journal size, feature set, and directory
-  hash are all options.
+- **`format`** writes a filesystem — from a tar archive (`--from-tar`), from a directory
+  tree on this machine (`--from-dir`, with `--owner UID:GID` to override the host's
+  ownership), or empty. The size, UUID, and timestamps are inputs; the tool reads neither
+  the clock nor a random source, so the same inputs write the same image every time. Grow
+  reservation, block size, inode count, reserved percentage, volume label, journal size,
+  feature set, and directory hash are all options. `--dry-run` reports the geometry
+  without opening the destination, and `--atomic` publishes the image only once it is
+  whole.
 - **`inspect`** reports what a filesystem says about itself and whether it is sound —
   as a table a person reads, as JSON, or as SARIF for a pipeline that ingests findings.
   A full scan walks every group descriptor, bitmap, inode, and extent tree, collecting
   each deviation as a typed anomaly; `--fail-on` sets the severity at which the run
   fails.
-- **`extract`** reads the contents back out: as a tar archive, as one file's bytes, or
+- **`extract`** reads the contents back out: as a tar archive, as one file's bytes, as
+  one path's full metadata (`--stat`, extended attributes and decoded ACLs included), or
   as a listing.
+- **`detect`** says which filesystem an image holds — one word, at an offset if asked.
 
 ## Streams and exit codes
 

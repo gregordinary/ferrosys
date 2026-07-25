@@ -26,12 +26,38 @@ ext = []
 # host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
 # and SCHILY ACL records. The archive source feeds the ext writer, so it enables `ext`.
 tar = ["dep:tar", "ext"]
+# The host-directory `Source`, which walks a tree on this machine into the entries a
+# format writes. Off by default so the base build carries only `thiserror`; enabling it
+# pulls in `rustix` for the two extended-attribute calls the standard library has no
+# equivalent of. The walk reads Linux inode metadata and Linux extended attributes, so it
+# is present on Linux. The directory source feeds the ext writer, so it enables `ext`.
+dir = ["dep:rustix", "ext"]
+# `Serialize` on the values a consumer embeds in a report of its own: the scan taxonomy
+# (`Anomaly`, `ScanReport`, `Severity`, `Category`, `Location`), the planned geometry
+# (`Layout`, `GroupLayout`, `BlockRange`), and the feature model (`FeatureSet`, `Profile`).
+# Serialization only — nothing here is deserialized, since these values are read from an
+# image or produced by a planner, never reconstructed from a document. The crate's own
+# `to_json` / `to_sarif` emitters are unaffected: they stay the schema-versioned canonical
+# form, and this is for a consumer whose own document has its own shape. Off by default so
+# the base build carries only `thiserror`; the types it covers are the ext family's, so it
+# enables `ext`.
+serde = ["dep:serde", "ext"]
 
 [dependencies]
 # Typed error enums. Build-time proc-macro only; no runtime footprint.
 thiserror = { workspace = true }
 # The archive `Source`, behind the `tar` feature.
 tar = { workspace = true, optional = true }
+# The `Serialize` derives, behind the `serde` feature.
+serde = { workspace = true, optional = true }
+
+# The host-directory `Source`'s dependency, on the platform whose trees it walks.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+# `lgetxattr` and `llistxattr`, behind the `dir` feature. Default features off with only
+# `std` and `fs` on, which on Linux is the direct-syscall backend: the tree it brings is
+# `bitflags` and `linux-raw-sys` type definitions, with no C library and no build script
+# probing one.
+rustix = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Scratch image files for the host-tool validation gates; never shipped.
@@ -41,7 +67,9 @@ tar = { workspace = true }
 # The writer property gate: generates source trees and geometries, and shrinks a
 # failing case to a minimal one. Never shipped.
 proptest = { workspace = true }
+# Reading back what the `serde` feature's derives emit; exercised with `--features serde`.
+serde_json = { workspace = true }
 
 [package.metadata.docs.rs]
-# Document the archive source on docs.rs.
+# Document the archive and directory sources on docs.rs.
 all-features = true

@@ -1,48 +1,31 @@
 //! `ferrosys extract`: read a filesystem's contents back out — as a tar archive, as one
-//! file's bytes, or as a listing.
+//! file's bytes, as a listing, or as one path's full metadata.
 //!
-//! # What the archive carries
+//! The archive is written by the library's `ArchiveSink`, so what it carries — the `./` root
+//! member, the omitted `/lost+found`, the PAX times, attributes, and ACLs — is the library's
+//! contract rather than this tool's. Feeding what comes out to `ferrosys format --from-tar`
+//! reproduces the filesystem it came from.
 //!
-//! Everything the filesystem holds that tar can express, and nothing is dropped in
-//! silence. Ownership, mode bits, symlinks, hard links, device and FIFO nodes come out in
-//! the header; the times (to the nanosecond, and negative where the file predates the
-//! epoch), the paths, the ids, the extended attributes, and the POSIX ACLs come out in
-//! PAX records, because the header cannot hold them. A socket has no tar entry type at
-//! all, so an image holding one is a typed error rather than an archive quietly missing a
-//! file.
+//! # Memory
 //!
-//! The PAX record is authoritative for every field it carries, and it is always written.
-//! The header's own path and link-target fields hold the same value when it fits in them,
-//! and are left empty when it does not — so they are either right or absent, never subtly
-//! wrong.
-//!
-//! # What comes out is what goes back in
-//!
-//! The archive opens with a `./` member describing the root directory, which is how the
-//! root's own metadata survives a round trip, and it omits `/lost+found`, which every
-//! filesystem makes for itself and which a formatter refuses to be told to make. Feeding
-//! this archive to `ferrosys format --from-tar` reproduces the filesystem it came from.
+//! Nothing here holds a whole file. `--cat` streams one file's bytes to the standard output
+//! and `--to-tar` streams each member's bytes into the archive, so pulling a multi-gigabyte
+//! file out of an image costs a working set rather than the file's size. `--list` holds one
+//! entry per name, and `--max-file-bytes` is the bound to set on an image whose declared
+//! sizes have not earned trust.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Write};
 
-use ferrosys::ext::ondisk::{Inode, Timestamp, Xattr};
-use ferrosys::ext::{Acl, OpenOptions, ReadPolicy, Reader, WalkEntry};
-use tar::{Builder, EntryType, Header};
+use ferrosys::ext::ondisk::{Inode, Timestamp};
+use ferrosys::ext::{Acl, ArchiveSink, Limits, OpenOptions, ReadPolicy, Reader, WalkEntry, Xattr};
 
 use crate::args::{ExtractArgs, ExtractMode, Stream};
 use crate::json::Obj;
 use crate::{Error, emit, from_read, render};
 
-/// `/lost+found`, the one path an archive must not carry: every filesystem makes it for
-/// itself, and a formatter refuses a source that tries to make it again.
-const LOST_FOUND: &[u8] = b"/lost+found";
-
-/// The root directory's inode number.
-const ROOT_INO: u32 = 2;
-
-/// The file-type bits of a mode.
+/// The file-type bits of a mode, and the types they name.
 const IFMT: u16 = 0o170000;
 const IFDIR: u16 = 0o040000;
 const IFREG: u16 = 0o100000;
@@ -56,11 +39,16 @@ const IFSOCK: u16 = 0o140000;
 pub fn run(args: ExtractArgs) -> Result<(), Error> {
     let image = args.image.display().to_string();
     let file = File::open(&args.image).map_err(|e| Error::io(&args.image, e))?;
+    let mut limits = Limits::new();
+    if let Some(max) = args.max_file_bytes {
+        limits = limits.max_file_bytes(max);
+    }
     let mut reader = Reader::open_with(
         file,
         &OpenOptions::new()
             .base(args.offset)
-            .policy(ReadPolicy::Lenient),
+            .policy(ReadPolicy::Lenient)
+            .limits(limits),
     )
     .map_err(|source| Error::NotExt {
         path: image,
@@ -69,13 +57,14 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
 
     match args.mode {
         ExtractMode::Cat(path) => cat(&mut reader, &path),
+        ExtractMode::Stat { path, json } => stat(&mut reader, &path, json),
         ExtractMode::List { json } => list(&mut reader, json),
         ExtractMode::ToTar(Stream::Std) => {
             // The archive is the artifact, and it is the only thing on the standard
             // output: no summary, no count, not even on the standard error.
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            to_tar(&mut reader, &mut out)?;
+            ArchiveSink::new(&mut out).write_tree(&mut reader)?;
             out.flush().map_err(|source| Error::Io {
                 what: "standard output".to_string(),
                 source,
@@ -84,303 +73,141 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
         ExtractMode::ToTar(Stream::File(path)) => {
             let file = File::create(&path).map_err(|e| Error::io(&path, e))?;
             let mut out = io::BufWriter::new(file);
-            to_tar(&mut reader, &mut out)?;
+            ArchiveSink::new(&mut out).write_tree(&mut reader)?;
             out.flush().map_err(|e| Error::io(&path, e))
         }
     }
 }
 
-/// One archive member, gathered from the filesystem before any of it is written.
-struct Member {
-    /// The path in the filesystem. Empty for the root, which has no name of its own.
-    path: Vec<u8>,
-    /// The mode, ownership, times, and size to record.
-    inode: Inode,
-    /// The attributes to carry, in the form an archive holds them.
-    xattrs: Vec<Xattr>,
-    /// The member this name is a second name for, when it is a hard link.
-    hardlink: Option<Vec<u8>>,
-    /// Where a symbolic link points.
-    symlink: Option<Vec<u8>>,
-    /// A device node's major and minor numbers.
-    device: Option<(u32, u32)>,
-    /// A regular file's bytes.
-    data: Vec<u8>,
-}
-
-/// Whether a path is `/lost+found` or something inside it.
-fn is_lost_found(path: &[u8]) -> bool {
-    path == LOST_FOUND || path.starts_with(b"/lost+found/")
-}
-
-/// The name a path takes inside an archive: `/etc/hostname` becomes `./etc/hostname`, and
-/// the root becomes `./`.
-///
-/// A relative name is what a tar archive carries and what an extractor unpacks without
-/// argument; the archive source maps it back to an absolute path on the way in. A
-/// directory's name ends in a slash, as every tar writer marks one.
-fn member_name(path: &[u8], directory: bool) -> Vec<u8> {
-    let mut name = Vec::with_capacity(path.len() + 2);
-    name.push(b'.');
-    name.extend_from_slice(path);
-    if directory {
-        name.push(b'/');
-    }
-    name
-}
-
-/// Write the whole tree as a tar archive.
-fn to_tar(reader: &mut Reader<File>, out: impl Write) -> Result<(), Error> {
-    let entries = reader.walk().map_err(from_read)?;
-    let mut builder = Builder::new(out);
-
-    // The root has no name, so the walk does not reach it; the `./` member is what carries
-    // its mode, ownership, times, and attributes across.
-    let root = reader.inode(ROOT_INO).map_err(from_read)?;
-    let root = Member {
-        path: Vec::new(),
-        xattrs: reader.xattrs(&root).map_err(from_read)?,
-        inode: root,
-        hardlink: None,
-        symlink: None,
-        device: None,
-        data: Vec::new(),
-    };
-    append(&mut builder, &root)?;
-
-    // The first name to reach an inode is the file; every later name for the same inode is
-    // another name for it — a hard link — and the archive says so rather than storing the
-    // bytes a second time.
-    let mut named: HashMap<u32, Vec<u8>> = HashMap::new();
-    for entry in entries {
-        if is_lost_found(&entry.path) {
-            continue;
-        }
-        append(&mut builder, &member(reader, entry, &mut named)?)?;
-    }
-
-    builder.finish().map_err(archive_write)
-}
-
-/// Gather everything one walk entry contributes to the archive.
-fn member(
-    reader: &mut Reader<File>,
-    entry: WalkEntry,
-    named: &mut HashMap<u32, Vec<u8>>,
-) -> Result<Member, Error> {
-    let WalkEntry {
-        path,
-        number,
-        inode,
-        ..
-    } = entry;
-    let kind = inode.mode & IFMT;
-    if kind == IFSOCK {
-        return Err(Error::Unrepresentable(path));
-    }
-
-    // A directory has more than one link by construction — its own name and its `.` — so
-    // link counts say nothing about it, and it is never another name for anything.
-    let hardlink = if kind == IFDIR {
-        None
-    } else {
-        match named.get(&number) {
-            // A hard link's target is a member of this same archive, so it is named the
-            // way that member is named.
-            Some(first) => Some(member_name(first, false)),
-            None => {
-                named.insert(number, path.clone());
-                None
-            }
-        }
-    };
-    // A hard link carries nothing of its own: the contents and the attributes belong to
-    // the inode, which the name that came first already wrote.
-    if hardlink.is_some() {
-        return Ok(Member {
-            path,
-            inode,
-            xattrs: Vec::new(),
-            hardlink,
-            symlink: None,
-            device: None,
-            data: Vec::new(),
-        });
-    }
-
-    let symlink = if kind == IFLNK {
-        Some(reader.read_symlink(&inode).map_err(from_read)?)
-    } else {
-        None
-    };
-    let device = if kind == IFCHR || kind == IFBLK {
-        Some(reader.device(&inode))
-    } else {
-        None
-    };
-    // read_data materializes the file's whole logical size, so extracting a foreign
-    // image trusts its `i_size`: a file claiming a very large sparse size allocates in
-    // proportion to that claim. inspect's scan reports on such an image without reading
-    // its files.
-    let data = if kind == IFREG {
-        reader.read_data(&inode).map_err(from_read)?
-    } else {
-        Vec::new()
-    };
-    let xattrs = reader.xattrs(&inode).map_err(from_read)?;
-
-    Ok(Member {
-        path,
-        inode,
-        xattrs,
-        hardlink: None,
-        symlink,
-        device,
-        data,
-    })
-}
-
-/// Writing the archive failed.
-fn archive_write(source: io::Error) -> Error {
-    Error::Io {
-        what: "the archive".to_string(),
-        source,
-    }
-}
-
-/// Append one member: its PAX records, then its header and contents.
-///
-/// The records go first because that is where they apply — an `x` header describes the
-/// entry that follows it.
-fn append(builder: &mut Builder<impl Write>, m: &Member) -> Result<(), Error> {
-    let kind = m.inode.mode & IFMT;
-    let name = member_name(&m.path, kind == IFDIR);
-
-    let entry_type = if m.hardlink.is_some() {
-        EntryType::Link
-    } else {
-        match kind {
-            IFDIR => EntryType::Directory,
-            IFREG => EntryType::Regular,
-            IFLNK => EntryType::Symlink,
-            IFCHR => EntryType::Char,
-            IFBLK => EntryType::Block,
-            IFIFO => EntryType::Fifo,
-            // A socket is refused before a member is ever built for it.
-            _ => return Err(Error::Unrepresentable(m.path.clone())),
-        }
-    };
-    let target = m.hardlink.as_ref().or(m.symlink.as_ref());
-
-    // Every field the header cannot hold exactly goes into a PAX record, and the ones it
-    // can go into both: the record is authoritative, and every reader that honours it —
-    // GNU tar, bsdtar, and this tool's own archive source among them — reads the exact
-    // value whatever the header says.
-    let mut records: Vec<(String, Vec<u8>)> = vec![
-        ("path".to_string(), name.clone()),
-        ("atime".to_string(), render::pax_time(m.inode.atime).into()),
-        ("ctime".to_string(), render::pax_time(m.inode.ctime).into()),
-        ("mtime".to_string(), render::pax_time(m.inode.mtime).into()),
-        ("uid".to_string(), m.inode.uid.to_string().into()),
-        ("gid".to_string(), m.inode.gid.to_string().into()),
-    ];
-    if let Some(target) = target {
-        records.push(("linkpath".to_string(), target.clone()));
-    }
-    for xattr in &m.xattrs {
-        records.push((
-            pax_xattr_key(&m.path, &xattr.name)?,
-            xattr_value(&m.path, xattr)?,
-        ));
-    }
-    let borrowed: Vec<(&str, &[u8])> = records
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_slice()))
-        .collect();
-    builder
-        .append_pax_extensions(borrowed)
-        .map_err(archive_write)?;
-
-    let mut header = Header::new_ustar();
-    header.set_entry_type(entry_type);
-    header.set_mode(u32::from(m.inode.mode & 0o7777));
-    header.set_uid(u64::from(m.inode.uid));
-    header.set_gid(u64::from(m.inode.gid));
-    // The header's time is unsigned whole seconds, so a file older than the epoch or one
-    // carrying a sub-second time cannot be written there. The PAX record above holds the
-    // real value; this is the approximation a reader that ignores it would see.
-    header.set_mtime(u64::try_from(m.inode.mtime.secs).unwrap_or(0));
-    if let Some((major, minor)) = m.device {
-        header.set_device_major(major).map_err(archive_write)?;
-        header.set_device_minor(minor).map_err(archive_write)?;
-    }
-    // A path or a target that is text and short enough goes into the header as well, where
-    // a reader that ignores PAX records finds it. One that is neither — not text, or too
-    // long for the field — is left out rather than truncated into a name that is not the
-    // file's, or transliterated into a differently-named file. The PAX record above holds
-    // it exactly either way, so an empty field here is honestly absent, never subtly
-    // wrong.
-    if let Ok(text) = std::str::from_utf8(&name) {
-        let _ = header.set_path(text);
-    }
-    if let Some(target) = target
-        && let Ok(text) = std::str::from_utf8(target)
-    {
-        let _ = header.set_link_name(text);
-    }
-
-    header.set_size(m.data.len() as u64);
-    header.set_cksum();
-    builder
-        .append(&header, m.data.as_slice())
-        .map_err(archive_write)
-}
-
-/// The PAX keyword for an extended attribute, `SCHILY.xattr.<name>`.
-///
-/// A PAX record's keyword is text and cannot hold an `=` (its key/value delimiter) or a
-/// newline (its record terminator), so a name carrying either — or one that is not valid
-/// UTF-8 — has no faithful spelling. It is refused rather than flattened through U+FFFD or
-/// split at a delimiter into a differently-named attribute, which would corrupt the round
-/// trip silently. Standard attribute names are ASCII without these bytes.
-fn pax_xattr_key(path: &[u8], name: &[u8]) -> Result<String, Error> {
-    match std::str::from_utf8(name) {
-        Ok(text) if !text.contains('=') && !text.contains('\n') => {
-            Ok(format!("SCHILY.xattr.{text}"))
-        }
-        _ => Err(Error::XattrNameUnrepresentable {
-            path: path.to_vec(),
-            name: name.to_vec(),
-        }),
-    }
-}
-
-/// The value an extended attribute takes in an archive.
-///
-/// A POSIX ACL is stored on disk in ext4's compact form, which is not the form the
-/// `getxattr` boundary speaks — and an archive holds what `getxattr` would have given it.
-/// So an ACL is decoded and written back out in the version-2 form, which is what GNU tar
-/// reads and what the archive source expects on the way back in. Every other attribute is
-/// bytes, and travels as bytes.
-fn xattr_value(path: &[u8], xattr: &Xattr) -> Result<Vec<u8>, Error> {
-    if xattr.name == Acl::ACCESS_NAME || xattr.name == Acl::DEFAULT_NAME {
-        let acl = Acl::decode(&xattr.value).map_err(|source| Error::BadAcl {
-            path: path.to_vec(),
-            source,
-        })?;
-        return Ok(acl.encode_xattr_v2());
-    }
-    Ok(xattr.value.clone())
-}
-
 /// Write one file's bytes to the standard output, and nothing else.
+///
+/// The bytes are streamed rather than held, so a file larger than memory is written out
+/// without ever existing in it.
 fn cat(reader: &mut Reader<File>, path: &[u8]) -> Result<(), Error> {
     let (_, inode) = reader.lookup(path).map_err(from_read)?;
     if inode.mode & IFMT != IFREG {
         return Err(Error::NotAFile(path.to_vec()));
     }
-    let data = reader.read_data(&inode).map_err(from_read)?;
-    emit(&data)
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    reader.read_data_to(&inode, &mut out).map_err(from_read)?;
+    out.flush().map_err(|source| Error::Io {
+        what: "standard output".to_string(),
+        source,
+    })
+}
+
+/// Report everything the filesystem records about one path.
+///
+/// This is the per-inode view: the metadata a listing carries, plus the extended attributes
+/// and decoded POSIX ACLs that only an archive would otherwise show — which for a rootfs is
+/// the headline question, since a file's capability set lives in an attribute. A path naming
+/// a symlink describes the link itself rather than its target, because a question about a
+/// path is a question about that path.
+fn stat(reader: &mut Reader<File>, path: &[u8], as_json: bool) -> Result<(), Error> {
+    let (number, inode) = reader.lookup_no_follow(path).map_err(from_read)?;
+    let xattrs = reader.xattrs(&inode).map_err(from_read)?;
+    let target = if inode.mode & IFMT == IFLNK {
+        Some(reader.read_symlink(&inode).map_err(from_read)?)
+    } else {
+        None
+    };
+    let device = match inode.mode & IFMT {
+        IFCHR | IFBLK => Some(reader.device(&inode)),
+        _ => None,
+    };
+
+    let text = if as_json {
+        stat_json(path, number, &inode, &xattrs, target.as_deref(), device)
+    } else {
+        stat_table(path, number, &inode, &xattrs, target.as_deref(), device)
+    };
+    emit(text.as_bytes())
+}
+
+/// One path's metadata as a person reads it: one field per line, attributes last.
+fn stat_table(
+    path: &[u8],
+    number: u32,
+    inode: &Inode,
+    xattrs: &[Xattr],
+    target: Option<&[u8]>,
+    device: Option<(u32, u32)>,
+) -> String {
+    let mut s = String::new();
+    let mut line = |k: &str, v: String| {
+        s.push_str(&format!("{k:<24}{v}\n"));
+    };
+    line("Path:", render::printable(path));
+    line("Inode:", number.to_string());
+    line("Type:", kind_name(inode.mode).to_string());
+    // The mode twice over: octal, which is how a mode is written and read, and the symbolic
+    // form a listing shows.
+    line(
+        "Mode:",
+        format!("{:04o} ({})", inode.mode & 0o7777, render::mode(inode.mode)),
+    );
+    line("Owner:", format!("{}:{}", inode.uid, inode.gid));
+    line("Links:", inode.links_count.to_string());
+    line("Size:", inode.size.to_string());
+    line("Blocks:", inode.blocks.to_string());
+    if let Some((major, minor)) = device {
+        line("Device:", format!("{major}:{minor}"));
+    }
+    if let Some(target) = target {
+        line("Symlink target:", render::printable(target));
+    }
+    for (label, t) in [
+        ("Accessed:", inode.atime),
+        ("Modified:", inode.mtime),
+        ("Changed:", inode.ctime),
+        ("Created:", inode.crtime),
+    ] {
+        line(
+            label,
+            format!("{} ({} ns)", render::iso8601(t.secs), t.nanos),
+        );
+    }
+    for xattr in xattrs {
+        // A POSIX ACL is stored in ext's compact form, which is not what a person means by
+        // an ACL: it is decoded to the text form `getfacl` prints. Every other attribute is
+        // bytes, shown the way a name is.
+        let rendered = acl_text(xattr).unwrap_or_else(|| render::printable(&xattr.value));
+        line(
+            &format!("Xattr {}:", render::printable(&xattr.name)),
+            rendered,
+        );
+    }
+    s
+}
+
+/// One path's metadata as a machine reads it, attributes included.
+fn stat_json(
+    path: &[u8],
+    number: u32,
+    inode: &Inode,
+    xattrs: &[Xattr],
+    target: Option<&[u8]>,
+    device: Option<(u32, u32)>,
+) -> String {
+    let mut out = String::new();
+    let mut o = Obj::new(&mut out);
+    o.u64("schema", crate::json::SCHEMA_VERSION);
+    let mut e = o.obj("entry");
+    entry_fields(&mut e, path, number, inode, target);
+    e.u64("blocks", inode.blocks);
+    time(&mut e, "crtime", inode.crtime);
+    if let Some((major, minor)) = device {
+        let mut d = e.obj("device");
+        d.u64("major", u64::from(major));
+        d.u64("minor", u64::from(minor));
+        d.end();
+    }
+    xattr_fields(&mut e, xattrs);
+    e.end();
+    o.end();
+    out.push('\n');
+    out
 }
 
 /// List the tree: every name the filesystem holds, `/lost+found` included, because a
@@ -388,16 +215,25 @@ fn cat(reader: &mut Reader<File>, path: &[u8]) -> Result<(), Error> {
 fn list(reader: &mut Reader<File>, as_json: bool) -> Result<(), Error> {
     let entries = reader.walk().map_err(from_read)?;
     // A symbolic link's target is part of what its name means, so a listing that leaves it
-    // out says less than it knows.
+    // out says less than it knows. The attributes are gathered for the JSON listing only:
+    // the table has no column for them, and reading a whole tree's attributes to print none
+    // of them would be work for nothing.
     let mut targets: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut xattrs: HashMap<usize, Vec<Xattr>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         if e.inode.mode & IFMT == IFLNK {
             targets.insert(i, reader.read_symlink(&e.inode).map_err(from_read)?);
         }
+        if as_json {
+            let attrs = reader.xattrs(&e.inode).map_err(from_read)?;
+            if !attrs.is_empty() {
+                xattrs.insert(i, attrs);
+            }
+        }
     }
 
     let text = if as_json {
-        list_json(&entries, &targets)
+        list_json(&entries, &targets, &xattrs)
     } else {
         list_table(&entries, &targets)
     };
@@ -428,26 +264,26 @@ fn list_table(entries: &[WalkEntry], targets: &HashMap<usize, Vec<u8>>) -> Strin
 }
 
 /// The listing a machine reads.
-fn list_json(entries: &[WalkEntry], targets: &HashMap<usize, Vec<u8>>) -> String {
+fn list_json(
+    entries: &[WalkEntry],
+    targets: &HashMap<usize, Vec<u8>>,
+    xattrs: &HashMap<usize, Vec<Xattr>>,
+) -> String {
     let mut out = String::new();
     let mut o = Obj::new(&mut out);
-    o.u64("version", 1);
+    o.u64("schema", crate::json::SCHEMA_VERSION);
     let mut a = o.arr("entries");
     for (i, e) in entries.iter().enumerate() {
         let mut j = a.obj();
-        j.bytes("path", &e.path);
-        j.u64("inode", u64::from(e.number));
-        j.str("type", kind_name(e.inode.mode));
-        j.u64("mode", u64::from(e.inode.mode & 0o7777));
-        j.u64("uid", u64::from(e.inode.uid));
-        j.u64("gid", u64::from(e.inode.gid));
-        j.u64("links", u64::from(e.inode.links_count));
-        j.u64("size", e.inode.size);
-        time(&mut j, "atime", e.inode.atime);
-        time(&mut j, "ctime", e.inode.ctime);
-        time(&mut j, "mtime", e.inode.mtime);
-        if let Some(target) = targets.get(&i) {
-            j.bytes("target", target);
+        entry_fields(
+            &mut j,
+            &e.path,
+            e.number,
+            &e.inode,
+            targets.get(&i).map(Vec::as_slice),
+        );
+        if let Some(attrs) = xattrs.get(&i) {
+            xattr_fields(&mut j, attrs);
         }
         j.end();
     }
@@ -455,6 +291,54 @@ fn list_json(entries: &[WalkEntry], targets: &HashMap<usize, Vec<u8>>) -> String
     o.end();
     out.push('\n');
     out
+}
+
+/// The fields a listing and a stat agree on, written once so the two documents cannot drift.
+fn entry_fields(o: &mut Obj<'_>, path: &[u8], number: u32, inode: &Inode, target: Option<&[u8]>) {
+    o.bytes("path", path);
+    o.u64("inode", u64::from(number));
+    o.str("type", kind_name(inode.mode));
+    // The permission bits as a number. JSON has no octal literal, so this is decimal — 509
+    // is `0o775` — and `mode_octal` beside it carries the spelling a mode is written in.
+    o.u64("mode", u64::from(inode.mode & 0o7777));
+    o.str("mode_octal", &format!("{:04o}", inode.mode & 0o7777));
+    o.u64("uid", u64::from(inode.uid));
+    o.u64("gid", u64::from(inode.gid));
+    o.u64("links", u64::from(inode.links_count));
+    o.u64("size", inode.size);
+    time(o, "atime", inode.atime);
+    time(o, "ctime", inode.ctime);
+    time(o, "mtime", inode.mtime);
+    if let Some(target) = target {
+        o.bytes("target", target);
+    }
+}
+
+/// An entry's extended attributes, each as a name, a value, and — for a POSIX ACL — the
+/// decoded text form, since the stored bytes are ext's compact encoding rather than anything
+/// a consumer would recognize.
+fn xattr_fields(o: &mut Obj<'_>, xattrs: &[Xattr]) {
+    let mut a = o.arr("xattrs");
+    for xattr in xattrs {
+        let mut x = a.obj();
+        x.bytes("name", &xattr.name);
+        x.bytes("value", &xattr.value);
+        if let Some(text) = acl_text(xattr) {
+            x.str("acl", &text);
+        }
+        x.end();
+    }
+    a.end();
+}
+
+/// The `getfacl`-style text of an attribute that holds a POSIX ACL, or `None` for any other
+/// attribute — and for an ACL attribute whose bytes do not decode, which is reported as the
+/// bytes it holds rather than as a failure of the whole listing.
+fn acl_text(xattr: &Xattr) -> Option<String> {
+    if xattr.name != Acl::ACCESS_NAME && xattr.name != Acl::DEFAULT_NAME {
+        return None;
+    }
+    Acl::decode(&xattr.value).ok().map(|acl| render::acl(&acl))
 }
 
 /// A timestamp as two integers: the whole seconds, which reach back past the epoch and so
@@ -475,50 +359,5 @@ fn kind_name(mode: u16) -> &'static str {
         IFIFO => "fifo",
         IFSOCK => "socket",
         _ => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_member_is_named_relative_to_the_archive_root() {
-        assert_eq!(member_name(b"/etc/hostname", false), b"./etc/hostname");
-        assert_eq!(member_name(b"/etc", true), b"./etc/");
-        // The root has no name of its own, so it is the bare `./` — which is exactly what
-        // the archive source reads back as the filesystem root.
-        assert_eq!(member_name(b"", true), b"./");
-    }
-
-    #[test]
-    fn lost_and_found_is_recognized_with_its_contents() {
-        assert!(is_lost_found(b"/lost+found"));
-        assert!(is_lost_found(b"/lost+found/17"));
-        // A name that merely begins the same way is a different file.
-        assert!(!is_lost_found(b"/lost+found-old"));
-        assert!(!is_lost_found(b"/etc/lost+found"));
-    }
-
-    #[test]
-    fn a_pax_xattr_key_is_built_for_a_plain_name_and_refused_otherwise() {
-        // A standard ASCII name becomes the SCHILY.xattr keyword.
-        assert_eq!(
-            pax_xattr_key(b"/f", b"user.comment").unwrap(),
-            "SCHILY.xattr.user.comment"
-        );
-
-        // A name a PAX keyword cannot carry faithfully is a typed error, not a silently
-        // corrupted record: an embedded '=' or newline (the record's own delimiters) or a
-        // byte that is not valid UTF-8.
-        for bad in [&b"user.a=b"[..], b"user.a\nb", b"user.\xff"] {
-            assert!(
-                matches!(
-                    pax_xattr_key(b"/f", bad),
-                    Err(Error::XattrNameUnrepresentable { .. })
-                ),
-                "name {bad:?} must be refused"
-            );
-        }
     }
 }

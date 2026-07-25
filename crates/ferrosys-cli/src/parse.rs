@@ -13,10 +13,9 @@
 use std::ffi::OsStr;
 use std::num::NonZeroU64;
 
-use ferrosys::ext::feature::FeatureSet;
 use ferrosys::ext::{
-    Compat, ErrorBehavior, GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount,
-    JournalSize, Profile, ReservedRatio, RoCompat, Severity,
+    Compat, ErrorBehavior, FeatureSet, GrowReservation, HashSignedness, HashVersion, Incompat,
+    InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity,
 };
 
 /// A value an option cannot take.
@@ -54,6 +53,9 @@ pub enum ValueError {
         /// The label's length in bytes.
         len: usize,
     },
+    /// The value is not an ownership pair.
+    #[error("{0}: expected UID:GID, two whole numbers separated by a colon")]
+    NotAnOwner(String),
     /// The value named a feature no ext feature word defines.
     #[error("{0}: not an ext feature name")]
     UnknownFeature(String),
@@ -115,6 +117,24 @@ pub fn count_u32(v: &OsStr) -> Result<u32, ValueError> {
             ValueError::NotANumber(shown(v))
         }
     })
+}
+
+/// An ownership pair, `UID:GID`, each a whole number the 32-bit on-disk fields hold.
+///
+/// Both halves are required: an image's ownership is two numbers, and taking one to mean
+/// the other would guess at which.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnOwner`] if the text is not two decimal numbers separated by a colon,
+/// or if either does not fit in 32 bits.
+pub fn owner(v: &OsStr) -> Result<(u32, u32), ValueError> {
+    let bad = || ValueError::NotAnOwner(shown(v));
+    let s = text(v).ok_or_else(bad)?;
+    let (uid, gid) = s.split_once(':').ok_or_else(bad)?;
+    let uid: u32 = uid.parse().map_err(|_| bad())?;
+    let gid: u32 = gid.parse().map_err(|_| bad())?;
+    Ok((uid, gid))
 }
 
 /// A count of seconds since the Unix epoch, which may be negative: ext4 timestamps

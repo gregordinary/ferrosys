@@ -10,8 +10,8 @@ seed, and timestamps are inputs the caller supplies, so the same inputs produce 
 same image byte for byte. The crate builds on Rust 1.88 or newer.
 
 > **Status:** under active development. The API is not yet stable. Following Cargo's
-> `0.x` semantics, a breaking change bumps the minor version — a `ferrosys = "0.1"`
-> requirement resolves `>=0.1.0, <0.2.0`, so a breaking release reaches no one unasked.
+> `0.x` semantics, a breaking change bumps the minor version, and a `0.x` requirement
+> resolves only within that minor — so a breaking release reaches no one unasked.
 
 ```rust
 use ferrosys::ext::ondisk::Timestamp;
@@ -76,24 +76,41 @@ assert!(contents.iter().any(|e| e.name == b"etc"));
   that ext2 and ext3 use; and checksums verified against each object's own bytes, so a
   field the filesystem carries and this crate does not model reads cleanly. `lookup`
   resolves a path through symbolic links against the image's own root.
-- **Streaming output** — `format_to` writes an image to any seekable destination,
-  touching only the blocks the filesystem uses, so a file stays sparse and a filesystem
-  larger than memory is possible. `format` collects the same bytes in memory. A source
-  may hand back a file's contents as a handle rather than a buffer, so a format's peak
-  memory is the largest single file rather than the sum of them all.
+- **Streaming in both directions** — `format_to` writes an image to any seekable
+  destination, touching only the blocks the filesystem uses, so a file stays sparse and a
+  filesystem larger than memory is possible, and `format` collects the same bytes in
+  memory. A source may hand back a file's contents as a handle rather than a buffer, so a
+  format's peak memory is the largest single file rather than the sum of them all. Reading
+  is the same shape: `read_into` reads a range of a file, `read_data_to` streams one to a
+  writer a window at a time, and `walk_with` walks the tree lazily, handing each entry to a
+  callback that may read as it goes — so pulling a multi-gigabyte file out of an image
+  costs a working set rather than its size.
 - **64-bit addressing** — block numbers beyond 2^32, for filesystems past 16 TiB.
 
 ## Features
 
-The `tar` feature (off by default) adds `ArchiveSource`, which builds a filesystem from
-a tar stream with its PAX timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*`
-ACL records. `ArchiveSource::from_path` leaves each member's bytes on disk until that
-file is placed. Without the feature, the crate depends only on `thiserror`.
+Three, each off by default. Without them the crate depends only on `thiserror`.
+
+- **`tar`** — `ArchiveSource` builds a filesystem from a tar stream with its PAX
+  timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` ACL records;
+  `ArchiveSource::from_path` leaves each member's bytes on disk until that file is placed.
+  `ArchiveSink` writes a filesystem back out as one, streaming each member.
+- **`dir`** — `DirectorySource` walks a directory tree on this machine into a filesystem,
+  carrying modes, ownership, all three times, symlinks, hard links, device, FIFO and
+  socket nodes, and extended attributes with their POSIX ACLs. Each file's bytes are read
+  as that file is placed and no descriptor is held in between, so the tree may hold any
+  number of files. `owner(uid, gid)` replaces the host's ownership, which is what a build
+  that does not run as root wants.
+- **`serde`** — `Serialize` on the scan taxonomy (`Anomaly`, `ScanReport`, `Severity`,
+  `Category`, `Location`), the planned geometry (`Layout`, `GroupLayout`, `BlockRange`),
+  and the feature model (`FeatureSet`, `Profile`), for a consumer embedding them in a
+  document of its own. The crate's own `to_json` and `to_sarif` emitters are unaffected:
+  they stay the schema-versioned canonical form.
 
 ## Command line
 
 [`ferrosys-cli`](https://crates.io/crates/ferrosys-cli) puts this crate on the command
-line as the `ferrosys` binary: `format`, `inspect`, and `extract`.
+line as the `ferrosys` binary: `format`, `inspect`, `extract`, and `detect`.
 
 ## Documentation
 

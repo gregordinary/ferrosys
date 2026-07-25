@@ -12,6 +12,16 @@
 
 use std::fmt::Write as _;
 
+/// The version of the document shapes this tool emits, carried as the `schema` field at the
+/// head of every one of them.
+///
+/// A downstream parser depends on the shape, and no signature describes it, so the shape
+/// names its own version — and it is named the same thing in every document the tool emits,
+/// including the library's own scan report (`ext::read::SCAN_SCHEMA_VERSION`), so a consumer
+/// reads one field wherever it looks. The tool's version says what wrote a document; this
+/// says what the document *is*, and the two move independently.
+pub const SCHEMA_VERSION: u64 = 1;
+
 /// Append a JSON string literal for `s`, escaping what the grammar requires.
 pub fn push_string(out: &mut String, s: &str) {
     out.push('"');

@@ -32,12 +32,12 @@ use std::path::Path;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-use ferrosys::ext::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
+use ferrosys::ext::acl::{EXEC, READ, WRITE};
 use ferrosys::ext::ondisk::{Inode, Timestamp};
 use ferrosys::ext::{
-    AllocError, Compat, FeatureSet, FormatError, FormatOptions, GeometryError, GrowReservation,
-    HashSignedness, HashVersion, Incompat, InodeCount, ReadError, Reader, ReservedRatio, RoCompat,
-    TreeBuilder, format_to,
+    Acl, AclEntry, AclQualifier, AllocError, Compat, FeatureSet, FormatError, FormatOptions,
+    GeometryError, GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount, ReadError,
+    Reader, ReservedRatio, RoCompat, TreeBuilder, format_to,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -753,9 +753,8 @@ fn resolve_xattrs(item: &RawItem, is_dir: bool, block_size: u32) -> BTreeMap<Vec
 fn realize(spec: &Spec) -> (TreeBuilder, BTreeMap<Vec<u8>, ExpectedEntry>) {
     let block_size = spec.geo.block_size;
     let base = Timestamp::from_secs(BASE_TIME);
-    let base_meta = |mode: u16, uid: u32, gid: u32| {
-        ferrosys::ext::source::Metadata::new(mode, base).owned_by(uid, gid)
-    };
+    let base_meta =
+        |mode: u16, uid: u32, gid: u32| ferrosys::ext::Metadata::new(mode, base).owned_by(uid, gid);
 
     let mut builder = TreeBuilder::new();
     let mut expected: BTreeMap<Vec<u8>, ExpectedEntry> = BTreeMap::new();
@@ -787,7 +786,7 @@ fn realize(spec: &Spec) -> (TreeBuilder, BTreeMap<Vec<u8>, ExpectedEntry>) {
             item.ctime.resolve(),
             item.mtime.resolve(),
         );
-        let m = ferrosys::ext::source::Metadata::new(item.mode, mtime)
+        let m = ferrosys::ext::Metadata::new(item.mode, mtime)
             .owned_by(item.uid, item.gid)
             .with_times(atime, ctime, mtime);
         let times = Some((atime, ctime, mtime));

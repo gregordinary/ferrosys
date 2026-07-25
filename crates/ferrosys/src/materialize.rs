@@ -51,6 +51,25 @@ use crate::source::Source;
 /// The reserved inode mapping the reserved group-descriptor-table blocks.
 const RESIZE_INO: u32 = 7;
 
+/// Relabel an out-of-space failure as the journal's own.
+///
+/// The journal is the largest structure a filesystem places for itself, so on a small
+/// filesystem it is the allocation that runs out of room — and a bare "out of space" for it
+/// reads as though the caller's contents did not fit, on a filesystem that may hold none.
+/// Any other failure passes through unchanged.
+fn journal_space(e: impl Into<FormatError>) -> FormatError {
+    match e.into() {
+        FormatError::Alloc(AllocError::OutOfSpace {
+            requested,
+            available,
+        }) => FormatError::JournalDoesNotFit {
+            requested,
+            available,
+        },
+        other => other,
+    }
+}
+
 /// The reserved inode holding the journal (`s_journal_inum`).
 const JOURNAL_INO: u32 = 8;
 
@@ -264,14 +283,50 @@ pub enum FormatError {
         /// Inodes the geometry provides.
         available: u32,
     },
-    /// A journal was requested but the size is below the minimum jbd2 accepts, or the
-    /// filesystem is too small to hold even the minimum journal.
+    /// An explicit [`JournalSize::Blocks`] is below the minimum jbd2 accepts.
     #[error("journal of {requested} blocks is below the minimum of {minimum}")]
     #[non_exhaustive]
     JournalTooSmall {
-        /// Journal blocks requested (zero when the filesystem is too small for any).
+        /// Journal blocks requested.
         requested: u32,
         /// The minimum journal size in blocks.
+        minimum: u32,
+    },
+    /// The journal does not fit in the blocks left free after the filesystem's fixed
+    /// metadata.
+    ///
+    /// The bare allocator failure ([`Alloc`](Self::Alloc)) is what a *source's* files
+    /// running out of room looks like; the journal earns its own variant because it is the
+    /// filesystem's own structure and the largest one a small filesystem places, so "out of
+    /// space" for it would otherwise read as though the caller's contents did not fit.
+    #[error(
+        "the journal needs {requested} blocks but only {available} are free: build a \
+         smaller journal, none at all, or a larger filesystem"
+    )]
+    #[non_exhaustive]
+    JournalDoesNotFit {
+        /// Blocks the journal needs.
+        requested: u64,
+        /// Blocks left free for it.
+        available: u64,
+    },
+    /// The feature set carries a journal, but the filesystem is too small to hold the
+    /// smallest one jbd2 accepts.
+    ///
+    /// This is a different fault from [`JournalTooSmall`](Self::JournalTooSmall), which is
+    /// a size the caller named: here no size would do, so the ways out are a filesystem
+    /// large enough for a journal or a feature set without one. A journal is not silently
+    /// dropped to make the format succeed — a feature word is a promise about what the
+    /// filesystem carries, and clearing one the caller asked for would break it quietly.
+    #[error(
+        "a filesystem of {blocks} blocks has no room for a journal, which needs at least \
+         {minimum} blocks: build it without the has_journal feature, or make it larger"
+    )]
+    #[non_exhaustive]
+    FilesystemTooSmallForJournal {
+        /// Blocks the filesystem has.
+        blocks: u64,
+        /// The smallest journal jbd2 accepts, in blocks.
         minimum: u32,
     },
     /// A regular file the filesystem provides for itself reaches
@@ -409,18 +464,16 @@ pub fn format(
     size_bytes: u64,
     options: FormatOptions,
 ) -> Result<Image, FormatError> {
-    let (layout, model) = prepare(source, size_bytes, &options)?;
-    let feature = options.feature;
+    let plan = FormatPlan::new(source, size_bytes, options)?;
 
     // The whole image is one buffer, so its size must be one this platform can address:
     // a 32-bit target holds no 4 GiB image, and a cast would silently size the buffer to
     // the low bits of the count and write a filesystem into the wrong number of bytes.
-    let image_bytes = layout.total_blocks * u64::from(layout.block_size);
+    let image_bytes = plan.layout.total_blocks * u64::from(plan.layout.block_size);
     let len = usize::try_from(image_bytes)
         .map_err(|_| FormatError::ImageTooLargeInMemory { bytes: image_bytes })?;
     let mut sink = std::io::Cursor::new(vec![0u8; len]);
-    let mut writer = Writer::new(&layout, &feature, options, &mut sink);
-    writer.materialize(&model)?;
+    let layout = plan.write_to(&mut sink)?;
     Ok(Image {
         bytes: sink.into_inner(),
         layout,
@@ -467,39 +520,175 @@ pub fn format_to(
     options: FormatOptions,
     mut sink: impl Write + Seek,
 ) -> Result<Layout, FormatError> {
-    let (layout, model) = prepare(source, size_bytes, &options)?;
-    let feature = options.feature;
-    let mut writer = Writer::new(&layout, &feature, options, &mut sink);
-    writer.materialize(&model)?;
-    writer.extend_to_full_size()?;
-    Ok(layout)
+    FormatPlan::new(source, size_bytes, options)?.write_to(&mut sink)
 }
 
-/// Everything a format decides before a byte is written: the layout the geometry planner
-/// produces and the inode model the source builds, checked against each other.
+/// Everything a format decides before a byte is written: the geometry the planner produces
+/// and the inode model the source builds, checked against each other.
 ///
-/// Both entry points call this, so a knob added to [`FormatOptions`] reaches them both at
-/// once. Two paths that derived this separately would be two paths that could disagree,
-/// and a disagreement between them is not a compile error — it is one entry point
-/// formatting differently from the other.
-fn prepare(
-    source: impl Source,
-    size_bytes: u64,
-    options: &FormatOptions,
-) -> Result<(Layout, FsModel), FormatError> {
-    options.validate_format_time()?;
-    let feature = options.feature;
-    let layout = plan_layout(&options.plan_request(size_bytes))?;
-    let mut config = ModelConfig::new(feature, first_user_inode(&feature), options.time);
-    config.fixed_time = options.fixed_time;
-    let model = build_model(source, config)?;
-    if model.used_inode_count() > layout.total_inodes {
-        return Err(FormatError::TooManyInodes {
-            needed: model.used_inode_count(),
-            available: layout.total_inodes,
+/// This is the whole fallible half of a format, and holding it as a value is what lets a
+/// caller find out whether a format will work **before** touching the destination. That
+/// matters because a format's destination must read as zero where the filesystem does not
+/// write — so creating or truncating it is part of formatting — and a destination truncated
+/// for a format that then failed on its source would be a file destroyed by a run that
+/// wrote no filesystem. [`write_to`](Self::write_to) is the half that can only fail on I/O.
+///
+/// It is also what a caller reports from without writing anything: [`layout`](Self::layout)
+/// is the geometry the bytes would realize, exact rather than estimated, because it is the
+/// same value the write uses.
+///
+/// [`plan_layout`] plans the *geometry* alone, from a size and a feature set. A plan here is
+/// that plus the model built from a source, and the check that the one fits the other.
+///
+/// Both entry points build one, so a knob added to [`FormatOptions`] reaches them together.
+/// Two paths that derived this separately would be two paths that could disagree, and a
+/// disagreement between them is not a compile error — it is one entry point formatting
+/// differently from the other.
+///
+/// ```no_run
+/// # use ferrosys::ext::{FormatOptions, FormatPlan, TreeBuilder};
+/// # use ferrosys::ext::ondisk::Timestamp;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
+/// let plan = FormatPlan::new(TreeBuilder::new(), 64 << 20, options)?;
+/// println!("{} blocks, {} reserved to grow into",
+///     plan.layout().total_blocks, plan.layout().reserved_gdt_blocks);
+///
+/// // Nothing has been written yet, and the destination is untouched until here.
+/// let out = std::fs::File::create("rootfs.img")?;
+/// let layout = plan.write_to(out)?;
+/// # let _ = layout;
+/// # Ok(())
+/// # }
+/// ```
+pub struct FormatPlan {
+    layout: Layout,
+    model: FsModel,
+    options: FormatOptions,
+    /// The journal's size in blocks, or `None` under a feature set without one.
+    journal_blocks: Option<u32>,
+}
+
+impl FormatPlan {
+    /// Plan a format of `size_bytes` from `source` under `options`, deciding everything
+    /// but the bytes.
+    ///
+    /// # Errors
+    ///
+    /// A [`FormatError`] if the geometry cannot be realized, the source cannot be modelled,
+    /// or the model needs more inodes than the geometry provides. Every failure a format has
+    /// that is not an I/O failure of the destination is here.
+    pub fn new(
+        source: impl Source,
+        size_bytes: u64,
+        options: FormatOptions,
+    ) -> Result<Self, FormatError> {
+        options.validate_format_time()?;
+        let feature = options.feature;
+        let layout = plan_layout(&options.plan_request(size_bytes))?;
+        let mut config = ModelConfig::new(feature, first_user_inode(&feature), options.time);
+        config.fixed_time = options.fixed_time;
+        let model = build_model(source, config)?;
+        if model.used_inode_count() > layout.total_inodes {
+            return Err(FormatError::TooManyInodes {
+                needed: model.used_inode_count(),
+                available: layout.total_inodes,
+            });
+        }
+        let journal_blocks = journal_size(&layout, &options)?;
+        Ok(Self {
+            layout,
+            model,
+            options,
+            journal_blocks,
+        })
+    }
+
+    /// The geometry the bytes will realize.
+    #[must_use]
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// How many inodes the source occupies, of the [`Layout::total_inodes`] the geometry
+    /// provides. The reserved inodes every filesystem carries are part of the count.
+    #[must_use]
+    pub fn used_inodes(&self) -> u32 {
+        self.model.used_inode_count()
+    }
+
+    /// Write the filesystem into `sink`, returning the geometry it realized.
+    ///
+    /// Only the blocks the filesystem uses are written, and nothing is read back, so a file
+    /// destination stays sparse. The sink is extended to the filesystem's full size, and
+    /// every byte it holds that is not written must read back as zero — a freshly created
+    /// file, or one truncated to zero length, satisfies that.
+    ///
+    /// # Errors
+    ///
+    /// A [`FormatError`] if the allocation or serialization cannot be realized, or
+    /// [`FormatError::Io`] if the sink cannot be written or sought.
+    pub fn write_to(self, mut sink: impl Write + Seek) -> Result<Layout, FormatError> {
+        let Self {
+            layout,
+            model,
+            options,
+            journal_blocks,
+        } = self;
+        let feature = options.feature;
+        let mut writer = Writer::new(&layout, &feature, options, journal_blocks, &mut sink);
+        writer.materialize(&model)?;
+        writer.extend_to_full_size()?;
+        Ok(layout)
+    }
+}
+
+/// The journal's size in blocks for a planned geometry, or `None` under a feature set that
+/// carries no journal.
+///
+/// This is decided at plan time because it is decided by the geometry and the options alone,
+/// and because both of its failures are failures of the *request* rather than of the
+/// writing: a filesystem with no room for the smallest journal jbd2 accepts, and an explicit
+/// size below that minimum or past what the feature set can describe. Discovering either
+/// after the destination was opened would mean a truncated file and no filesystem.
+///
+/// # Errors
+///
+/// [`FormatError::FilesystemTooSmallForJournal`] if no journal fits;
+/// [`FormatError::JournalTooSmall`] if an explicit size is below the jbd2 minimum;
+/// [`FormatError::LargeFileWithoutFeature`] if an explicit size makes the log a large file
+/// on a filesystem without `large_file`.
+fn journal_size(layout: &Layout, options: &FormatOptions) -> Result<Option<u32>, FormatError> {
+    if !options.feature.has_journal() {
+        return Ok(None);
+    }
+    let minimum = journal::MIN_JOURNAL_BLOCKS;
+    let blocks = match options.journal {
+        JournalSize::Auto => journal::default_journal_blocks(layout.total_blocks).ok_or(
+            FormatError::FilesystemTooSmallForJournal {
+                blocks: layout.total_blocks,
+                minimum,
+            },
+        )?,
+        JournalSize::Blocks(n) if n >= minimum => n,
+        JournalSize::Blocks(n) => {
+            return Err(FormatError::JournalTooSmall {
+                requested: n,
+                minimum,
+            });
+        }
+    };
+    // The journal is a regular file, so a log an explicit size pushed to 2 GiB needs
+    // `large_file` like any other. The heuristic never reaches that far; an explicit block
+    // count can, and the conflict is stated rather than written to disk.
+    let size = u64::from(blocks) * u64::from(options.feature.block_size);
+    if size >= LARGE_FILE_MIN_SIZE && !options.feature.has_large_file() {
+        return Err(FormatError::LargeFileWithoutFeature {
+            what: "journal",
+            size,
         });
     }
-    Ok((layout, model))
+    Ok(Some(blocks))
 }
 
 /// The mutable state of one format: the destination, the allocator, and the inodes
@@ -531,10 +720,21 @@ struct Writer<'a, W> {
     /// `s_jnl_blocks`. `None` until the journal is materialized, and when the feature
     /// set carries no journal.
     journal_backup: Option<[u32; 17]>,
+    /// How many blocks the journal takes, decided at plan time, or `None` when the feature
+    /// set carries no journal. The size is a pure function of the geometry and the options,
+    /// so it is settled before the destination is opened — a journal a filesystem has no
+    /// room for must not be discovered half way through writing one.
+    journal_blocks: Option<u32>,
 }
 
 impl<'a, W: Write + Seek> Writer<'a, W> {
-    fn new(layout: &'a Layout, feature: &'a FeatureSet, options: FormatOptions, sink: W) -> Self {
+    fn new(
+        layout: &'a Layout,
+        feature: &'a FeatureSet,
+        options: FormatOptions,
+        journal_blocks: Option<u32>,
+        sink: W,
+    ) -> Self {
         let block_size = layout.block_size as usize;
         let csum: Box<dyn Checksummer> = if feature.has_metadata_csum() {
             Box::new(Crc32c::new(&options.uuid))
@@ -570,6 +770,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             inodes: BTreeMap::new(),
             gdt_bytes: Vec::new(),
             journal_backup: None,
+            journal_blocks,
         }
     }
 
@@ -988,10 +1189,9 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             self.new_inode()
         };
         self.inodes.insert(RESIZE_INO, resize);
-        let journal = if self.feature.has_journal() {
-            self.materialize_journal_inode()?
-        } else {
-            self.new_inode()
+        let journal = match self.journal_blocks {
+            Some(blocks) => self.materialize_journal_inode(blocks)?,
+            None => self.new_inode(),
         };
         self.inodes.insert(JOURNAL_INO, journal);
         // The orphan file is not a reserved inode: it exists only with the feature, and
@@ -1052,18 +1252,8 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// block is the jbd2 superblock and whose remaining blocks are the empty log. The
     /// journal maps as one extent whenever a contiguous run is free, falling back to a
     /// fragmented allocation otherwise.
-    fn materialize_journal_inode(&mut self) -> Result<Inode, FormatError> {
-        let blocks = self.journal_block_count()?;
-        // The journal is a regular file, so a log an explicit size pushed to 2 GiB needs
-        // `large_file` like any other. The heuristic never reaches that far; an explicit
-        // block count can, and the conflict is stated rather than written to disk.
+    fn materialize_journal_inode(&mut self, blocks: u32) -> Result<Inode, FormatError> {
         let size = u64::from(blocks) * u64::from(self.feature.block_size);
-        if size >= LARGE_FILE_MIN_SIZE && !self.feature.has_large_file() {
-            return Err(FormatError::LargeFileWithoutFeature {
-                what: "journal",
-                size,
-            });
-        }
         // The image starts zeroed, so only the first block — the jbd2 superblock — needs
         // writing; the rest of the log is already the zero blocks it must be.
         let sb = journal::build_superblock(&journal::JournalParams::new(
@@ -1082,7 +1272,10 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // backup gaps leave runs long enough for any journal size the heuristic picks.
             let ranges = match self.alloc.allocate_contiguous(u64::from(blocks)) {
                 Some(range) => vec![range],
-                None => self.alloc.allocate(u64::from(blocks))?,
+                None => self
+                    .alloc
+                    .allocate(u64::from(blocks))
+                    .map_err(journal_space)?,
             };
             self.write_block(ranges[0].start, &sb)?;
             inode.flags = InodeFlags::EXTENTS;
@@ -1092,7 +1285,9 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // ext3: the journal maps through the classic block map, its indirect blocks
             // interleaved with the log the same way `mke2fs` writes them. Only the first
             // block, the jbd2 superblock, is written; the rest stays zeroed.
-            let physical = self.build_classic_map(&mut inode, blocks as usize)?;
+            let physical = self
+                .build_classic_map(&mut inode, blocks as usize)
+                .map_err(journal_space)?;
             self.write_block(physical[0], &sb)?;
         }
         inode.size = size;
@@ -1107,26 +1302,6 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         backup[16] = inode.size as u32;
         self.journal_backup = Some(backup);
         Ok(inode)
-    }
-
-    /// The journal size in blocks from the options: the heuristic for
-    /// [`JournalSize::Auto`], or the explicit count, rejecting a size below the jbd2
-    /// minimum or a filesystem too small to hold one.
-    fn journal_block_count(&self) -> Result<u32, FormatError> {
-        let minimum = journal::MIN_JOURNAL_BLOCKS;
-        match self.options.journal {
-            JournalSize::Auto => journal::default_journal_blocks(self.layout.total_blocks).ok_or(
-                FormatError::JournalTooSmall {
-                    requested: 0,
-                    minimum,
-                },
-            ),
-            JournalSize::Blocks(n) if n >= minimum => Ok(n),
-            JournalSize::Blocks(n) => Err(FormatError::JournalTooSmall {
-                requested: n,
-                minimum,
-            }),
-        }
     }
 
     /// Build the resize inode (inode 7): a classic double-indirect map whose indirect
@@ -1716,7 +1891,8 @@ mod tests {
         assert!(model.inodes.contains_key(&ORPHAN_INO), "the entry took it");
 
         let mut sink = std::io::Cursor::new(Vec::new());
-        let mut writer = Writer::new(&layout, &feature, options, &mut sink);
+        let journal = journal_size(&layout, &options).expect("the journal size is realizable");
+        let mut writer = Writer::new(&layout, &feature, options, journal, &mut sink);
         let err = writer
             .materialize(&model)
             .expect_err("the collision is refused");
@@ -1872,10 +2048,12 @@ mod tests {
         let plain = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16]);
         assert_eq!(plain.grow, GrowReservation::Max);
         let image = format(TreeBuilder::new(), 64 * MIB, plain).expect("default format");
+        // 64 MiB is below the knee at which the whole map is affordable, so the
+        // reservation is the share of the filesystem `Max` will spend: 16384 blocks / 64.
         assert_eq!(
             image.layout().reserved_gdt_blocks,
-            1024,
-            "Max fills the 4 KiB resize map"
+            256,
+            "Max reserves the share of a 64 MiB filesystem it can spare"
         );
         let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).expect("open");
         // The resize inode (7) maps its reservation through the classic block map, so
@@ -2000,8 +2178,8 @@ mod tests {
             panic!("a 2 GiB log does not fit a 64 MiB image");
         };
         assert!(
-            matches!(err, FormatError::Alloc(_)),
-            "the feature check must give way to the allocator, got {err:?}"
+            matches!(err, FormatError::JournalDoesNotFit { .. }),
+            "the feature check must give way to the space the journal needs, got {err:?}"
         );
     }
 

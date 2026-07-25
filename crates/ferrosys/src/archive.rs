@@ -1,4 +1,6 @@
-//! A [`Source`] backed by a tar archive with PAX extensions.
+//! Tar archives with PAX extensions, in both directions: [`ArchiveSource`] reads one into
+//! the entries a format consumes, and [`ArchiveSink`] writes a filesystem's contents back out
+//! as one. An archive that makes the round trip describes the same filesystem at both ends.
 //!
 //! [`ArchiveSource`] parses a tar stream into the [`SourceEntry`] list the model
 //! consumes, carrying the fidelity a package-built rootfs needs: ownership and mode
@@ -41,8 +43,10 @@ use crate::ondisk::{Timestamp, Xattr};
 use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry};
 
 mod blocks;
+mod sink;
 
 use blocks::{Member, MemberBody, PaxRecord};
+pub use sink::ArchiveSink;
 
 /// A failure reading or interpreting a tar archive.
 #[derive(Debug, thiserror::Error)]
@@ -79,7 +83,25 @@ pub enum ArchiveError {
         /// What was wrong.
         reason: &'static str,
     },
-    /// A `SCHILY.acl.*` record could not be translated into a valid ACL.
+    /// The stream is a *compressed* archive, named by the magic at its head. This parser
+    /// reads uncompressed tar, so the archive has to be decompressed first — through a pipe
+    /// into [`ArchiveSource::from_reader`], or into a file for
+    /// [`from_path`](ArchiveSource::from_path) to keep each member on disk.
+    ///
+    /// It is a variant of its own because everything else this parser could say about such
+    /// a stream is about tar framing the caller never wrote, and the one useful fact — that
+    /// these are gzip's bytes — is the one a message about framing does not carry.
+    #[error(
+        "the archive is {format}-compressed, and this reads uncompressed tar: decompress it first"
+    )]
+    #[non_exhaustive]
+    Compressed {
+        /// The compression format the head of the stream identifies: `gzip`, `zstd`, `xz`,
+        /// `bzip2`, `lz4`, `lzma`, `lzop`, or `compress`.
+        format: &'static str,
+    },
+    /// A `SCHILY.acl.*` record could not be translated into a valid ACL, or an entry's
+    /// stored ACL could not be translated into one.
     #[error(
         "archive entry {} has an invalid ACL: {source}",
         String::from_utf8_lossy(path)
@@ -91,6 +113,53 @@ pub enum ArchiveError {
         /// The underlying ACL error.
         source: crate::acl::AclError,
     },
+    /// The filesystem being written out could not be read.
+    #[error(transparent)]
+    Read(#[from] crate::read::ReadError),
+    /// The filesystem holds an entry a tar archive has no way to express: a socket, which
+    /// has no entry type at all. It is a typed error rather than an archive quietly missing
+    /// a file.
+    #[error(
+        "{} is a socket, which a tar archive has no entry type for: writing it out would \
+         drop it silently",
+        String::from_utf8_lossy(path)
+    )]
+    #[non_exhaustive]
+    Unrepresentable {
+        /// The offending entry's path.
+        path: Vec<u8>,
+    },
+    /// An extended-attribute name a PAX record's keyword cannot carry faithfully: it holds
+    /// an `=` or a newline — the record's own delimiters — or is not valid UTF-8. It is
+    /// refused rather than written as a differently-named attribute.
+    #[error(
+        "{}: extended-attribute name {} cannot be written to a PAX record: it holds an '=' \
+         or a newline, or is not valid UTF-8",
+        String::from_utf8_lossy(path),
+        String::from_utf8_lossy(name)
+    )]
+    #[non_exhaustive]
+    XattrNameUnrepresentable {
+        /// The entry carrying the attribute.
+        path: Vec<u8>,
+        /// The offending attribute name.
+        name: Vec<u8>,
+    },
+}
+
+impl ArchiveError {
+    /// Classify the failure of writing one member's body.
+    ///
+    /// `tar` copies a body out of a reader, so a failure there is either the destination's or
+    /// the *filesystem's*, arriving as the [`std::io::Error`] a `Read` is obliged to speak.
+    /// The reader's own message is preserved, and the path names the member it was reading —
+    /// which a bare i/o error would not.
+    fn from_body_io(e: std::io::Error, path: &[u8]) -> Self {
+        ArchiveError::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", String::from_utf8_lossy(path)),
+        ))
+    }
 }
 
 /// A [`Source`] that yields the entries parsed from a tar archive.

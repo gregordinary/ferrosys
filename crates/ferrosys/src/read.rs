@@ -33,7 +33,7 @@
 //! readily as a bare one.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::csum::{Checksummer, Crc32c};
 use crate::extent::{ExtentNode, MAX_EXTENT_DEPTH, parse_node, tail_offset};
@@ -129,8 +129,14 @@ fn describe_unsupported_incompat(bits: u32) -> String {
 const DIRECT_BLOCKS: usize = 12;
 
 /// Levels of indirection the classic block map reaches: single, double, and triple.
-/// This bounds [`Reader::walk_indirect`]'s recursion by construction.
+/// This bounds [`Reader::walk_indirect_window`]'s recursion by construction.
 const INDIRECT_LEVELS: u32 = 3;
+
+/// The most logical blocks one mapping window covers, which is what makes streaming a
+/// file a fixed cost: the map for a window is eight bytes per block, so 4096 blocks is
+/// 32 KiB of map covering 16 MiB of file at a 4 KiB block size. A file of any length is
+/// read as a succession of these rather than as one map of everything its size claims.
+const MAP_WINDOW_BLOCKS: usize = 4096;
 
 /// The number of logical blocks a file can address: a logical block number is 32
 /// bits wide in both the extent (`ee_block`) and classic maps, so a file spans at
@@ -153,6 +159,11 @@ const MAX_PATH: usize = 4096;
 
 /// The fewest bytes one directory record can occupy: the eight-byte header plus a name of
 /// at least one byte, rounded up to the four-byte alignment every `rec_len` obeys.
+///
+/// This is [`min_rec_len(1)`](crate::ondisk::min_rec_len), which is where that rule is
+/// spelled; the value appears again here because it divides a `u64` and the rule's
+/// function is not `const`. A unit test holds the two equal, so a change to the record
+/// header or to the alignment cannot move one without moving the other.
 ///
 /// Every name a well-formed filesystem holds costs at least this much of its own blocks,
 /// which is what turns the source's length into a bound on how many names it can
@@ -239,6 +250,7 @@ fn maps_data(inode: &Inode, block_size: usize) -> bool {
 /// Structural`. [`ReadPolicy::Strict`] is fatal at [`Conformance`](Self::Conformance)
 /// and above.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Severity {
     /// Valid and harmless: a representation a conformant reader accepts without
     /// remark.
@@ -268,6 +280,7 @@ impl Severity {
 /// The subsystem a deviation was found in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Category {
     /// The primary or a backup superblock.
     Superblock,
@@ -322,6 +335,7 @@ pub const SCAN_SCHEMA_VERSION: u32 = 1;
 /// only the coordinates that locate it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Location {
     /// Block number, when the deviation is block-addressed.
     pub block: Option<u64>,
@@ -343,6 +357,7 @@ pub struct Location {
 /// golden test and versioned by [`SCAN_SCHEMA_VERSION`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Anomaly {
     /// How serious the deviation is.
     pub severity: Severity,
@@ -835,6 +850,20 @@ pub enum ReadError {
         /// The directory inode carrying the hash-index flag.
         inode: u32,
     },
+    /// An inode that is not a directory carries the hash-index flag, which describes how a
+    /// directory's blocks are organized and means nothing on anything else. This is the
+    /// incoherence `e2fsck` reports as "inode N has INDEX_FL flag set but is not a
+    /// directory".
+    ///
+    /// It is a separate fault from [`IndexFlagWithoutFeature`](Self::IndexFlagWithoutFeature),
+    /// which is a directory whose flag the superblock's feature words deny. An inode can
+    /// carry both faults, and each names a different thing to fix.
+    #[error("inode {inode} is marked hash-indexed, but it is not a directory")]
+    #[non_exhaustive]
+    IndexFlagOnNonDirectory {
+        /// The inode carrying the hash-index flag.
+        inode: u32,
+    },
     /// A group descriptor places a bitmap or inode table outside the group it belongs to
     /// on a filesystem without `flex_bg`, where each group's metadata must lie within it.
     /// This is the corruption `e2fsck` reports as "block bitmap for group N is not in
@@ -883,6 +912,24 @@ pub enum ReadError {
     WalkTooLarge {
         /// The bound that was reached.
         limit: usize,
+    },
+    /// A whole-file read was asked for a file larger than [`Limits::max_file_bytes`], the
+    /// cap the caller set on it.
+    ///
+    /// The bound is the caller's alone — no structural bound exists behind it, since a
+    /// legitimate all-hole file and a crafted `i_size` are the same shape from the outside.
+    /// Reaching it is an error rather than a short buffer for the same reason
+    /// [`WalkTooLarge`](Self::WalkTooLarge) is: a caller extracting a file from a truncated
+    /// read would write an incomplete one and see success. To read part of a file
+    /// deliberately, use [`Reader::read_into`], which is bounded by the buffer given to it
+    /// and reports how much it filled.
+    #[error("the file is {size} bytes, more than the {limit}-byte cap this read is held to")]
+    #[non_exhaustive]
+    FileTooLarge {
+        /// The file's logical size, as its inode declares it.
+        size: u64,
+        /// The cap that was exceeded.
+        limit: u64,
     },
     /// A metadata object's stored checksum did not match its recomputed value.
     #[error("{object} {index} checksum mismatch: stored {stored:#010x}, computed {computed:#010x}")]
@@ -990,6 +1037,12 @@ impl ReadError {
                 Category::Directory,
                 Location::default(),
             ),
+            // The same reasoning one object down: a cap the caller set is not a fault in
+            // the image, but the read it stopped could not be completed, so it is filed
+            // against the inode whose size exceeded it.
+            ReadError::FileTooLarge { .. } => {
+                (Severity::Structural, Category::Inode, Location::default())
+            }
             ReadError::NotFound { .. }
             | ReadError::NotADirectory { .. }
             | ReadError::SymlinkLoop { .. } => (
@@ -1100,6 +1153,16 @@ impl ReadError {
                     ..Location::default()
                 },
             ),
+            // The flag on a non-directory is a fact about that inode, not about any
+            // directory tree, so it is filed against the inode.
+            ReadError::IndexFlagOnNonDirectory { inode } => (
+                Severity::Conformance,
+                Category::Inode,
+                Location {
+                    inode: Some(*inode),
+                    ..Location::default()
+                },
+            ),
             ReadError::MetadataOutsideGroup {
                 what, group, block, ..
             } => {
@@ -1146,16 +1209,38 @@ impl ReadError {
 /// threshold back to those findings, and [`to_json`](Self::to_json) /
 /// [`to_table`](Self::to_table) project them for a machine or a person.
 ///
-/// A report holds at most [`MAX_ANOMALIES`](Self::MAX_ANOMALIES) findings and says so
-/// through [`is_truncated`](Self::is_truncated) when it stopped there.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// A report holds at most [`Limits::max_anomalies`] findings and says so through
+/// [`is_truncated`](Self::is_truncated) when it stopped there.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ScanReport {
     anomalies: Vec<Anomaly>,
     truncated: bool,
+    /// The findings cap the scan that produced this report ran under — the
+    /// [`Limits::max_anomalies`] it was opened with, which a caller may set to anything.
+    /// Kept so a truncation notice names the bound that actually applied rather than the
+    /// default constant, which need not be the same number.
+    ///
+    /// It is not serialized: the cap is a property of the scan that ran, not of the
+    /// report's findings, and `truncated` already says whether it was reached.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    cap: usize,
+}
+
+impl Default for ScanReport {
+    /// An empty report from a scan under the default limits.
+    fn default() -> Self {
+        Self {
+            anomalies: Vec::new(),
+            truncated: false,
+            cap: Self::MAX_ANOMALIES,
+        }
+    }
 }
 
 impl ScanReport {
-    /// The most findings one report holds.
+    /// The default of [`Limits::max_anomalies`]: the most findings one report holds
+    /// unless a caller names another cap.
     ///
     /// A scan reads an image it has no reason to trust, and how many findings that image
     /// yields is the image's own claim: a handful of crafted inodes can name the same
@@ -1171,22 +1256,28 @@ impl ScanReport {
         &self.anomalies
     }
 
-    /// Whether the scan stopped at [`MAX_ANOMALIES`](Self::MAX_ANOMALIES) with the image
-    /// still unfinished.
+    /// Whether the scan stopped at its findings cap with the image still unfinished.
     ///
     /// A truncated report is a floor, not a full accounting: the image holds at least
     /// these findings, and the scan did not look at the rest of it. Everything derived
     /// from the report — [`worst_severity`](Self::worst_severity),
-    /// [`has_fatal`](Self::has_fatal) — is likewise a floor.
+    /// [`has_fatal`](Self::has_fatal) — is likewise a floor, and
+    /// [`is_clean`](Self::is_clean) is `false` whatever the report holds, since a scan
+    /// that stopped short has seen nothing that would let it call an image clean.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Whether the scan found nothing.
+    /// Whether the scan looked at the whole image and found nothing.
+    ///
+    /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
+    /// holds. The cap can be set low enough that a scan stops before reporting anything —
+    /// at zero, before reading a single group — and an empty report from a scan that
+    /// stopped is an absence of looking, not an absence of faults.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.anomalies.is_empty()
+        !self.truncated && self.anomalies.is_empty()
     }
 
     /// The severity of the most serious anomaly, or `None` when the report is clean.
@@ -1215,9 +1306,8 @@ impl ScanReport {
     /// here, not a stored wire format.
     ///
     /// `truncated` is always present, true or false: a consumer must be able to tell a
-    /// complete report from one that stopped at
-    /// [`MAX_ANOMALIES`](Self::MAX_ANOMALIES), and an absent field would read as
-    /// complete.
+    /// complete report from one that stopped at its findings cap, and an absent field
+    /// would read as complete.
     ///
     /// The document opens with `"schema"`, holding [`SCAN_SCHEMA_VERSION`]. A downstream
     /// parser has a contract that no Rust signature describes, so the emitted shape names
@@ -1255,11 +1345,11 @@ impl ScanReport {
     /// document is a pure function of the report — no tool version or timestamp enters it —
     /// so identical findings render identical bytes.
     ///
-    /// A report that stopped at [`MAX_ANOMALIES`](Self::MAX_ANOMALIES) carries a
-    /// warning-level `toolExecutionNotifications` entry saying so, which is where SARIF
-    /// records something about the run rather than about the artifact. A complete report
-    /// emits no `invocations` at all, so the document a clean or short scan renders is
-    /// unchanged by the cap existing.
+    /// A report that stopped at its findings cap carries a warning-level
+    /// `toolExecutionNotifications` entry saying so, naming the cap that applied, which is
+    /// where SARIF records something about the run rather than about the artifact. A
+    /// complete report emits no `invocations` at all, so the document a clean or short
+    /// scan renders is unchanged by the cap existing.
     ///
     /// `artifact_uri`, when set, becomes each result's physical artifact location: the
     /// reader reads an anonymous stream, so the image's identity is the caller's to supply.
@@ -1294,13 +1384,7 @@ impl ScanReport {
                 ",\"invocations\":[{\"executionSuccessful\":true,\
                  \"toolExecutionNotifications\":[{\"level\":\"warning\",\"message\":{\"text\":",
             );
-            push_json_string(
-                &mut out,
-                &format!(
-                    "report truncated at {} anomalies; the rest of the image was not scanned",
-                    Self::MAX_ANOMALIES
-                ),
-            );
+            push_json_string(&mut out, &self.truncation_notice());
             out.push_str("}}]}]");
         }
         out.push_str("}]}");
@@ -1310,10 +1394,20 @@ impl ScanReport {
     /// Render the report as a fixed-column human table: a header row, then one line
     /// per anomaly with its severity, category, location, and detail. A clean report
     /// renders a single `no anomalies` line.
+    ///
+    /// A [`truncated`](Self::is_truncated) report ends with the notice saying so, whether
+    /// or not it holds findings — an empty one is the case where saying so matters most,
+    /// since `no anomalies` on its own would read as a verdict the scan never reached.
     #[must_use]
     pub fn to_table(&self) -> String {
         if self.anomalies.is_empty() {
-            return String::from("no anomalies\n");
+            let mut out = String::from("no anomalies\n");
+            if self.truncated {
+                out.push('\n');
+                out.push_str(&self.truncation_notice());
+                out.push('\n');
+            }
+            return out;
         }
         let rows: Vec<(&str, &str, String, &str)> = self
             .anomalies
@@ -1343,12 +1437,24 @@ impl ScanReport {
             out.push_str(&format!("{s:<sev_w$}  {c:<cat_w$}  {l:<loc_w$}  {d}\n"));
         }
         if self.truncated {
-            out.push_str(&format!(
-                "\nreport truncated at {} anomalies; the rest of the image was not scanned\n",
-                Self::MAX_ANOMALIES
-            ));
+            out.push('\n');
+            out.push_str(&self.truncation_notice());
+            out.push('\n');
         }
         out
+    }
+
+    /// The one sentence a truncated report renders, in whichever projection asks for it.
+    ///
+    /// It names the cap the scan actually ran under, which is a caller's
+    /// [`Limits::max_anomalies`] and not necessarily
+    /// [`MAX_ANOMALIES`](Self::MAX_ANOMALIES): a report that stopped at seven findings
+    /// because seven is what was asked for must not say it stopped at ten thousand.
+    fn truncation_notice(&self) -> String {
+        format!(
+            "report truncated at {} anomalies; the rest of the image was not scanned",
+            self.cap
+        )
     }
 }
 
@@ -1514,8 +1620,22 @@ pub struct Limits {
     /// [`ReadError::WalkTooLarge`]. Defaults to no caller-imposed cap; the walk is bounded
     /// regardless by the names the image's blocks have room to hold.
     pub max_walk_entries: usize,
-    /// The most bytes one [`read_data`](Reader::read_data) returns. Defaults to no cap,
-    /// which is the documented contract: `read_data` trusts `i_size`.
+    /// The largest file a whole-file read will read. Defaults to no cap, which is the
+    /// documented contract: [`read_data`](Reader::read_data) trusts `i_size`.
+    ///
+    /// A file larger than this is [`ReadError::FileTooLarge`], not a shortened buffer. The
+    /// three caps here agree on that shape wherever a short answer could be mistaken for a
+    /// whole one: a walk that reached its bound errors, a read that reached this one errors,
+    /// and only a scan — whose report says [`is_truncated`](ScanReport::is_truncated) in
+    /// the document it emits — returns what it managed to gather. A caller extracting a
+    /// file from a truncated read would otherwise write an incomplete one and see success.
+    ///
+    /// It bounds both whole-file forms, [`read_data`](Reader::read_data) and
+    /// [`read_data_to`](Reader::read_data_to), because what it expresses is distrust of the
+    /// declared size rather than a memory bound. To read part of a file deliberately, use
+    /// [`read_into`](Reader::read_into): it is bounded by the buffer the caller supplies —
+    /// mapping included — and reports how much of it was filled, so a partial read is
+    /// representable rather than silent.
     ///
     /// This one has no structural bound behind it, and that is a property of the format
     /// rather than an omission. A sparse file's holes cost no blocks, so a file whose
@@ -2602,7 +2722,7 @@ impl<R: Read + Seek> Reader<R> {
     /// Every allocation the scan makes is bounded by the bytes the source actually holds,
     /// not by a count an image claims: the objects walked are capped at the groups and
     /// inodes the source can physically hold, each metadata block is read once, and the
-    /// findings themselves stop at [`ScanReport::MAX_ANOMALIES`] with
+    /// findings themselves stop at [`Limits::max_anomalies`] with
     /// [`ScanReport::is_truncated`] recording that they did. That is what makes this the
     /// path to point at an image that may have been built to be hostile.
     #[must_use]
@@ -2827,6 +2947,7 @@ impl<R: Read + Seek> Reader<R> {
         ScanReport {
             anomalies,
             truncated,
+            cap: self.limits.max_anomalies,
         }
     }
 
@@ -2902,9 +3023,10 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// The mapping flag and the attribute-block pointer are structural: they decide how
     /// the reader interprets bytes, so a disagreement leaves it unable to vouch for what
-    /// it read. The size and the hash-index flag are conformance deviations: both are read
-    /// correctly either way, and what is missing is only the word that should advertise
-    /// them.
+    /// it read. The size and the hash-index flag are conformance deviations, read
+    /// correctly either way — for the size and for a directory's flag, what is missing is
+    /// the word that should advertise it; for the flag on anything but a directory, the
+    /// flag itself describes an organization that file does not have.
     fn scan_feature_coherence(&self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
         if inode.flags.contains(InodeFlags::EXTENTS) && !self.feature.has_extents() {
             out.push(ReadError::ExtentFlagWithoutFeature { inode: ino }.anomaly());
@@ -2928,8 +3050,18 @@ impl<R: Read + Seek> Reader<R> {
                 .anomaly(),
             );
         }
-        if inode.flags.contains(InodeFlags::INDEX) && !self.feature.has_dir_index() {
-            out.push(ReadError::IndexFlagWithoutFeature { inode: ino }.anomaly());
+        // The hash-index flag is two rules, not one, and each names a different thing to
+        // fix: a directory whose flag the feature words deny, and an inode carrying the
+        // flag that is not a directory at all. An inode can be both. Reporting the first
+        // for the second would describe a regular file as a hash-indexed directory.
+        if inode.flags.contains(InodeFlags::INDEX) {
+            if is_dir(inode) {
+                if !self.feature.has_dir_index() {
+                    out.push(ReadError::IndexFlagWithoutFeature { inode: ino }.anomaly());
+                }
+            } else {
+                out.push(ReadError::IndexFlagOnNonDirectory { inode: ino }.anomaly());
+            }
         }
     }
 
@@ -3224,7 +3356,7 @@ impl<R: Read + Seek> Reader<R> {
     /// [`ReadError`] variants if a mapping block cannot be read.
     fn data_blocks(&mut self, inode: &Inode) -> Result<Vec<u64>, ReadError> {
         let want = self.logical_block_count(inode);
-        self.map_blocks(inode, want)
+        self.map_window(inode, 0, want)
     }
 
     /// The blocks the image can actually hold: the filesystem's own block count, bounded
@@ -3264,131 +3396,151 @@ impl<R: Read + Seek> Reader<R> {
         want
     }
 
-    /// The logical-to-physical map of an inode's first `want` logical blocks. A caller
-    /// that needs only the head of a file — the journal's superblock is its first block —
-    /// asks for that much rather than for a map of everything the size claims.
-    fn map_blocks(&mut self, inode: &Inode, want: usize) -> Result<Vec<u64>, ReadError> {
+    /// The logical-to-physical map of `count` logical blocks beginning at logical block
+    /// `first`, with a zero standing for a block that reads as zeros without occupying
+    /// any. The returned map is exactly `count` long.
+    ///
+    /// This is the one place that decides how an inode maps its blocks, and it is windowed
+    /// so that reading part of a file costs part of a map: only the mapping structures the
+    /// window touches are read, so a block far into a file is reached through the indirect
+    /// blocks above it rather than by materializing everything before it. A caller that
+    /// needs only the head of a file — the journal's superblock is its first block — asks
+    /// for a window of one.
+    ///
+    /// Pointers outside the window are neither read nor validated: a read validates the
+    /// map it follows. The forensic [`scan`](Self::scan) is what validates a whole map.
+    fn map_window(
+        &mut self,
+        inode: &Inode,
+        first: usize,
+        count: usize,
+    ) -> Result<Vec<u64>, ReadError> {
         // Not every inode's `i_block` area holds block pointers. A *fast* symlink keeps
         // its target string there, and a device node its major and minor; reading either
         // as a mapping interprets a filename or a device number as block numbers.
-        if !maps_data(inode, self.block_size) {
+        if count == 0 || !maps_data(inode, self.block_size) {
             return Ok(Vec::new());
         }
-        let mut map = if inode.flags.contains(InodeFlags::EXTENTS) {
-            self.extent_map(inode, want)?
+        // Zero-filled, so every hole the walk below leaves untouched already reads as one.
+        let mut map = vec![0u64; count];
+        if inode.flags.contains(InodeFlags::EXTENTS) {
+            self.extent_window(inode, first, &mut map)?;
         } else {
-            self.block_map(inode, want)?
-        };
-        if map.len() < want {
-            map.resize(want, 0);
+            self.block_map_window(inode, first, &mut map)?;
         }
         Ok(map)
     }
 
-    /// The logical-to-physical map an inode's extent tree describes, for the logical
-    /// blocks the file's size covers.
+    /// Place the part of an inode's extent tree that falls in the window.
     ///
     /// [`extent_leaves`](Self::extent_leaves) has already checked every leaf's physical
     /// run against the block count, so placing a leaf here is a matter of its logical
-    /// offset. A leaf — or the tail of one — beyond `want` names blocks past the file's
-    /// size that a read truncates away, so it is not materialized: that bounds the map
-    /// to the file's logical size rather than to an extent's arbitrary logical offset.
-    fn extent_map(&mut self, inode: &Inode, want: usize) -> Result<Vec<u64>, ReadError> {
-        let mut map: Vec<u64> = Vec::new();
+    /// offset: a run is clipped to the window and a run entirely outside it is skipped.
+    fn extent_window(
+        &mut self,
+        inode: &Inode,
+        first: usize,
+        map: &mut [u64],
+    ) -> Result<(), ReadError> {
+        let end = first.saturating_add(map.len());
         for leaf in self.extent_leaves(inode)? {
             let lo = leaf.block as usize;
-            if lo >= want {
-                continue;
-            }
-            // Materialize only the part of the run within the file's logical size.
-            let run = (leaf.len as usize).min(want - lo);
-            let end = lo + run;
-            if map.len() < end {
-                map.resize(end, 0);
-            }
+            let hi = lo.saturating_add(leaf.len as usize);
             // An uninitialized run occupies blocks but holds no data: it reads back as
-            // zeros, exactly as a hole does, so it is recorded as one.
-            if !leaf.initialized {
+            // zeros, exactly as a hole does, so it is left as one.
+            if hi <= first || lo >= end || !leaf.initialized {
                 continue;
             }
-            for i in 0..run {
-                map[lo + i] = leaf.start + i as u64;
+            for logical in lo.max(first)..hi.min(end) {
+                map[logical - first] = leaf.start + (logical - lo) as u64;
             }
         }
-        Ok(map)
+        Ok(())
     }
 
-    /// The logical-to-physical map an inode's classic block map describes: twelve
-    /// direct pointers, then one, two, and three levels of indirection.
+    /// Place the part of an inode's classic block map that falls in the window: twelve
+    /// direct pointers, then one, two, and three levels of indirection, each level
+    /// covering `per_block^level` logical blocks after the last.
     ///
     /// A zero pointer is a hole, at every level — a hole in an indirect pointer means
     /// every block that indirect block would have mapped is a hole too, which is how a
-    /// sparse ext2 file stores a gigabyte of nothing in one word.
-    fn block_map(&mut self, inode: &Inode, want: usize) -> Result<Vec<u64>, ReadError> {
-        let mut out = Vec::with_capacity(want.min(DIRECT_BLOCKS));
-        for i in 0..DIRECT_BLOCKS {
-            if out.len() >= want {
-                return Ok(out);
-            }
-            // Every pointer is checked, the direct ones included: a walk that collects a
-            // block number without validating it reports nothing wrong about a map it
-            // cannot follow.
+    /// sparse ext2 file stores a gigabyte of nothing in one word. A level whose span lies
+    /// outside the window is skipped without reading its blocks at all.
+    fn block_map_window(
+        &mut self,
+        inode: &Inode,
+        first: usize,
+        map: &mut [u64],
+    ) -> Result<(), ReadError> {
+        let end = first.saturating_add(map.len());
+        for i in first..DIRECT_BLOCKS.min(end) {
             let ptr = u64::from(get_u32(&inode.block, i * 4));
             if ptr != 0 {
                 self.check_data_block(ptr)?;
             }
-            out.push(ptr);
+            map[i - first] = ptr;
         }
+        let per_block = self.block_size / 4;
+        let mut base = DIRECT_BLOCKS;
         for level in 1..=INDIRECT_LEVELS {
-            if out.len() >= want {
+            if base >= end {
                 break;
             }
-            let slot = DIRECT_BLOCKS + level as usize - 1;
-            let root = u64::from(get_u32(&inode.block, slot * 4));
-            self.walk_indirect(root, level, want, &mut out)?;
+            let next = base.saturating_add(per_block.saturating_pow(level));
+            if next > first {
+                let slot = DIRECT_BLOCKS + level as usize - 1;
+                let root = u64::from(get_u32(&inode.block, slot * 4));
+                self.walk_indirect_window(root, level, base, first, map)?;
+            }
+            base = next;
         }
-        out.truncate(want);
-        Ok(out)
+        Ok(())
     }
 
-    /// Append the blocks an indirect block maps, `level` levels deep, stopping once
-    /// `want` blocks have been collected.
+    /// Place the blocks an indirect block maps that fall in the window, `level` levels
+    /// deep, where the block's own span begins at logical block `base`.
     ///
-    /// The recursion is at most [`INDIRECT_LEVELS`] deep by construction and every
-    /// push is bounded by `want`, so a crafted map can neither exhaust the stack nor
-    /// allocate without bound.
-    fn walk_indirect(
+    /// The recursion is at most [`INDIRECT_LEVELS`] deep by construction, one block is read
+    /// per level, and a slot whose span misses the window is skipped without descending
+    /// into it — so a crafted map can neither exhaust the stack nor drive reads without
+    /// bound, and a window deep into a sparse file costs one read per level rather than a
+    /// walk of everything before it.
+    fn walk_indirect_window(
         &mut self,
         block: u64,
         level: u32,
-        want: usize,
-        out: &mut Vec<u64>,
+        base: usize,
+        first: usize,
+        map: &mut [u64],
     ) -> Result<(), ReadError> {
-        if out.len() >= want {
-            return Ok(());
-        }
-        let per_block = self.block_size / 4;
+        // A hole this far up stands for every block below it, which the zero-filled map
+        // already records.
         if block == 0 {
-            // A hole this far up stands for every block below it.
-            let span = per_block.saturating_pow(level);
-            let n = span.min(want - out.len());
-            out.resize(out.len() + n, 0);
             return Ok(());
         }
         self.check_data_block(block)?;
         let buf = self.block(block)?;
+        let per_block = self.block_size / 4;
+        // What one slot of this block covers: a slot of a single-indirect block is one
+        // logical block, and each further level multiplies by the pointers a block holds.
+        let span = per_block.saturating_pow(level - 1);
+        let end = first.saturating_add(map.len());
         for i in 0..per_block {
-            if out.len() >= want {
+            let lo = base.saturating_add(i.saturating_mul(span));
+            if lo >= end {
                 break;
+            }
+            if lo.saturating_add(span) <= first {
+                continue;
             }
             let ptr = u64::from(get_u32(&buf, i * 4));
             if level == 1 {
                 if ptr != 0 {
                     self.check_data_block(ptr)?;
                 }
-                out.push(ptr);
+                map[lo - first] = ptr;
             } else {
-                self.walk_indirect(ptr, level - 1, want, out)?;
+                self.walk_indirect_window(ptr, level - 1, lo, first, map)?;
             }
         }
         Ok(())
@@ -3467,9 +3619,17 @@ impl<R: Read + Seek> Reader<R> {
     /// write without materializing its files, use [`scan`](Self::scan), which allocates
     /// nothing per logical block.
     ///
+    /// [`Limits::max_file_bytes`] is what withdraws that trust: a file larger than the cap
+    /// is [`ReadError::FileTooLarge`] rather than a shortened buffer, so a truncated read
+    /// can never be mistaken for a whole one. To read part of a file deliberately, use
+    /// [`read_into`](Self::read_into), which is bounded by the buffer given to it and
+    /// reports how much of it was filled; to read a large file without holding it, use
+    /// [`read_data_to`](Self::read_data_to).
+    ///
     /// # Errors
     ///
-    /// [`ReadError`] variants if the mapping or a data block cannot be read.
+    /// [`ReadError::FileTooLarge`] if the file is larger than [`Limits::max_file_bytes`];
+    /// other [`ReadError`] variants if the mapping or a data block cannot be read.
     pub fn read_data(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError> {
         // There is no structural bound to apply here, and that is a fact about the
         // format rather than a gap. A sparse file's holes cost no blocks, so a file whose
@@ -3477,23 +3637,158 @@ impl<R: Read + Seek> Reader<R> {
         // at its full size — which makes a legitimate all-hole file and a crafted `i_size`
         // the same shape from the outside. So this trusts `i_size`, as its documentation
         // says, and the only cap is the one a caller sets.
-        let want = inode.size.min(self.limits.max_file_bytes);
-        let map = self.data_blocks(inode)?;
-        let mut data = Vec::new();
-        for phys in map {
-            if data.len() as u64 >= want {
-                break;
-            }
-            if phys == 0 {
-                // A hole: it reads as zeros without occupying a block to read.
-                data.resize(data.len() + self.block_size, 0);
-            } else {
-                let block = self.block(phys)?;
-                data.extend_from_slice(&block);
+        let want = self.whole_file_len(inode)?;
+        let len = usize::try_from(want).map_err(|_| ReadError::FileTooLarge {
+            size: want,
+            limit: usize::MAX as u64,
+        })?;
+        let mut data = vec![0u8; len];
+        // The read is bounded by the buffer, which is bounded by the cap checked above, so
+        // the mapping it builds is bounded with it: eight bytes per logical block of the
+        // window, never one per block the size claims.
+        let filled = self.read_into(inode, 0, &mut data)?;
+        data.truncate(filled);
+        Ok(data)
+    }
+
+    /// Stream the full contents of a regular file or slow symlink to `out`, returning the
+    /// bytes written.
+    ///
+    /// This is [`read_data`](Self::read_data) without holding the file: the contents are
+    /// written out a window at a time, so memory is a fixed working set rather than the
+    /// file's size — which is what extracting a multi-gigabyte file out of an image needs.
+    /// Holes are written as zeros, exactly as they read.
+    ///
+    /// The same [`Limits::max_file_bytes`] cap applies, since what it expresses is distrust
+    /// of the declared size rather than a memory bound.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::FileTooLarge`] if the file is larger than [`Limits::max_file_bytes`];
+    /// [`ReadError::Io`] if `out` cannot be written; other [`ReadError`] variants if the
+    /// mapping or a data block cannot be read.
+    pub fn read_data_to(&mut self, inode: &Inode, mut out: impl Write) -> Result<u64, ReadError> {
+        let want = self.whole_file_len(inode)?;
+        let bs = self.block_size as u64;
+        let zeros = vec![0u8; self.block_size];
+        let mut written = 0u64;
+        // One window's map at a time, so the map is a fixed cost however large the file:
+        // `MAP_WINDOW_BLOCKS` entries of eight bytes each. The windows are walked in order,
+        // so each costs one pass over the inode's mapping structures — a few block reads
+        // for an extent tree, the indirect blocks the window covers for a classic map.
+        while written < want {
+            let first = usize::try_from(written / bs).unwrap_or(usize::MAX);
+            let remaining_blocks = (want - written).div_ceil(bs);
+            let count = usize::try_from(remaining_blocks.min(MAP_WINDOW_BLOCKS as u64))
+                .unwrap_or(MAP_WINDOW_BLOCKS);
+            for phys in self.map_window(inode, first, count)? {
+                let left = want - written;
+                let take = usize::try_from(left.min(bs)).unwrap_or(self.block_size);
+                if phys == 0 {
+                    // A hole: it reads as zeros without occupying a block to read.
+                    out.write_all(&zeros[..take])?;
+                } else {
+                    let block = self.block(phys)?;
+                    out.write_all(&block[..take])?;
+                }
+                written += take as u64;
+                if written >= want {
+                    break;
+                }
             }
         }
-        data.truncate(usize::try_from(want).unwrap_or(usize::MAX));
-        Ok(data)
+        Ok(written)
+    }
+
+    /// Read a file's bytes at `offset` into `buf`, returning how many were filled.
+    ///
+    /// This is the ranged read the whole-file forms are built on: it fills at most
+    /// `buf.len()` bytes and stops at the file's logical size, so a short return means the
+    /// range reached the end of the file rather than that anything was dropped. An `offset`
+    /// at or past the size fills nothing. Holes are filled with zeros, exactly as they
+    /// read.
+    ///
+    /// Everything it allocates is bounded by `buf`: the logical-to-physical map covers the
+    /// window the buffer spans and no more, so a hostile `i_size` costs the caller nothing
+    /// beyond the buffer they chose. [`Limits::max_file_bytes`] therefore does not apply
+    /// here — the buffer *is* the bound — and the mapping structures are followed only for
+    /// the window, so blocks outside it are neither read nor validated.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError`] variants if the mapping or a data block cannot be read.
+    pub fn read_into(
+        &mut self,
+        inode: &Inode,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, ReadError> {
+        let size = self.file_len(inode);
+        if offset >= size || buf.is_empty() {
+            return Ok(0);
+        }
+        let bs = self.block_size as u64;
+        let want = (size - offset).min(buf.len() as u64);
+        // The window is the logical blocks the range touches: the block holding `offset`
+        // through the one holding its last byte.
+        let first = usize::try_from(offset / bs).unwrap_or(usize::MAX);
+        let last = usize::try_from((offset + want - 1) / bs).unwrap_or(usize::MAX);
+        let count = last - first + 1;
+        // Where the range begins inside its first block, and so where each block's bytes
+        // land in the buffer.
+        let mut skip = usize::try_from(offset % bs).unwrap_or(0);
+        let mut filled = 0usize;
+        for phys in self.map_window(inode, first, count)? {
+            let take =
+                (self.block_size - skip).min(usize::try_from(want).unwrap_or(usize::MAX) - filled);
+            if phys == 0 {
+                // A hole reads as zeros; the buffer is filled rather than left as it was,
+                // so a caller reusing one buffer never sees a previous read's bytes.
+                buf[filled..filled + take].fill(0);
+            } else {
+                let block = self.block(phys)?;
+                buf[filled..filled + take].copy_from_slice(&block[skip..skip + take]);
+            }
+            filled += take;
+            skip = 0;
+            if filled as u64 >= want {
+                break;
+            }
+        }
+        Ok(filled)
+    }
+
+    /// A file's logical size as a whole-file read sees it: the length
+    /// [`file_len`](Self::file_len) reports, held to [`Limits::max_file_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::FileTooLarge`] if the size exceeds the cap.
+    fn whole_file_len(&mut self, inode: &Inode) -> Result<u64, ReadError> {
+        let size = self.file_len(inode);
+        if size > self.limits.max_file_bytes {
+            return Err(ReadError::FileTooLarge {
+                size,
+                limit: self.limits.max_file_bytes,
+            });
+        }
+        Ok(size)
+    }
+
+    /// The logical size of the data an inode maps.
+    ///
+    /// Three things narrow the inode's own size field. An inode whose block area holds
+    /// something else — a fast symlink's target, a device's numbers — maps no data at all,
+    /// whatever the field claims. A size past the 2^32-block logical ceiling cannot be
+    /// mapped past it. And a directory holds no holes, so it cannot span more blocks than
+    /// the image has; both bounds come from [`logical_block_count`](Self::logical_block_count).
+    fn file_len(&mut self, inode: &Inode) -> u64 {
+        if !maps_data(inode, self.block_size) {
+            return 0;
+        }
+        let mapped =
+            (self.logical_block_count(inode) as u64).saturating_mul(self.block_size as u64);
+        inode.size.min(mapped)
     }
 
     /// The most names the source has room to describe: every name a well-formed
@@ -3526,7 +3821,7 @@ impl<R: Read + Seek> Reader<R> {
         // per block it claims.
         let want = self.logical_block_count(&inode).min(1);
         let first = self
-            .map_blocks(&inode, want)?
+            .map_window(&inode, 0, want)?
             .first()
             .copied()
             .filter(|&b| b != 0)
@@ -3761,9 +4056,44 @@ impl<R: Read + Seek> Reader<R> {
     /// [`ReadError`] variants if any directory along the walk cannot be read, or
     /// [`ReadError::WalkTooLarge`] if the tree holds more names than the bounds allow.
     pub fn walk(&mut self) -> Result<Vec<WalkEntry>, ReadError> {
-        let cap = self.limits.max_walk_entries.min(self.max_names());
         let mut out = Vec::new();
-        let root = self.inode(ROOT_INO)?;
+        self.walk_with::<ReadError>(|_, entry| {
+            out.push(entry);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Walk the whole tree, handing each [`WalkEntry`] to `visit` as it is reached rather
+    /// than gathering them all first.
+    ///
+    /// The order, the bounds, and the cycle handling are [`walk`](Self::walk)'s exactly;
+    /// what differs is that nothing accumulates, so a tree of any size costs the walk's own
+    /// state rather than one full [`Inode`] and path per name. That is what makes a whole
+    /// tree processable in a fixed working set — writing an archive, counting a tree,
+    /// building an index.
+    ///
+    /// `visit` receives the reader itself, so it may read each entry's contents,
+    /// attributes, or link target as it goes. It is called once per name, in walk order,
+    /// and an error it returns stops the walk and is returned unchanged — so a consumer's
+    /// own failure is not reported as a fault in the image.
+    ///
+    /// The error type is the consumer's, and the walk's own [`ReadError`]s convert into it,
+    /// so a caller whose work has failures of its own — writing an archive, say — reports
+    /// them in its own vocabulary rather than forcing them through this one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `visit` returns, or the [`walk`](Self::walk) errors converted into it:
+    /// [`ReadError`] variants if a directory cannot be read, or [`ReadError::WalkTooLarge`]
+    /// if the tree holds more names than the bounds allow.
+    pub fn walk_with<E: From<ReadError>>(
+        &mut self,
+        mut visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let cap = self.limits.max_walk_entries.min(self.max_names());
+        let mut seen = 0usize;
+        let root = self.inode(ROOT_INO).map_err(E::from)?;
         // Track the directory inodes descended into: a well-formed tree reaches each
         // exactly once, so declining to re-descend a repeat bounds the walk against a
         // directory cycle or a hard-linked directory rather than fanning out.
@@ -3775,22 +4105,25 @@ impl<R: Read + Seek> Reader<R> {
         // order, so popping yields them in order and a directory's whole subtree is
         // emitted before its next sibling — the documented depth-first, names-sorted
         // order the recursion produced.
-        let mut stack = self.walk_children(&root, &[])?;
+        let mut stack = self.walk_children(&root, &[]).map_err(E::from)?;
         while let Some(entry) = stack.pop() {
-            if out.len() >= cap {
-                return Err(ReadError::WalkTooLarge { limit: cap });
+            if seen >= cap {
+                return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
             }
+            seen += 1;
             // Descend into a subdirectory only the first time its inode is reached; a
             // repeat is a directory cycle or hard link, so re-descending would not
             // terminate. The visited set bounds fan-out; the explicit stack bounds
             // nothing but the heap, so depth is limited only by the image.
             if is_dir(&entry.inode) && visited.insert(entry.number) {
-                let children = self.walk_children(&entry.inode, &entry.path)?;
+                let children = self
+                    .walk_children(&entry.inode, &entry.path)
+                    .map_err(E::from)?;
                 stack.extend(children);
             }
-            out.push(entry);
+            visit(self, entry)?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// The child entries of directory `inode` as walk entries, in reverse name order so
@@ -5008,7 +5341,7 @@ mod tests {
     }
 
     #[test]
-    fn open_at_refuses_an_offset_that_overflows_the_superblock_position() {
+    fn open_with_refuses_a_base_that_overflows_the_superblock_position() {
         // A `base` near the top of the range leaves no room for the superblock 1024 bytes
         // in. The sum is refused as out of range rather than wrapping to a small seek that
         // would read a non-superblock and mislabel the image.
@@ -5365,7 +5698,7 @@ mod tests {
         // The truncation reaches every projection: a consumer of any of them must be able
         // to tell a complete report from one that stopped.
         assert!(report.to_json().contains("\"truncated\":true"));
-        assert!(report.to_table().contains("report truncated"));
+        assert!(report.to_table().contains("report truncated at 10000"));
         assert!(
             report
                 .to_sarif(None)
@@ -5376,7 +5709,9 @@ mod tests {
         assert!(report.has_fatal(ReadPolicy::Strict));
 
         // And the cap is a knob, not a constant: a caller reading with a gigabyte to
-        // spare tightens it and gets a report that says it stopped that much sooner.
+        // spare tightens it and gets a report that says it stopped that much sooner —
+        // and says so naming the bound that applied. A notice quoting the default
+        // constant would tell a caller who asked for seven that ten thousand were found.
         let mut tight = Reader::open_with(
             std::io::Cursor::new(&bytes),
             &OpenOptions::new()
@@ -5387,6 +5722,29 @@ mod tests {
         let short = tight.scan();
         assert!(short.is_truncated());
         assert_eq!(short.anomalies().len(), 7);
+        let notice = "report truncated at 7 anomalies; the rest of the image was not scanned";
+        assert!(short.to_table().contains(notice), "{}", short.to_table());
+        assert!(short.to_sarif(None).contains(notice));
+
+        // A cap of zero stops the scan before it reads a group. The report is empty, and
+        // it is *not* clean: an absence of findings from a scan that never looked is not
+        // a verdict about the image.
+        let mut none = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new()
+                .policy(ReadPolicy::Lenient)
+                .limits(Limits::new().max_anomalies(0)),
+        )
+        .unwrap();
+        let empty = none.scan();
+        assert!(empty.is_truncated());
+        assert!(empty.anomalies().is_empty());
+        assert!(
+            !empty.is_clean(),
+            "a truncated report claimed the image was clean"
+        );
+        assert!(empty.to_json().contains("\"clean\":false"));
+        assert!(empty.to_table().contains("report truncated at 0 anomalies"));
     }
 
     #[test]
@@ -5445,13 +5803,248 @@ mod tests {
         let (_, inode) = r.lookup(b"/f").unwrap();
         assert_eq!(r.read_data(&inode).unwrap().len(), 8192);
 
+        // Over the cap the read is refused, and the error carries both numbers a caller
+        // acts on. A hundred bytes of an eight-kilobyte file returned as `Ok` would be
+        // indistinguishable from a hundred-byte file — the silent loss the walk's own
+        // bound exists to avoid, one object down.
         let mut capped = Reader::open_with(
             std::io::Cursor::new(&bytes),
             &OpenOptions::new().limits(Limits::new().max_file_bytes(100)),
         )
         .unwrap();
         let (_, inode) = capped.lookup(b"/f").unwrap();
-        assert_eq!(capped.read_data(&inode).unwrap().len(), 100);
+        assert!(matches!(
+            capped.read_data(&inode),
+            Err(ReadError::FileTooLarge {
+                size: 8192,
+                limit: 100
+            })
+        ));
+        // Streaming the same file is bounded the same way: the cap expresses distrust of
+        // the declared size, not a memory bound, so it is not escaped by not holding the
+        // bytes.
+        let mut sink = Vec::new();
+        assert!(matches!(
+            capped.read_data_to(&inode, &mut sink),
+            Err(ReadError::FileTooLarge { .. })
+        ));
+        assert!(sink.is_empty(), "nothing is written before the refusal");
+
+        // A ranged read is bounded by the buffer the caller supplies, so the cap does not
+        // apply to it: this is the way to read part of a file deliberately, and the count
+        // it returns is what makes the partial read representable.
+        let mut buf = [0u8; 100];
+        assert_eq!(capped.read_into(&inode, 0, &mut buf).unwrap(), 100);
+        assert_eq!(buf, [7u8; 100]);
+    }
+
+    #[test]
+    fn a_capped_read_never_maps_the_claim_behind_it() {
+        // The cap is asked for by a caller reading an image it does not trust, so the
+        // image it has to hold against is the crafted one. A size field claiming sixteen
+        // terabytes on a 64 MiB image implies a map of 2^32 logical blocks — eight bytes
+        // each, thirty-four gigabytes — so a cap that let the read begin and truncated
+        // afterwards would allocate that before returning anything.
+        //
+        // What proves nothing was mapped is that this completes: the size is checked
+        // before a block of map exists.
+        const CLAIM: u64 = 1 << 44; // sixteen terabytes, on a 64 MiB image
+        let image = format(TreeBuilder::new(), 64 * MIB, opts()).unwrap();
+        let mut bytes = image.into_bytes();
+        craft_extent_inode(&mut bytes, 12, 0o100600, 1, 4, 2000, CLAIM);
+
+        for cap in [0u64, 10, 8192] {
+            let mut r = Reader::open_with(
+                std::io::Cursor::new(&bytes),
+                &OpenOptions::new()
+                    .policy(ReadPolicy::Lenient)
+                    .limits(Limits::new().max_file_bytes(cap)),
+            )
+            .unwrap();
+            let inode = r.inode(12).unwrap();
+            assert!(
+                matches!(
+                    r.read_data(&inode),
+                    Err(ReadError::FileTooLarge { size: CLAIM, .. })
+                ),
+                "a {CLAIM}-byte claim must be refused under a {cap}-byte cap"
+            );
+        }
+
+        // And a ranged read of the same inode reads the window it was asked for without
+        // mapping the claim: the crafted extent covers logical block 0, so the first
+        // block's bytes are readable while everything the claim adds past it is not
+        // materialized at all.
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let inode = r.inode(12).unwrap();
+        let mut buf = [0u8; 4096];
+        assert_eq!(r.read_into(&inode, 0, &mut buf).unwrap(), 4096);
+    }
+
+    #[test]
+    fn a_ranged_read_reads_the_window_it_is_given() {
+        // The primitive the whole-file forms are built on, over both mappings: a window
+        // anywhere in the file, holes filled as zeros, short only at the end of the file.
+        // `-O ^extent` is the classic direct/indirect map, where a window deep into the
+        // file is reached through the indirect blocks above it.
+        for label in ["extent", "block-mapped"] {
+            let mut o = opts();
+            if label == "block-mapped" {
+                o.feature = FeatureSet::EXT2;
+            }
+            // Long enough to reach single indirection under the classic map (12 direct
+            // blocks = 48 KiB at a 4 KiB block), with a recognizable byte per block.
+            let mut contents = Vec::new();
+            for block in 0..20u8 {
+                contents.extend(std::iter::repeat_n(block, 4096));
+            }
+            let source = TreeBuilder::new().file(
+                b"/f".to_vec(),
+                contents.clone(),
+                Metadata::new(0o644, Timestamp::from_secs(0)),
+            );
+            let image = format(source, 64 * MIB, o).unwrap();
+            let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+            let (_, inode) = r.lookup(b"/f").unwrap();
+
+            // A whole-file read still returns the whole file, however it is now built.
+            assert_eq!(
+                r.read_data(&inode).unwrap(),
+                contents,
+                "{label}: whole file"
+            );
+
+            // A window crossing a block boundary, and one past the direct blocks.
+            for (offset, len) in [
+                (0usize, 10usize),
+                (4090, 12),
+                (65536, 8192),
+                (4096 * 19, 4096),
+            ] {
+                let mut buf = vec![0u8; len];
+                let filled = r.read_into(&inode, offset as u64, &mut buf).unwrap();
+                assert_eq!(filled, len, "{label}: {len} bytes at {offset}");
+                assert_eq!(&buf[..filled], &contents[offset..offset + len]);
+            }
+
+            // A read at the end is short rather than an error, and one past the end reads
+            // nothing: that is how a caller knows it reached the end rather than a bound.
+            let mut buf = vec![0u8; 4096];
+            let filled = r
+                .read_into(&inode, contents.len() as u64 - 10, &mut buf)
+                .unwrap();
+            assert_eq!(filled, 10, "{label}: a read at the end is short");
+            assert_eq!(
+                r.read_into(&inode, contents.len() as u64, &mut buf)
+                    .unwrap(),
+                0,
+                "{label}: a read past the end fills nothing"
+            );
+
+            // Streaming yields the same bytes as holding them, which is the property that
+            // lets a caller choose by memory rather than by fidelity.
+            let mut sink = Vec::new();
+            assert_eq!(
+                r.read_data_to(&inode, &mut sink).unwrap(),
+                contents.len() as u64
+            );
+            assert_eq!(sink, contents, "{label}: streamed bytes");
+        }
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_sparse_file_reads_holes_as_zeros() {
+        // A hole reads as zeros without occupying a block, at any offset and at any level
+        // of the classic map — and a windowed read must fill the caller's buffer with them
+        // rather than leave whatever it held. The hole here is the whole file: an inode
+        // whose size claims blocks its mapping never names.
+        let image = format(TreeBuilder::new(), 64 * MIB, opts()).unwrap();
+        let mut bytes = image.into_bytes();
+        // A size of four blocks over a one-block extent at logical block 0: blocks 1..4
+        // are a hole the tree does not name.
+        craft_extent_inode(&mut bytes, 12, 0o100600, 1, 4, 2000, 4 * 4096);
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let inode = r.inode(12).unwrap();
+
+        let mut buf = vec![0xffu8; 8192];
+        let filled = r.read_into(&inode, 4096, &mut buf).unwrap();
+        assert_eq!(filled, 8192);
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "a hole reads as zeros, overwriting the buffer's previous contents"
+        );
+    }
+
+    #[test]
+    fn a_walk_with_visits_every_name_without_gathering_them() {
+        // The callback form and the gathering form describe the same tree in the same
+        // order; what differs is only whether the entries are held. Comparing the two is
+        // what keeps them from drifting.
+        let time = Timestamp::from_secs(0);
+        let source = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/etc/hostname".to_vec(),
+                b"host\n".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .directory(b"/usr".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/usr/x".to_vec(),
+                b"x".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        let image = format(source, 64 * MIB, opts()).unwrap();
+        let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+
+        let gathered: Vec<Vec<u8>> = r.walk().unwrap().into_iter().map(|e| e.path).collect();
+        let mut streamed = Vec::new();
+        // The reader is handed to the callback, so an entry's contents are readable as it
+        // is reached — which is what makes a fixed-memory pass over a whole tree possible.
+        let mut bytes_seen = 0u64;
+        r.walk_with::<ReadError>(|reader, entry| {
+            if entry.inode.mode & 0o170000 == 0o100000 {
+                bytes_seen += reader.read_data(&entry.inode)?.len() as u64;
+            }
+            streamed.push(entry.path);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed, gathered);
+        assert_eq!(bytes_seen, 6, "hostname's five bytes and x's one");
+
+        // An error the callback returns stops the walk and comes back unchanged, so a
+        // consumer's own failure is never reported as a fault in the image.
+        let mut count = 0usize;
+        let stopped = r.walk_with::<ReadError>(|_, _| {
+            count += 1;
+            if count == 2 {
+                return Err(ReadError::BadJournal);
+            }
+            Ok(())
+        });
+        assert!(matches!(stopped, Err(ReadError::BadJournal)));
+        assert_eq!(count, 2, "the walk stops at the failing entry");
+
+        // The entry bound applies to the callback form too, so a hostile image cannot
+        // drive an unbounded number of calls.
+        let mut capped = Reader::open_with(
+            std::io::Cursor::new(image.as_bytes()),
+            &OpenOptions::new().limits(Limits::new().max_walk_entries(2)),
+        )
+        .unwrap();
+        assert!(matches!(
+            capped.walk_with::<ReadError>(|_, _| Ok(())),
+            Err(ReadError::WalkTooLarge { limit: 2 })
+        ));
     }
 
     #[test]
@@ -5685,6 +6278,94 @@ mod tests {
         assert_eq!(found.category, Category::Directory);
         assert!(found.location.inode.is_some());
         assert!(report.has_fatal(ReadPolicy::Strict));
+    }
+
+    #[test]
+    fn flags_the_hash_index_flag_on_something_that_is_not_a_directory() {
+        // The flag describes how a *directory's* blocks are organized, so on a regular file
+        // it means nothing — the incoherence `e2fsck` reports as "inode N has INDEX_FL flag
+        // set but is not a directory". It is a different fault from a directory whose flag
+        // the feature words deny, and reporting that one here would describe a regular file
+        // as a hash-indexed directory.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"data".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 64 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let (number, _) = {
+            let mut r = Reader::open_with(
+                std::io::Cursor::new(&bytes),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .unwrap();
+            assert!(r.feature().has_dir_index());
+            assert!(r.scan().is_clean());
+            r.lookup(b"/f").expect("the file")
+        };
+
+        // Set INDEX_FL (0x1000) in the file's `i_flags`, at offset 0x20 of the inode.
+        let at = inode_offset(&bytes, number) + 0x20;
+        bytes[at + 1] |= 0x10;
+
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let file = r.inode(number).unwrap();
+        assert!(file.flags.contains(InodeFlags::INDEX));
+        let report = r.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.detail.contains("not a directory"))
+            .unwrap_or_else(|| panic!("the flag on a non-directory is flagged: {report:?}"));
+        assert_eq!(found.severity, Severity::Conformance);
+        assert_eq!(found.category, Category::Inode);
+        assert_eq!(found.location.inode, Some(number));
+        // And not the directory rule: the feature stands, and this is not a directory.
+        assert!(
+            !report
+                .anomalies()
+                .iter()
+                .any(|a| a.detail.contains("does not enable the dir_index feature")),
+            "a regular file was described as a hash-indexed directory: {report:?}"
+        );
+
+        // Clearing `dir_index` (compat 0x20) does not add the directory rule either: that
+        // rule is about a directory, and the two faults stay distinct.
+        bytes[1024 + 0x5c] &= !0x20;
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let report = r.scan();
+        assert!(
+            !report
+                .anomalies()
+                .iter()
+                .any(|a| a.detail.contains("does not enable the dir_index feature")),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .anomalies()
+                .iter()
+                .any(|a| a.detail.contains("not a directory"))
+        );
+    }
+
+    #[test]
+    fn the_dirent_bound_is_the_shortest_record_the_format_encodes() {
+        // `MIN_DIRENT_LEN` and `min_rec_len` spell the same rule — an eight-byte header
+        // plus a name, rounded up to four — in two places, because the bound divides a
+        // `u64` and the rule's function is not `const`. Holding them equal is what keeps a
+        // change to the header or the alignment from moving one and not the other.
+        assert_eq!(MIN_DIRENT_LEN, u64::from(crate::ondisk::min_rec_len(1)));
+        // And it really is the floor: a zero-length name is not a record a filesystem
+        // holds, and every longer name costs more.
+        assert!(MIN_DIRENT_LEN <= u64::from(crate::ondisk::min_rec_len(255)));
     }
 
     #[test]
@@ -6092,6 +6773,7 @@ mod tests {
                 },
             ],
             truncated: false,
+            cap: ScanReport::MAX_ANOMALIES,
         };
         assert_eq!(
             report.to_json(),
@@ -6114,6 +6796,7 @@ mod tests {
         let clean = ScanReport {
             anomalies: Vec::new(),
             truncated: false,
+            cap: ScanReport::MAX_ANOMALIES,
         };
         assert_eq!(
             clean.to_json(),
@@ -6157,6 +6840,7 @@ mod tests {
                 },
             ],
             truncated: false,
+            cap: ScanReport::MAX_ANOMALIES,
         };
         let expected = String::from(
             "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
@@ -6183,6 +6867,7 @@ mod tests {
                 detail: "x".to_string(),
             }],
             truncated: false,
+            cap: ScanReport::MAX_ANOMALIES,
         };
         assert!(bare.to_sarif(None).contains(
             "\"ruleId\":\"superblock\",\"level\":\"warning\",\"message\":{\"text\":\"x\"},\

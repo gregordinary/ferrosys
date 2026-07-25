@@ -23,6 +23,15 @@ repository = "https://github.com/gregordinary/ferrosys"
 thiserror = "2"
 # default-features off: archive parsing (incl. PAX xattrs), no host-side xattr writes.
 tar = { version = "0.4", default-features = false }
+# default-features off, `std` + `fs` on: the two extended-attribute calls the directory
+# source needs, over the direct-syscall backend, with no C library in the tree.
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+# default-features off, `std` + `derive` on: the `Serialize` implementations the `serde`
+# feature adds, and nothing else — no deserialization, no runtime format.
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+# The `serde` feature's gate reads what the derives emit, so the shape a consumer sees is
+# asserted rather than assumed. A development dependency only; never shipped.
+serde_json = "1"
 tempfile = "3"
 proptest = "1"
 # The version is required alongside the path so `cargo publish` accepts the

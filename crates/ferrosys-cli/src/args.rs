@@ -14,11 +14,10 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use ferrosys::ext::feature::{FeatureError, FeatureSet};
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    ErrorBehavior, GrowReservation, HashSignedness, HashVersion, InodeCount, JournalSize, Profile,
-    ReservedRatio, Severity,
+    ErrorBehavior, FeatureError, FeatureSet, GrowReservation, HashSignedness, HashVersion,
+    InodeCount, JournalSize, Profile, ReservedRatio, Severity,
 };
 
 use crate::parse::{self, ValueError};
@@ -73,6 +72,8 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Read a filesystem's contents back out.
     Extract(ExtractArgs),
+    /// Say which filesystem an image holds.
+    Detect(DetectArgs),
     /// Print usage, for the tool as a whole or for one subcommand.
     Help(Topic),
     /// Print the version.
@@ -90,6 +91,8 @@ pub enum Topic {
     Inspect,
     /// One subcommand.
     Extract,
+    /// One subcommand.
+    Detect,
 }
 
 /// Where an archive is read from, or written to: a named file, or the standard stream,
@@ -113,12 +116,22 @@ impl Stream {
     }
 }
 
+/// What a format populates the filesystem from. At most one is given; without either the
+/// filesystem is empty but for `/lost+found`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Contents {
+    /// A tar archive: a named file, or the standard input.
+    Tar(Stream),
+    /// A directory tree on this host.
+    Dir(PathBuf),
+}
+
 /// `ferrosys format`: everything the filesystem's bytes are a function of.
 ///
 /// Every input is here, and nothing else is read: the identity (`uuid`, `hash_seed`),
 /// the clock (`time`, `fixed_time`), the geometry (`size`, `feature`, `grow`,
-/// `journal`), and the contents (`from_tar`). Two runs given the same values write the
-/// same bytes.
+/// `journal`), and the contents (`contents`, `owner`). Two runs given the same values
+/// write the same bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FormatArgs {
     /// The file to write. It must be a regular file.
@@ -129,8 +142,11 @@ pub struct FormatArgs {
     pub uuid: [u8; 16],
     /// The filesystem's creation and write time.
     pub time: Timestamp,
-    /// The archive to populate the filesystem from, or `None` for an empty one.
-    pub from_tar: Option<Stream>,
+    /// What to populate the filesystem from, or `None` for an empty one.
+    pub contents: Option<Contents>,
+    /// The user and group every entry is owned by, overriding what a walked directory
+    /// tree records, or `None` to keep the host's.
+    pub owner: Option<(u32, u32)>,
     /// The feature profile, with the block and inode sizes already folded in.
     pub feature: FeatureSet,
     /// What the kernel does on a detected filesystem error (`s_errors`).
@@ -155,6 +171,11 @@ pub struct FormatArgs {
     pub hash_seed: [u8; 16],
     /// Print the geometry the format realized as JSON.
     pub json: bool,
+    /// Write the image to a sibling temporary file and rename it over the destination once
+    /// it is complete, so the destination never holds a partial image.
+    pub atomic: bool,
+    /// Report the geometry the format would realize and write nothing.
+    pub dry_run: bool,
 }
 
 /// `ferrosys inspect`: what to report on, and what counts as a failing verdict.
@@ -177,6 +198,17 @@ pub struct InspectArgs {
     pub fail_on: Option<Severity>,
 }
 
+/// `ferrosys detect`: which image to classify, and where the filesystem begins in it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DetectArgs {
+    /// The image to classify.
+    pub image: PathBuf,
+    /// Where the filesystem begins within it.
+    pub offset: u64,
+    /// Report as JSON rather than as one line of text.
+    pub json: bool,
+}
+
 /// `ferrosys extract`: what to read the filesystem's contents into.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExtractArgs {
@@ -186,6 +218,9 @@ pub struct ExtractArgs {
     pub offset: u64,
     /// What to produce.
     pub mode: ExtractMode,
+    /// The largest file a read will return, or `None` for no cap. A file past it is an
+    /// error rather than a truncated one.
+    pub max_file_bytes: Option<u64>,
 }
 
 /// The one thing an extract produces. Exactly one is asked for.
@@ -195,6 +230,13 @@ pub enum ExtractMode {
     ToTar(Stream),
     /// Write one file's bytes, and nothing else.
     Cat(Vec<u8>),
+    /// Report everything one path's inode records, extended attributes included.
+    Stat {
+        /// The path inside the image.
+        path: Vec<u8>,
+        /// Report as JSON rather than as text.
+        json: bool,
+    },
     /// List the tree.
     List {
         /// List as JSON rather than as text.
@@ -262,12 +304,21 @@ pub enum UsageError {
     /// The requested features cannot be written together.
     #[error(transparent)]
     Feature(#[from] FeatureError),
+    /// `format` was given two things to populate the filesystem from.
+    #[error("format: give at most one of --from-tar or --from-dir")]
+    TwoSources,
+    /// `--owner` was given to a format with no directory tree to apply it to.
+    #[error(
+        "format: --owner replaces the ownership a walked directory tree records, so it \
+         goes with --from-dir"
+    )]
+    OwnerWithoutDir,
     /// `extract` was told to produce nothing, or more than one thing.
-    #[error("extract: give exactly one of --to-tar, --cat, or --list")]
+    #[error("extract: give exactly one of --to-tar, --cat, --stat, or --list")]
     ExtractMode,
     /// `--json` was given to an extract that produces bytes, which have no JSON form.
-    #[error("extract: --json applies to --list")]
-    JsonWithoutList,
+    #[error("extract: --json applies to --list and --stat")]
+    JsonWithoutReport,
     /// `inspect` was given both `--json` and `--sarif`, two different output formats.
     #[error("inspect: --sarif and --json are different output formats; give one")]
     SarifWithJson,
@@ -433,6 +484,7 @@ pub fn parse(
         }
         Arg::Positional(name) if name == OsStr::new("inspect") => inspect(&mut args),
         Arg::Positional(name) if name == OsStr::new("extract") => extract(&mut args),
+        Arg::Positional(name) if name == OsStr::new("detect") => detect(&mut args),
         Arg::Positional(name) if name == OsStr::new("help") => Ok(Command::Help(Topic::General)),
         Arg::Long(name, None) if name == "help" => Ok(Command::Help(Topic::General)),
         Arg::Long(name, None) if name == "version" => Ok(Command::Version),
@@ -460,6 +512,8 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut uuid: Option<[u8; 16]> = None;
     let mut time: Option<i64> = None;
     let mut from_tar: Option<Stream> = None;
+    let mut from_dir: Option<PathBuf> = None;
+    let mut owner: Option<(u32, u32)> = None;
     // The feature set is composed once the whole line is read (below), not mutated in place
     // as options arrive. So the base profile (`-t`), the size overrides, and the `-O` deltas
     // take effect in a fixed order — profile seeds, sizes override, `-O` lists layer on last
@@ -480,6 +534,8 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut hash_signedness = HashSignedness::default();
     let mut hash_seed: Option<[u8; 16]> = None;
     let mut json = false;
+    let mut atomic = false;
+    let mut dry_run = false;
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -505,6 +561,13 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         );
                     }
                     "from-tar" => from_tar = Some(Stream::from_value(args.value(&flag, attached)?)),
+                    "from-dir" => from_dir = Some(PathBuf::from(args.value(&flag, attached)?)),
+                    "owner" => {
+                        owner = Some(
+                            parse::owner(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
                     // The base profile seeds the feature set; `--type` and `-t` name the same
                     // thing, and the last one given wins. `-O` and the size options layer on
                     // top of it when the set is composed below.
@@ -587,6 +650,14 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         Args::no_value(&flag, attached)?;
                         json = true;
                     }
+                    "atomic" => {
+                        Args::no_value(&flag, attached)?;
+                        atomic = true;
+                    }
+                    "dry-run" => {
+                        Args::no_value(&flag, attached)?;
+                        dry_run = true;
+                    }
                     _ => {
                         return Err(UsageError::UnknownFlag { command: CMD, flag });
                     }
@@ -646,6 +717,19 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
         command: CMD,
         what: "output file",
     })?;
+    // One source of contents, or none. Two would be a merge, which nothing here decides
+    // the rules for.
+    let contents = match (from_tar, from_dir) {
+        (None, None) => None,
+        (Some(stream), None) => Some(Contents::Tar(stream)),
+        (None, Some(path)) => Some(Contents::Dir(path)),
+        (Some(_), Some(_)) => return Err(UsageError::TwoSources),
+    };
+    // An archive carries its own ownership and an empty filesystem has nothing to own, so
+    // an override with nothing to override is a mistake caught rather than ignored.
+    if owner.is_some() && !matches!(contents, Some(Contents::Dir(_))) {
+        return Err(UsageError::OwnerWithoutDir);
+    }
     // Compose the feature set now that the whole line is read: the base profile seeds it
     // (ext4 when no `-t` was given), the size options override, and the `-O` lists layer on
     // last, left to right. A combination that must never reach disk is a request that cannot
@@ -668,7 +752,8 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
         size,
         uuid,
         time: Timestamp::from_secs(time),
-        from_tar,
+        contents,
+        owner,
         feature,
         errors,
         inodes,
@@ -684,6 +769,8 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
         // have.
         hash_seed: hash_seed.unwrap_or(uuid),
         json,
+        atomic,
+        dry_run,
     })))
 }
 
@@ -785,6 +872,62 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     }))
 }
 
+/// `ferrosys detect [options] IMAGE`.
+fn detect(args: &mut Args) -> Result<Command, UsageError> {
+    const CMD: &str = "detect";
+    let mut image: Option<PathBuf> = None;
+    let mut offset = 0u64;
+    let mut json = false;
+
+    while let Some(arg) = args.next()? {
+        match arg {
+            Arg::Long(name, attached) => {
+                let flag = format!("--{name}");
+                match name.as_str() {
+                    "help" => return Ok(Command::Help(Topic::Detect)),
+                    "offset" => {
+                        offset =
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
+                    }
+                    "json" => {
+                        Args::no_value(&flag, attached)?;
+                        json = true;
+                    }
+                    _ => {
+                        return Err(UsageError::UnknownFlag { command: CMD, flag });
+                    }
+                }
+            }
+            Arg::Short('h', None) => return Ok(Command::Help(Topic::Detect)),
+            Arg::Short(letter, _) => {
+                return Err(UsageError::UnknownFlag {
+                    command: CMD,
+                    flag: format!("-{letter}"),
+                });
+            }
+            Arg::Positional(value) => {
+                if image.is_some() {
+                    return Err(UsageError::UnexpectedArgument {
+                        command: CMD,
+                        value: value.to_string_lossy().into_owned(),
+                    });
+                }
+                image = Some(PathBuf::from(value));
+            }
+        }
+    }
+
+    let image = image.ok_or(UsageError::MissingArgument {
+        command: CMD,
+        what: "image",
+    })?;
+    Ok(Command::Detect(DetectArgs {
+        image,
+        offset,
+        json,
+    }))
+}
+
 /// `ferrosys extract [options] IMAGE`.
 fn extract(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "extract";
@@ -792,8 +935,10 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     let mut offset = 0u64;
     let mut to_tar: Option<Stream> = None;
     let mut cat: Option<Vec<u8>> = None;
+    let mut stat: Option<Vec<u8>> = None;
     let mut list = false;
     let mut json = false;
+    let mut max_file_bytes: Option<u64> = None;
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -812,6 +957,17 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
                     "cat" => {
                         let value = args.value(&flag, attached)?;
                         cat = Some(os::bytes(&value).to_vec());
+                    }
+                    // A path inside the image, taken as bytes for the same reason `--cat`'s
+                    // is: a name in a filesystem is a byte string, not text.
+                    "stat" => {
+                        let value = args.value(&flag, attached)?;
+                        stat = Some(os::bytes(&value).to_vec());
+                    }
+                    "max-file-bytes" => {
+                        max_file_bytes = Some(
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        );
                     }
                     "list" => {
                         Args::no_value(&flag, attached)?;
@@ -849,22 +1005,26 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
         command: CMD,
         what: "image",
     })?;
-    // Exactly one artifact per run: the standard output carries a tar stream, or a
-    // file's bytes, or a listing, and the tool is told which.
-    let mode = match (to_tar, cat, list) {
-        (Some(stream), None, false) => ExtractMode::ToTar(stream),
-        (None, Some(path), false) => ExtractMode::Cat(path),
-        (None, None, true) => ExtractMode::List { json },
+    // Exactly one artifact per run: the standard output carries a tar stream, a file's
+    // bytes, one path's metadata, or a listing, and the tool is told which.
+    let mode = match (to_tar, cat, stat, list) {
+        (Some(stream), None, None, false) => ExtractMode::ToTar(stream),
+        (None, Some(path), None, false) => ExtractMode::Cat(path),
+        (None, None, Some(path), false) => ExtractMode::Stat { path, json },
+        (None, None, None, true) => ExtractMode::List { json },
         _ => return Err(UsageError::ExtractMode),
     };
-    if json && !matches!(mode, ExtractMode::List { .. }) {
-        return Err(UsageError::JsonWithoutList);
+    // JSON is a rendering of a report, so it goes with the two modes that produce one. A
+    // tar stream and a file's bytes are not reports and have no JSON form.
+    if json && !matches!(mode, ExtractMode::List { .. } | ExtractMode::Stat { .. }) {
+        return Err(UsageError::JsonWithoutReport);
     }
 
     Ok(Command::Extract(ExtractArgs {
         image,
         offset,
         mode,
+        max_file_bytes,
     }))
 }
 
@@ -904,7 +1064,8 @@ mod tests {
         // than one the tool would have had to invent.
         assert_eq!(a.hash_seed, UUID_BYTES);
         assert_eq!(a.feature, FeatureSet::DEFAULT);
-        assert_eq!(a.from_tar, None);
+        assert_eq!(a.contents, None);
+        assert_eq!(a.owner, None);
         assert!(!a.json);
     }
 
@@ -948,6 +1109,73 @@ mod tests {
         match both.expect("parses") {
             Command::Format(a) => assert_eq!(a.time, Timestamp::from_secs(42)),
             other => panic!("expected format, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_takes_one_source_of_contents() {
+        let tar = fmt(&format!(
+            "format --size 64M --uuid {UUID} --time 1 --from-tar rootfs.tar out.img"
+        ));
+        assert_eq!(
+            tar.contents,
+            Some(Contents::Tar(Stream::File(PathBuf::from("rootfs.tar"))))
+        );
+        let dash = fmt(&format!(
+            "format --size 64M --uuid {UUID} --time 1 --from-tar - out.img"
+        ));
+        assert_eq!(dash.contents, Some(Contents::Tar(Stream::Std)));
+        let dir = fmt(&format!(
+            "format --size 64M --uuid {UUID} --time 1 --from-dir staging out.img"
+        ));
+        assert_eq!(dir.contents, Some(Contents::Dir(PathBuf::from("staging"))));
+
+        // Two sources would be a merge, and nothing here decides the rules for one.
+        assert_eq!(
+            line(&format!(
+                "format --size 64M --uuid {UUID} --time 1 --from-tar r.tar --from-dir d out.img"
+            ))
+            .unwrap_err(),
+            UsageError::TwoSources
+        );
+    }
+
+    #[test]
+    fn format_takes_an_ownership_override_for_a_walked_tree() {
+        let a = fmt(&format!(
+            "format --size 64M --uuid {UUID} --time 1 --from-dir staging --owner 0:0 out.img"
+        ));
+        assert_eq!(a.owner, Some((0, 0)));
+        let a = fmt(&format!(
+            "format --size 64M --uuid {UUID} --time 1 --from-dir staging --owner 1000:100 out.img"
+        ));
+        assert_eq!(a.owner, Some((1000, 100)));
+
+        // An archive carries its own ownership and an empty filesystem has none to
+        // override, so the option has nothing to apply to.
+        for line_text in [
+            format!("format --size 64M --uuid {UUID} --time 1 --owner 0:0 out.img"),
+            format!(
+                "format --size 64M --uuid {UUID} --time 1 --from-tar r.tar --owner 0:0 out.img"
+            ),
+        ] {
+            assert_eq!(line(&line_text).unwrap_err(), UsageError::OwnerWithoutDir);
+        }
+
+        // Both halves are required, and each must fit the on-disk field.
+        for bad in ["0", "0:", ":0", "root:root", "-1:0", "4294967296:0"] {
+            assert!(
+                matches!(
+                    line(&format!(
+                        "format --size 64M --uuid {UUID} --time 1 --from-dir d --owner {bad} out.img"
+                    )),
+                    Err(UsageError::Value {
+                        source: ValueError::NotAnOwner(_),
+                        ..
+                    })
+                ),
+                "--owner {bad} should be a usage error"
+            );
         }
     }
 
@@ -1290,7 +1518,7 @@ mod tests {
         // Bytes have no JSON form.
         assert_eq!(
             line("extract --cat /x --json image.img").unwrap_err(),
-            UsageError::JsonWithoutList
+            UsageError::JsonWithoutReport
         );
     }
 

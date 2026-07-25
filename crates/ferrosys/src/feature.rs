@@ -63,6 +63,10 @@ macro_rules! feature_word {
     ) => {
         $(#[$ty_doc])*
         #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
+        // A feature word serializes as the raw on-disk word it wraps, which is what
+        // `bits()` returns and what a superblock holds. The names are a projection of it
+        // (`FeatureSet::names`), not a second encoding of the same fact.
+        #[cfg_attr(feature = "serde", derive(serde::Serialize))]
         pub struct $name(u32);
 
         impl $name {
@@ -332,6 +336,7 @@ feature_word! {
 /// names alone are not enough.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FeatureSet {
     /// The `compat` feature word.
     pub compat: Compat,
@@ -990,6 +995,7 @@ fn push_pin_word(out: &mut String, label: &str, bits: u32, names: &[&str], unkno
 /// result `mke2fs -t ext4 -O ^extent` produces. A profile seeds a format; it does not
 /// constrain what the image becomes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Profile {
     /// ext2: files mapped through the classic indirect-block scheme, with no journal. Its
     /// baseline is [`FeatureSet::EXT2`].

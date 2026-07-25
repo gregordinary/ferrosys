@@ -26,8 +26,10 @@ mod util;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ferrosys::ext::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
-use ferrosys::ext::{OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr};
+use ferrosys::ext::acl::{EXEC, READ, WRITE};
+use ferrosys::ext::{
+    Acl, AclEntry, AclQualifier, OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr,
+};
 use util::{available, e2fsck_clean, tool};
 
 /// The contents of a file in the source tree, keyed by its path in the image.
