@@ -1,21 +1,32 @@
 #[non_exhaustive] pub enum ferrosys::DetectError
 #[non_exhaustive] pub enum ferrosys::Filesystem
 #[non_exhaustive] pub ferrosys::DetectError::Io
+#[non_exhaustive] pub struct ferrosys::DetectOptions
 impl Clone for ferrosys::DetectError
+impl Clone for ferrosys::DetectOptions
 impl Clone for ferrosys::Filesystem
+impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Filesystem
 impl Debug for ferrosys::DetectError
+impl Debug for ferrosys::DetectOptions
 impl Debug for ferrosys::Filesystem
+impl Default for ferrosys::DetectOptions
 impl Display for ferrosys::DetectError
 impl Eq for ferrosys::DetectError
+impl Eq for ferrosys::DetectOptions
 impl Eq for ferrosys::Filesystem
 impl Error for ferrosys::DetectError
 impl Hash for ferrosys::Filesystem
 impl PartialEq for ferrosys::DetectError
+impl PartialEq for ferrosys::DetectOptions
 impl PartialEq for ferrosys::Filesystem
+pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::DetectOptions::new() -> Self
 pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
 pub ferrosys::DetectError::Io::message: String
 pub ferrosys::DetectError::Unrecognized
+pub ferrosys::DetectOptions::base: u64
 pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
 pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
+pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>
 pub mod ferrosys

@@ -62,8 +62,9 @@ jobs:
       - name: Install attr for the getfattr xattr gate
         run: sudo apt-get update && sudo apt-get install -y attr
 
-      # `--all-features` builds the `tar` archive source, so its PAX/xattr/ACL
-      # surface is tested, linted, and doc-checked rather than shipping unexercised.
+      # `--all-features` builds the `tar` archive source and the `dir` directory source,
+      # so their PAX/xattr/ACL surface is tested, linted, and doc-checked rather than
+      # shipping unexercised.
       # `--release` because the host-tool gates build multi-gigabyte images and the
       # >2^32-block tier streams a 9 TiB filesystem: ~13 s optimized, ~3 min
       # unoptimized. Correctness is identical either way; this is CI wall-clock.
@@ -106,6 +107,23 @@ jobs:
               *) echo "::error::seed $seed is not a readable image (exit $status)"; exit 1 ;;
             esac
           done
+
+      # The archive seed has the same problem and needs the other half of the pipeline to
+      # check it: an archive the parser refuses seeds a fuzzer that never frames a member,
+      # and a tar header carries a checksum over its own bytes, so a mutation almost never
+      # recovers one. Formatting from it exercises the parse and the entry conversion both,
+      # and its generator is asserted to still reproduce it byte for byte.
+      - name: Fuzz archive seed still parses, and reproduces from its generator
+        run: |
+          for seed in crates/ferrosys/fuzz/seeds/archive_parse/*.tar; do
+            ./target/debug/ferrosys format --size 32M --from-tar "$seed" \
+              --uuid f0e17055-0000-4000-8000-000000000000 --time 1700000000 \
+              /tmp/archive-seed.img > /dev/null \
+              || { echo "::error::seed $seed no longer parses"; exit 1; }
+          done
+          python3 crates/ferrosys/fuzz/make-archive-seed.py /tmp/regenerated.tar > /dev/null
+          cmp /tmp/regenerated.tar crates/ferrosys/fuzz/seeds/archive_parse/rootfs-pax.tar \
+            || { echo "::error::make-archive-seed.py no longer reproduces the seed"; exit 1; }
 
       - name: Rustdoc
         run: cargo doc --no-deps --all-features
