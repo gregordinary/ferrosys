@@ -20,7 +20,8 @@ use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::source::{Metadata, Source};
 use ferrosys::ext::{
     Acl, AclEntry, AclQualifier, Compat, FormatOptions, GrowReservation, Image, Incompat,
-    InodeCount, Profile, Reader, ReservedRatio, RoCompat, TreeBuilder, format, format_to,
+    InodeCount, OpenOptions, Profile, Reader, ReservedRatio, RoCompat, TreeBuilder, format,
+    format_to,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -1652,6 +1653,54 @@ fn debugfs_out(path: &Path, cmd: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+#[test]
+fn a_large_self_written_image_reads_back_whole_at_the_default_limits() {
+    // A resource limit added for safety against a hostile image is a contract nothing
+    // else checks: it has no signature, no compile error, and no semver signal, and a
+    // default set too tight would silently start refusing images this crate itself wrote.
+    // So the defaults are exercised against a large image with many names, read back
+    // through every path that allocates from a field the image supplies.
+    if !available("e2fsck") {
+        return;
+    }
+    // A 2 GiB filesystem, so the size-driven inode count comfortably holds the names.
+    const N: u32 = 40_000;
+    let image = format(big_dir_source(N, 40), 2048 * MIB, options()).expect("format");
+    let mut reader = Reader::open_with(std::io::Cursor::new(image.as_bytes()), &OpenOptions::new())
+        .expect("open at the default limits");
+
+    // Every name comes back: the walk's structural bound is derived from the source's
+    // own length, so it is orders of magnitude above what a real filesystem holds.
+    let walked = reader.walk().expect("walk at the default limits");
+    assert_eq!(
+        walked.len() as u32,
+        N + 2,
+        "the walk dropped names at the default limits: {} entries for {N} files, \
+         /bigdir, and /lost+found",
+        walked.len()
+    );
+
+    // The scan reaches a verdict rather than stopping at its cap.
+    let report = reader.scan();
+    assert!(
+        !report.is_truncated(),
+        "a sound image filled the finding cap: {:?}",
+        report.anomalies()
+    );
+    assert!(
+        report.anomalies().is_empty(),
+        "a self-written image scanned dirty: {:?}",
+        report.anomalies()
+    );
+
+    // And a file reads back at its full length.
+    let (_, dir) = reader.lookup(b"/bigdir").expect("lookup /bigdir");
+    assert!(!reader.read_dir(&dir).expect("read /bigdir").is_empty());
+
+    let file = write_image(&image);
+    e2fsck_clean(file.path()).expect("e2fsck rejects an image this gate read as sound");
+}
+
 /// The inode of the sole entry under `/bigdir` in a walked image.
 fn bigdir_inode(image: &Image) -> ferrosys::ext::ondisk::Inode {
     use ferrosys::ext::Reader;
@@ -1827,6 +1876,66 @@ fn every_hash_version_orders_an_index_e2fsck_accepts_under_a_nonzero_seed() {
             dump.contains(&format!("Hash Version: {dx_byte}")),
             "the index root's hash version is not {name}'s:\n{dump}"
         );
+    }
+}
+
+/// A feature word and the bytes written under it must agree, and `large_file` is the
+/// pairing the geometry itself can break: the resize inode is a regular file whose size
+/// records the classic block map's reach, which at a 4096-byte block is 4 GiB — a large
+/// file. `mke2fs` resolves the conflict by setting the feature back; this crate refuses
+/// the combination instead. Either way the boundary is the same, and it is the boundary
+/// that matters: this pins it against `mke2fs` at every block size, and then confirms
+/// that the sizes the rule leaves alone really do write `e2fsck`-clean images without the
+/// feature.
+#[test]
+fn the_large_file_pairing_matches_mke2fs_at_every_block_size() {
+    if !available("mke2fs") || !available("dumpe2fs") || !available("e2fsck") {
+        return;
+    }
+    for block_size in [1024u32, 2048, 4096] {
+        // The reference's own verdict: `mke2fs -O ^large_file` honors the clear where the
+        // resize inode fits under the bound and sets the feature back where it does not.
+        let baseline = tempfile::NamedTempFile::new().expect("temp file");
+        let status = tool("mke2fs")
+            .args(["-q", "-F", "-t", "ext2", "-I", "256"])
+            .args(["-b", &block_size.to_string()])
+            .args(["-O", "^large_file"])
+            .arg(baseline.path())
+            .arg("64m")
+            .status()
+            .expect("spawn mke2fs");
+        assert!(status.success(), "mke2fs failed at {block_size}");
+        let needed = image_has_feature(baseline.path(), "large_file");
+
+        // The crate's rule, derived from the resize inode's own declared size, must draw
+        // the line in the same place.
+        let mut o = block_mapped_options(Profile::Ext2, block_size);
+        o.feature = o
+            .feature
+            .with_feature("large_file", false)
+            .expect("a known name");
+        assert!(o.feature.has_resize_inode());
+        let planned = o.feature.validate();
+        assert_eq!(
+            planned.is_err(),
+            needed,
+            "at a {block_size}-byte block mke2fs {} large_file, so the rule must {} the set",
+            if needed { "reasserts" } else { "drops" },
+            if needed { "refuse" } else { "accept" }
+        );
+
+        // Where the rule accepts, the image it writes is one `e2fsck` calls clean — the
+        // check that the acceptance is not merely permissive.
+        if planned.is_ok() {
+            let file = format_file(block_mapped_tree(), 64 * MIB, o);
+            assert!(
+                !image_has_feature(file.path(), "large_file"),
+                "the emitted image must carry the feature words asked for"
+            );
+            e2fsck_clean(file.path()).unwrap_or_else(|e| {
+                panic!("e2fsck faulted a {block_size}-byte-block image without large_file:\n{e}")
+            });
+        }
     }
 }
 

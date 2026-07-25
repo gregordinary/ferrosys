@@ -1,0 +1,21 @@
+#[non_exhaustive] pub enum ferrosys::DetectError
+#[non_exhaustive] pub enum ferrosys::Filesystem
+#[non_exhaustive] pub ferrosys::DetectError::Io
+impl Clone for ferrosys::DetectError
+impl Clone for ferrosys::Filesystem
+impl Copy for ferrosys::Filesystem
+impl Debug for ferrosys::DetectError
+impl Debug for ferrosys::Filesystem
+impl Display for ferrosys::DetectError
+impl Eq for ferrosys::DetectError
+impl Eq for ferrosys::Filesystem
+impl Error for ferrosys::DetectError
+impl Hash for ferrosys::Filesystem
+impl PartialEq for ferrosys::DetectError
+impl PartialEq for ferrosys::Filesystem
+pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
+pub ferrosys::DetectError::Io::message: String
+pub ferrosys::DetectError::Unrecognized
+pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
+pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
+pub mod ferrosys

@@ -53,24 +53,41 @@ const TAG_OTHER: u16 = 0x20;
 
 /// A failure encoding or decoding an ACL.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AclError {
     /// The ACL is missing a required entry: exactly one owner, owning-group, and
     /// other entry must be present.
-    #[error("ACL is missing its required {0} entry")]
-    MissingRequired(&'static str),
+    #[error("ACL is missing its required {tag} entry")]
+    #[non_exhaustive]
+    MissingRequired {
+        /// The entry tag that is absent: `owner`, `owning group`, or `other`.
+        tag: &'static str,
+    },
     /// A required entry appears more than once, or a named user/group id repeats.
-    #[error("ACL has a duplicate {0} entry")]
-    Duplicate(&'static str),
+    #[error("ACL has a duplicate {tag} entry")]
+    #[non_exhaustive]
+    Duplicate {
+        /// The entry tag that repeats.
+        tag: &'static str,
+    },
     /// The ACL names specific users or groups but carries no mask entry, which POSIX
     /// requires in that case.
     #[error("ACL names users or groups but has no mask entry")]
     MaskRequired,
     /// A permission field set bits outside read/write/execute.
-    #[error("ACL entry has invalid permission bits {0:#x}")]
-    InvalidPerm(u16),
+    #[error("ACL entry has invalid permission bits {perm:#x}")]
+    #[non_exhaustive]
+    InvalidPerm {
+        /// The permission field as found, including the bits outside `rwx`.
+        perm: u16,
+    },
     /// The encoded ACL was truncated or its version was not 1.
-    #[error("encoded ACL is malformed: {0}")]
-    Malformed(&'static str),
+    #[error("encoded ACL is malformed: {reason}")]
+    #[non_exhaustive]
+    Malformed {
+        /// What about the encoding is wrong.
+        reason: &'static str,
+    },
 }
 
 /// Who an [`AclEntry`] grants permissions to.
@@ -143,7 +160,7 @@ impl Acl {
     pub fn new(mut entries: Vec<AclEntry>) -> Result<Self, AclError> {
         for e in &entries {
             if e.perm & !(READ | WRITE | EXEC) != 0 {
-                return Err(AclError::InvalidPerm(e.perm));
+                return Err(AclError::InvalidPerm { perm: e.perm });
             }
         }
         entries.sort_by_key(|e| e.who.sort_key());
@@ -166,25 +183,29 @@ impl Acl {
         let other = count(|w| matches!(w, AclQualifier::Other));
         let mask = count(|w| matches!(w, AclQualifier::Mask));
         if user_obj == 0 {
-            return Err(AclError::MissingRequired("owner"));
+            return Err(AclError::MissingRequired { tag: "owner" });
         }
         if group_obj == 0 {
-            return Err(AclError::MissingRequired("owning-group"));
+            return Err(AclError::MissingRequired {
+                tag: "owning-group",
+            });
         }
         if other == 0 {
-            return Err(AclError::MissingRequired("other"));
+            return Err(AclError::MissingRequired { tag: "other" });
         }
         if user_obj > 1 {
-            return Err(AclError::Duplicate("owner"));
+            return Err(AclError::Duplicate { tag: "owner" });
         }
         if group_obj > 1 {
-            return Err(AclError::Duplicate("owning-group"));
+            return Err(AclError::Duplicate {
+                tag: "owning-group",
+            });
         }
         if other > 1 {
-            return Err(AclError::Duplicate("other"));
+            return Err(AclError::Duplicate { tag: "other" });
         }
         if mask > 1 {
-            return Err(AclError::Duplicate("mask"));
+            return Err(AclError::Duplicate { tag: "mask" });
         }
         // Named users and groups must have distinct ids, and their presence requires
         // a mask entry.
@@ -196,14 +217,14 @@ impl Acl {
                 AclQualifier::User(id) => {
                     named = true;
                     if users.contains(&id) {
-                        return Err(AclError::Duplicate("named-user"));
+                        return Err(AclError::Duplicate { tag: "named-user" });
                     }
                     users.push(id);
                 }
                 AclQualifier::Group(id) => {
                     named = true;
                     if groups.contains(&id) {
-                        return Err(AclError::Duplicate("named-group"));
+                        return Err(AclError::Duplicate { tag: "named-group" });
                     }
                     groups.push(id);
                 }
@@ -246,17 +267,23 @@ impl Acl {
     /// or a validity error from [`new`](Self::new).
     pub fn decode(bytes: &[u8]) -> Result<Self, AclError> {
         if bytes.len() < 4 {
-            return Err(AclError::Malformed("shorter than the version header"));
+            return Err(AclError::Malformed {
+                reason: "shorter than the version header",
+            });
         }
         let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         if version != ACL_VERSION {
-            return Err(AclError::Malformed("unexpected version"));
+            return Err(AclError::Malformed {
+                reason: "unexpected version",
+            });
         }
         let mut entries = Vec::new();
         let mut off = 4;
         while off < bytes.len() {
             if off + 4 > bytes.len() {
-                return Err(AclError::Malformed("truncated entry"));
+                return Err(AclError::Malformed {
+                    reason: "truncated entry",
+                });
             }
             let tag = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
             let perm = u16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
@@ -268,7 +295,9 @@ impl Acl {
                 TAG_OTHER => AclQualifier::Other,
                 TAG_USER | TAG_GROUP => {
                     if off + 4 > bytes.len() {
-                        return Err(AclError::Malformed("truncated entry id"));
+                        return Err(AclError::Malformed {
+                            reason: "truncated entry id",
+                        });
                     }
                     let id = u32::from_le_bytes([
                         bytes[off],
@@ -283,7 +312,11 @@ impl Acl {
                         AclQualifier::Group(id)
                     }
                 }
-                _ => return Err(AclError::Malformed("unknown tag")),
+                _ => {
+                    return Err(AclError::Malformed {
+                        reason: "unknown tag",
+                    });
+                }
             };
             entries.push(AclEntry { who, perm });
         }
@@ -333,15 +366,21 @@ impl Acl {
     /// [`new`](Self::new).
     pub fn decode_xattr_v2(bytes: &[u8]) -> Result<Self, AclError> {
         if bytes.len() < 4 {
-            return Err(AclError::Malformed("shorter than the version header"));
+            return Err(AclError::Malformed {
+                reason: "shorter than the version header",
+            });
         }
         let (header, body) = bytes.split_at(4);
         let version = u32::from_le_bytes(header.try_into().expect("split at four bytes"));
         if version != XATTR_ACL_VERSION {
-            return Err(AclError::Malformed("unexpected version"));
+            return Err(AclError::Malformed {
+                reason: "unexpected version",
+            });
         }
         if body.len() % XATTR_ENTRY_LEN != 0 {
-            return Err(AclError::Malformed("truncated entry"));
+            return Err(AclError::Malformed {
+                reason: "truncated entry",
+            });
         }
         let mut entries = Vec::with_capacity(body.len() / XATTR_ENTRY_LEN);
         for e in body.chunks_exact(XATTR_ENTRY_LEN) {
@@ -357,7 +396,11 @@ impl Acl {
                 TAG_GROUP => AclQualifier::Group(id),
                 TAG_MASK => AclQualifier::Mask,
                 TAG_OTHER => AclQualifier::Other,
-                _ => return Err(AclError::Malformed("unknown tag")),
+                _ => {
+                    return Err(AclError::Malformed {
+                        reason: "unknown tag",
+                    });
+                }
             };
             entries.push(AclEntry { who, perm });
         }
@@ -470,7 +513,9 @@ mod tests {
                 perm: READ,
             }])
             .unwrap_err(),
-            AclError::MissingRequired("owning-group")
+            AclError::MissingRequired {
+                tag: "owning-group"
+            }
         );
         assert_eq!(
             Acl::new(vec![AclEntry {
@@ -478,7 +523,7 @@ mod tests {
                 perm: 0x40,
             }])
             .unwrap_err(),
-            AclError::InvalidPerm(0x40)
+            AclError::InvalidPerm { perm: 0x40 }
         );
     }
 
@@ -527,7 +572,7 @@ mod tests {
         // rejects the version-2 bytes, as the version-2 decoder rejects the on-disk ones.
         assert!(matches!(
             Acl::decode(&acl.encode_xattr_v2()),
-            Err(AclError::Malformed(_))
+            Err(AclError::Malformed { .. })
         ));
     }
 
@@ -537,13 +582,13 @@ mod tests {
         // parser is a malformed ACL, not a silent misread.
         assert!(matches!(
             Acl::decode_xattr_v2(&sample().encode()),
-            Err(AclError::Malformed(_))
+            Err(AclError::Malformed { .. })
         ));
         let mut truncated = vec![0x02, 0x00, 0x00, 0x00];
         truncated.extend_from_slice(&[0x01, 0x00, 0x07, 0x00]); // half an entry
         assert!(matches!(
             Acl::decode_xattr_v2(&truncated),
-            Err(AclError::Malformed(_))
+            Err(AclError::Malformed { .. })
         ));
     }
 
@@ -551,8 +596,11 @@ mod tests {
     fn decode_rejects_bad_version_and_truncation() {
         assert!(matches!(
             Acl::decode(&[0x02, 0, 0, 0]),
-            Err(AclError::Malformed(_))
+            Err(AclError::Malformed { .. })
         ));
-        assert!(matches!(Acl::decode(&[0x01]), Err(AclError::Malformed(_))));
+        assert!(matches!(
+            Acl::decode(&[0x01]),
+            Err(AclError::Malformed { .. })
+        ));
     }
 }

@@ -126,12 +126,20 @@ pub enum Error {
         source: AclError,
     },
     /// The scan found what the caller asked to be told about.
-    #[error("the filesystem holds {count} anomalies, the worst of them {}", worst.as_str())]
+    #[error(
+        "the filesystem holds {}{count} {}, the worst of them {}",
+        if *truncated { "at least " } else { "" },
+        if *count == 1 { "anomaly" } else { "anomalies" },
+        worst.as_str()
+    )]
     Verdict {
         /// How many anomalies the scan found.
         count: usize,
         /// The severity of the most serious one.
         worst: Severity,
+        /// Whether the scan stopped at its cap with the image unfinished, which makes the
+        /// count and the severity a floor rather than the whole account.
+        truncated: bool,
     },
     /// An entry a tar archive has no way to hold.
     #[error(
@@ -196,8 +204,10 @@ impl Error {
 /// about whether the filesystem is sound.
 fn from_read(e: ReadError) -> Error {
     match e {
-        ReadError::Io(message) => Error::ImageIo(message),
-        ReadError::NotFound(path) | ReadError::NotADirectory(path) => Error::NoSuchPath(path),
+        ReadError::Io { message, .. } => Error::ImageIo(message),
+        ReadError::NotFound { path, .. } | ReadError::NotADirectory { path, .. } => {
+            Error::NoSuchPath(path)
+        }
         other => Error::Image(other),
     }
 }
@@ -412,6 +422,8 @@ is what `ferrosys format --from-tar` reads back in.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrosys::ext::ondisk::Timestamp;
+    use ferrosys::ext::{FormatOptions, Reader, TreeBuilder};
 
     #[test]
     fn every_failure_names_the_exit_code_it_reports() {
@@ -425,10 +437,32 @@ mod tests {
         assert_eq!(
             Error::Verdict {
                 count: 1,
-                worst: Severity::Structural
+                worst: Severity::Structural,
+                truncated: false,
             }
             .exit_code(),
             exit::IMAGE_BAD
+        );
+        // A report that stopped at its cap says the count is a floor, so the verdict a
+        // person reads does not claim to have counted the whole image.
+        assert_eq!(
+            Error::Verdict {
+                count: 10_000,
+                worst: Severity::Structural,
+                truncated: true,
+            }
+            .to_string(),
+            "the filesystem holds at least 10000 anomalies, the worst of them structural"
+        );
+        // One finding is one anomaly: the verdict is a line a person reads.
+        assert_eq!(
+            Error::Verdict {
+                count: 1,
+                worst: Severity::Integrity,
+                truncated: false,
+            }
+            .to_string(),
+            "the filesystem holds 1 anomaly, the worst of them integrity"
         );
         assert_eq!(
             Error::NotExt {
@@ -446,31 +480,33 @@ mod tests {
 
     #[test]
     fn a_read_failure_is_the_image_s_only_when_it_is_about_the_image() {
-        // A structural failure is what a bad image looks like...
+        // A structural failure is what a bad image looks like. Every structural variant
+        // takes the same arm, so one of them stands for all.
         assert_eq!(
             from_read(ReadError::BadDirectory).exit_code(),
             exit::IMAGE_BAD
         );
-        assert_eq!(
-            from_read(ReadError::ChecksumMismatch {
-                object: "inode",
-                index: 12,
-                stored: 1,
-                computed: 2
-            })
-            .exit_code(),
-            exit::IMAGE_BAD
-        );
         // ...while the host failing to read, or a path the filesystem does not have, says
-        // nothing at all about whether the filesystem is sound.
-        assert_eq!(
-            from_read(ReadError::Io("disk on fire".into())).exit_code(),
-            exit::OPERATIONAL
-        );
-        assert_eq!(
-            from_read(ReadError::NotFound(b"/nowhere".to_vec())).exit_code(),
-            exit::OPERATIONAL
-        );
+        // nothing at all about whether the filesystem is sound. Both are taken from the
+        // library rather than assembled here: a literal would prove only that this match
+        // arm is spelled the way this test spells it, where a real failure proves the
+        // library still reports the variant the arm is for.
+        let host_failed = ReadError::from(std::io::Error::other("disk on fire"));
+        assert_eq!(from_read(host_failed).exit_code(), exit::OPERATIONAL);
+
+        let time = Timestamp::from_secs(1_700_000_000);
+        let image = ferrosys::ext::format(
+            TreeBuilder::new(),
+            64 << 20,
+            FormatOptions::new([0x11; 16], time, [0; 16]),
+        )
+        .expect("format a minimal image");
+        let mut reader =
+            Reader::open(std::io::Cursor::new(image.as_bytes())).expect("open the image");
+        let absent = reader
+            .lookup(b"/nowhere")
+            .expect_err("the image has no such path");
+        assert_eq!(from_read(absent).exit_code(), exit::OPERATIONAL);
     }
 
     #[test]

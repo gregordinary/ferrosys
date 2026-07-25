@@ -17,7 +17,7 @@
 //! bytes left over after the last entry that fits.
 
 use crate::geometry::BlockRange;
-use crate::ondisk::{EXTENT_ENTRY_SIZE, ExtentHeader, ExtentIdx, ExtentLeaf};
+use crate::ondisk::{EXTENT_ENTRY_SIZE, ExtentHeader, ExtentIdx, ExtentLeaf, ParseError};
 
 /// Largest block run a single extent leaf can map.
 pub const MAX_EXTENT_LEN: u32 = 32768;
@@ -32,9 +32,11 @@ const MAX_LOGICAL_BLOCKS: u64 = 1 << 32;
 
 /// A failure building or serializing an extent tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExtentError {
     /// More entries than the target node holds.
     #[error("{entries} extent entries exceed the {capacity} that fit in the node")]
+    #[non_exhaustive]
     TooManyEntries {
         /// Entries the node was asked to hold.
         entries: usize,
@@ -42,28 +44,40 @@ pub enum ExtentError {
         capacity: usize,
     },
     /// The node buffer is too small to hold an extent header.
-    #[error("extent node buffer of {0} bytes cannot hold a header")]
-    NodeTooSmall(usize),
+    #[error("extent node buffer of {bytes} bytes cannot hold a header")]
+    #[non_exhaustive]
+    NodeTooSmall {
+        /// Bytes the buffer holds.
+        bytes: usize,
+    },
     /// The leaves need a tree deeper than ext4 defines.
     #[error("extent tree of depth {depth} exceeds the maximum depth {MAX_EXTENT_DEPTH}")]
+    #[non_exhaustive]
     TooDeep {
         /// Depth the leaves would need.
         depth: u16,
     },
     /// The file spans more logical blocks than a 32-bit `ee_block` addresses.
     #[error("file of {blocks} blocks exceeds the {MAX_LOGICAL_BLOCKS} an extent tree addresses")]
+    #[non_exhaustive]
     FileTooLarge {
         /// Logical blocks the file needs.
         blocks: u64,
     },
     /// The supplied node blocks do not match the planned shape.
     #[error("extent tree needs {need} node blocks but {got} were supplied")]
+    #[non_exhaustive]
     NodeBlockCount {
         /// Node blocks the shape requires.
         need: usize,
         /// Node blocks supplied.
         got: usize,
     },
+    /// A leaf holds a run the on-disk `ee_len` field does not encode. The runs this
+    /// module builds are always encodable, so this reaches a caller only for leaves it
+    /// assembled itself.
+    #[error(transparent)]
+    Leaf(#[from] ParseError),
 }
 
 /// The parsed contents of one extent-tree node: its leaves at depth zero, or its
@@ -119,6 +133,7 @@ pub struct ExtentNodeBlock {
 /// A complete extent tree: the root that lives inline in the inode, and the external
 /// nodes it points at.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct ExtentTree {
     /// The inode's inline root. Holds the leaves directly for a depth-zero tree.
     pub root: ExtentNode,
@@ -129,6 +144,7 @@ pub struct ExtentTree {
 
 /// The shape of the tree a set of leaves needs.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct TreeShape {
     /// Depth of the root: zero when the leaves fit inline in the inode.
     pub depth: u16,
@@ -341,7 +357,7 @@ pub fn build_tree(
 /// `buf`.
 pub fn write_node(node: &ExtentNode, eh_max: usize, buf: &mut [u8]) -> Result<(), ExtentError> {
     if buf.len() < EXTENT_ENTRY_SIZE {
-        return Err(ExtentError::NodeTooSmall(buf.len()));
+        return Err(ExtentError::NodeTooSmall { bytes: buf.len() });
     }
     let entries = node.len();
     if entries > eh_max || EXTENT_ENTRY_SIZE * (eh_max + 1) > buf.len() {
@@ -364,7 +380,7 @@ pub fn write_node(node: &ExtentNode, eh_max: usize, buf: &mut [u8]) -> Result<()
     match node {
         ExtentNode::Leaves(leaves) => {
             for (i, leaf) in leaves.iter().enumerate() {
-                put(i, leaf.to_bytes());
+                put(i, leaf.to_bytes()?);
             }
         }
         ExtentNode::Index { entries, .. } => {

@@ -105,6 +105,14 @@ Clearing the ext4-layer features one by one this way lands on the same ext2 base
 disk is refused by name — dropping `has_journal` while `orphan_file` remains, for
 instance, since the orphan file's entries are journalled.
 
+The same rule covers what the source holds, because a feature word is a promise about the
+structures the filesystem carries. Dropping `ext_attr` from a source whose entries have
+extended attributes, or `large_file` from one holding a file of 2 GiB or more, is refused
+by name and by path: the attribute is neither dropped nor written into a filesystem whose
+words deny it. `^large_file` at the 4096-byte block size is refused on its own, before any
+source is read, because the resize inode a growable filesystem carries is itself a file
+that large.
+
 `--grow` sizes the reserved descriptor blocks that let the filesystem grow online without
 relocating its descriptor table. It defaults to `max`, which reserves the most the format
 allows; `--grow 4G` reserves exactly enough to reach a known target, and `--grow none`
@@ -177,6 +185,13 @@ so `conformance` is a check on this tool's own output, an opt-in self-check, and
 `inspect` does by default. `--fail-on structural` faults only an image whose structures
 cannot be followed at all; `--fail-on never` reports every finding and exits 0 regardless,
 which is what to use when you want the report and not the judgement.
+
+A scan reads an image it has no reason to trust, so what it collects is bounded: it stops
+at ten thousand findings and says so, in the table, in the `"truncated"` field of the JSON
+report, and as a SARIF notification. A truncated report is a floor — the image holds at
+least these findings, and the rest of it went unread — so the verdict it reaches reads
+"at least *n* anomalies". Ten thousand findings is far past what a filesystem needs to be
+called bad.
 
 `--groups` adds every block group's descriptor. `--json` reports the same data as a JSON
 document carrying a `"version"` field, the feature names split by word, the ext2/ext3/ext4

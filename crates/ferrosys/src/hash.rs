@@ -16,7 +16,15 @@
 //! reserved in a directory index to mark a hash that continues into the next block.
 
 /// The hash algorithm a directory index is ordered by (`s_def_hash_version`).
+///
+/// Three of the codes the format defines are named here. Codes 3 to 5 are the
+/// `_UNSIGNED` forms of these same three algorithms, which this crate models more
+/// directly as [`HashSignedness`] beside the algorithm, so an image using one is read
+/// through the algorithm it names and the signedness it records. Code 6 is siphash, used
+/// only by `casefold`, which this crate does not write. [`from_u8`](Self::from_u8)
+/// answers `None` for all four.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum HashVersion {
     /// The original ext2 directory hash. It has no minor hash and ignores the seed.
     Legacy,
@@ -38,7 +46,8 @@ impl HashVersion {
         }
     }
 
-    /// Parse the value stored in `s_def_hash_version`.
+    /// Parse the value stored in `s_def_hash_version`, or `None` for a code this crate
+    /// does not name.
     #[must_use]
     pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -47,6 +56,23 @@ impl HashVersion {
             2 => Some(Self::Tea),
             _ => None,
         }
+    }
+
+    /// The algorithm's name as every ext tool prints it: `legacy`, `half_md4`, or `tea`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::HalfMd4 => "half_md4",
+            Self::Tea => "tea",
+        }
+    }
+}
+
+impl core::fmt::Display for HashVersion {
+    /// The name in [`HashVersion::name`].
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
     }
 }
 

@@ -38,7 +38,19 @@ pub const BG_INODE_ZEROED: u16 = 0x0004;
 ///
 /// [`write_to`]: GroupDescriptor::write_to
 /// [`read_from`]: GroupDescriptor::read_from
+///
+/// # Constructing one
+///
+/// Start from [`GroupDescriptor::default`] and assign the fields that differ. A
+/// `#[non_exhaustive]` structure cannot be written as a literal from outside
+/// this crate, and that is about the Rust type, not the format: the byte layout is
+/// [`read_from`](Self::read_from), [`write_to`](Self::write_to), and the
+/// [`SIZE_32`](Self::SIZE_32) / [`SIZE_64`](Self::SIZE_64) widths, and none of them
+/// changes. What the attribute buys is that this crate can widen its
+/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// being a breaking change for everyone reading an image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub struct GroupDescriptor {
     /// Block number of this group's block bitmap (`bg_block_bitmap`).
     pub block_bitmap: u64,

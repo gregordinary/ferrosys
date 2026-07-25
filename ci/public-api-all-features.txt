@@ -1,0 +1,2480 @@
+#[non_exhaustive] pub enum ferrosys::DetectError
+#[non_exhaustive] pub enum ferrosys::Filesystem
+#[non_exhaustive] pub enum ferrosys::ext::AclError
+#[non_exhaustive] pub enum ferrosys::ext::AllocError
+#[non_exhaustive] pub enum ferrosys::ext::ArchiveError
+#[non_exhaustive] pub enum ferrosys::ext::Category
+#[non_exhaustive] pub enum ferrosys::ext::CsumScheme
+#[non_exhaustive] pub enum ferrosys::ext::DirError
+#[non_exhaustive] pub enum ferrosys::ext::ExtentError
+#[non_exhaustive] pub enum ferrosys::ext::FeatureError
+#[non_exhaustive] pub enum ferrosys::ext::FormatError
+#[non_exhaustive] pub enum ferrosys::ext::GeometryError
+#[non_exhaustive] pub enum ferrosys::ext::GrowReservation
+#[non_exhaustive] pub enum ferrosys::ext::HashVersion
+#[non_exhaustive] pub enum ferrosys::ext::InodeCount
+#[non_exhaustive] pub enum ferrosys::ext::JournalSize
+#[non_exhaustive] pub enum ferrosys::ext::ModelError
+#[non_exhaustive] pub enum ferrosys::ext::ParseError
+#[non_exhaustive] pub enum ferrosys::ext::ReadError
+#[non_exhaustive] pub enum ferrosys::ext::acl::AclError
+#[non_exhaustive] pub enum ferrosys::ext::alloc::AllocError
+#[non_exhaustive] pub enum ferrosys::ext::archive::ArchiveError
+#[non_exhaustive] pub enum ferrosys::ext::csum::CsumScheme
+#[non_exhaustive] pub enum ferrosys::ext::dir::DirError
+#[non_exhaustive] pub enum ferrosys::ext::extent::ExtentError
+#[non_exhaustive] pub enum ferrosys::ext::feature::FeatureError
+#[non_exhaustive] pub enum ferrosys::ext::geometry::GeometryError
+#[non_exhaustive] pub enum ferrosys::ext::geometry::GrowReservation
+#[non_exhaustive] pub enum ferrosys::ext::geometry::InodeCount
+#[non_exhaustive] pub enum ferrosys::ext::hash::HashVersion
+#[non_exhaustive] pub enum ferrosys::ext::journal::JournalSize
+#[non_exhaustive] pub enum ferrosys::ext::materialize::FormatError
+#[non_exhaustive] pub enum ferrosys::ext::model::ModelError
+#[non_exhaustive] pub enum ferrosys::ext::ondisk::ParseError
+#[non_exhaustive] pub enum ferrosys::ext::read::Category
+#[non_exhaustive] pub enum ferrosys::ext::read::ReadError
+#[non_exhaustive] pub ferrosys::DetectError::Io
+#[non_exhaustive] pub ferrosys::ext::AclError::Duplicate
+#[non_exhaustive] pub ferrosys::ext::AclError::InvalidPerm
+#[non_exhaustive] pub ferrosys::ext::AclError::Malformed
+#[non_exhaustive] pub ferrosys::ext::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::ext::AllocError::OutOfSpace
+#[non_exhaustive] pub ferrosys::ext::ArchiveError::Acl
+#[non_exhaustive] pub ferrosys::ext::ArchiveError::Bad
+#[non_exhaustive] pub ferrosys::ext::ArchiveError::Malformed
+#[non_exhaustive] pub ferrosys::ext::ArchiveError::Unsupported
+#[non_exhaustive] pub ferrosys::ext::DirError::EntryTooLarge
+#[non_exhaustive] pub ferrosys::ext::DirError::IndexTooLarge
+#[non_exhaustive] pub ferrosys::ext::ExtentError::FileTooLarge
+#[non_exhaustive] pub ferrosys::ext::ExtentError::NodeBlockCount
+#[non_exhaustive] pub ferrosys::ext::ExtentError::NodeTooSmall
+#[non_exhaustive] pub ferrosys::ext::ExtentError::TooDeep
+#[non_exhaustive] pub ferrosys::ext::ExtentError::TooManyEntries
+#[non_exhaustive] pub ferrosys::ext::FeatureError::BlockSize
+#[non_exhaustive] pub ferrosys::ext::FeatureError::InodeSize
+#[non_exhaustive] pub ferrosys::ext::FeatureError::RequiresExtents
+#[non_exhaustive] pub ferrosys::ext::FeatureError::ResizeInodeRequiresLargeFile
+#[non_exhaustive] pub ferrosys::ext::FormatError::FormatTimeOutOfRange
+#[non_exhaustive] pub ferrosys::ext::FormatError::ImageTooLargeInMemory
+#[non_exhaustive] pub ferrosys::ext::FormatError::JournalTooSmall
+#[non_exhaustive] pub ferrosys::ext::FormatError::LargeFileWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::FormatError::OrphanInodeInUse
+#[non_exhaustive] pub ferrosys::ext::FormatError::ResizeMapNeeds32BitBlocks
+#[non_exhaustive] pub ferrosys::ext::FormatError::TooManyInodes
+#[non_exhaustive] pub ferrosys::ext::GeometryError::BlockCountNeeds64Bit
+#[non_exhaustive] pub ferrosys::ext::GeometryError::BlockCountTooLarge
+#[non_exhaustive] pub ferrosys::ext::GeometryError::FinalGroupTooSmall
+#[non_exhaustive] pub ferrosys::ext::GeometryError::GrowTargetTooLarge
+#[non_exhaustive] pub ferrosys::ext::GeometryError::GrowTargetTooSmall
+#[non_exhaustive] pub ferrosys::ext::GeometryError::InodesTooDense
+#[non_exhaustive] pub ferrosys::ext::GeometryError::ReservationNeeds32BitBlocks
+#[non_exhaustive] pub ferrosys::ext::GeometryError::TooManyGroups
+#[non_exhaustive] pub ferrosys::ext::GeometryError::TooManyInodes
+#[non_exhaustive] pub ferrosys::ext::GeometryError::TooSmall
+#[non_exhaustive] pub ferrosys::ext::ModelError::DeviceNumberTooLarge
+#[non_exhaustive] pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow
+#[non_exhaustive] pub ferrosys::ext::ModelError::Duplicate
+#[non_exhaustive] pub ferrosys::ext::ModelError::EmptySymlinkTarget
+#[non_exhaustive] pub ferrosys::ext::ModelError::FileTooLargeWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ModelError::FirstUserInodeReserved
+#[non_exhaustive] pub ferrosys::ext::ModelError::HardlinkCycle
+#[non_exhaustive] pub ferrosys::ext::ModelError::HardlinkTargetIsDirectory
+#[non_exhaustive] pub ferrosys::ext::ModelError::HardlinkTargetMissing
+#[non_exhaustive] pub ferrosys::ext::ModelError::InvalidComponent
+#[non_exhaustive] pub ferrosys::ext::ModelError::InvalidXattrName
+#[non_exhaustive] pub ferrosys::ext::ModelError::ParentMissing
+#[non_exhaustive] pub ferrosys::ext::ModelError::ParentNotDir
+#[non_exhaustive] pub ferrosys::ext::ModelError::ReservedPath
+#[non_exhaustive] pub ferrosys::ext::ModelError::RootNotDirectory
+#[non_exhaustive] pub ferrosys::ext::ModelError::SymlinkTargetHasNul
+#[non_exhaustive] pub ferrosys::ext::ModelError::SymlinkTargetTooLong
+#[non_exhaustive] pub ferrosys::ext::ModelError::TimestampOutOfRange
+#[non_exhaustive] pub ferrosys::ext::ModelError::TooManyLinks
+#[non_exhaustive] pub ferrosys::ext::ModelError::XattrNameTooLong
+#[non_exhaustive] pub ferrosys::ext::ModelError::XattrsTooLarge
+#[non_exhaustive] pub ferrosys::ext::ModelError::XattrsWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ParseError::BadMagic
+#[non_exhaustive] pub ferrosys::ext::ParseError::InvalidField
+#[non_exhaustive] pub ferrosys::ext::ParseError::TooShort
+#[non_exhaustive] pub ferrosys::ext::ReadError::ChecksumMismatch
+#[non_exhaustive] pub ferrosys::ext::ReadError::ExtentFlagWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ReadError::IndexFlagWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ReadError::Io
+#[non_exhaustive] pub ferrosys::ext::ReadError::LargeFileWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ReadError::MetadataOutsideGroup
+#[non_exhaustive] pub ferrosys::ext::ReadError::NoSuchInode
+#[non_exhaustive] pub ferrosys::ext::ReadError::NotADirectory
+#[non_exhaustive] pub ferrosys::ext::ReadError::NotFound
+#[non_exhaustive] pub ferrosys::ext::ReadError::OutOfRange
+#[non_exhaustive] pub ferrosys::ext::ReadError::SymlinkLoop
+#[non_exhaustive] pub ferrosys::ext::ReadError::UnsupportedIncompat
+#[non_exhaustive] pub ferrosys::ext::ReadError::WalkTooLarge
+#[non_exhaustive] pub ferrosys::ext::ReadError::XattrBlockWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::acl::AclError::Duplicate
+#[non_exhaustive] pub ferrosys::ext::acl::AclError::InvalidPerm
+#[non_exhaustive] pub ferrosys::ext::acl::AclError::Malformed
+#[non_exhaustive] pub ferrosys::ext::acl::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::ext::alloc::AllocError::OutOfSpace
+#[non_exhaustive] pub ferrosys::ext::archive::ArchiveError::Acl
+#[non_exhaustive] pub ferrosys::ext::archive::ArchiveError::Bad
+#[non_exhaustive] pub ferrosys::ext::archive::ArchiveError::Malformed
+#[non_exhaustive] pub ferrosys::ext::archive::ArchiveError::Unsupported
+#[non_exhaustive] pub ferrosys::ext::dir::DirError::EntryTooLarge
+#[non_exhaustive] pub ferrosys::ext::dir::DirError::IndexTooLarge
+#[non_exhaustive] pub ferrosys::ext::extent::ExtentError::FileTooLarge
+#[non_exhaustive] pub ferrosys::ext::extent::ExtentError::NodeBlockCount
+#[non_exhaustive] pub ferrosys::ext::extent::ExtentError::NodeTooSmall
+#[non_exhaustive] pub ferrosys::ext::extent::ExtentError::TooDeep
+#[non_exhaustive] pub ferrosys::ext::extent::ExtentError::TooManyEntries
+#[non_exhaustive] pub ferrosys::ext::feature::FeatureError::BlockSize
+#[non_exhaustive] pub ferrosys::ext::feature::FeatureError::InodeSize
+#[non_exhaustive] pub ferrosys::ext::feature::FeatureError::RequiresExtents
+#[non_exhaustive] pub ferrosys::ext::feature::FeatureError::ResizeInodeRequiresLargeFile
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::BlockCountNeeds64Bit
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::BlockCountTooLarge
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::FinalGroupTooSmall
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::GrowTargetTooLarge
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::GrowTargetTooSmall
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::InodesTooDense
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::ReservationNeeds32BitBlocks
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::TooManyGroups
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::TooManyInodes
+#[non_exhaustive] pub ferrosys::ext::geometry::GeometryError::TooSmall
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::FormatTimeOutOfRange
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::ImageTooLargeInMemory
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::JournalTooSmall
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::LargeFileWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::OrphanInodeInUse
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::ResizeMapNeeds32BitBlocks
+#[non_exhaustive] pub ferrosys::ext::materialize::FormatError::TooManyInodes
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::DeviceNumberTooLarge
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::DirectoryLinkCountOverflow
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::Duplicate
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::EmptySymlinkTarget
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::FileTooLargeWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::FirstUserInodeReserved
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::HardlinkCycle
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::HardlinkTargetIsDirectory
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::HardlinkTargetMissing
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::InvalidComponent
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::InvalidXattrName
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::ParentMissing
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::ParentNotDir
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::ReservedPath
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::RootNotDirectory
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::SymlinkTargetHasNul
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::SymlinkTargetTooLong
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::TimestampOutOfRange
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::TooManyLinks
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::XattrNameTooLong
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::XattrsTooLarge
+#[non_exhaustive] pub ferrosys::ext::model::ModelError::XattrsWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::ondisk::ParseError::BadMagic
+#[non_exhaustive] pub ferrosys::ext::ondisk::ParseError::InvalidField
+#[non_exhaustive] pub ferrosys::ext::ondisk::ParseError::TooShort
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::ChecksumMismatch
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::ExtentFlagWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::IndexFlagWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::Io
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::LargeFileWithoutFeature
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::MetadataOutsideGroup
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::NoSuchInode
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::NotADirectory
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::NotFound
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::OutOfRange
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::SymlinkLoop
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::UnsupportedIncompat
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::WalkTooLarge
+#[non_exhaustive] pub ferrosys::ext::read::ReadError::XattrBlockWithoutFeature
+#[non_exhaustive] pub struct ferrosys::ext::Anomaly
+#[non_exhaustive] pub struct ferrosys::ext::DirBlock
+#[non_exhaustive] pub struct ferrosys::ext::Entry
+#[non_exhaustive] pub struct ferrosys::ext::ExtentTree
+#[non_exhaustive] pub struct ferrosys::ext::FeatureSet
+#[non_exhaustive] pub struct ferrosys::ext::FormatOptions
+#[non_exhaustive] pub struct ferrosys::ext::FsModel
+#[non_exhaustive] pub struct ferrosys::ext::GroupLayout
+#[non_exhaustive] pub struct ferrosys::ext::JournalParams
+#[non_exhaustive] pub struct ferrosys::ext::JournalSuperblock
+#[non_exhaustive] pub struct ferrosys::ext::Layout
+#[non_exhaustive] pub struct ferrosys::ext::Limits
+#[non_exhaustive] pub struct ferrosys::ext::Location
+#[non_exhaustive] pub struct ferrosys::ext::ModelConfig
+#[non_exhaustive] pub struct ferrosys::ext::OpenOptions
+#[non_exhaustive] pub struct ferrosys::ext::PlanRequest
+#[non_exhaustive] pub struct ferrosys::ext::WalkEntry
+#[non_exhaustive] pub struct ferrosys::ext::dir::DirBlock
+#[non_exhaustive] pub struct ferrosys::ext::extent::ExtentTree
+#[non_exhaustive] pub struct ferrosys::ext::extent::TreeShape
+#[non_exhaustive] pub struct ferrosys::ext::feature::FeatureSet
+#[non_exhaustive] pub struct ferrosys::ext::geometry::GroupLayout
+#[non_exhaustive] pub struct ferrosys::ext::geometry::Layout
+#[non_exhaustive] pub struct ferrosys::ext::geometry::PlanRequest
+#[non_exhaustive] pub struct ferrosys::ext::journal::JournalParams
+#[non_exhaustive] pub struct ferrosys::ext::journal::JournalSuperblock
+#[non_exhaustive] pub struct ferrosys::ext::materialize::FormatOptions
+#[non_exhaustive] pub struct ferrosys::ext::model::DirChild
+#[non_exhaustive] pub struct ferrosys::ext::model::FsModel
+#[non_exhaustive] pub struct ferrosys::ext::model::ModelConfig
+#[non_exhaustive] pub struct ferrosys::ext::model::ModelInode
+#[non_exhaustive] pub struct ferrosys::ext::ondisk::GroupDescriptor
+#[non_exhaustive] pub struct ferrosys::ext::ondisk::Inode
+#[non_exhaustive] pub struct ferrosys::ext::ondisk::SuperBlock
+#[non_exhaustive] pub struct ferrosys::ext::read::Anomaly
+#[non_exhaustive] pub struct ferrosys::ext::read::Entry
+#[non_exhaustive] pub struct ferrosys::ext::read::Limits
+#[non_exhaustive] pub struct ferrosys::ext::read::Location
+#[non_exhaustive] pub struct ferrosys::ext::read::OpenOptions
+#[non_exhaustive] pub struct ferrosys::ext::read::WalkEntry
+impl BitOr for ferrosys::ext::Compat
+impl BitOr for ferrosys::ext::Incompat
+impl BitOr for ferrosys::ext::RoCompat
+impl BitOr for ferrosys::ext::feature::Compat
+impl BitOr for ferrosys::ext::feature::Incompat
+impl BitOr for ferrosys::ext::feature::RoCompat
+impl BitOr for ferrosys::ext::ondisk::InodeFlags
+impl BitOrAssign for ferrosys::ext::Compat
+impl BitOrAssign for ferrosys::ext::Incompat
+impl BitOrAssign for ferrosys::ext::RoCompat
+impl BitOrAssign for ferrosys::ext::feature::Compat
+impl BitOrAssign for ferrosys::ext::feature::Incompat
+impl BitOrAssign for ferrosys::ext::feature::RoCompat
+impl Checksummer for ferrosys::ext::Crc32c
+impl Checksummer for ferrosys::ext::NullCsum
+impl Checksummer for ferrosys::ext::csum::Crc32c
+impl Checksummer for ferrosys::ext::csum::NullCsum
+impl Clone for ferrosys::DetectError
+impl Clone for ferrosys::Filesystem
+impl Clone for ferrosys::ext::Acl
+impl Clone for ferrosys::ext::AclEntry
+impl Clone for ferrosys::ext::AclError
+impl Clone for ferrosys::ext::AclQualifier
+impl Clone for ferrosys::ext::AllocError
+impl Clone for ferrosys::ext::Allocator
+impl Clone for ferrosys::ext::Anomaly
+impl Clone for ferrosys::ext::BlockRange
+impl Clone for ferrosys::ext::Category
+impl Clone for ferrosys::ext::Compat
+impl Clone for ferrosys::ext::Crc32c
+impl Clone for ferrosys::ext::CsumScheme
+impl Clone for ferrosys::ext::DirBlock
+impl Clone for ferrosys::ext::DirBlockKind
+impl Clone for ferrosys::ext::DirError
+impl Clone for ferrosys::ext::DirHash
+impl Clone for ferrosys::ext::Entry
+impl Clone for ferrosys::ext::EntryKind
+impl Clone for ferrosys::ext::ErrorBehavior
+impl Clone for ferrosys::ext::ExtentError
+impl Clone for ferrosys::ext::ExtentNode
+impl Clone for ferrosys::ext::ExtentTree
+impl Clone for ferrosys::ext::FeatureError
+impl Clone for ferrosys::ext::FeatureSet
+impl Clone for ferrosys::ext::FileContent
+impl Clone for ferrosys::ext::FileRange
+impl Clone for ferrosys::ext::FormatOptions
+impl Clone for ferrosys::ext::FsModel
+impl Clone for ferrosys::ext::GeometryError
+impl Clone for ferrosys::ext::GroupLayout
+impl Clone for ferrosys::ext::GrowReservation
+impl Clone for ferrosys::ext::HashSignedness
+impl Clone for ferrosys::ext::HashVersion
+impl Clone for ferrosys::ext::HtreeDir
+impl Clone for ferrosys::ext::Incompat
+impl Clone for ferrosys::ext::InodeCount
+impl Clone for ferrosys::ext::JournalParams
+impl Clone for ferrosys::ext::JournalSize
+impl Clone for ferrosys::ext::JournalSuperblock
+impl Clone for ferrosys::ext::Layout
+impl Clone for ferrosys::ext::Limits
+impl Clone for ferrosys::ext::LinearDir
+impl Clone for ferrosys::ext::Location
+impl Clone for ferrosys::ext::Metadata
+impl Clone for ferrosys::ext::ModelConfig
+impl Clone for ferrosys::ext::ModelError
+impl Clone for ferrosys::ext::NullCsum
+impl Clone for ferrosys::ext::OpenOptions
+impl Clone for ferrosys::ext::ParseError
+impl Clone for ferrosys::ext::PlanRequest
+impl Clone for ferrosys::ext::Profile
+impl Clone for ferrosys::ext::ReadError
+impl Clone for ferrosys::ext::ReadPolicy
+impl Clone for ferrosys::ext::ReservedRatio
+impl Clone for ferrosys::ext::RoCompat
+impl Clone for ferrosys::ext::ScanReport
+impl Clone for ferrosys::ext::Severity
+impl Clone for ferrosys::ext::SourceEntry
+impl Clone for ferrosys::ext::TreeBuilder
+impl Clone for ferrosys::ext::WalkEntry
+impl Clone for ferrosys::ext::Xattr
+impl Clone for ferrosys::ext::acl::Acl
+impl Clone for ferrosys::ext::acl::AclEntry
+impl Clone for ferrosys::ext::acl::AclError
+impl Clone for ferrosys::ext::acl::AclQualifier
+impl Clone for ferrosys::ext::alloc::AllocError
+impl Clone for ferrosys::ext::alloc::Allocator
+impl Clone for ferrosys::ext::csum::Crc32c
+impl Clone for ferrosys::ext::csum::CsumScheme
+impl Clone for ferrosys::ext::csum::NullCsum
+impl Clone for ferrosys::ext::dir::DirBlock
+impl Clone for ferrosys::ext::dir::DirBlockKind
+impl Clone for ferrosys::ext::dir::DirError
+impl Clone for ferrosys::ext::dir::HtreeDir
+impl Clone for ferrosys::ext::dir::LinearDir
+impl Clone for ferrosys::ext::extent::ExtentError
+impl Clone for ferrosys::ext::extent::ExtentNode
+impl Clone for ferrosys::ext::extent::ExtentNodeBlock
+impl Clone for ferrosys::ext::extent::ExtentTree
+impl Clone for ferrosys::ext::extent::TreeShape
+impl Clone for ferrosys::ext::feature::Compat
+impl Clone for ferrosys::ext::feature::FeatureError
+impl Clone for ferrosys::ext::feature::FeatureSet
+impl Clone for ferrosys::ext::feature::Incompat
+impl Clone for ferrosys::ext::feature::Profile
+impl Clone for ferrosys::ext::feature::RoCompat
+impl Clone for ferrosys::ext::geometry::BlockRange
+impl Clone for ferrosys::ext::geometry::GeometryError
+impl Clone for ferrosys::ext::geometry::GroupLayout
+impl Clone for ferrosys::ext::geometry::GrowReservation
+impl Clone for ferrosys::ext::geometry::InodeCount
+impl Clone for ferrosys::ext::geometry::Layout
+impl Clone for ferrosys::ext::geometry::PlanRequest
+impl Clone for ferrosys::ext::geometry::ReservedRatio
+impl Clone for ferrosys::ext::hash::DirHash
+impl Clone for ferrosys::ext::hash::HashSignedness
+impl Clone for ferrosys::ext::hash::HashVersion
+impl Clone for ferrosys::ext::journal::JournalParams
+impl Clone for ferrosys::ext::journal::JournalSize
+impl Clone for ferrosys::ext::journal::JournalSuperblock
+impl Clone for ferrosys::ext::materialize::ErrorBehavior
+impl Clone for ferrosys::ext::materialize::FormatOptions
+impl Clone for ferrosys::ext::model::Content
+impl Clone for ferrosys::ext::model::DirChild
+impl Clone for ferrosys::ext::model::FsModel
+impl Clone for ferrosys::ext::model::ModelConfig
+impl Clone for ferrosys::ext::model::ModelError
+impl Clone for ferrosys::ext::model::ModelInode
+impl Clone for ferrosys::ext::ondisk::DirEntry
+impl Clone for ferrosys::ext::ondisk::DxEntry
+impl Clone for ferrosys::ext::ondisk::ExtentHeader
+impl Clone for ferrosys::ext::ondisk::ExtentIdx
+impl Clone for ferrosys::ext::ondisk::ExtentLeaf
+impl Clone for ferrosys::ext::ondisk::FileType
+impl Clone for ferrosys::ext::ondisk::GroupDescriptor
+impl Clone for ferrosys::ext::ondisk::Inode
+impl Clone for ferrosys::ext::ondisk::InodeFlags
+impl Clone for ferrosys::ext::ondisk::ParseError
+impl Clone for ferrosys::ext::ondisk::SuperBlock
+impl Clone for ferrosys::ext::ondisk::Timestamp
+impl Clone for ferrosys::ext::ondisk::Xattr
+impl Clone for ferrosys::ext::read::Anomaly
+impl Clone for ferrosys::ext::read::Category
+impl Clone for ferrosys::ext::read::Entry
+impl Clone for ferrosys::ext::read::Limits
+impl Clone for ferrosys::ext::read::Location
+impl Clone for ferrosys::ext::read::OpenOptions
+impl Clone for ferrosys::ext::read::ReadError
+impl Clone for ferrosys::ext::read::ReadPolicy
+impl Clone for ferrosys::ext::read::ScanReport
+impl Clone for ferrosys::ext::read::Severity
+impl Clone for ferrosys::ext::read::WalkEntry
+impl Clone for ferrosys::ext::source::EntryKind
+impl Clone for ferrosys::ext::source::FileContent
+impl Clone for ferrosys::ext::source::FileRange
+impl Clone for ferrosys::ext::source::Metadata
+impl Clone for ferrosys::ext::source::SourceEntry
+impl Clone for ferrosys::ext::source::TreeBuilder
+impl Copy for ferrosys::Filesystem
+impl Copy for ferrosys::ext::AclEntry
+impl Copy for ferrosys::ext::AclQualifier
+impl Copy for ferrosys::ext::AllocError
+impl Copy for ferrosys::ext::BlockRange
+impl Copy for ferrosys::ext::Category
+impl Copy for ferrosys::ext::Compat
+impl Copy for ferrosys::ext::Crc32c
+impl Copy for ferrosys::ext::CsumScheme
+impl Copy for ferrosys::ext::DirBlockKind
+impl Copy for ferrosys::ext::DirError
+impl Copy for ferrosys::ext::DirHash
+impl Copy for ferrosys::ext::ErrorBehavior
+impl Copy for ferrosys::ext::ExtentError
+impl Copy for ferrosys::ext::FeatureError
+impl Copy for ferrosys::ext::FeatureSet
+impl Copy for ferrosys::ext::FormatOptions
+impl Copy for ferrosys::ext::GeometryError
+impl Copy for ferrosys::ext::GroupLayout
+impl Copy for ferrosys::ext::GrowReservation
+impl Copy for ferrosys::ext::HashSignedness
+impl Copy for ferrosys::ext::HashVersion
+impl Copy for ferrosys::ext::HtreeDir
+impl Copy for ferrosys::ext::Incompat
+impl Copy for ferrosys::ext::InodeCount
+impl Copy for ferrosys::ext::JournalParams
+impl Copy for ferrosys::ext::JournalSize
+impl Copy for ferrosys::ext::JournalSuperblock
+impl Copy for ferrosys::ext::Limits
+impl Copy for ferrosys::ext::LinearDir
+impl Copy for ferrosys::ext::Location
+impl Copy for ferrosys::ext::Metadata
+impl Copy for ferrosys::ext::ModelConfig
+impl Copy for ferrosys::ext::NullCsum
+impl Copy for ferrosys::ext::OpenOptions
+impl Copy for ferrosys::ext::ParseError
+impl Copy for ferrosys::ext::PlanRequest
+impl Copy for ferrosys::ext::Profile
+impl Copy for ferrosys::ext::ReadPolicy
+impl Copy for ferrosys::ext::ReservedRatio
+impl Copy for ferrosys::ext::RoCompat
+impl Copy for ferrosys::ext::Severity
+impl Copy for ferrosys::ext::acl::AclEntry
+impl Copy for ferrosys::ext::acl::AclQualifier
+impl Copy for ferrosys::ext::alloc::AllocError
+impl Copy for ferrosys::ext::csum::Crc32c
+impl Copy for ferrosys::ext::csum::CsumScheme
+impl Copy for ferrosys::ext::csum::NullCsum
+impl Copy for ferrosys::ext::dir::DirBlockKind
+impl Copy for ferrosys::ext::dir::DirError
+impl Copy for ferrosys::ext::dir::HtreeDir
+impl Copy for ferrosys::ext::dir::LinearDir
+impl Copy for ferrosys::ext::extent::ExtentError
+impl Copy for ferrosys::ext::feature::Compat
+impl Copy for ferrosys::ext::feature::FeatureError
+impl Copy for ferrosys::ext::feature::FeatureSet
+impl Copy for ferrosys::ext::feature::Incompat
+impl Copy for ferrosys::ext::feature::Profile
+impl Copy for ferrosys::ext::feature::RoCompat
+impl Copy for ferrosys::ext::geometry::BlockRange
+impl Copy for ferrosys::ext::geometry::GeometryError
+impl Copy for ferrosys::ext::geometry::GroupLayout
+impl Copy for ferrosys::ext::geometry::GrowReservation
+impl Copy for ferrosys::ext::geometry::InodeCount
+impl Copy for ferrosys::ext::geometry::PlanRequest
+impl Copy for ferrosys::ext::geometry::ReservedRatio
+impl Copy for ferrosys::ext::hash::DirHash
+impl Copy for ferrosys::ext::hash::HashSignedness
+impl Copy for ferrosys::ext::hash::HashVersion
+impl Copy for ferrosys::ext::journal::JournalParams
+impl Copy for ferrosys::ext::journal::JournalSize
+impl Copy for ferrosys::ext::journal::JournalSuperblock
+impl Copy for ferrosys::ext::materialize::ErrorBehavior
+impl Copy for ferrosys::ext::materialize::FormatOptions
+impl Copy for ferrosys::ext::model::ModelConfig
+impl Copy for ferrosys::ext::ondisk::DxEntry
+impl Copy for ferrosys::ext::ondisk::ExtentHeader
+impl Copy for ferrosys::ext::ondisk::ExtentIdx
+impl Copy for ferrosys::ext::ondisk::ExtentLeaf
+impl Copy for ferrosys::ext::ondisk::FileType
+impl Copy for ferrosys::ext::ondisk::GroupDescriptor
+impl Copy for ferrosys::ext::ondisk::InodeFlags
+impl Copy for ferrosys::ext::ondisk::ParseError
+impl Copy for ferrosys::ext::ondisk::Timestamp
+impl Copy for ferrosys::ext::read::Category
+impl Copy for ferrosys::ext::read::Limits
+impl Copy for ferrosys::ext::read::Location
+impl Copy for ferrosys::ext::read::OpenOptions
+impl Copy for ferrosys::ext::read::ReadPolicy
+impl Copy for ferrosys::ext::read::Severity
+impl Copy for ferrosys::ext::source::Metadata
+impl Debug for ferrosys::DetectError
+impl Debug for ferrosys::Filesystem
+impl Debug for ferrosys::ext::Acl
+impl Debug for ferrosys::ext::AclEntry
+impl Debug for ferrosys::ext::AclError
+impl Debug for ferrosys::ext::AclQualifier
+impl Debug for ferrosys::ext::AllocError
+impl Debug for ferrosys::ext::Allocator
+impl Debug for ferrosys::ext::Anomaly
+impl Debug for ferrosys::ext::ArchiveError
+impl Debug for ferrosys::ext::BlockRange
+impl Debug for ferrosys::ext::Category
+impl Debug for ferrosys::ext::Compat
+impl Debug for ferrosys::ext::Crc32c
+impl Debug for ferrosys::ext::CsumScheme
+impl Debug for ferrosys::ext::DirBlock
+impl Debug for ferrosys::ext::DirBlockKind
+impl Debug for ferrosys::ext::DirError
+impl Debug for ferrosys::ext::DirHash
+impl Debug for ferrosys::ext::Entry
+impl Debug for ferrosys::ext::EntryKind
+impl Debug for ferrosys::ext::ErrorBehavior
+impl Debug for ferrosys::ext::ExtentError
+impl Debug for ferrosys::ext::ExtentNode
+impl Debug for ferrosys::ext::ExtentTree
+impl Debug for ferrosys::ext::FeatureError
+impl Debug for ferrosys::ext::FeatureSet
+impl Debug for ferrosys::ext::FileContent
+impl Debug for ferrosys::ext::FileRange
+impl Debug for ferrosys::ext::FormatError
+impl Debug for ferrosys::ext::FormatOptions
+impl Debug for ferrosys::ext::FsModel
+impl Debug for ferrosys::ext::GeometryError
+impl Debug for ferrosys::ext::GroupLayout
+impl Debug for ferrosys::ext::GrowReservation
+impl Debug for ferrosys::ext::HashSignedness
+impl Debug for ferrosys::ext::HashVersion
+impl Debug for ferrosys::ext::HtreeDir
+impl Debug for ferrosys::ext::Incompat
+impl Debug for ferrosys::ext::InodeCount
+impl Debug for ferrosys::ext::JournalParams
+impl Debug for ferrosys::ext::JournalSize
+impl Debug for ferrosys::ext::JournalSuperblock
+impl Debug for ferrosys::ext::Layout
+impl Debug for ferrosys::ext::Limits
+impl Debug for ferrosys::ext::LinearDir
+impl Debug for ferrosys::ext::Location
+impl Debug for ferrosys::ext::Metadata
+impl Debug for ferrosys::ext::ModelConfig
+impl Debug for ferrosys::ext::ModelError
+impl Debug for ferrosys::ext::NullCsum
+impl Debug for ferrosys::ext::OpenOptions
+impl Debug for ferrosys::ext::ParseError
+impl Debug for ferrosys::ext::PlanRequest
+impl Debug for ferrosys::ext::Profile
+impl Debug for ferrosys::ext::ReadError
+impl Debug for ferrosys::ext::ReadPolicy
+impl Debug for ferrosys::ext::ReservedRatio
+impl Debug for ferrosys::ext::RoCompat
+impl Debug for ferrosys::ext::ScanReport
+impl Debug for ferrosys::ext::Severity
+impl Debug for ferrosys::ext::SourceEntry
+impl Debug for ferrosys::ext::TreeBuilder
+impl Debug for ferrosys::ext::WalkEntry
+impl Debug for ferrosys::ext::Xattr
+impl Debug for ferrosys::ext::acl::Acl
+impl Debug for ferrosys::ext::acl::AclEntry
+impl Debug for ferrosys::ext::acl::AclError
+impl Debug for ferrosys::ext::acl::AclQualifier
+impl Debug for ferrosys::ext::alloc::AllocError
+impl Debug for ferrosys::ext::alloc::Allocator
+impl Debug for ferrosys::ext::archive::ArchiveError
+impl Debug for ferrosys::ext::csum::Crc32c
+impl Debug for ferrosys::ext::csum::CsumScheme
+impl Debug for ferrosys::ext::csum::NullCsum
+impl Debug for ferrosys::ext::dir::DirBlock
+impl Debug for ferrosys::ext::dir::DirBlockKind
+impl Debug for ferrosys::ext::dir::DirError
+impl Debug for ferrosys::ext::dir::HtreeDir
+impl Debug for ferrosys::ext::dir::LinearDir
+impl Debug for ferrosys::ext::extent::ExtentError
+impl Debug for ferrosys::ext::extent::ExtentNode
+impl Debug for ferrosys::ext::extent::ExtentNodeBlock
+impl Debug for ferrosys::ext::extent::ExtentTree
+impl Debug for ferrosys::ext::extent::TreeShape
+impl Debug for ferrosys::ext::feature::Compat
+impl Debug for ferrosys::ext::feature::FeatureError
+impl Debug for ferrosys::ext::feature::FeatureSet
+impl Debug for ferrosys::ext::feature::Incompat
+impl Debug for ferrosys::ext::feature::Profile
+impl Debug for ferrosys::ext::feature::RoCompat
+impl Debug for ferrosys::ext::geometry::BlockRange
+impl Debug for ferrosys::ext::geometry::GeometryError
+impl Debug for ferrosys::ext::geometry::GroupLayout
+impl Debug for ferrosys::ext::geometry::GrowReservation
+impl Debug for ferrosys::ext::geometry::InodeCount
+impl Debug for ferrosys::ext::geometry::Layout
+impl Debug for ferrosys::ext::geometry::PlanRequest
+impl Debug for ferrosys::ext::geometry::ReservedRatio
+impl Debug for ferrosys::ext::hash::DirHash
+impl Debug for ferrosys::ext::hash::HashSignedness
+impl Debug for ferrosys::ext::hash::HashVersion
+impl Debug for ferrosys::ext::journal::JournalParams
+impl Debug for ferrosys::ext::journal::JournalSize
+impl Debug for ferrosys::ext::journal::JournalSuperblock
+impl Debug for ferrosys::ext::materialize::ErrorBehavior
+impl Debug for ferrosys::ext::materialize::FormatError
+impl Debug for ferrosys::ext::materialize::FormatOptions
+impl Debug for ferrosys::ext::model::Content
+impl Debug for ferrosys::ext::model::DirChild
+impl Debug for ferrosys::ext::model::FsModel
+impl Debug for ferrosys::ext::model::ModelConfig
+impl Debug for ferrosys::ext::model::ModelError
+impl Debug for ferrosys::ext::model::ModelInode
+impl Debug for ferrosys::ext::ondisk::DirEntry
+impl Debug for ferrosys::ext::ondisk::DxEntry
+impl Debug for ferrosys::ext::ondisk::ExtentHeader
+impl Debug for ferrosys::ext::ondisk::ExtentIdx
+impl Debug for ferrosys::ext::ondisk::ExtentLeaf
+impl Debug for ferrosys::ext::ondisk::FileType
+impl Debug for ferrosys::ext::ondisk::GroupDescriptor
+impl Debug for ferrosys::ext::ondisk::Inode
+impl Debug for ferrosys::ext::ondisk::InodeFlags
+impl Debug for ferrosys::ext::ondisk::ParseError
+impl Debug for ferrosys::ext::ondisk::SuperBlock
+impl Debug for ferrosys::ext::ondisk::Timestamp
+impl Debug for ferrosys::ext::ondisk::Xattr
+impl Debug for ferrosys::ext::read::Anomaly
+impl Debug for ferrosys::ext::read::Category
+impl Debug for ferrosys::ext::read::Entry
+impl Debug for ferrosys::ext::read::Limits
+impl Debug for ferrosys::ext::read::Location
+impl Debug for ferrosys::ext::read::OpenOptions
+impl Debug for ferrosys::ext::read::ReadError
+impl Debug for ferrosys::ext::read::ReadPolicy
+impl Debug for ferrosys::ext::read::ScanReport
+impl Debug for ferrosys::ext::read::Severity
+impl Debug for ferrosys::ext::read::WalkEntry
+impl Debug for ferrosys::ext::source::EntryKind
+impl Debug for ferrosys::ext::source::FileContent
+impl Debug for ferrosys::ext::source::FileRange
+impl Debug for ferrosys::ext::source::Metadata
+impl Debug for ferrosys::ext::source::SourceEntry
+impl Debug for ferrosys::ext::source::TreeBuilder
+impl Default for ferrosys::ext::Compat
+impl Default for ferrosys::ext::CsumScheme
+impl Default for ferrosys::ext::ErrorBehavior
+impl Default for ferrosys::ext::FeatureSet
+impl Default for ferrosys::ext::GrowReservation
+impl Default for ferrosys::ext::HashSignedness
+impl Default for ferrosys::ext::HashVersion
+impl Default for ferrosys::ext::Incompat
+impl Default for ferrosys::ext::InodeCount
+impl Default for ferrosys::ext::JournalSize
+impl Default for ferrosys::ext::Limits
+impl Default for ferrosys::ext::Location
+impl Default for ferrosys::ext::NullCsum
+impl Default for ferrosys::ext::OpenOptions
+impl Default for ferrosys::ext::Profile
+impl Default for ferrosys::ext::ReadPolicy
+impl Default for ferrosys::ext::ReservedRatio
+impl Default for ferrosys::ext::RoCompat
+impl Default for ferrosys::ext::ScanReport
+impl Default for ferrosys::ext::TreeBuilder
+impl Default for ferrosys::ext::csum::CsumScheme
+impl Default for ferrosys::ext::csum::NullCsum
+impl Default for ferrosys::ext::feature::Compat
+impl Default for ferrosys::ext::feature::FeatureSet
+impl Default for ferrosys::ext::feature::Incompat
+impl Default for ferrosys::ext::feature::Profile
+impl Default for ferrosys::ext::feature::RoCompat
+impl Default for ferrosys::ext::geometry::GrowReservation
+impl Default for ferrosys::ext::geometry::InodeCount
+impl Default for ferrosys::ext::geometry::ReservedRatio
+impl Default for ferrosys::ext::hash::HashSignedness
+impl Default for ferrosys::ext::hash::HashVersion
+impl Default for ferrosys::ext::journal::JournalSize
+impl Default for ferrosys::ext::materialize::ErrorBehavior
+impl Default for ferrosys::ext::ondisk::GroupDescriptor
+impl Default for ferrosys::ext::ondisk::InodeFlags
+impl Default for ferrosys::ext::ondisk::SuperBlock
+impl Default for ferrosys::ext::ondisk::Timestamp
+impl Default for ferrosys::ext::read::Limits
+impl Default for ferrosys::ext::read::Location
+impl Default for ferrosys::ext::read::OpenOptions
+impl Default for ferrosys::ext::read::ReadPolicy
+impl Default for ferrosys::ext::read::ScanReport
+impl Default for ferrosys::ext::source::TreeBuilder
+impl DirLayout for ferrosys::ext::HtreeDir
+impl DirLayout for ferrosys::ext::LinearDir
+impl DirLayout for ferrosys::ext::dir::HtreeDir
+impl DirLayout for ferrosys::ext::dir::LinearDir
+impl Display for ferrosys::DetectError
+impl Display for ferrosys::ext::AclError
+impl Display for ferrosys::ext::AllocError
+impl Display for ferrosys::ext::ArchiveError
+impl Display for ferrosys::ext::DirError
+impl Display for ferrosys::ext::ExtentError
+impl Display for ferrosys::ext::FeatureError
+impl Display for ferrosys::ext::FormatError
+impl Display for ferrosys::ext::GeometryError
+impl Display for ferrosys::ext::HashVersion
+impl Display for ferrosys::ext::ModelError
+impl Display for ferrosys::ext::ParseError
+impl Display for ferrosys::ext::Profile
+impl Display for ferrosys::ext::ReadError
+impl Display for ferrosys::ext::acl::AclError
+impl Display for ferrosys::ext::alloc::AllocError
+impl Display for ferrosys::ext::archive::ArchiveError
+impl Display for ferrosys::ext::dir::DirError
+impl Display for ferrosys::ext::extent::ExtentError
+impl Display for ferrosys::ext::feature::FeatureError
+impl Display for ferrosys::ext::feature::Profile
+impl Display for ferrosys::ext::geometry::GeometryError
+impl Display for ferrosys::ext::hash::HashVersion
+impl Display for ferrosys::ext::materialize::FormatError
+impl Display for ferrosys::ext::model::ModelError
+impl Display for ferrosys::ext::ondisk::ParseError
+impl Display for ferrosys::ext::read::ReadError
+impl Eq for ferrosys::DetectError
+impl Eq for ferrosys::Filesystem
+impl Eq for ferrosys::ext::Acl
+impl Eq for ferrosys::ext::AclEntry
+impl Eq for ferrosys::ext::AclError
+impl Eq for ferrosys::ext::AclQualifier
+impl Eq for ferrosys::ext::AllocError
+impl Eq for ferrosys::ext::Anomaly
+impl Eq for ferrosys::ext::BlockRange
+impl Eq for ferrosys::ext::Category
+impl Eq for ferrosys::ext::Compat
+impl Eq for ferrosys::ext::CsumScheme
+impl Eq for ferrosys::ext::DirBlock
+impl Eq for ferrosys::ext::DirBlockKind
+impl Eq for ferrosys::ext::DirError
+impl Eq for ferrosys::ext::DirHash
+impl Eq for ferrosys::ext::Entry
+impl Eq for ferrosys::ext::EntryKind
+impl Eq for ferrosys::ext::ErrorBehavior
+impl Eq for ferrosys::ext::ExtentError
+impl Eq for ferrosys::ext::ExtentNode
+impl Eq for ferrosys::ext::ExtentTree
+impl Eq for ferrosys::ext::FeatureError
+impl Eq for ferrosys::ext::FeatureSet
+impl Eq for ferrosys::ext::FileContent
+impl Eq for ferrosys::ext::FileRange
+impl Eq for ferrosys::ext::FsModel
+impl Eq for ferrosys::ext::GeometryError
+impl Eq for ferrosys::ext::GroupLayout
+impl Eq for ferrosys::ext::GrowReservation
+impl Eq for ferrosys::ext::HashSignedness
+impl Eq for ferrosys::ext::HashVersion
+impl Eq for ferrosys::ext::Incompat
+impl Eq for ferrosys::ext::InodeCount
+impl Eq for ferrosys::ext::JournalParams
+impl Eq for ferrosys::ext::JournalSize
+impl Eq for ferrosys::ext::JournalSuperblock
+impl Eq for ferrosys::ext::Layout
+impl Eq for ferrosys::ext::Limits
+impl Eq for ferrosys::ext::Location
+impl Eq for ferrosys::ext::Metadata
+impl Eq for ferrosys::ext::ModelError
+impl Eq for ferrosys::ext::OpenOptions
+impl Eq for ferrosys::ext::ParseError
+impl Eq for ferrosys::ext::PlanRequest
+impl Eq for ferrosys::ext::Profile
+impl Eq for ferrosys::ext::ReadError
+impl Eq for ferrosys::ext::ReadPolicy
+impl Eq for ferrosys::ext::ReservedRatio
+impl Eq for ferrosys::ext::RoCompat
+impl Eq for ferrosys::ext::ScanReport
+impl Eq for ferrosys::ext::Severity
+impl Eq for ferrosys::ext::SourceEntry
+impl Eq for ferrosys::ext::WalkEntry
+impl Eq for ferrosys::ext::Xattr
+impl Eq for ferrosys::ext::acl::Acl
+impl Eq for ferrosys::ext::acl::AclEntry
+impl Eq for ferrosys::ext::acl::AclError
+impl Eq for ferrosys::ext::acl::AclQualifier
+impl Eq for ferrosys::ext::alloc::AllocError
+impl Eq for ferrosys::ext::csum::CsumScheme
+impl Eq for ferrosys::ext::dir::DirBlock
+impl Eq for ferrosys::ext::dir::DirBlockKind
+impl Eq for ferrosys::ext::dir::DirError
+impl Eq for ferrosys::ext::extent::ExtentError
+impl Eq for ferrosys::ext::extent::ExtentNode
+impl Eq for ferrosys::ext::extent::ExtentNodeBlock
+impl Eq for ferrosys::ext::extent::ExtentTree
+impl Eq for ferrosys::ext::extent::TreeShape
+impl Eq for ferrosys::ext::feature::Compat
+impl Eq for ferrosys::ext::feature::FeatureError
+impl Eq for ferrosys::ext::feature::FeatureSet
+impl Eq for ferrosys::ext::feature::Incompat
+impl Eq for ferrosys::ext::feature::Profile
+impl Eq for ferrosys::ext::feature::RoCompat
+impl Eq for ferrosys::ext::geometry::BlockRange
+impl Eq for ferrosys::ext::geometry::GeometryError
+impl Eq for ferrosys::ext::geometry::GroupLayout
+impl Eq for ferrosys::ext::geometry::GrowReservation
+impl Eq for ferrosys::ext::geometry::InodeCount
+impl Eq for ferrosys::ext::geometry::Layout
+impl Eq for ferrosys::ext::geometry::PlanRequest
+impl Eq for ferrosys::ext::geometry::ReservedRatio
+impl Eq for ferrosys::ext::hash::DirHash
+impl Eq for ferrosys::ext::hash::HashSignedness
+impl Eq for ferrosys::ext::hash::HashVersion
+impl Eq for ferrosys::ext::journal::JournalParams
+impl Eq for ferrosys::ext::journal::JournalSize
+impl Eq for ferrosys::ext::journal::JournalSuperblock
+impl Eq for ferrosys::ext::materialize::ErrorBehavior
+impl Eq for ferrosys::ext::model::Content
+impl Eq for ferrosys::ext::model::DirChild
+impl Eq for ferrosys::ext::model::FsModel
+impl Eq for ferrosys::ext::model::ModelError
+impl Eq for ferrosys::ext::model::ModelInode
+impl Eq for ferrosys::ext::ondisk::DirEntry
+impl Eq for ferrosys::ext::ondisk::DxEntry
+impl Eq for ferrosys::ext::ondisk::ExtentHeader
+impl Eq for ferrosys::ext::ondisk::ExtentIdx
+impl Eq for ferrosys::ext::ondisk::ExtentLeaf
+impl Eq for ferrosys::ext::ondisk::FileType
+impl Eq for ferrosys::ext::ondisk::GroupDescriptor
+impl Eq for ferrosys::ext::ondisk::Inode
+impl Eq for ferrosys::ext::ondisk::InodeFlags
+impl Eq for ferrosys::ext::ondisk::ParseError
+impl Eq for ferrosys::ext::ondisk::SuperBlock
+impl Eq for ferrosys::ext::ondisk::Timestamp
+impl Eq for ferrosys::ext::ondisk::Xattr
+impl Eq for ferrosys::ext::read::Anomaly
+impl Eq for ferrosys::ext::read::Category
+impl Eq for ferrosys::ext::read::Entry
+impl Eq for ferrosys::ext::read::Limits
+impl Eq for ferrosys::ext::read::Location
+impl Eq for ferrosys::ext::read::OpenOptions
+impl Eq for ferrosys::ext::read::ReadError
+impl Eq for ferrosys::ext::read::ReadPolicy
+impl Eq for ferrosys::ext::read::ScanReport
+impl Eq for ferrosys::ext::read::Severity
+impl Eq for ferrosys::ext::read::WalkEntry
+impl Eq for ferrosys::ext::source::EntryKind
+impl Eq for ferrosys::ext::source::FileContent
+impl Eq for ferrosys::ext::source::FileRange
+impl Eq for ferrosys::ext::source::Metadata
+impl Eq for ferrosys::ext::source::SourceEntry
+impl Error for ferrosys::DetectError
+impl Error for ferrosys::ext::AclError
+impl Error for ferrosys::ext::AllocError
+impl Error for ferrosys::ext::ArchiveError
+impl Error for ferrosys::ext::DirError
+impl Error for ferrosys::ext::ExtentError
+impl Error for ferrosys::ext::FeatureError
+impl Error for ferrosys::ext::FormatError
+impl Error for ferrosys::ext::GeometryError
+impl Error for ferrosys::ext::ModelError
+impl Error for ferrosys::ext::ParseError
+impl Error for ferrosys::ext::ReadError
+impl Error for ferrosys::ext::acl::AclError
+impl Error for ferrosys::ext::alloc::AllocError
+impl Error for ferrosys::ext::archive::ArchiveError
+impl Error for ferrosys::ext::dir::DirError
+impl Error for ferrosys::ext::extent::ExtentError
+impl Error for ferrosys::ext::feature::FeatureError
+impl Error for ferrosys::ext::geometry::GeometryError
+impl Error for ferrosys::ext::materialize::FormatError
+impl Error for ferrosys::ext::model::ModelError
+impl Error for ferrosys::ext::ondisk::ParseError
+impl Error for ferrosys::ext::read::ReadError
+impl From<AllocError> for ferrosys::ext::AllocError
+impl From<AllocError> for ferrosys::ext::FormatError
+impl From<AllocError> for ferrosys::ext::alloc::AllocError
+impl From<AllocError> for ferrosys::ext::materialize::FormatError
+impl From<DirError> for ferrosys::ext::DirError
+impl From<DirError> for ferrosys::ext::FormatError
+impl From<DirError> for ferrosys::ext::dir::DirError
+impl From<DirError> for ferrosys::ext::materialize::FormatError
+impl From<Error> for ferrosys::ext::ArchiveError
+impl From<Error> for ferrosys::ext::FormatError
+impl From<Error> for ferrosys::ext::ReadError
+impl From<Error> for ferrosys::ext::archive::ArchiveError
+impl From<Error> for ferrosys::ext::materialize::FormatError
+impl From<Error> for ferrosys::ext::read::ReadError
+impl From<ExtentError> for ferrosys::ext::ExtentError
+impl From<ExtentError> for ferrosys::ext::FormatError
+impl From<ExtentError> for ferrosys::ext::extent::ExtentError
+impl From<ExtentError> for ferrosys::ext::materialize::FormatError
+impl From<FeatureError> for ferrosys::ext::FeatureError
+impl From<FeatureError> for ferrosys::ext::GeometryError
+impl From<FeatureError> for ferrosys::ext::feature::FeatureError
+impl From<FeatureError> for ferrosys::ext::geometry::GeometryError
+impl From<FileRange> for ferrosys::ext::FileContent
+impl From<FileRange> for ferrosys::ext::FileRange
+impl From<FileRange> for ferrosys::ext::source::FileContent
+impl From<FileRange> for ferrosys::ext::source::FileRange
+impl From<GeometryError> for ferrosys::ext::FormatError
+impl From<GeometryError> for ferrosys::ext::GeometryError
+impl From<GeometryError> for ferrosys::ext::geometry::GeometryError
+impl From<GeometryError> for ferrosys::ext::materialize::FormatError
+impl From<ModelError> for ferrosys::ext::FormatError
+impl From<ModelError> for ferrosys::ext::ModelError
+impl From<ModelError> for ferrosys::ext::materialize::FormatError
+impl From<ModelError> for ferrosys::ext::model::ModelError
+impl From<ParseError> for ferrosys::ext::DirError
+impl From<ParseError> for ferrosys::ext::ExtentError
+impl From<ParseError> for ferrosys::ext::FormatError
+impl From<ParseError> for ferrosys::ext::ParseError
+impl From<ParseError> for ferrosys::ext::ReadError
+impl From<ParseError> for ferrosys::ext::dir::DirError
+impl From<ParseError> for ferrosys::ext::extent::ExtentError
+impl From<ParseError> for ferrosys::ext::materialize::FormatError
+impl From<ParseError> for ferrosys::ext::ondisk::ParseError
+impl From<ParseError> for ferrosys::ext::read::ReadError
+impl From<Vec<u8>> for ferrosys::ext::FileContent
+impl From<Vec<u8>> for ferrosys::ext::source::FileContent
+impl Hash for ferrosys::Filesystem
+impl Hash for ferrosys::ext::Compat
+impl Hash for ferrosys::ext::Incompat
+impl Hash for ferrosys::ext::Profile
+impl Hash for ferrosys::ext::RoCompat
+impl Hash for ferrosys::ext::feature::Compat
+impl Hash for ferrosys::ext::feature::Incompat
+impl Hash for ferrosys::ext::feature::Profile
+impl Hash for ferrosys::ext::feature::RoCompat
+impl Ord for ferrosys::ext::DirHash
+impl Ord for ferrosys::ext::Severity
+impl Ord for ferrosys::ext::hash::DirHash
+impl Ord for ferrosys::ext::read::Severity
+impl PartialEq for ferrosys::DetectError
+impl PartialEq for ferrosys::Filesystem
+impl PartialEq for ferrosys::ext::Acl
+impl PartialEq for ferrosys::ext::AclEntry
+impl PartialEq for ferrosys::ext::AclError
+impl PartialEq for ferrosys::ext::AclQualifier
+impl PartialEq for ferrosys::ext::AllocError
+impl PartialEq for ferrosys::ext::Anomaly
+impl PartialEq for ferrosys::ext::BlockRange
+impl PartialEq for ferrosys::ext::Category
+impl PartialEq for ferrosys::ext::Compat
+impl PartialEq for ferrosys::ext::CsumScheme
+impl PartialEq for ferrosys::ext::DirBlock
+impl PartialEq for ferrosys::ext::DirBlockKind
+impl PartialEq for ferrosys::ext::DirError
+impl PartialEq for ferrosys::ext::DirHash
+impl PartialEq for ferrosys::ext::Entry
+impl PartialEq for ferrosys::ext::EntryKind
+impl PartialEq for ferrosys::ext::ErrorBehavior
+impl PartialEq for ferrosys::ext::ExtentError
+impl PartialEq for ferrosys::ext::ExtentNode
+impl PartialEq for ferrosys::ext::ExtentTree
+impl PartialEq for ferrosys::ext::FeatureError
+impl PartialEq for ferrosys::ext::FeatureSet
+impl PartialEq for ferrosys::ext::FileContent
+impl PartialEq for ferrosys::ext::FileRange
+impl PartialEq for ferrosys::ext::FsModel
+impl PartialEq for ferrosys::ext::GeometryError
+impl PartialEq for ferrosys::ext::GroupLayout
+impl PartialEq for ferrosys::ext::GrowReservation
+impl PartialEq for ferrosys::ext::HashSignedness
+impl PartialEq for ferrosys::ext::HashVersion
+impl PartialEq for ferrosys::ext::Incompat
+impl PartialEq for ferrosys::ext::InodeCount
+impl PartialEq for ferrosys::ext::JournalParams
+impl PartialEq for ferrosys::ext::JournalSize
+impl PartialEq for ferrosys::ext::JournalSuperblock
+impl PartialEq for ferrosys::ext::Layout
+impl PartialEq for ferrosys::ext::Limits
+impl PartialEq for ferrosys::ext::Location
+impl PartialEq for ferrosys::ext::Metadata
+impl PartialEq for ferrosys::ext::ModelError
+impl PartialEq for ferrosys::ext::OpenOptions
+impl PartialEq for ferrosys::ext::ParseError
+impl PartialEq for ferrosys::ext::PlanRequest
+impl PartialEq for ferrosys::ext::Profile
+impl PartialEq for ferrosys::ext::ReadError
+impl PartialEq for ferrosys::ext::ReadPolicy
+impl PartialEq for ferrosys::ext::ReservedRatio
+impl PartialEq for ferrosys::ext::RoCompat
+impl PartialEq for ferrosys::ext::ScanReport
+impl PartialEq for ferrosys::ext::Severity
+impl PartialEq for ferrosys::ext::SourceEntry
+impl PartialEq for ferrosys::ext::WalkEntry
+impl PartialEq for ferrosys::ext::Xattr
+impl PartialEq for ferrosys::ext::acl::Acl
+impl PartialEq for ferrosys::ext::acl::AclEntry
+impl PartialEq for ferrosys::ext::acl::AclError
+impl PartialEq for ferrosys::ext::acl::AclQualifier
+impl PartialEq for ferrosys::ext::alloc::AllocError
+impl PartialEq for ferrosys::ext::csum::CsumScheme
+impl PartialEq for ferrosys::ext::dir::DirBlock
+impl PartialEq for ferrosys::ext::dir::DirBlockKind
+impl PartialEq for ferrosys::ext::dir::DirError
+impl PartialEq for ferrosys::ext::extent::ExtentError
+impl PartialEq for ferrosys::ext::extent::ExtentNode
+impl PartialEq for ferrosys::ext::extent::ExtentNodeBlock
+impl PartialEq for ferrosys::ext::extent::ExtentTree
+impl PartialEq for ferrosys::ext::extent::TreeShape
+impl PartialEq for ferrosys::ext::feature::Compat
+impl PartialEq for ferrosys::ext::feature::FeatureError
+impl PartialEq for ferrosys::ext::feature::FeatureSet
+impl PartialEq for ferrosys::ext::feature::Incompat
+impl PartialEq for ferrosys::ext::feature::Profile
+impl PartialEq for ferrosys::ext::feature::RoCompat
+impl PartialEq for ferrosys::ext::geometry::BlockRange
+impl PartialEq for ferrosys::ext::geometry::GeometryError
+impl PartialEq for ferrosys::ext::geometry::GroupLayout
+impl PartialEq for ferrosys::ext::geometry::GrowReservation
+impl PartialEq for ferrosys::ext::geometry::InodeCount
+impl PartialEq for ferrosys::ext::geometry::Layout
+impl PartialEq for ferrosys::ext::geometry::PlanRequest
+impl PartialEq for ferrosys::ext::geometry::ReservedRatio
+impl PartialEq for ferrosys::ext::hash::DirHash
+impl PartialEq for ferrosys::ext::hash::HashSignedness
+impl PartialEq for ferrosys::ext::hash::HashVersion
+impl PartialEq for ferrosys::ext::journal::JournalParams
+impl PartialEq for ferrosys::ext::journal::JournalSize
+impl PartialEq for ferrosys::ext::journal::JournalSuperblock
+impl PartialEq for ferrosys::ext::materialize::ErrorBehavior
+impl PartialEq for ferrosys::ext::model::Content
+impl PartialEq for ferrosys::ext::model::DirChild
+impl PartialEq for ferrosys::ext::model::FsModel
+impl PartialEq for ferrosys::ext::model::ModelError
+impl PartialEq for ferrosys::ext::model::ModelInode
+impl PartialEq for ferrosys::ext::ondisk::DirEntry
+impl PartialEq for ferrosys::ext::ondisk::DxEntry
+impl PartialEq for ferrosys::ext::ondisk::ExtentHeader
+impl PartialEq for ferrosys::ext::ondisk::ExtentIdx
+impl PartialEq for ferrosys::ext::ondisk::ExtentLeaf
+impl PartialEq for ferrosys::ext::ondisk::FileType
+impl PartialEq for ferrosys::ext::ondisk::GroupDescriptor
+impl PartialEq for ferrosys::ext::ondisk::Inode
+impl PartialEq for ferrosys::ext::ondisk::InodeFlags
+impl PartialEq for ferrosys::ext::ondisk::ParseError
+impl PartialEq for ferrosys::ext::ondisk::SuperBlock
+impl PartialEq for ferrosys::ext::ondisk::Timestamp
+impl PartialEq for ferrosys::ext::ondisk::Xattr
+impl PartialEq for ferrosys::ext::read::Anomaly
+impl PartialEq for ferrosys::ext::read::Category
+impl PartialEq for ferrosys::ext::read::Entry
+impl PartialEq for ferrosys::ext::read::Limits
+impl PartialEq for ferrosys::ext::read::Location
+impl PartialEq for ferrosys::ext::read::OpenOptions
+impl PartialEq for ferrosys::ext::read::ReadError
+impl PartialEq for ferrosys::ext::read::ReadPolicy
+impl PartialEq for ferrosys::ext::read::ScanReport
+impl PartialEq for ferrosys::ext::read::Severity
+impl PartialEq for ferrosys::ext::read::WalkEntry
+impl PartialEq for ferrosys::ext::source::EntryKind
+impl PartialEq for ferrosys::ext::source::FileContent
+impl PartialEq for ferrosys::ext::source::FileRange
+impl PartialEq for ferrosys::ext::source::Metadata
+impl PartialEq for ferrosys::ext::source::SourceEntry
+impl PartialOrd for ferrosys::ext::DirHash
+impl PartialOrd for ferrosys::ext::Severity
+impl PartialOrd for ferrosys::ext::hash::DirHash
+impl PartialOrd for ferrosys::ext::read::Severity
+impl Source for ferrosys::ext::ArchiveSource
+impl Source for ferrosys::ext::TreeBuilder
+impl Source for ferrosys::ext::archive::ArchiveSource
+impl Source for ferrosys::ext::source::TreeBuilder
+pub const ferrosys::ext::Acl::ACCESS_NAME: &'static [u8]
+pub const ferrosys::ext::Acl::DEFAULT_NAME: &'static [u8]
+pub const ferrosys::ext::Compat::DIR_INDEX: Self
+pub const ferrosys::ext::Compat::EXT_ATTR: Self
+pub const ferrosys::ext::Compat::HAS_JOURNAL: Self
+pub const ferrosys::ext::Compat::NONE: Self
+pub const ferrosys::ext::Compat::ORPHAN_FILE: Self
+pub const ferrosys::ext::Compat::RESIZE_INODE: Self
+pub const ferrosys::ext::FeatureSet::DEFAULT: Self
+pub const ferrosys::ext::FeatureSet::EMPTY: Self
+pub const ferrosys::ext::FeatureSet::EXT2: Self
+pub const ferrosys::ext::FeatureSet::EXT3: Self
+pub const ferrosys::ext::FeatureSet::LATEST: Self
+pub const ferrosys::ext::HashSignedness::SIGNED_FLAG: u32
+pub const ferrosys::ext::HashSignedness::UNSIGNED_FLAG: u32
+pub const ferrosys::ext::Incompat::CSUM_SEED: Self
+pub const ferrosys::ext::Incompat::EXTENTS: Self
+pub const ferrosys::ext::Incompat::FILETYPE: Self
+pub const ferrosys::ext::Incompat::FLEX_BG: Self
+pub const ferrosys::ext::Incompat::META_BG: Self
+pub const ferrosys::ext::Incompat::NONE: Self
+pub const ferrosys::ext::Incompat::SIXTY_FOUR_BIT: Self
+pub const ferrosys::ext::ReservedRatio::DEFAULT: Self
+pub const ferrosys::ext::RoCompat::DIR_NLINK: Self
+pub const ferrosys::ext::RoCompat::EXTRA_ISIZE: Self
+pub const ferrosys::ext::RoCompat::HUGE_FILE: Self
+pub const ferrosys::ext::RoCompat::LARGE_FILE: Self
+pub const ferrosys::ext::RoCompat::METADATA_CSUM: Self
+pub const ferrosys::ext::RoCompat::NONE: Self
+pub const ferrosys::ext::RoCompat::SPARSE_SUPER: Self
+pub const ferrosys::ext::SCAN_SCHEMA_VERSION: u32
+pub const ferrosys::ext::ScanReport::MAX_ANOMALIES: usize
+pub const ferrosys::ext::acl::Acl::ACCESS_NAME: &'static [u8]
+pub const ferrosys::ext::acl::Acl::DEFAULT_NAME: &'static [u8]
+pub const ferrosys::ext::acl::EXEC: u16
+pub const ferrosys::ext::acl::READ: u16
+pub const ferrosys::ext::acl::WRITE: u16
+pub const ferrosys::ext::extent::MAX_EXTENT_DEPTH: u16
+pub const ferrosys::ext::extent::MAX_EXTENT_LEN: u32
+pub const ferrosys::ext::feature::Compat::DIR_INDEX: Self
+pub const ferrosys::ext::feature::Compat::EXT_ATTR: Self
+pub const ferrosys::ext::feature::Compat::HAS_JOURNAL: Self
+pub const ferrosys::ext::feature::Compat::NONE: Self
+pub const ferrosys::ext::feature::Compat::ORPHAN_FILE: Self
+pub const ferrosys::ext::feature::Compat::RESIZE_INODE: Self
+pub const ferrosys::ext::feature::FeatureSet::DEFAULT: Self
+pub const ferrosys::ext::feature::FeatureSet::EMPTY: Self
+pub const ferrosys::ext::feature::FeatureSet::EXT2: Self
+pub const ferrosys::ext::feature::FeatureSet::EXT3: Self
+pub const ferrosys::ext::feature::FeatureSet::LATEST: Self
+pub const ferrosys::ext::feature::Incompat::CSUM_SEED: Self
+pub const ferrosys::ext::feature::Incompat::EXTENTS: Self
+pub const ferrosys::ext::feature::Incompat::FILETYPE: Self
+pub const ferrosys::ext::feature::Incompat::FLEX_BG: Self
+pub const ferrosys::ext::feature::Incompat::META_BG: Self
+pub const ferrosys::ext::feature::Incompat::NONE: Self
+pub const ferrosys::ext::feature::Incompat::SIXTY_FOUR_BIT: Self
+pub const ferrosys::ext::feature::LARGE_FILE_MIN_SIZE: u64
+pub const ferrosys::ext::feature::RoCompat::DIR_NLINK: Self
+pub const ferrosys::ext::feature::RoCompat::EXTRA_ISIZE: Self
+pub const ferrosys::ext::feature::RoCompat::HUGE_FILE: Self
+pub const ferrosys::ext::feature::RoCompat::LARGE_FILE: Self
+pub const ferrosys::ext::feature::RoCompat::METADATA_CSUM: Self
+pub const ferrosys::ext::feature::RoCompat::NONE: Self
+pub const ferrosys::ext::feature::RoCompat::SPARSE_SUPER: Self
+pub const ferrosys::ext::geometry::MAX_32BIT_BLOCKS: u64
+pub const ferrosys::ext::geometry::MAX_EXTENT_BLOCKS: u64
+pub const ferrosys::ext::geometry::ReservedRatio::DEFAULT: Self
+pub const ferrosys::ext::hash::HashSignedness::SIGNED_FLAG: u32
+pub const ferrosys::ext::hash::HashSignedness::UNSIGNED_FLAG: u32
+pub const ferrosys::ext::journal::JBD2_MAGIC: u32
+pub const ferrosys::ext::journal::JBD2_SUPERBLOCK_V2: u32
+pub const ferrosys::ext::journal::MIN_JOURNAL_BLOCKS: u32
+pub const ferrosys::ext::model::FIRST_USER_INO: u32
+pub const ferrosys::ext::model::LOST_FOUND_INO: u32
+pub const ferrosys::ext::model::ROOT_INO: u32
+pub const ferrosys::ext::ondisk::BG_BLOCK_UNINIT: u16
+pub const ferrosys::ext::ondisk::BG_INODE_UNINIT: u16
+pub const ferrosys::ext::ondisk::BG_INODE_ZEROED: u16
+pub const ferrosys::ext::ondisk::DIR_TAIL_LEN: usize
+pub const ferrosys::ext::ondisk::DX_CHECKSUM_OFFSET: usize
+pub const ferrosys::ext::ondisk::DX_ENTRY_LEN: usize
+pub const ferrosys::ext::ondisk::DX_HASH_CONTINUED: u32
+pub const ferrosys::ext::ondisk::DX_MAX_INDIRECT_LEVELS: u8
+pub const ferrosys::ext::ondisk::DX_NODE_COUNT_OFFSET: usize
+pub const ferrosys::ext::ondisk::DX_ROOT_COUNT_OFFSET: usize
+pub const ferrosys::ext::ondisk::DX_TAIL_LEN: usize
+pub const ferrosys::ext::ondisk::EXTENT_ENTRY_SIZE: usize
+pub const ferrosys::ext::ondisk::EXTENT_MAGIC: u16
+pub const ferrosys::ext::ondisk::EXTENT_TAIL_LEN: usize
+pub const ferrosys::ext::ondisk::ExtentHeader::SIZE: usize
+pub const ferrosys::ext::ondisk::ExtentIdx::SIZE: usize
+pub const ferrosys::ext::ondisk::ExtentLeaf::SIZE: usize
+pub const ferrosys::ext::ondisk::GOOD_OLD_FIRST_INODE: u32
+pub const ferrosys::ext::ondisk::GOOD_OLD_INODE_SIZE: usize
+pub const ferrosys::ext::ondisk::GroupDescriptor::CHECKSUM_OFFSET: usize
+pub const ferrosys::ext::ondisk::GroupDescriptor::SIZE_32: usize
+pub const ferrosys::ext::ondisk::GroupDescriptor::SIZE_64: usize
+pub const ferrosys::ext::ondisk::Inode::BLOCK_BYTES: usize
+pub const ferrosys::ext::ondisk::Inode::BLOCK_OFFSET: usize
+pub const ferrosys::ext::ondisk::Inode::CHECKSUM_HI_OFFSET: usize
+pub const ferrosys::ext::ondisk::Inode::CHECKSUM_LO_OFFSET: usize
+pub const ferrosys::ext::ondisk::Inode::EXTRA_ISIZE_OFFSET: usize
+pub const ferrosys::ext::ondisk::InodeFlags::EXTENTS: Self
+pub const ferrosys::ext::ondisk::InodeFlags::HUGE_FILE: Self
+pub const ferrosys::ext::ondisk::InodeFlags::INDEX: Self
+pub const ferrosys::ext::ondisk::InodeFlags::NONE: Self
+pub const ferrosys::ext::ondisk::ORPHAN_BLOCK_MAGIC: u32
+pub const ferrosys::ext::ondisk::ORPHAN_TAIL_LEN: usize
+pub const ferrosys::ext::ondisk::ROOT_INODE_MODE: u16
+pub const ferrosys::ext::ondisk::SUPERBLOCK_MAGIC: u16
+pub const ferrosys::ext::ondisk::SuperBlock::SIZE: usize
+pub const ferrosys::ext::ondisk::Timestamp::EPOCH_MAX: i64
+pub const ferrosys::ext::ondisk::Timestamp::EPOCH_MIN: i64
+pub const ferrosys::ext::ondisk::Timestamp::NANOS_PER_SEC: u32
+pub const ferrosys::ext::read::MAX_SYMLINK_HOPS: u32
+pub const ferrosys::ext::read::MIN_DIRENT_LEN: u64
+pub const ferrosys::ext::read::SCAN_SCHEMA_VERSION: u32
+pub const ferrosys::ext::read::ScanReport::MAX_ANOMALIES: usize
+pub const fn ferrosys::ext::BlockRange::end(self) -> u64
+pub const fn ferrosys::ext::BlockRange::is_empty(self) -> bool
+pub const fn ferrosys::ext::Compat::bits(self) -> u32
+pub const fn ferrosys::ext::Compat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::Compat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::Compat::is_empty(self) -> bool
+pub const fn ferrosys::ext::Compat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::Compat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::CsumScheme::uninit_bg_semantics(self) -> bool
+pub const fn ferrosys::ext::CsumScheme::writes_object_checksums(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::desc_size(self) -> u16
+pub const fn ferrosys::ext::FeatureSet::has_csum_seed(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_dir_index(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_dir_nlink(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_ext_attr(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_extents(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_filetype(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_flex_bg(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_journal(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_large_file(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_metadata_csum(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_orphan_file(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::has_resize_inode(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::inodes_per_block(self) -> u32
+pub const fn ferrosys::ext::FeatureSet::is_64bit(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::is_sparse_super(self) -> bool
+pub const fn ferrosys::ext::FeatureSet::validate(self) -> Result<(), FeatureError>
+pub const fn ferrosys::ext::FeatureSet::with_block_size(self, block_size: u32) -> Self
+pub const fn ferrosys::ext::FeatureSet::with_inode_size(self, inode_size: u16) -> Self
+pub const fn ferrosys::ext::FileRange::is_empty(&self) -> bool
+pub const fn ferrosys::ext::FileRange::len(&self) -> u64
+pub const fn ferrosys::ext::FileRange::offset(&self) -> u64
+pub const fn ferrosys::ext::FormatOptions::plan_request(&self, size_bytes: u64) -> PlanRequest
+pub const fn ferrosys::ext::HashSignedness::from_flags(flags: u32) -> Self
+pub const fn ferrosys::ext::HashSignedness::to_flag(self) -> u32
+pub const fn ferrosys::ext::HashVersion::from_u8(v: u8) -> Option<Self>
+pub const fn ferrosys::ext::HashVersion::name(self) -> &'static str
+pub const fn ferrosys::ext::HashVersion::to_u8(self) -> u8
+pub const fn ferrosys::ext::Incompat::bits(self) -> u32
+pub const fn ferrosys::ext::Incompat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::Incompat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::Incompat::is_empty(self) -> bool
+pub const fn ferrosys::ext::Incompat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::Incompat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::JournalParams::new(block_size: u32, journal_blocks: u32, uuid: [u8; 16]) -> Self
+pub const fn ferrosys::ext::Limits::max_anomalies(self, max: usize) -> Self
+pub const fn ferrosys::ext::Limits::max_file_bytes(self, max: u64) -> Self
+pub const fn ferrosys::ext::Limits::max_walk_entries(self, max: usize) -> Self
+pub const fn ferrosys::ext::Limits::new() -> Self
+pub const fn ferrosys::ext::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::ext::OpenOptions::csum_seed(self, seed: u32) -> Self
+pub const fn ferrosys::ext::OpenOptions::limits(self, limits: Limits) -> Self
+pub const fn ferrosys::ext::OpenOptions::new() -> Self
+pub const fn ferrosys::ext::OpenOptions::policy(self, policy: ReadPolicy) -> Self
+pub const fn ferrosys::ext::PlanRequest::grow(self, grow: GrowReservation) -> Self
+pub const fn ferrosys::ext::PlanRequest::inodes(self, inodes: InodeCount) -> Self
+pub const fn ferrosys::ext::PlanRequest::new(size_bytes: u64, feature: FeatureSet) -> Self
+pub const fn ferrosys::ext::PlanRequest::reserved(self, reserved: ReservedRatio) -> Self
+pub const fn ferrosys::ext::Profile::feature_set(self) -> FeatureSet
+pub const fn ferrosys::ext::Profile::name(self) -> &'static str
+pub const fn ferrosys::ext::Profile::of(features: FeatureSet) -> Self
+pub const fn ferrosys::ext::RoCompat::bits(self) -> u32
+pub const fn ferrosys::ext::RoCompat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::RoCompat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::RoCompat::is_empty(self) -> bool
+pub const fn ferrosys::ext::RoCompat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::RoCompat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::csum::CsumScheme::uninit_bg_semantics(self) -> bool
+pub const fn ferrosys::ext::csum::CsumScheme::writes_object_checksums(self) -> bool
+pub const fn ferrosys::ext::extent::node_capacity(node_bytes: usize) -> usize
+pub const fn ferrosys::ext::extent::tail_offset(node_bytes: usize) -> usize
+pub const fn ferrosys::ext::feature::Compat::bits(self) -> u32
+pub const fn ferrosys::ext::feature::Compat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::feature::Compat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::feature::Compat::is_empty(self) -> bool
+pub const fn ferrosys::ext::feature::Compat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::feature::Compat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::feature::FeatureSet::desc_size(self) -> u16
+pub const fn ferrosys::ext::feature::FeatureSet::has_csum_seed(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_dir_index(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_dir_nlink(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_ext_attr(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_extents(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_filetype(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_flex_bg(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_journal(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_large_file(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_metadata_csum(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_orphan_file(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::has_resize_inode(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::inodes_per_block(self) -> u32
+pub const fn ferrosys::ext::feature::FeatureSet::is_64bit(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::is_sparse_super(self) -> bool
+pub const fn ferrosys::ext::feature::FeatureSet::validate(self) -> Result<(), FeatureError>
+pub const fn ferrosys::ext::feature::FeatureSet::with_block_size(self, block_size: u32) -> Self
+pub const fn ferrosys::ext::feature::FeatureSet::with_inode_size(self, inode_size: u16) -> Self
+pub const fn ferrosys::ext::feature::Incompat::bits(self) -> u32
+pub const fn ferrosys::ext::feature::Incompat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::feature::Incompat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::feature::Incompat::is_empty(self) -> bool
+pub const fn ferrosys::ext::feature::Incompat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::feature::Incompat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::feature::Profile::feature_set(self) -> FeatureSet
+pub const fn ferrosys::ext::feature::Profile::name(self) -> &'static str
+pub const fn ferrosys::ext::feature::Profile::of(features: FeatureSet) -> Self
+pub const fn ferrosys::ext::feature::RoCompat::bits(self) -> u32
+pub const fn ferrosys::ext::feature::RoCompat::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::feature::RoCompat::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::feature::RoCompat::is_empty(self) -> bool
+pub const fn ferrosys::ext::feature::RoCompat::unknown_bits(self) -> u32
+pub const fn ferrosys::ext::feature::RoCompat::without(self, other: Self) -> Self
+pub const fn ferrosys::ext::geometry::BlockRange::end(self) -> u64
+pub const fn ferrosys::ext::geometry::BlockRange::is_empty(self) -> bool
+pub const fn ferrosys::ext::geometry::PlanRequest::grow(self, grow: GrowReservation) -> Self
+pub const fn ferrosys::ext::geometry::PlanRequest::inodes(self, inodes: InodeCount) -> Self
+pub const fn ferrosys::ext::geometry::PlanRequest::new(size_bytes: u64, feature: FeatureSet) -> Self
+pub const fn ferrosys::ext::geometry::PlanRequest::reserved(self, reserved: ReservedRatio) -> Self
+pub const fn ferrosys::ext::hash::HashSignedness::from_flags(flags: u32) -> Self
+pub const fn ferrosys::ext::hash::HashSignedness::to_flag(self) -> u32
+pub const fn ferrosys::ext::hash::HashVersion::from_u8(v: u8) -> Option<Self>
+pub const fn ferrosys::ext::hash::HashVersion::name(self) -> &'static str
+pub const fn ferrosys::ext::hash::HashVersion::to_u8(self) -> u8
+pub const fn ferrosys::ext::journal::JournalParams::new(block_size: u32, journal_blocks: u32, uuid: [u8; 16]) -> Self
+pub const fn ferrosys::ext::materialize::FormatOptions::plan_request(&self, size_bytes: u64) -> PlanRequest
+pub const fn ferrosys::ext::ondisk::FileType::from_mode(mode: u16) -> Self
+pub const fn ferrosys::ext::ondisk::FileType::from_u8(v: u8) -> Self
+pub const fn ferrosys::ext::ondisk::FileType::to_u8(self) -> u8
+pub const fn ferrosys::ext::ondisk::Inode::fits(inode_size: u16, extra_isize: u16, off: usize, width: usize) -> bool
+pub const fn ferrosys::ext::ondisk::Inode::has_checksum_hi(inode_size: u16, extra_isize: u16) -> bool
+pub const fn ferrosys::ext::ondisk::InodeFlags::bits(self) -> u32
+pub const fn ferrosys::ext::ondisk::InodeFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::ondisk::Timestamp::decode(field: u32, extra: u32) -> Self
+pub const fn ferrosys::ext::ondisk::Timestamp::encode(self) -> (u32, u32)
+pub const fn ferrosys::ext::ondisk::Timestamp::from_secs(secs: i64) -> Self
+pub const fn ferrosys::ext::ondisk::Timestamp::is_representable(self) -> bool
+pub const fn ferrosys::ext::ondisk::dx_limit(block_size: usize, count_offset: usize, checksums: bool) -> usize
+pub const fn ferrosys::ext::ondisk::dx_tail_offset(count_offset: usize, limit: usize) -> usize
+pub const fn ferrosys::ext::ondisk::extra_isize_for(inode_size: u16) -> u16
+pub const fn ferrosys::ext::ondisk::orphan_entries_len(block_size: usize) -> usize
+pub const fn ferrosys::ext::read::Limits::max_anomalies(self, max: usize) -> Self
+pub const fn ferrosys::ext::read::Limits::max_file_bytes(self, max: u64) -> Self
+pub const fn ferrosys::ext::read::Limits::max_walk_entries(self, max: usize) -> Self
+pub const fn ferrosys::ext::read::Limits::new() -> Self
+pub const fn ferrosys::ext::read::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::ext::read::OpenOptions::csum_seed(self, seed: u32) -> Self
+pub const fn ferrosys::ext::read::OpenOptions::limits(self, limits: Limits) -> Self
+pub const fn ferrosys::ext::read::OpenOptions::new() -> Self
+pub const fn ferrosys::ext::read::OpenOptions::policy(self, policy: ReadPolicy) -> Self
+pub const fn ferrosys::ext::source::FileRange::is_empty(&self) -> bool
+pub const fn ferrosys::ext::source::FileRange::len(&self) -> u64
+pub const fn ferrosys::ext::source::FileRange::offset(&self) -> u64
+pub enum ferrosys::ext::AclQualifier
+pub enum ferrosys::ext::DirBlockKind
+pub enum ferrosys::ext::EntryKind
+pub enum ferrosys::ext::ErrorBehavior
+pub enum ferrosys::ext::ExtentNode
+pub enum ferrosys::ext::FileContent
+pub enum ferrosys::ext::HashSignedness
+pub enum ferrosys::ext::Profile
+pub enum ferrosys::ext::ReadPolicy
+pub enum ferrosys::ext::Severity
+pub enum ferrosys::ext::acl::AclQualifier
+pub enum ferrosys::ext::dir::DirBlockKind
+pub enum ferrosys::ext::extent::ExtentNode
+pub enum ferrosys::ext::feature::Profile
+pub enum ferrosys::ext::hash::HashSignedness
+pub enum ferrosys::ext::materialize::ErrorBehavior
+pub enum ferrosys::ext::model::Content
+pub enum ferrosys::ext::ondisk::FileType
+pub enum ferrosys::ext::read::ReadPolicy
+pub enum ferrosys::ext::read::Severity
+pub enum ferrosys::ext::source::EntryKind
+pub enum ferrosys::ext::source::FileContent
+pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
+pub ferrosys::DetectError::Io::message: String
+pub ferrosys::DetectError::Unrecognized
+pub ferrosys::Filesystem::Ext(crate::feature::Profile)
+pub ferrosys::ext::AclEntry::perm: u16
+pub ferrosys::ext::AclEntry::who: AclQualifier
+pub ferrosys::ext::AclError::Duplicate::tag: &'static str
+pub ferrosys::ext::AclError::InvalidPerm::perm: u16
+pub ferrosys::ext::AclError::Malformed::reason: &'static str
+pub ferrosys::ext::AclError::MaskRequired
+pub ferrosys::ext::AclError::MissingRequired::tag: &'static str
+pub ferrosys::ext::AclQualifier::Group(u32)
+pub ferrosys::ext::AclQualifier::GroupObj
+pub ferrosys::ext::AclQualifier::Mask
+pub ferrosys::ext::AclQualifier::Other
+pub ferrosys::ext::AclQualifier::User(u32)
+pub ferrosys::ext::AclQualifier::UserObj
+pub ferrosys::ext::AllocError::OutOfSpace::available: u64
+pub ferrosys::ext::AllocError::OutOfSpace::requested: u64
+pub ferrosys::ext::Anomaly::category: Category
+pub ferrosys::ext::Anomaly::detail: String
+pub ferrosys::ext::Anomaly::location: Location
+pub ferrosys::ext::Anomaly::severity: Severity
+pub ferrosys::ext::ArchiveError::Acl::path: Vec<u8>
+pub ferrosys::ext::ArchiveError::Acl::source: crate::acl::AclError
+pub ferrosys::ext::ArchiveError::Bad::path: Vec<u8>
+pub ferrosys::ext::ArchiveError::Bad::reason: &'static str
+pub ferrosys::ext::ArchiveError::Io(std::io::Error)
+pub ferrosys::ext::ArchiveError::Malformed::reason: &'static str
+pub ferrosys::ext::ArchiveError::Unsupported::path: Vec<u8>
+pub ferrosys::ext::BlockRange::len: u64
+pub ferrosys::ext::BlockRange::start: u64
+pub ferrosys::ext::Category::Bitmap
+pub ferrosys::ext::Category::Directory
+pub ferrosys::ext::Category::ExtentTree
+pub ferrosys::ext::Category::GroupDescriptor
+pub ferrosys::ext::Category::Inode
+pub ferrosys::ext::Category::Journal
+pub ferrosys::ext::Category::Orphan
+pub ferrosys::ext::Category::Superblock
+pub ferrosys::ext::Category::Xattr
+pub ferrosys::ext::CsumScheme::Crc32c
+pub ferrosys::ext::CsumScheme::None
+pub ferrosys::ext::DirBlock::bytes: Vec<u8>
+pub ferrosys::ext::DirBlock::kind: DirBlockKind
+pub ferrosys::ext::DirBlockKind::Entries
+pub ferrosys::ext::DirBlockKind::Index
+pub ferrosys::ext::DirBlockKind::Index::count_offset: usize
+pub ferrosys::ext::DirBlockKind::Index::limit: usize
+pub ferrosys::ext::DirError::Encode(crate::ondisk::ParseError)
+pub ferrosys::ext::DirError::EntryTooLarge::block_size: usize
+pub ferrosys::ext::DirError::EntryTooLarge::need: usize
+pub ferrosys::ext::DirError::IndexTooLarge::blocks: usize
+pub ferrosys::ext::DirError::IndexTooLarge::capacity: usize
+pub ferrosys::ext::DirError::MissingDotEntries
+pub ferrosys::ext::DirHash::major: u32
+pub ferrosys::ext::DirHash::minor: u32
+pub ferrosys::ext::Entry::file_type: crate::ondisk::FileType
+pub ferrosys::ext::Entry::inode: u32
+pub ferrosys::ext::Entry::name: Vec<u8>
+pub ferrosys::ext::EntryKind::BlockDevice
+pub ferrosys::ext::EntryKind::BlockDevice::major: u32
+pub ferrosys::ext::EntryKind::BlockDevice::minor: u32
+pub ferrosys::ext::EntryKind::CharDevice
+pub ferrosys::ext::EntryKind::CharDevice::major: u32
+pub ferrosys::ext::EntryKind::CharDevice::minor: u32
+pub ferrosys::ext::EntryKind::Directory
+pub ferrosys::ext::EntryKind::Fifo
+pub ferrosys::ext::EntryKind::File(FileContent)
+pub ferrosys::ext::EntryKind::HardLink
+pub ferrosys::ext::EntryKind::HardLink::target: Vec<u8>
+pub ferrosys::ext::EntryKind::Socket
+pub ferrosys::ext::EntryKind::Symlink(Vec<u8>)
+pub ferrosys::ext::ErrorBehavior::Continue
+pub ferrosys::ext::ErrorBehavior::Panic
+pub ferrosys::ext::ErrorBehavior::RemountReadOnly
+pub ferrosys::ext::ExtentError::FileTooLarge::blocks: u64
+pub ferrosys::ext::ExtentError::Leaf(crate::ondisk::ParseError)
+pub ferrosys::ext::ExtentError::NodeBlockCount::got: usize
+pub ferrosys::ext::ExtentError::NodeBlockCount::need: usize
+pub ferrosys::ext::ExtentError::NodeTooSmall::bytes: usize
+pub ferrosys::ext::ExtentError::TooDeep::depth: u16
+pub ferrosys::ext::ExtentError::TooManyEntries::capacity: usize
+pub ferrosys::ext::ExtentError::TooManyEntries::entries: usize
+pub ferrosys::ext::ExtentNode::Index
+pub ferrosys::ext::ExtentNode::Index::depth: u16
+pub ferrosys::ext::ExtentNode::Index::entries: Vec<crate::ondisk::ExtentIdx>
+pub ferrosys::ext::ExtentNode::Leaves(Vec<crate::ondisk::ExtentLeaf>)
+pub ferrosys::ext::ExtentTree::nodes: Vec<ExtentNodeBlock>
+pub ferrosys::ext::ExtentTree::root: ExtentNode
+pub ferrosys::ext::FeatureError::BlockSize::block_size: u32
+pub ferrosys::ext::FeatureError::CsumSeedWithoutMetadataCsum
+pub ferrosys::ext::FeatureError::FiletypeRequired
+pub ferrosys::ext::FeatureError::FlexBgRequired
+pub ferrosys::ext::FeatureError::InodeSize::inode_size: u16
+pub ferrosys::ext::FeatureError::MetaBg
+pub ferrosys::ext::FeatureError::OrphanFileWithoutJournal
+pub ferrosys::ext::FeatureError::RequiresExtents::feature: &'static str
+pub ferrosys::ext::FeatureError::ResizeInodeRequiresLargeFile::block_size: u32
+pub ferrosys::ext::FeatureError::ResizeInodeRequiresLargeFile::size: u64
+pub ferrosys::ext::FeatureSet::block_size: u32
+pub ferrosys::ext::FeatureSet::compat: Compat
+pub ferrosys::ext::FeatureSet::incompat: Incompat
+pub ferrosys::ext::FeatureSet::inode_size: u16
+pub ferrosys::ext::FeatureSet::ro_compat: RoCompat
+pub ferrosys::ext::FileContent::Owned(Vec<u8>)
+pub ferrosys::ext::FileContent::Range(FileRange)
+pub ferrosys::ext::FormatError::Alloc(crate::alloc::AllocError)
+pub ferrosys::ext::FormatError::Dir(crate::dir::DirError)
+pub ferrosys::ext::FormatError::Extent(crate::extent::ExtentError)
+pub ferrosys::ext::FormatError::FormatTimeOutOfRange::secs: i64
+pub ferrosys::ext::FormatError::Geometry(crate::geometry::GeometryError)
+pub ferrosys::ext::FormatError::ImageTooLargeInMemory::bytes: u64
+pub ferrosys::ext::FormatError::Io(std::io::Error)
+pub ferrosys::ext::FormatError::JournalTooSmall::minimum: u32
+pub ferrosys::ext::FormatError::JournalTooSmall::requested: u32
+pub ferrosys::ext::FormatError::LargeFileWithoutFeature::size: u64
+pub ferrosys::ext::FormatError::LargeFileWithoutFeature::what: &'static str
+pub ferrosys::ext::FormatError::Model(crate::model::ModelError)
+pub ferrosys::ext::FormatError::OrphanInodeInUse::inode: u32
+pub ferrosys::ext::FormatError::Parse(crate::ondisk::ParseError)
+pub ferrosys::ext::FormatError::ResizeMapNeeds32BitBlocks::block: u64
+pub ferrosys::ext::FormatError::TooManyInodes::available: u32
+pub ferrosys::ext::FormatError::TooManyInodes::needed: u32
+pub ferrosys::ext::FormatOptions::errors: ErrorBehavior
+pub ferrosys::ext::FormatOptions::feature: crate::feature::FeatureSet
+pub ferrosys::ext::FormatOptions::fixed_time: Option<crate::ondisk::Timestamp>
+pub ferrosys::ext::FormatOptions::grow: crate::geometry::GrowReservation
+pub ferrosys::ext::FormatOptions::hash_seed: [u8; 16]
+pub ferrosys::ext::FormatOptions::hash_signedness: crate::hash::HashSignedness
+pub ferrosys::ext::FormatOptions::hash_version: crate::hash::HashVersion
+pub ferrosys::ext::FormatOptions::inodes: crate::geometry::InodeCount
+pub ferrosys::ext::FormatOptions::journal: crate::journal::JournalSize
+pub ferrosys::ext::FormatOptions::reserved: crate::geometry::ReservedRatio
+pub ferrosys::ext::FormatOptions::time: crate::ondisk::Timestamp
+pub ferrosys::ext::FormatOptions::uuid: [u8; 16]
+pub ferrosys::ext::FormatOptions::volume_name: [u8; 16]
+pub ferrosys::ext::FsModel::first_free_inode: u32
+pub ferrosys::ext::FsModel::inodes: std::collections::BTreeMap<u32, ModelInode>
+pub ferrosys::ext::GeometryError::BlockCountNeeds64Bit::blocks: u64
+pub ferrosys::ext::GeometryError::BlockCountNeeds64Bit::limit: u64
+pub ferrosys::ext::GeometryError::BlockCountTooLarge::blocks: u64
+pub ferrosys::ext::GeometryError::BlockCountTooLarge::limit: u64
+pub ferrosys::ext::GeometryError::Feature(crate::feature::FeatureError)
+pub ferrosys::ext::GeometryError::FinalGroupTooSmall::blocks: u64
+pub ferrosys::ext::GeometryError::FinalGroupTooSmall::overhead: u64
+pub ferrosys::ext::GeometryError::GrowTargetNeedsResizeInode
+pub ferrosys::ext::GeometryError::GrowTargetTooLarge::limit: u64
+pub ferrosys::ext::GeometryError::GrowTargetTooLarge::needed: u64
+pub ferrosys::ext::GeometryError::GrowTargetTooSmall::initial: u64
+pub ferrosys::ext::GeometryError::GrowTargetTooSmall::target: u64
+pub ferrosys::ext::GeometryError::InodesTooDense::inodes_per_group: u64
+pub ferrosys::ext::GeometryError::InodesTooDense::limit: u64
+pub ferrosys::ext::GeometryError::ReservationNeeds32BitBlocks::blocks: u64
+pub ferrosys::ext::GeometryError::ReservationNeeds32BitBlocks::limit: u64
+pub ferrosys::ext::GeometryError::TooManyGroups::blocks: u64
+pub ferrosys::ext::GeometryError::TooManyGroups::groups: u64
+pub ferrosys::ext::GeometryError::TooManyGroups::limit: u64
+pub ferrosys::ext::GeometryError::TooManyInodes::blocks: u64
+pub ferrosys::ext::GeometryError::TooManyInodes::inodes: u64
+pub ferrosys::ext::GeometryError::TooManyInodes::limit: u64
+pub ferrosys::ext::GeometryError::TooSmall::blocks: u64
+pub ferrosys::ext::GeometryError::TooSmall::overhead: u64
+pub ferrosys::ext::GroupLayout::block_bitmap: u64
+pub ferrosys::ext::GroupLayout::block_count: u32
+pub ferrosys::ext::GroupLayout::has_super: bool
+pub ferrosys::ext::GroupLayout::index: u32
+pub ferrosys::ext::GroupLayout::inode_bitmap: u64
+pub ferrosys::ext::GroupLayout::inode_table: u64
+pub ferrosys::ext::GroupLayout::start_block: u64
+pub ferrosys::ext::GrowReservation::Max
+pub ferrosys::ext::GrowReservation::None
+pub ferrosys::ext::GrowReservation::UpTo(u64)
+pub ferrosys::ext::HashSignedness::Signed
+pub ferrosys::ext::HashSignedness::Unsigned
+pub ferrosys::ext::HashVersion::HalfMd4
+pub ferrosys::ext::HashVersion::Legacy
+pub ferrosys::ext::HashVersion::Tea
+pub ferrosys::ext::HtreeDir::checksums: bool
+pub ferrosys::ext::HtreeDir::seed: [u8; 16]
+pub ferrosys::ext::HtreeDir::signedness: crate::hash::HashSignedness
+pub ferrosys::ext::HtreeDir::version: crate::hash::HashVersion
+pub ferrosys::ext::InodeCount::Auto
+pub ferrosys::ext::InodeCount::BytesPerInode(std::num::NonZeroU64)
+pub ferrosys::ext::InodeCount::Count(u32)
+pub ferrosys::ext::JournalParams::block_size: u32
+pub ferrosys::ext::JournalParams::journal_blocks: u32
+pub ferrosys::ext::JournalParams::uuid: [u8; 16]
+pub ferrosys::ext::JournalSize::Auto
+pub ferrosys::ext::JournalSize::Blocks(u32)
+pub ferrosys::ext::JournalSuperblock::block_size: u32
+pub ferrosys::ext::JournalSuperblock::first: u32
+pub ferrosys::ext::JournalSuperblock::max_len: u32
+pub ferrosys::ext::JournalSuperblock::nr_users: u32
+pub ferrosys::ext::JournalSuperblock::sequence: u32
+pub ferrosys::ext::JournalSuperblock::start: u32
+pub ferrosys::ext::JournalSuperblock::uuid: [u8; 16]
+pub ferrosys::ext::Layout::block_size: u32
+pub ferrosys::ext::Layout::blocks_per_group: u32
+pub ferrosys::ext::Layout::feature: crate::feature::FeatureSet
+pub ferrosys::ext::Layout::first_data_block: u32
+pub ferrosys::ext::Layout::flex_bg_size: u32
+pub ferrosys::ext::Layout::gdt_blocks: u32
+pub ferrosys::ext::Layout::group_count: u32
+pub ferrosys::ext::Layout::groups: Vec<GroupLayout>
+pub ferrosys::ext::Layout::inode_table_blocks: u32
+pub ferrosys::ext::Layout::inodes_per_group: u32
+pub ferrosys::ext::Layout::max_grow_blocks: u64
+pub ferrosys::ext::Layout::reserved_blocks: u64
+pub ferrosys::ext::Layout::reserved_gdt_blocks: u32
+pub ferrosys::ext::Layout::total_blocks: u64
+pub ferrosys::ext::Layout::total_inodes: u32
+pub ferrosys::ext::Limits::max_anomalies: usize
+pub ferrosys::ext::Limits::max_file_bytes: u64
+pub ferrosys::ext::Limits::max_walk_entries: usize
+pub ferrosys::ext::LinearDir::tail_len: usize
+pub ferrosys::ext::Location::block: Option<u64>
+pub ferrosys::ext::Location::group: Option<u32>
+pub ferrosys::ext::Location::inode: Option<u32>
+pub ferrosys::ext::Metadata::atime: crate::ondisk::Timestamp
+pub ferrosys::ext::Metadata::ctime: crate::ondisk::Timestamp
+pub ferrosys::ext::Metadata::gid: u32
+pub ferrosys::ext::Metadata::mode: u16
+pub ferrosys::ext::Metadata::mtime: crate::ondisk::Timestamp
+pub ferrosys::ext::Metadata::uid: u32
+pub ferrosys::ext::ModelConfig::block_size: u32
+pub ferrosys::ext::ModelConfig::default_time: crate::ondisk::Timestamp
+pub ferrosys::ext::ModelConfig::dir_nlink: bool
+pub ferrosys::ext::ModelConfig::ext_attr: bool
+pub ferrosys::ext::ModelConfig::first_user_inode: u32
+pub ferrosys::ext::ModelConfig::fixed_time: Option<crate::ondisk::Timestamp>
+pub ferrosys::ext::ModelConfig::inode_size: u16
+pub ferrosys::ext::ModelConfig::large_file: bool
+pub ferrosys::ext::ModelError::DeviceNumberTooLarge::major: u32
+pub ferrosys::ext::ModelError::DeviceNumberTooLarge::minor: u32
+pub ferrosys::ext::ModelError::DeviceNumberTooLarge::path: Vec<u8>
+pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow::limit: u16
+pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow::path: Vec<u8>
+pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow::subdirs: u64
+pub ferrosys::ext::ModelError::Duplicate::path: Vec<u8>
+pub ferrosys::ext::ModelError::EmptyPath
+pub ferrosys::ext::ModelError::EmptySymlinkTarget::path: Vec<u8>
+pub ferrosys::ext::ModelError::FileTooLargeWithoutFeature::limit: u64
+pub ferrosys::ext::ModelError::FileTooLargeWithoutFeature::path: Vec<u8>
+pub ferrosys::ext::ModelError::FileTooLargeWithoutFeature::size: u64
+pub ferrosys::ext::ModelError::FirstUserInodeReserved::floor: u32
+pub ferrosys::ext::ModelError::FirstUserInodeReserved::given: u32
+pub ferrosys::ext::ModelError::HardlinkCycle::path: Vec<u8>
+pub ferrosys::ext::ModelError::HardlinkCycle::target: Vec<u8>
+pub ferrosys::ext::ModelError::HardlinkTargetIsDirectory::path: Vec<u8>
+pub ferrosys::ext::ModelError::HardlinkTargetIsDirectory::target: Vec<u8>
+pub ferrosys::ext::ModelError::HardlinkTargetMissing::path: Vec<u8>
+pub ferrosys::ext::ModelError::HardlinkTargetMissing::target: Vec<u8>
+pub ferrosys::ext::ModelError::InvalidComponent::component: Vec<u8>
+pub ferrosys::ext::ModelError::InvalidComponent::path: Vec<u8>
+pub ferrosys::ext::ModelError::InvalidXattrName::name: Vec<u8>
+pub ferrosys::ext::ModelError::InvalidXattrName::path: Vec<u8>
+pub ferrosys::ext::ModelError::InvalidXattrName::reason: &'static str
+pub ferrosys::ext::ModelError::ParentMissing::path: Vec<u8>
+pub ferrosys::ext::ModelError::ParentNotDir::path: Vec<u8>
+pub ferrosys::ext::ModelError::ReservedPath::path: Vec<u8>
+pub ferrosys::ext::ModelError::RootNotDirectory::path: Vec<u8>
+pub ferrosys::ext::ModelError::SymlinkTargetHasNul::path: Vec<u8>
+pub ferrosys::ext::ModelError::SymlinkTargetTooLong::len: usize
+pub ferrosys::ext::ModelError::SymlinkTargetTooLong::path: Vec<u8>
+pub ferrosys::ext::ModelError::TimestampOutOfRange::nanos: u32
+pub ferrosys::ext::ModelError::TimestampOutOfRange::path: Vec<u8>
+pub ferrosys::ext::ModelError::TimestampOutOfRange::secs: i64
+pub ferrosys::ext::ModelError::TooManyLinks::path: Vec<u8>
+pub ferrosys::ext::ModelError::TooManyLinks::target: Vec<u8>
+pub ferrosys::ext::ModelError::XattrNameTooLong::path: Vec<u8>
+pub ferrosys::ext::ModelError::XattrsTooLarge::needed: usize
+pub ferrosys::ext::ModelError::XattrsTooLarge::path: Vec<u8>
+pub ferrosys::ext::ModelError::XattrsWithoutFeature::path: Vec<u8>
+pub ferrosys::ext::OpenOptions::base: u64
+pub ferrosys::ext::OpenOptions::csum_seed: Option<u32>
+pub ferrosys::ext::OpenOptions::limits: Limits
+pub ferrosys::ext::OpenOptions::policy: ReadPolicy
+pub ferrosys::ext::ParseError::BadMagic::expected: u32
+pub ferrosys::ext::ParseError::BadMagic::found: u32
+pub ferrosys::ext::ParseError::BadMagic::structure: &'static str
+pub ferrosys::ext::ParseError::InvalidField::field: &'static str
+pub ferrosys::ext::ParseError::InvalidField::structure: &'static str
+pub ferrosys::ext::ParseError::InvalidField::value: u64
+pub ferrosys::ext::ParseError::TooShort::got: usize
+pub ferrosys::ext::ParseError::TooShort::need: usize
+pub ferrosys::ext::ParseError::TooShort::structure: &'static str
+pub ferrosys::ext::PlanRequest::feature: crate::feature::FeatureSet
+pub ferrosys::ext::PlanRequest::grow: GrowReservation
+pub ferrosys::ext::PlanRequest::inodes: InodeCount
+pub ferrosys::ext::PlanRequest::reserved: ReservedRatio
+pub ferrosys::ext::PlanRequest::size_bytes: u64
+pub ferrosys::ext::Profile::Ext2
+pub ferrosys::ext::Profile::Ext3
+pub ferrosys::ext::Profile::Ext4
+pub ferrosys::ext::ReadError::BadDirectory
+pub ferrosys::ext::ReadError::BadExtentTree
+pub ferrosys::ext::ReadError::BadJournal
+pub ferrosys::ext::ReadError::BadOrphanFile
+pub ferrosys::ext::ReadError::ChecksumMismatch::computed: u32
+pub ferrosys::ext::ReadError::ChecksumMismatch::index: u64
+pub ferrosys::ext::ReadError::ChecksumMismatch::object: &'static str
+pub ferrosys::ext::ReadError::ChecksumMismatch::stored: u32
+pub ferrosys::ext::ReadError::ExtentFlagWithoutFeature::inode: u32
+pub ferrosys::ext::ReadError::IndexFlagWithoutFeature::inode: u32
+pub ferrosys::ext::ReadError::Io::kind: std::io::ErrorKind
+pub ferrosys::ext::ReadError::Io::message: String
+pub ferrosys::ext::ReadError::LargeFileWithoutFeature::inode: u32
+pub ferrosys::ext::ReadError::LargeFileWithoutFeature::size: u64
+pub ferrosys::ext::ReadError::MetadataOutsideGroup::block: u64
+pub ferrosys::ext::ReadError::MetadataOutsideGroup::group: u32
+pub ferrosys::ext::ReadError::MetadataOutsideGroup::what: &'static str
+pub ferrosys::ext::ReadError::NoSuchInode::inode: u32
+pub ferrosys::ext::ReadError::NotADirectory::path: Vec<u8>
+pub ferrosys::ext::ReadError::NotFound::path: Vec<u8>
+pub ferrosys::ext::ReadError::OutOfRange::index: u64
+pub ferrosys::ext::ReadError::OutOfRange::what: &'static str
+pub ferrosys::ext::ReadError::Parse(crate::ondisk::ParseError)
+pub ferrosys::ext::ReadError::SymlinkLoop::path: Vec<u8>
+pub ferrosys::ext::ReadError::UnsupportedIncompat::bits: u32
+pub ferrosys::ext::ReadError::WalkTooLarge::limit: usize
+pub ferrosys::ext::ReadError::XattrBlockWithoutFeature::block: u64
+pub ferrosys::ext::ReadError::XattrBlockWithoutFeature::inode: u32
+pub ferrosys::ext::ReadPolicy::Lenient
+pub ferrosys::ext::ReadPolicy::Strict
+pub ferrosys::ext::Severity::Conformance
+pub ferrosys::ext::Severity::Cosmetic
+pub ferrosys::ext::Severity::Integrity
+pub ferrosys::ext::Severity::Structural
+pub ferrosys::ext::SourceEntry::kind: EntryKind
+pub ferrosys::ext::SourceEntry::meta: Metadata
+pub ferrosys::ext::SourceEntry::path: Vec<u8>
+pub ferrosys::ext::SourceEntry::xattrs: Vec<crate::ondisk::Xattr>
+pub ferrosys::ext::WalkEntry::inode: crate::ondisk::Inode
+pub ferrosys::ext::WalkEntry::number: u32
+pub ferrosys::ext::WalkEntry::path: Vec<u8>
+pub ferrosys::ext::Xattr::name: Vec<u8>
+pub ferrosys::ext::Xattr::value: Vec<u8>
+pub ferrosys::ext::acl::AclEntry::perm: u16
+pub ferrosys::ext::acl::AclEntry::who: AclQualifier
+pub ferrosys::ext::acl::AclError::Duplicate::tag: &'static str
+pub ferrosys::ext::acl::AclError::InvalidPerm::perm: u16
+pub ferrosys::ext::acl::AclError::Malformed::reason: &'static str
+pub ferrosys::ext::acl::AclError::MaskRequired
+pub ferrosys::ext::acl::AclError::MissingRequired::tag: &'static str
+pub ferrosys::ext::acl::AclQualifier::Group(u32)
+pub ferrosys::ext::acl::AclQualifier::GroupObj
+pub ferrosys::ext::acl::AclQualifier::Mask
+pub ferrosys::ext::acl::AclQualifier::Other
+pub ferrosys::ext::acl::AclQualifier::User(u32)
+pub ferrosys::ext::acl::AclQualifier::UserObj
+pub ferrosys::ext::alloc::AllocError::OutOfSpace::available: u64
+pub ferrosys::ext::alloc::AllocError::OutOfSpace::requested: u64
+pub ferrosys::ext::archive::ArchiveError::Acl::path: Vec<u8>
+pub ferrosys::ext::archive::ArchiveError::Acl::source: crate::acl::AclError
+pub ferrosys::ext::archive::ArchiveError::Bad::path: Vec<u8>
+pub ferrosys::ext::archive::ArchiveError::Bad::reason: &'static str
+pub ferrosys::ext::archive::ArchiveError::Io(std::io::Error)
+pub ferrosys::ext::archive::ArchiveError::Malformed::reason: &'static str
+pub ferrosys::ext::archive::ArchiveError::Unsupported::path: Vec<u8>
+pub ferrosys::ext::csum::CsumScheme::Crc32c
+pub ferrosys::ext::csum::CsumScheme::None
+pub ferrosys::ext::dir::DirBlock::bytes: Vec<u8>
+pub ferrosys::ext::dir::DirBlock::kind: DirBlockKind
+pub ferrosys::ext::dir::DirBlockKind::Entries
+pub ferrosys::ext::dir::DirBlockKind::Index
+pub ferrosys::ext::dir::DirBlockKind::Index::count_offset: usize
+pub ferrosys::ext::dir::DirBlockKind::Index::limit: usize
+pub ferrosys::ext::dir::DirError::Encode(crate::ondisk::ParseError)
+pub ferrosys::ext::dir::DirError::EntryTooLarge::block_size: usize
+pub ferrosys::ext::dir::DirError::EntryTooLarge::need: usize
+pub ferrosys::ext::dir::DirError::IndexTooLarge::blocks: usize
+pub ferrosys::ext::dir::DirError::IndexTooLarge::capacity: usize
+pub ferrosys::ext::dir::DirError::MissingDotEntries
+pub ferrosys::ext::dir::HtreeDir::checksums: bool
+pub ferrosys::ext::dir::HtreeDir::seed: [u8; 16]
+pub ferrosys::ext::dir::HtreeDir::signedness: crate::hash::HashSignedness
+pub ferrosys::ext::dir::HtreeDir::version: crate::hash::HashVersion
+pub ferrosys::ext::dir::LinearDir::tail_len: usize
+pub ferrosys::ext::extent::ExtentError::FileTooLarge::blocks: u64
+pub ferrosys::ext::extent::ExtentError::Leaf(crate::ondisk::ParseError)
+pub ferrosys::ext::extent::ExtentError::NodeBlockCount::got: usize
+pub ferrosys::ext::extent::ExtentError::NodeBlockCount::need: usize
+pub ferrosys::ext::extent::ExtentError::NodeTooSmall::bytes: usize
+pub ferrosys::ext::extent::ExtentError::TooDeep::depth: u16
+pub ferrosys::ext::extent::ExtentError::TooManyEntries::capacity: usize
+pub ferrosys::ext::extent::ExtentError::TooManyEntries::entries: usize
+pub ferrosys::ext::extent::ExtentNode::Index
+pub ferrosys::ext::extent::ExtentNode::Index::depth: u16
+pub ferrosys::ext::extent::ExtentNode::Index::entries: Vec<crate::ondisk::ExtentIdx>
+pub ferrosys::ext::extent::ExtentNode::Leaves(Vec<crate::ondisk::ExtentLeaf>)
+pub ferrosys::ext::extent::ExtentNodeBlock::block: u64
+pub ferrosys::ext::extent::ExtentNodeBlock::node: ExtentNode
+pub ferrosys::ext::extent::ExtentTree::nodes: Vec<ExtentNodeBlock>
+pub ferrosys::ext::extent::ExtentTree::root: ExtentNode
+pub ferrosys::ext::extent::TreeShape::depth: u16
+pub ferrosys::ext::extent::TreeShape::level_nodes: Vec<usize>
+pub ferrosys::ext::extent::TreeShape::node_blocks: usize
+pub ferrosys::ext::feature::FeatureError::BlockSize::block_size: u32
+pub ferrosys::ext::feature::FeatureError::CsumSeedWithoutMetadataCsum
+pub ferrosys::ext::feature::FeatureError::FiletypeRequired
+pub ferrosys::ext::feature::FeatureError::FlexBgRequired
+pub ferrosys::ext::feature::FeatureError::InodeSize::inode_size: u16
+pub ferrosys::ext::feature::FeatureError::MetaBg
+pub ferrosys::ext::feature::FeatureError::OrphanFileWithoutJournal
+pub ferrosys::ext::feature::FeatureError::RequiresExtents::feature: &'static str
+pub ferrosys::ext::feature::FeatureError::ResizeInodeRequiresLargeFile::block_size: u32
+pub ferrosys::ext::feature::FeatureError::ResizeInodeRequiresLargeFile::size: u64
+pub ferrosys::ext::feature::FeatureSet::block_size: u32
+pub ferrosys::ext::feature::FeatureSet::compat: Compat
+pub ferrosys::ext::feature::FeatureSet::incompat: Incompat
+pub ferrosys::ext::feature::FeatureSet::inode_size: u16
+pub ferrosys::ext::feature::FeatureSet::ro_compat: RoCompat
+pub ferrosys::ext::feature::Profile::Ext2
+pub ferrosys::ext::feature::Profile::Ext3
+pub ferrosys::ext::feature::Profile::Ext4
+pub ferrosys::ext::geometry::BlockRange::len: u64
+pub ferrosys::ext::geometry::BlockRange::start: u64
+pub ferrosys::ext::geometry::GeometryError::BlockCountNeeds64Bit::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::BlockCountNeeds64Bit::limit: u64
+pub ferrosys::ext::geometry::GeometryError::BlockCountTooLarge::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::BlockCountTooLarge::limit: u64
+pub ferrosys::ext::geometry::GeometryError::Feature(crate::feature::FeatureError)
+pub ferrosys::ext::geometry::GeometryError::FinalGroupTooSmall::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::FinalGroupTooSmall::overhead: u64
+pub ferrosys::ext::geometry::GeometryError::GrowTargetNeedsResizeInode
+pub ferrosys::ext::geometry::GeometryError::GrowTargetTooLarge::limit: u64
+pub ferrosys::ext::geometry::GeometryError::GrowTargetTooLarge::needed: u64
+pub ferrosys::ext::geometry::GeometryError::GrowTargetTooSmall::initial: u64
+pub ferrosys::ext::geometry::GeometryError::GrowTargetTooSmall::target: u64
+pub ferrosys::ext::geometry::GeometryError::InodesTooDense::inodes_per_group: u64
+pub ferrosys::ext::geometry::GeometryError::InodesTooDense::limit: u64
+pub ferrosys::ext::geometry::GeometryError::ReservationNeeds32BitBlocks::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::ReservationNeeds32BitBlocks::limit: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyGroups::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyGroups::groups: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyGroups::limit: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyInodes::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyInodes::inodes: u64
+pub ferrosys::ext::geometry::GeometryError::TooManyInodes::limit: u64
+pub ferrosys::ext::geometry::GeometryError::TooSmall::blocks: u64
+pub ferrosys::ext::geometry::GeometryError::TooSmall::overhead: u64
+pub ferrosys::ext::geometry::GroupLayout::block_bitmap: u64
+pub ferrosys::ext::geometry::GroupLayout::block_count: u32
+pub ferrosys::ext::geometry::GroupLayout::has_super: bool
+pub ferrosys::ext::geometry::GroupLayout::index: u32
+pub ferrosys::ext::geometry::GroupLayout::inode_bitmap: u64
+pub ferrosys::ext::geometry::GroupLayout::inode_table: u64
+pub ferrosys::ext::geometry::GroupLayout::start_block: u64
+pub ferrosys::ext::geometry::GrowReservation::Max
+pub ferrosys::ext::geometry::GrowReservation::None
+pub ferrosys::ext::geometry::GrowReservation::UpTo(u64)
+pub ferrosys::ext::geometry::InodeCount::Auto
+pub ferrosys::ext::geometry::InodeCount::BytesPerInode(std::num::NonZeroU64)
+pub ferrosys::ext::geometry::InodeCount::Count(u32)
+pub ferrosys::ext::geometry::Layout::block_size: u32
+pub ferrosys::ext::geometry::Layout::blocks_per_group: u32
+pub ferrosys::ext::geometry::Layout::feature: crate::feature::FeatureSet
+pub ferrosys::ext::geometry::Layout::first_data_block: u32
+pub ferrosys::ext::geometry::Layout::flex_bg_size: u32
+pub ferrosys::ext::geometry::Layout::gdt_blocks: u32
+pub ferrosys::ext::geometry::Layout::group_count: u32
+pub ferrosys::ext::geometry::Layout::groups: Vec<GroupLayout>
+pub ferrosys::ext::geometry::Layout::inode_table_blocks: u32
+pub ferrosys::ext::geometry::Layout::inodes_per_group: u32
+pub ferrosys::ext::geometry::Layout::max_grow_blocks: u64
+pub ferrosys::ext::geometry::Layout::reserved_blocks: u64
+pub ferrosys::ext::geometry::Layout::reserved_gdt_blocks: u32
+pub ferrosys::ext::geometry::Layout::total_blocks: u64
+pub ferrosys::ext::geometry::Layout::total_inodes: u32
+pub ferrosys::ext::geometry::PlanRequest::feature: crate::feature::FeatureSet
+pub ferrosys::ext::geometry::PlanRequest::grow: GrowReservation
+pub ferrosys::ext::geometry::PlanRequest::inodes: InodeCount
+pub ferrosys::ext::geometry::PlanRequest::reserved: ReservedRatio
+pub ferrosys::ext::geometry::PlanRequest::size_bytes: u64
+pub ferrosys::ext::hash::DirHash::major: u32
+pub ferrosys::ext::hash::DirHash::minor: u32
+pub ferrosys::ext::hash::HashSignedness::Signed
+pub ferrosys::ext::hash::HashSignedness::Unsigned
+pub ferrosys::ext::hash::HashVersion::HalfMd4
+pub ferrosys::ext::hash::HashVersion::Legacy
+pub ferrosys::ext::hash::HashVersion::Tea
+pub ferrosys::ext::journal::JournalParams::block_size: u32
+pub ferrosys::ext::journal::JournalParams::journal_blocks: u32
+pub ferrosys::ext::journal::JournalParams::uuid: [u8; 16]
+pub ferrosys::ext::journal::JournalSize::Auto
+pub ferrosys::ext::journal::JournalSize::Blocks(u32)
+pub ferrosys::ext::journal::JournalSuperblock::block_size: u32
+pub ferrosys::ext::journal::JournalSuperblock::first: u32
+pub ferrosys::ext::journal::JournalSuperblock::max_len: u32
+pub ferrosys::ext::journal::JournalSuperblock::nr_users: u32
+pub ferrosys::ext::journal::JournalSuperblock::sequence: u32
+pub ferrosys::ext::journal::JournalSuperblock::start: u32
+pub ferrosys::ext::journal::JournalSuperblock::uuid: [u8; 16]
+pub ferrosys::ext::materialize::ErrorBehavior::Continue
+pub ferrosys::ext::materialize::ErrorBehavior::Panic
+pub ferrosys::ext::materialize::ErrorBehavior::RemountReadOnly
+pub ferrosys::ext::materialize::FormatError::Alloc(crate::alloc::AllocError)
+pub ferrosys::ext::materialize::FormatError::Dir(crate::dir::DirError)
+pub ferrosys::ext::materialize::FormatError::Extent(crate::extent::ExtentError)
+pub ferrosys::ext::materialize::FormatError::FormatTimeOutOfRange::secs: i64
+pub ferrosys::ext::materialize::FormatError::Geometry(crate::geometry::GeometryError)
+pub ferrosys::ext::materialize::FormatError::ImageTooLargeInMemory::bytes: u64
+pub ferrosys::ext::materialize::FormatError::Io(std::io::Error)
+pub ferrosys::ext::materialize::FormatError::JournalTooSmall::minimum: u32
+pub ferrosys::ext::materialize::FormatError::JournalTooSmall::requested: u32
+pub ferrosys::ext::materialize::FormatError::LargeFileWithoutFeature::size: u64
+pub ferrosys::ext::materialize::FormatError::LargeFileWithoutFeature::what: &'static str
+pub ferrosys::ext::materialize::FormatError::Model(crate::model::ModelError)
+pub ferrosys::ext::materialize::FormatError::OrphanInodeInUse::inode: u32
+pub ferrosys::ext::materialize::FormatError::Parse(crate::ondisk::ParseError)
+pub ferrosys::ext::materialize::FormatError::ResizeMapNeeds32BitBlocks::block: u64
+pub ferrosys::ext::materialize::FormatError::TooManyInodes::available: u32
+pub ferrosys::ext::materialize::FormatError::TooManyInodes::needed: u32
+pub ferrosys::ext::materialize::FormatOptions::errors: ErrorBehavior
+pub ferrosys::ext::materialize::FormatOptions::feature: crate::feature::FeatureSet
+pub ferrosys::ext::materialize::FormatOptions::fixed_time: Option<crate::ondisk::Timestamp>
+pub ferrosys::ext::materialize::FormatOptions::grow: crate::geometry::GrowReservation
+pub ferrosys::ext::materialize::FormatOptions::hash_seed: [u8; 16]
+pub ferrosys::ext::materialize::FormatOptions::hash_signedness: crate::hash::HashSignedness
+pub ferrosys::ext::materialize::FormatOptions::hash_version: crate::hash::HashVersion
+pub ferrosys::ext::materialize::FormatOptions::inodes: crate::geometry::InodeCount
+pub ferrosys::ext::materialize::FormatOptions::journal: crate::journal::JournalSize
+pub ferrosys::ext::materialize::FormatOptions::reserved: crate::geometry::ReservedRatio
+pub ferrosys::ext::materialize::FormatOptions::time: crate::ondisk::Timestamp
+pub ferrosys::ext::materialize::FormatOptions::uuid: [u8; 16]
+pub ferrosys::ext::materialize::FormatOptions::volume_name: [u8; 16]
+pub ferrosys::ext::model::Content::Device
+pub ferrosys::ext::model::Content::Device::major: u32
+pub ferrosys::ext::model::Content::Device::minor: u32
+pub ferrosys::ext::model::Content::Directory(Vec<DirChild>)
+pub ferrosys::ext::model::Content::FastSymlink(Vec<u8>)
+pub ferrosys::ext::model::Content::File(crate::source::FileContent)
+pub ferrosys::ext::model::Content::SlowSymlink(Vec<u8>)
+pub ferrosys::ext::model::Content::Special
+pub ferrosys::ext::model::DirChild::file_type: crate::ondisk::FileType
+pub ferrosys::ext::model::DirChild::inode: u32
+pub ferrosys::ext::model::DirChild::name: Vec<u8>
+pub ferrosys::ext::model::FsModel::first_free_inode: u32
+pub ferrosys::ext::model::FsModel::inodes: std::collections::BTreeMap<u32, ModelInode>
+pub ferrosys::ext::model::ModelConfig::block_size: u32
+pub ferrosys::ext::model::ModelConfig::default_time: crate::ondisk::Timestamp
+pub ferrosys::ext::model::ModelConfig::dir_nlink: bool
+pub ferrosys::ext::model::ModelConfig::ext_attr: bool
+pub ferrosys::ext::model::ModelConfig::first_user_inode: u32
+pub ferrosys::ext::model::ModelConfig::fixed_time: Option<crate::ondisk::Timestamp>
+pub ferrosys::ext::model::ModelConfig::inode_size: u16
+pub ferrosys::ext::model::ModelConfig::large_file: bool
+pub ferrosys::ext::model::ModelError::DeviceNumberTooLarge::major: u32
+pub ferrosys::ext::model::ModelError::DeviceNumberTooLarge::minor: u32
+pub ferrosys::ext::model::ModelError::DeviceNumberTooLarge::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::DirectoryLinkCountOverflow::limit: u16
+pub ferrosys::ext::model::ModelError::DirectoryLinkCountOverflow::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::DirectoryLinkCountOverflow::subdirs: u64
+pub ferrosys::ext::model::ModelError::Duplicate::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::EmptyPath
+pub ferrosys::ext::model::ModelError::EmptySymlinkTarget::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::FileTooLargeWithoutFeature::limit: u64
+pub ferrosys::ext::model::ModelError::FileTooLargeWithoutFeature::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::FileTooLargeWithoutFeature::size: u64
+pub ferrosys::ext::model::ModelError::FirstUserInodeReserved::floor: u32
+pub ferrosys::ext::model::ModelError::FirstUserInodeReserved::given: u32
+pub ferrosys::ext::model::ModelError::HardlinkCycle::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::HardlinkCycle::target: Vec<u8>
+pub ferrosys::ext::model::ModelError::HardlinkTargetIsDirectory::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::HardlinkTargetIsDirectory::target: Vec<u8>
+pub ferrosys::ext::model::ModelError::HardlinkTargetMissing::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::HardlinkTargetMissing::target: Vec<u8>
+pub ferrosys::ext::model::ModelError::InvalidComponent::component: Vec<u8>
+pub ferrosys::ext::model::ModelError::InvalidComponent::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::InvalidXattrName::name: Vec<u8>
+pub ferrosys::ext::model::ModelError::InvalidXattrName::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::InvalidXattrName::reason: &'static str
+pub ferrosys::ext::model::ModelError::ParentMissing::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::ParentNotDir::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::ReservedPath::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::RootNotDirectory::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::SymlinkTargetHasNul::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::SymlinkTargetTooLong::len: usize
+pub ferrosys::ext::model::ModelError::SymlinkTargetTooLong::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::TimestampOutOfRange::nanos: u32
+pub ferrosys::ext::model::ModelError::TimestampOutOfRange::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::TimestampOutOfRange::secs: i64
+pub ferrosys::ext::model::ModelError::TooManyLinks::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::TooManyLinks::target: Vec<u8>
+pub ferrosys::ext::model::ModelError::XattrNameTooLong::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::XattrsTooLarge::needed: usize
+pub ferrosys::ext::model::ModelError::XattrsTooLarge::path: Vec<u8>
+pub ferrosys::ext::model::ModelError::XattrsWithoutFeature::path: Vec<u8>
+pub ferrosys::ext::model::ModelInode::atime: crate::ondisk::Timestamp
+pub ferrosys::ext::model::ModelInode::content: Content
+pub ferrosys::ext::model::ModelInode::crtime: crate::ondisk::Timestamp
+pub ferrosys::ext::model::ModelInode::ctime: crate::ondisk::Timestamp
+pub ferrosys::ext::model::ModelInode::gid: u32
+pub ferrosys::ext::model::ModelInode::links_count: u16
+pub ferrosys::ext::model::ModelInode::mode: u16
+pub ferrosys::ext::model::ModelInode::mtime: crate::ondisk::Timestamp
+pub ferrosys::ext::model::ModelInode::number: u32
+pub ferrosys::ext::model::ModelInode::uid: u32
+pub ferrosys::ext::model::ModelInode::xattrs: Vec<crate::ondisk::Xattr>
+pub ferrosys::ext::ondisk::DirEntry::file_type: FileType
+pub ferrosys::ext::ondisk::DirEntry::inode: u32
+pub ferrosys::ext::ondisk::DirEntry::name: Vec<u8>
+pub ferrosys::ext::ondisk::DxEntry::block: u32
+pub ferrosys::ext::ondisk::DxEntry::hash: u32
+pub ferrosys::ext::ondisk::ExtentHeader::depth: u16
+pub ferrosys::ext::ondisk::ExtentHeader::entries: u16
+pub ferrosys::ext::ondisk::ExtentHeader::generation: u32
+pub ferrosys::ext::ondisk::ExtentHeader::max: u16
+pub ferrosys::ext::ondisk::ExtentIdx::block: u32
+pub ferrosys::ext::ondisk::ExtentIdx::leaf: u64
+pub ferrosys::ext::ondisk::ExtentLeaf::block: u32
+pub ferrosys::ext::ondisk::ExtentLeaf::initialized: bool
+pub ferrosys::ext::ondisk::ExtentLeaf::len: u16
+pub ferrosys::ext::ondisk::ExtentLeaf::start: u64
+pub ferrosys::ext::ondisk::FileType::BlockDev
+pub ferrosys::ext::ondisk::FileType::CharDev
+pub ferrosys::ext::ondisk::FileType::Dir
+pub ferrosys::ext::ondisk::FileType::Fifo
+pub ferrosys::ext::ondisk::FileType::RegFile
+pub ferrosys::ext::ondisk::FileType::Socket
+pub ferrosys::ext::ondisk::FileType::Symlink
+pub ferrosys::ext::ondisk::FileType::Unknown
+pub ferrosys::ext::ondisk::GroupDescriptor::block_bitmap: u64
+pub ferrosys::ext::ondisk::GroupDescriptor::block_bitmap_csum: u32
+pub ferrosys::ext::ondisk::GroupDescriptor::checksum: u16
+pub ferrosys::ext::ondisk::GroupDescriptor::flags: u16
+pub ferrosys::ext::ondisk::GroupDescriptor::free_blocks_count: u32
+pub ferrosys::ext::ondisk::GroupDescriptor::free_inodes_count: u32
+pub ferrosys::ext::ondisk::GroupDescriptor::inode_bitmap: u64
+pub ferrosys::ext::ondisk::GroupDescriptor::inode_bitmap_csum: u32
+pub ferrosys::ext::ondisk::GroupDescriptor::inode_table: u64
+pub ferrosys::ext::ondisk::GroupDescriptor::itable_unused: u32
+pub ferrosys::ext::ondisk::GroupDescriptor::used_dirs_count: u32
+pub ferrosys::ext::ondisk::Inode::atime: Timestamp
+pub ferrosys::ext::ondisk::Inode::block: [u8; 60]
+pub ferrosys::ext::ondisk::Inode::blocks: u64
+pub ferrosys::ext::ondisk::Inode::checksum: u32
+pub ferrosys::ext::ondisk::Inode::crtime: Timestamp
+pub ferrosys::ext::ondisk::Inode::ctime: Timestamp
+pub ferrosys::ext::ondisk::Inode::dtime: u32
+pub ferrosys::ext::ondisk::Inode::extra_isize: u16
+pub ferrosys::ext::ondisk::Inode::file_acl: u64
+pub ferrosys::ext::ondisk::Inode::flags: InodeFlags
+pub ferrosys::ext::ondisk::Inode::generation: u32
+pub ferrosys::ext::ondisk::Inode::gid: u32
+pub ferrosys::ext::ondisk::Inode::inline_xattr: Vec<u8>
+pub ferrosys::ext::ondisk::Inode::links_count: u16
+pub ferrosys::ext::ondisk::Inode::mode: u16
+pub ferrosys::ext::ondisk::Inode::mtime: Timestamp
+pub ferrosys::ext::ondisk::Inode::size: u64
+pub ferrosys::ext::ondisk::Inode::uid: u32
+pub ferrosys::ext::ondisk::ParseError::BadMagic::expected: u32
+pub ferrosys::ext::ondisk::ParseError::BadMagic::found: u32
+pub ferrosys::ext::ondisk::ParseError::BadMagic::structure: &'static str
+pub ferrosys::ext::ondisk::ParseError::InvalidField::field: &'static str
+pub ferrosys::ext::ondisk::ParseError::InvalidField::structure: &'static str
+pub ferrosys::ext::ondisk::ParseError::InvalidField::value: u64
+pub ferrosys::ext::ondisk::ParseError::TooShort::got: usize
+pub ferrosys::ext::ondisk::ParseError::TooShort::need: usize
+pub ferrosys::ext::ondisk::ParseError::TooShort::structure: &'static str
+pub ferrosys::ext::ondisk::SuperBlock::block_group_nr: u16
+pub ferrosys::ext::ondisk::SuperBlock::blocks_count: u64
+pub ferrosys::ext::ondisk::SuperBlock::blocks_per_group: u32
+pub ferrosys::ext::ondisk::SuperBlock::checkinterval: u32
+pub ferrosys::ext::ondisk::SuperBlock::checksum: u32
+pub ferrosys::ext::ondisk::SuperBlock::checksum_seed: u32
+pub ferrosys::ext::ondisk::SuperBlock::checksum_type: u8
+pub ferrosys::ext::ondisk::SuperBlock::clusters_per_group: u32
+pub ferrosys::ext::ondisk::SuperBlock::creator_os: u32
+pub ferrosys::ext::ondisk::SuperBlock::def_hash_version: u8
+pub ferrosys::ext::ondisk::SuperBlock::def_resgid: u16
+pub ferrosys::ext::ondisk::SuperBlock::def_resuid: u16
+pub ferrosys::ext::ondisk::SuperBlock::default_mount_opts: u32
+pub ferrosys::ext::ondisk::SuperBlock::desc_size: u16
+pub ferrosys::ext::ondisk::SuperBlock::errors: u16
+pub ferrosys::ext::ondisk::SuperBlock::feature_compat: u32
+pub ferrosys::ext::ondisk::SuperBlock::feature_incompat: u32
+pub ferrosys::ext::ondisk::SuperBlock::feature_ro_compat: u32
+pub ferrosys::ext::ondisk::SuperBlock::first_data_block: u32
+pub ferrosys::ext::ondisk::SuperBlock::first_ino: u32
+pub ferrosys::ext::ondisk::SuperBlock::first_meta_bg: u32
+pub ferrosys::ext::ondisk::SuperBlock::flags: u32
+pub ferrosys::ext::ondisk::SuperBlock::free_blocks_count: u64
+pub ferrosys::ext::ondisk::SuperBlock::free_inodes_count: u32
+pub ferrosys::ext::ondisk::SuperBlock::hash_seed: [u8; 16]
+pub ferrosys::ext::ondisk::SuperBlock::inode_size: u16
+pub ferrosys::ext::ondisk::SuperBlock::inodes_count: u32
+pub ferrosys::ext::ondisk::SuperBlock::inodes_per_group: u32
+pub ferrosys::ext::ondisk::SuperBlock::jnl_backup_type: u8
+pub ferrosys::ext::ondisk::SuperBlock::jnl_blocks: [u32; 17]
+pub ferrosys::ext::ondisk::SuperBlock::journal_inum: u32
+pub ferrosys::ext::ondisk::SuperBlock::kbytes_written: u64
+pub ferrosys::ext::ondisk::SuperBlock::last_mounted: [u8; 64]
+pub ferrosys::ext::ondisk::SuperBlock::lastcheck: u32
+pub ferrosys::ext::ondisk::SuperBlock::log_block_size: u32
+pub ferrosys::ext::ondisk::SuperBlock::log_cluster_size: u32
+pub ferrosys::ext::ondisk::SuperBlock::log_groups_per_flex: u8
+pub ferrosys::ext::ondisk::SuperBlock::magic: u16
+pub ferrosys::ext::ondisk::SuperBlock::max_mnt_count: u16
+pub ferrosys::ext::ondisk::SuperBlock::min_extra_isize: u16
+pub ferrosys::ext::ondisk::SuperBlock::minor_rev_level: u16
+pub ferrosys::ext::ondisk::SuperBlock::mkfs_time: u32
+pub ferrosys::ext::ondisk::SuperBlock::mnt_count: u16
+pub ferrosys::ext::ondisk::SuperBlock::mtime: u32
+pub ferrosys::ext::ondisk::SuperBlock::orphan_file_inum: u32
+pub ferrosys::ext::ondisk::SuperBlock::overhead_clusters: u32
+pub ferrosys::ext::ondisk::SuperBlock::r_blocks_count: u64
+pub ferrosys::ext::ondisk::SuperBlock::reserved_gdt_blocks: u16
+pub ferrosys::ext::ondisk::SuperBlock::rev_level: u32
+pub ferrosys::ext::ondisk::SuperBlock::state: u16
+pub ferrosys::ext::ondisk::SuperBlock::uuid: [u8; 16]
+pub ferrosys::ext::ondisk::SuperBlock::volume_name: [u8; 16]
+pub ferrosys::ext::ondisk::SuperBlock::want_extra_isize: u16
+pub ferrosys::ext::ondisk::SuperBlock::wtime: u32
+pub ferrosys::ext::ondisk::Timestamp::nanos: u32
+pub ferrosys::ext::ondisk::Timestamp::secs: i64
+pub ferrosys::ext::ondisk::Xattr::name: Vec<u8>
+pub ferrosys::ext::ondisk::Xattr::value: Vec<u8>
+pub ferrosys::ext::read::Anomaly::category: Category
+pub ferrosys::ext::read::Anomaly::detail: String
+pub ferrosys::ext::read::Anomaly::location: Location
+pub ferrosys::ext::read::Anomaly::severity: Severity
+pub ferrosys::ext::read::Category::Bitmap
+pub ferrosys::ext::read::Category::Directory
+pub ferrosys::ext::read::Category::ExtentTree
+pub ferrosys::ext::read::Category::GroupDescriptor
+pub ferrosys::ext::read::Category::Inode
+pub ferrosys::ext::read::Category::Journal
+pub ferrosys::ext::read::Category::Orphan
+pub ferrosys::ext::read::Category::Superblock
+pub ferrosys::ext::read::Category::Xattr
+pub ferrosys::ext::read::Entry::file_type: crate::ondisk::FileType
+pub ferrosys::ext::read::Entry::inode: u32
+pub ferrosys::ext::read::Entry::name: Vec<u8>
+pub ferrosys::ext::read::Limits::max_anomalies: usize
+pub ferrosys::ext::read::Limits::max_file_bytes: u64
+pub ferrosys::ext::read::Limits::max_walk_entries: usize
+pub ferrosys::ext::read::Location::block: Option<u64>
+pub ferrosys::ext::read::Location::group: Option<u32>
+pub ferrosys::ext::read::Location::inode: Option<u32>
+pub ferrosys::ext::read::OpenOptions::base: u64
+pub ferrosys::ext::read::OpenOptions::csum_seed: Option<u32>
+pub ferrosys::ext::read::OpenOptions::limits: Limits
+pub ferrosys::ext::read::OpenOptions::policy: ReadPolicy
+pub ferrosys::ext::read::ReadError::BadDirectory
+pub ferrosys::ext::read::ReadError::BadExtentTree
+pub ferrosys::ext::read::ReadError::BadJournal
+pub ferrosys::ext::read::ReadError::BadOrphanFile
+pub ferrosys::ext::read::ReadError::ChecksumMismatch::computed: u32
+pub ferrosys::ext::read::ReadError::ChecksumMismatch::index: u64
+pub ferrosys::ext::read::ReadError::ChecksumMismatch::object: &'static str
+pub ferrosys::ext::read::ReadError::ChecksumMismatch::stored: u32
+pub ferrosys::ext::read::ReadError::ExtentFlagWithoutFeature::inode: u32
+pub ferrosys::ext::read::ReadError::IndexFlagWithoutFeature::inode: u32
+pub ferrosys::ext::read::ReadError::Io::kind: std::io::ErrorKind
+pub ferrosys::ext::read::ReadError::Io::message: String
+pub ferrosys::ext::read::ReadError::LargeFileWithoutFeature::inode: u32
+pub ferrosys::ext::read::ReadError::LargeFileWithoutFeature::size: u64
+pub ferrosys::ext::read::ReadError::MetadataOutsideGroup::block: u64
+pub ferrosys::ext::read::ReadError::MetadataOutsideGroup::group: u32
+pub ferrosys::ext::read::ReadError::MetadataOutsideGroup::what: &'static str
+pub ferrosys::ext::read::ReadError::NoSuchInode::inode: u32
+pub ferrosys::ext::read::ReadError::NotADirectory::path: Vec<u8>
+pub ferrosys::ext::read::ReadError::NotFound::path: Vec<u8>
+pub ferrosys::ext::read::ReadError::OutOfRange::index: u64
+pub ferrosys::ext::read::ReadError::OutOfRange::what: &'static str
+pub ferrosys::ext::read::ReadError::Parse(crate::ondisk::ParseError)
+pub ferrosys::ext::read::ReadError::SymlinkLoop::path: Vec<u8>
+pub ferrosys::ext::read::ReadError::UnsupportedIncompat::bits: u32
+pub ferrosys::ext::read::ReadError::WalkTooLarge::limit: usize
+pub ferrosys::ext::read::ReadError::XattrBlockWithoutFeature::block: u64
+pub ferrosys::ext::read::ReadError::XattrBlockWithoutFeature::inode: u32
+pub ferrosys::ext::read::ReadPolicy::Lenient
+pub ferrosys::ext::read::ReadPolicy::Strict
+pub ferrosys::ext::read::Severity::Conformance
+pub ferrosys::ext::read::Severity::Cosmetic
+pub ferrosys::ext::read::Severity::Integrity
+pub ferrosys::ext::read::Severity::Structural
+pub ferrosys::ext::read::WalkEntry::inode: crate::ondisk::Inode
+pub ferrosys::ext::read::WalkEntry::number: u32
+pub ferrosys::ext::read::WalkEntry::path: Vec<u8>
+pub ferrosys::ext::source::EntryKind::BlockDevice
+pub ferrosys::ext::source::EntryKind::BlockDevice::major: u32
+pub ferrosys::ext::source::EntryKind::BlockDevice::minor: u32
+pub ferrosys::ext::source::EntryKind::CharDevice
+pub ferrosys::ext::source::EntryKind::CharDevice::major: u32
+pub ferrosys::ext::source::EntryKind::CharDevice::minor: u32
+pub ferrosys::ext::source::EntryKind::Directory
+pub ferrosys::ext::source::EntryKind::Fifo
+pub ferrosys::ext::source::EntryKind::File(FileContent)
+pub ferrosys::ext::source::EntryKind::HardLink
+pub ferrosys::ext::source::EntryKind::HardLink::target: Vec<u8>
+pub ferrosys::ext::source::EntryKind::Socket
+pub ferrosys::ext::source::EntryKind::Symlink(Vec<u8>)
+pub ferrosys::ext::source::FileContent::Owned(Vec<u8>)
+pub ferrosys::ext::source::FileContent::Range(FileRange)
+pub ferrosys::ext::source::Metadata::atime: crate::ondisk::Timestamp
+pub ferrosys::ext::source::Metadata::ctime: crate::ondisk::Timestamp
+pub ferrosys::ext::source::Metadata::gid: u32
+pub ferrosys::ext::source::Metadata::mode: u16
+pub ferrosys::ext::source::Metadata::mtime: crate::ondisk::Timestamp
+pub ferrosys::ext::source::Metadata::uid: u32
+pub ferrosys::ext::source::SourceEntry::kind: EntryKind
+pub ferrosys::ext::source::SourceEntry::meta: Metadata
+pub ferrosys::ext::source::SourceEntry::path: Vec<u8>
+pub ferrosys::ext::source::SourceEntry::xattrs: Vec<crate::ondisk::Xattr>
+pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
+pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
+pub fn ferrosys::ext::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::ext::Acl::decode_xattr_v2(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::ext::Acl::encode(&self) -> Vec<u8>
+pub fn ferrosys::ext::Acl::encode_xattr_v2(&self) -> Vec<u8>
+pub fn ferrosys::ext::Acl::entries(&self) -> &[AclEntry]
+pub fn ferrosys::ext::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
+pub fn ferrosys::ext::Allocator::allocate(&mut self, count: u64) -> Result<Vec<BlockRange>, AllocError>
+pub fn ferrosys::ext::Allocator::allocate_contiguous(&mut self, count: u64) -> Option<BlockRange>
+pub fn ferrosys::ext::Allocator::allocate_one(&mut self) -> Result<u64, AllocError>
+pub fn ferrosys::ext::Allocator::free_count(&self) -> u64
+pub fn ferrosys::ext::Allocator::group_bitmap(&self, index: u32) -> Option<&[u8]>
+pub fn ferrosys::ext::Allocator::group_free_count(&self, index: u32) -> u32
+pub fn ferrosys::ext::Allocator::is_used(&self, b: u64) -> bool
+pub fn ferrosys::ext::Allocator::mark_used(&mut self, range: BlockRange)
+pub fn ferrosys::ext::Allocator::new(layout: &Layout) -> Self
+pub fn ferrosys::ext::Anomaly::to_json(&self) -> String
+pub fn ferrosys::ext::ArchiveSource::from_path(path: impl AsRef<Path>) -> Result<Self, ArchiveError>
+pub fn ferrosys::ext::ArchiveSource::from_reader<R: Read>(reader: R) -> Result<Self, ArchiveError>
+pub fn ferrosys::ext::ArchiveSource::is_empty(&self) -> bool
+pub fn ferrosys::ext::ArchiveSource::len(&self) -> usize
+pub fn ferrosys::ext::Category::as_str(self) -> &'static str
+pub fn ferrosys::ext::Checksummer::base_seed(&self) -> u32 /* required */
+pub fn ferrosys::ext::Checksummer::crc32c(&self, seed: u32, data: &[u8]) -> u32 /* required */
+pub fn ferrosys::ext::Checksummer::scheme(&self) -> CsumScheme /* required */
+pub fn ferrosys::ext::Compat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::Compat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::Crc32c::new(uuid: &[u8; 16]) -> Self
+pub fn ferrosys::ext::Crc32c::with_seed(base_seed: u32) -> Self
+pub fn ferrosys::ext::DirLayout::build_blocks(&self, entries: &[DirEntry], block_size: usize) -> Result<Vec<DirBlock>, DirError> /* required */
+pub fn ferrosys::ext::ExtentNode::depth(&self) -> u16
+pub fn ferrosys::ext::ExtentNode::is_empty(&self) -> bool
+pub fn ferrosys::ext::ExtentNode::len(&self) -> usize
+pub fn ferrosys::ext::FeatureSet::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::FeatureSet::pin(self) -> String
+pub fn ferrosys::ext::FeatureSet::with_feature(self, name: &str, on: bool) -> Option<Self>
+pub fn ferrosys::ext::FileContent::is_empty(&self) -> bool
+pub fn ferrosys::ext::FileContent::len(&self) -> u64
+pub fn ferrosys::ext::FileContent::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::ext::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::ext::FileRange::path(&self) -> &Path
+pub fn ferrosys::ext::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::ext::FormatOptions::new(uuid: [u8; 16], time: Timestamp, hash_seed: [u8; 16]) -> Self
+pub fn ferrosys::ext::FormatOptions::profile(self, profile: Profile) -> Self
+pub fn ferrosys::ext::FsModel::root(&self) -> &ModelInode
+pub fn ferrosys::ext::FsModel::used_inode_count(&self) -> u32
+pub fn ferrosys::ext::Image::as_bytes(&self) -> &[u8]
+pub fn ferrosys::ext::Image::into_bytes(self) -> Vec<u8>
+pub fn ferrosys::ext::Image::layout(&self) -> &Layout
+pub fn ferrosys::ext::Image::write_to(&self, w: impl std::io::Write) -> std::io::Result<()>
+pub fn ferrosys::ext::Incompat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::Incompat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::JournalSuperblock::read_from(buf: &[u8]) -> Result<Self, crate::ondisk::ParseError>
+pub fn ferrosys::ext::Layout::backup_groups(&self) -> Vec<u32>
+pub fn ferrosys::ext::Layout::is_flex_head(&self, index: u32) -> bool
+pub fn ferrosys::ext::Layout::metadata_regions(&self) -> Vec<BlockRange>
+pub fn ferrosys::ext::Layout::overhead_blocks(&self) -> u64
+pub fn ferrosys::ext::Layout::super_overhead_region(&self, index: u32) -> Option<BlockRange>
+pub fn ferrosys::ext::Metadata::new(mode: u16, mtime: Timestamp) -> Self
+pub fn ferrosys::ext::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
+pub fn ferrosys::ext::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::ext::ModelConfig::new(feature: FeatureSet, first_user_inode: u32, default_time: Timestamp) -> Self
+pub fn ferrosys::ext::ReadError::anomaly(&self) -> Anomaly
+pub fn ferrosys::ext::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ext::Reader::device(&self, inode: &Inode) -> (u32, u32)
+pub fn ferrosys::ext::Reader::feature(&self) -> FeatureSet
+pub fn ferrosys::ext::Reader::group_count(&self) -> u32
+pub fn ferrosys::ext::Reader::group_descriptor(&mut self, group: u32) -> Result<GroupDescriptor, ReadError>
+pub fn ferrosys::ext::Reader::inode(&mut self, number: u32) -> Result<Inode, ReadError>
+pub fn ferrosys::ext::Reader::journal_superblock(&mut self) -> Result<Option<crate::journal::JournalSuperblock>, ReadError>
+pub fn ferrosys::ext::Reader::lookup(&mut self, path: &[u8]) -> Result<(u32, Inode), ReadError>
+pub fn ferrosys::ext::Reader::lookup_no_follow(&mut self, path: &[u8]) -> Result<(u32, Inode), ReadError>
+pub fn ferrosys::ext::Reader::open(src: R) -> Result<Self, ReadError>
+pub fn ferrosys::ext::Reader::open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError>
+pub fn ferrosys::ext::Reader::policy(&self) -> ReadPolicy
+pub fn ferrosys::ext::Reader::profile(&self) -> Profile
+pub fn ferrosys::ext::Reader::read_data(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::ext::Reader::read_dir(&mut self, inode: &Inode) -> Result<Vec<Entry>, ReadError>
+pub fn ferrosys::ext::Reader::read_symlink(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::ext::Reader::scan(&mut self) -> ScanReport
+pub fn ferrosys::ext::Reader::superblock(&self) -> &SuperBlock
+pub fn ferrosys::ext::Reader::verify_checksums(&mut self) -> Result<(), ReadError>
+pub fn ferrosys::ext::Reader::walk(&mut self) -> Result<Vec<WalkEntry>, ReadError>
+pub fn ferrosys::ext::Reader::xattrs(&mut self, inode: &Inode) -> Result<Vec<Xattr>, ReadError>
+pub fn ferrosys::ext::ReservedRatio::blocks(self, total_blocks: u64) -> u64
+pub fn ferrosys::ext::ReservedRatio::from_hundredths_of_percent(hundredths: u16) -> Option<Self>
+pub fn ferrosys::ext::ReservedRatio::hundredths_of_percent(self) -> u16
+pub fn ferrosys::ext::RoCompat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::RoCompat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::ScanReport::anomalies(&self) -> &[Anomaly]
+pub fn ferrosys::ext::ScanReport::has_fatal(&self, policy: ReadPolicy) -> bool
+pub fn ferrosys::ext::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ext::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ext::ScanReport::to_json(&self) -> String
+pub fn ferrosys::ext::ScanReport::to_sarif(&self, artifact_uri: Option<&str>) -> String
+pub fn ferrosys::ext::ScanReport::to_table(&self) -> String
+pub fn ferrosys::ext::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::ext::Severity::as_str(self) -> &'static str
+pub fn ferrosys::ext::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::ext::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::fifo(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::file(self, path: impl Into<Vec<u8>>, contents: impl Into<FileContent>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::hardlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::new() -> Self
+pub fn ferrosys::ext::TreeBuilder::root(self, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::socket(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
+pub fn ferrosys::ext::acl::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::ext::acl::Acl::decode_xattr_v2(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::ext::acl::Acl::encode(&self) -> Vec<u8>
+pub fn ferrosys::ext::acl::Acl::encode_xattr_v2(&self) -> Vec<u8>
+pub fn ferrosys::ext::acl::Acl::entries(&self) -> &[AclEntry]
+pub fn ferrosys::ext::acl::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
+pub fn ferrosys::ext::alloc::Allocator::allocate(&mut self, count: u64) -> Result<Vec<BlockRange>, AllocError>
+pub fn ferrosys::ext::alloc::Allocator::allocate_contiguous(&mut self, count: u64) -> Option<BlockRange>
+pub fn ferrosys::ext::alloc::Allocator::allocate_one(&mut self) -> Result<u64, AllocError>
+pub fn ferrosys::ext::alloc::Allocator::free_count(&self) -> u64
+pub fn ferrosys::ext::alloc::Allocator::group_bitmap(&self, index: u32) -> Option<&[u8]>
+pub fn ferrosys::ext::alloc::Allocator::group_free_count(&self, index: u32) -> u32
+pub fn ferrosys::ext::alloc::Allocator::is_used(&self, b: u64) -> bool
+pub fn ferrosys::ext::alloc::Allocator::mark_used(&mut self, range: BlockRange)
+pub fn ferrosys::ext::alloc::Allocator::new(layout: &Layout) -> Self
+pub fn ferrosys::ext::archive::ArchiveSource::from_path(path: impl AsRef<Path>) -> Result<Self, ArchiveError>
+pub fn ferrosys::ext::archive::ArchiveSource::from_reader<R: Read>(reader: R) -> Result<Self, ArchiveError>
+pub fn ferrosys::ext::archive::ArchiveSource::is_empty(&self) -> bool
+pub fn ferrosys::ext::archive::ArchiveSource::len(&self) -> usize
+pub fn ferrosys::ext::build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, ModelError>
+pub fn ferrosys::ext::csum::Checksummer::base_seed(&self) -> u32 /* required */
+pub fn ferrosys::ext::csum::Checksummer::crc32c(&self, seed: u32, data: &[u8]) -> u32 /* required */
+pub fn ferrosys::ext::csum::Checksummer::scheme(&self) -> CsumScheme /* required */
+pub fn ferrosys::ext::csum::Crc32c::new(uuid: &[u8; 16]) -> Self
+pub fn ferrosys::ext::csum::Crc32c::with_seed(base_seed: u32) -> Self
+pub fn ferrosys::ext::dir::DirLayout::build_blocks(&self, entries: &[DirEntry], block_size: usize) -> Result<Vec<DirBlock>, DirError> /* required */
+pub fn ferrosys::ext::ext2(uuid: [u8; 16], time: crate::ondisk::Timestamp, hash_seed: [u8; 16]) -> FormatOptions
+pub fn ferrosys::ext::ext3(uuid: [u8; 16], time: crate::ondisk::Timestamp, hash_seed: [u8; 16]) -> FormatOptions
+pub fn ferrosys::ext::ext4(uuid: [u8; 16], time: crate::ondisk::Timestamp, hash_seed: [u8; 16]) -> FormatOptions
+pub fn ferrosys::ext::extent::ExtentNode::depth(&self) -> u16
+pub fn ferrosys::ext::extent::ExtentNode::is_empty(&self) -> bool
+pub fn ferrosys::ext::extent::ExtentNode::len(&self) -> usize
+pub fn ferrosys::ext::extent::build_leaves(ranges: &[crate::geometry::BlockRange]) -> Result<Vec<crate::ondisk::ExtentLeaf>, ExtentError>
+pub fn ferrosys::ext::extent::build_tree(leaves: &[crate::ondisk::ExtentLeaf], inline_capacity: usize, node_capacity: usize, node_blocks: &[u64]) -> Result<ExtentTree, ExtentError>
+pub fn ferrosys::ext::extent::parse_node(buf: &[u8]) -> Result<ExtentNode, crate::ondisk::ParseError>
+pub fn ferrosys::ext::extent::plan_tree(leaves: usize, inline_capacity: usize, node_capacity: usize) -> Result<TreeShape, ExtentError>
+pub fn ferrosys::ext::extent::write_node(node: &ExtentNode, eh_max: usize, buf: &mut [u8]) -> Result<(), ExtentError>
+pub fn ferrosys::ext::feature::Compat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::feature::Compat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::feature::FeatureSet::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::feature::FeatureSet::pin(self) -> String
+pub fn ferrosys::ext::feature::FeatureSet::with_feature(self, name: &str, on: bool) -> Option<Self>
+pub fn ferrosys::ext::feature::Incompat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::feature::Incompat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::feature::RoCompat::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::feature::RoCompat::names(self) -> Vec<&'static str>
+pub fn ferrosys::ext::format(source: impl Source, size_bytes: u64, options: FormatOptions) -> Result<Image, FormatError>
+pub fn ferrosys::ext::format_to(source: impl Source, size_bytes: u64, options: FormatOptions, sink: impl Write + Seek) -> Result<crate::geometry::Layout, FormatError>
+pub fn ferrosys::ext::geometry::Layout::backup_groups(&self) -> Vec<u32>
+pub fn ferrosys::ext::geometry::Layout::is_flex_head(&self, index: u32) -> bool
+pub fn ferrosys::ext::geometry::Layout::metadata_regions(&self) -> Vec<BlockRange>
+pub fn ferrosys::ext::geometry::Layout::overhead_blocks(&self) -> u64
+pub fn ferrosys::ext::geometry::Layout::super_overhead_region(&self, index: u32) -> Option<BlockRange>
+pub fn ferrosys::ext::geometry::ReservedRatio::blocks(self, total_blocks: u64) -> u64
+pub fn ferrosys::ext::geometry::ReservedRatio::from_hundredths_of_percent(hundredths: u16) -> Option<Self>
+pub fn ferrosys::ext::geometry::ReservedRatio::hundredths_of_percent(self) -> u16
+pub fn ferrosys::ext::geometry::plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError>
+pub fn ferrosys::ext::hash::dir_hash(name: &[u8], version: HashVersion, signedness: HashSignedness, seed: &[u8; 16]) -> DirHash
+pub fn ferrosys::ext::journal::JournalSuperblock::read_from(buf: &[u8]) -> Result<Self, crate::ondisk::ParseError>
+pub fn ferrosys::ext::journal::build_superblock(params: &JournalParams) -> Vec<u8>
+pub fn ferrosys::ext::journal::default_journal_blocks(num_blocks: u64) -> Option<u32>
+pub fn ferrosys::ext::materialize::FormatOptions::new(uuid: [u8; 16], time: Timestamp, hash_seed: [u8; 16]) -> Self
+pub fn ferrosys::ext::materialize::FormatOptions::profile(self, profile: Profile) -> Self
+pub fn ferrosys::ext::materialize::Image::as_bytes(&self) -> &[u8]
+pub fn ferrosys::ext::materialize::Image::into_bytes(self) -> Vec<u8>
+pub fn ferrosys::ext::materialize::Image::layout(&self) -> &Layout
+pub fn ferrosys::ext::materialize::Image::write_to(&self, w: impl std::io::Write) -> std::io::Result<()>
+pub fn ferrosys::ext::materialize::format(source: impl Source, size_bytes: u64, options: FormatOptions) -> Result<Image, FormatError>
+pub fn ferrosys::ext::materialize::format_to(source: impl Source, size_bytes: u64, options: FormatOptions, sink: impl Write + Seek) -> Result<crate::geometry::Layout, FormatError>
+pub fn ferrosys::ext::model::FsModel::root(&self) -> &ModelInode
+pub fn ferrosys::ext::model::FsModel::used_inode_count(&self) -> u32
+pub fn ferrosys::ext::model::ModelConfig::new(feature: FeatureSet, first_user_inode: u32, default_time: Timestamp) -> Self
+pub fn ferrosys::ext::model::ModelInode::is_dir(&self) -> bool
+pub fn ferrosys::ext::model::build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, ModelError>
+pub fn ferrosys::ext::ondisk::DirEntry::read_from(buf: &[u8], block_size: usize) -> Result<(Self, usize), ParseError>
+pub fn ferrosys::ext::ondisk::DirEntry::write_to(&self, buf: &mut [u8], rec_len: usize, block_size: usize) -> Result<(), ParseError>
+pub fn ferrosys::ext::ondisk::ExtentHeader::from_bytes(b: &[u8; 12]) -> Result<Self, ParseError>
+pub fn ferrosys::ext::ondisk::ExtentHeader::to_bytes(&self) -> [u8; 12]
+pub fn ferrosys::ext::ondisk::ExtentIdx::from_bytes(b: &[u8; 12]) -> Self
+pub fn ferrosys::ext::ondisk::ExtentIdx::to_bytes(&self) -> [u8; 12]
+pub fn ferrosys::ext::ondisk::ExtentLeaf::from_bytes(b: &[u8; 12]) -> Self
+pub fn ferrosys::ext::ondisk::ExtentLeaf::to_bytes(&self) -> Result<[u8; 12], ParseError>
+pub fn ferrosys::ext::ondisk::GroupDescriptor::read_from(buf: &[u8], desc_size: usize) -> Result<Self, ParseError>
+pub fn ferrosys::ext::ondisk::GroupDescriptor::write_to(&self, buf: &mut [u8], desc_size: usize) -> Result<(), ParseError>
+pub fn ferrosys::ext::ondisk::Inode::empty(inode_size: u16) -> Self
+pub fn ferrosys::ext::ondisk::Inode::inline_xattr_capacity(&self, inode_size: u16) -> usize
+pub fn ferrosys::ext::ondisk::Inode::inline_xattr_capacity_for(inode_size: u16) -> usize
+pub fn ferrosys::ext::ondisk::Inode::read_from(buf: &[u8], inode_size: u16) -> Result<Self, ParseError>
+pub fn ferrosys::ext::ondisk::Inode::to_bytes(&self, inode_size: u16) -> Result<Vec<u8>, ParseError>
+pub fn ferrosys::ext::ondisk::Inode::write_to(&self, buf: &mut [u8], inode_size: u16) -> Result<(), ParseError>
+pub fn ferrosys::ext::ondisk::SuperBlock::new() -> Self
+pub fn ferrosys::ext::ondisk::SuperBlock::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::ext::ondisk::SuperBlock::to_bytes(&self) -> [u8; 1024]
+pub fn ferrosys::ext::ondisk::min_rec_len(name_len: usize) -> u16
+pub fn ferrosys::ext::ondisk::orphan_tail_bytes(checksum: u32) -> [u8; 8]
+pub fn ferrosys::ext::ondisk::read_dx_countlimit(buf: &[u8], count_offset: usize) -> Result<(u16, u16), super::ParseError>
+pub fn ferrosys::ext::ondisk::read_dx_entries(buf: &[u8], count_offset: usize) -> Result<Vec<DxEntry>, super::ParseError>
+pub fn ferrosys::ext::ondisk::read_dx_root_info(buf: &[u8]) -> Result<(u8, u8), super::ParseError>
+pub fn ferrosys::ext::ondisk::read_orphan_tail(block: &[u8]) -> Result<u32, super::ParseError>
+pub fn ferrosys::ext::ondisk::rec_len_from_disk(disk: u16, block_size: usize) -> usize
+pub fn ferrosys::ext::ondisk::rec_len_to_disk(len: usize, block_size: usize) -> u16
+pub fn ferrosys::ext::ondisk::write_dir_tail(buf: &mut [u8], checksum: u32) -> Result<(), super::ParseError>
+pub fn ferrosys::ext::ondisk::write_dx_entries(buf: &mut [u8], count_offset: usize, limit: usize, entries: &[DxEntry]) -> Result<(), super::ParseError>
+pub fn ferrosys::ext::ondisk::write_dx_node_header(buf: &mut [u8]) -> Result<(), super::ParseError>
+pub fn ferrosys::ext::ondisk::write_dx_root_header(buf: &mut [u8], dir_ino: u32, parent_ino: u32, hash_version: u8, indirect_levels: u8) -> Result<(), super::ParseError>
+pub fn ferrosys::ext::ondisk::write_dx_tail(buf: &mut [u8], count_offset: usize, limit: usize, checksum: u32) -> Result<(), super::ParseError>
+pub fn ferrosys::ext::plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError>
+pub fn ferrosys::ext::read::Anomaly::to_json(&self) -> String
+pub fn ferrosys::ext::read::Category::as_str(self) -> &'static str
+pub fn ferrosys::ext::read::ReadError::anomaly(&self) -> Anomaly
+pub fn ferrosys::ext::read::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ext::read::Reader::device(&self, inode: &Inode) -> (u32, u32)
+pub fn ferrosys::ext::read::Reader::feature(&self) -> FeatureSet
+pub fn ferrosys::ext::read::Reader::group_count(&self) -> u32
+pub fn ferrosys::ext::read::Reader::group_descriptor(&mut self, group: u32) -> Result<GroupDescriptor, ReadError>
+pub fn ferrosys::ext::read::Reader::inode(&mut self, number: u32) -> Result<Inode, ReadError>
+pub fn ferrosys::ext::read::Reader::journal_superblock(&mut self) -> Result<Option<crate::journal::JournalSuperblock>, ReadError>
+pub fn ferrosys::ext::read::Reader::lookup(&mut self, path: &[u8]) -> Result<(u32, Inode), ReadError>
+pub fn ferrosys::ext::read::Reader::lookup_no_follow(&mut self, path: &[u8]) -> Result<(u32, Inode), ReadError>
+pub fn ferrosys::ext::read::Reader::open(src: R) -> Result<Self, ReadError>
+pub fn ferrosys::ext::read::Reader::open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError>
+pub fn ferrosys::ext::read::Reader::policy(&self) -> ReadPolicy
+pub fn ferrosys::ext::read::Reader::profile(&self) -> Profile
+pub fn ferrosys::ext::read::Reader::read_data(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::ext::read::Reader::read_dir(&mut self, inode: &Inode) -> Result<Vec<Entry>, ReadError>
+pub fn ferrosys::ext::read::Reader::read_symlink(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::ext::read::Reader::scan(&mut self) -> ScanReport
+pub fn ferrosys::ext::read::Reader::superblock(&self) -> &SuperBlock
+pub fn ferrosys::ext::read::Reader::verify_checksums(&mut self) -> Result<(), ReadError>
+pub fn ferrosys::ext::read::Reader::walk(&mut self) -> Result<Vec<WalkEntry>, ReadError>
+pub fn ferrosys::ext::read::Reader::xattrs(&mut self, inode: &Inode) -> Result<Vec<Xattr>, ReadError>
+pub fn ferrosys::ext::read::ScanReport::anomalies(&self) -> &[Anomaly]
+pub fn ferrosys::ext::read::ScanReport::has_fatal(&self, policy: ReadPolicy) -> bool
+pub fn ferrosys::ext::read::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ext::read::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ext::read::ScanReport::to_json(&self) -> String
+pub fn ferrosys::ext::read::ScanReport::to_sarif(&self, artifact_uri: Option<&str>) -> String
+pub fn ferrosys::ext::read::ScanReport::to_table(&self) -> String
+pub fn ferrosys::ext::read::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::ext::read::Severity::as_str(self) -> &'static str
+pub fn ferrosys::ext::source::FileContent::is_empty(&self) -> bool
+pub fn ferrosys::ext::source::FileContent::len(&self) -> u64
+pub fn ferrosys::ext::source::FileContent::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::ext::source::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::ext::source::FileRange::path(&self) -> &Path
+pub fn ferrosys::ext::source::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::ext::source::Metadata::new(mode: u16, mtime: Timestamp) -> Self
+pub fn ferrosys::ext::source::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
+pub fn ferrosys::ext::source::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::ext::source::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::ext::source::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::fifo(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::file(self, path: impl Into<Vec<u8>>, contents: impl Into<FileContent>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::hardlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::new() -> Self
+pub fn ferrosys::ext::source::TreeBuilder::root(self, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::socket(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::ext::source::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
+pub mod ferrosys
+pub mod ferrosys::ext
+pub mod ferrosys::ext::acl
+pub mod ferrosys::ext::alloc
+pub mod ferrosys::ext::archive
+pub mod ferrosys::ext::csum
+pub mod ferrosys::ext::dir
+pub mod ferrosys::ext::extent
+pub mod ferrosys::ext::feature
+pub mod ferrosys::ext::geometry
+pub mod ferrosys::ext::hash
+pub mod ferrosys::ext::journal
+pub mod ferrosys::ext::materialize
+pub mod ferrosys::ext::model
+pub mod ferrosys::ext::ondisk
+pub mod ferrosys::ext::read
+pub mod ferrosys::ext::source
+pub struct ferrosys::ext::Acl { /* private fields */ }
+pub struct ferrosys::ext::AclEntry
+pub struct ferrosys::ext::Allocator { /* private fields */ }
+pub struct ferrosys::ext::ArchiveSource { /* private fields */ }
+pub struct ferrosys::ext::BlockRange
+pub struct ferrosys::ext::Compat(/* private */)
+pub struct ferrosys::ext::Crc32c { /* private fields */ }
+pub struct ferrosys::ext::DirHash
+pub struct ferrosys::ext::FileRange { /* private fields */ }
+pub struct ferrosys::ext::HtreeDir
+pub struct ferrosys::ext::Image { /* private fields */ }
+pub struct ferrosys::ext::Incompat(/* private */)
+pub struct ferrosys::ext::LinearDir
+pub struct ferrosys::ext::Metadata
+pub struct ferrosys::ext::NullCsum
+pub struct ferrosys::ext::Reader<R> { /* private fields */ }
+pub struct ferrosys::ext::ReservedRatio { /* private fields */ }
+pub struct ferrosys::ext::RoCompat(/* private */)
+pub struct ferrosys::ext::ScanReport { /* private fields */ }
+pub struct ferrosys::ext::SourceEntry
+pub struct ferrosys::ext::TreeBuilder { /* private fields */ }
+pub struct ferrosys::ext::Xattr
+pub struct ferrosys::ext::acl::Acl { /* private fields */ }
+pub struct ferrosys::ext::acl::AclEntry
+pub struct ferrosys::ext::alloc::Allocator { /* private fields */ }
+pub struct ferrosys::ext::archive::ArchiveSource { /* private fields */ }
+pub struct ferrosys::ext::csum::Crc32c { /* private fields */ }
+pub struct ferrosys::ext::csum::NullCsum
+pub struct ferrosys::ext::dir::HtreeDir
+pub struct ferrosys::ext::dir::LinearDir
+pub struct ferrosys::ext::extent::ExtentNodeBlock
+pub struct ferrosys::ext::feature::Compat(/* private */)
+pub struct ferrosys::ext::feature::Incompat(/* private */)
+pub struct ferrosys::ext::feature::RoCompat(/* private */)
+pub struct ferrosys::ext::geometry::BlockRange
+pub struct ferrosys::ext::geometry::ReservedRatio { /* private fields */ }
+pub struct ferrosys::ext::hash::DirHash
+pub struct ferrosys::ext::materialize::Image { /* private fields */ }
+pub struct ferrosys::ext::ondisk::DirEntry
+pub struct ferrosys::ext::ondisk::DxEntry
+pub struct ferrosys::ext::ondisk::ExtentHeader
+pub struct ferrosys::ext::ondisk::ExtentIdx
+pub struct ferrosys::ext::ondisk::ExtentLeaf
+pub struct ferrosys::ext::ondisk::InodeFlags(u32)
+pub struct ferrosys::ext::ondisk::Timestamp
+pub struct ferrosys::ext::ondisk::Xattr
+pub struct ferrosys::ext::read::Reader<R> { /* private fields */ }
+pub struct ferrosys::ext::read::ScanReport { /* private fields */ }
+pub struct ferrosys::ext::source::FileRange { /* private fields */ }
+pub struct ferrosys::ext::source::Metadata
+pub struct ferrosys::ext::source::SourceEntry
+pub struct ferrosys::ext::source::TreeBuilder { /* private fields */ }
+pub trait ferrosys::ext::Checksummer: crate::sealed::Sealed
+pub trait ferrosys::ext::DirLayout: crate::sealed::Sealed
+pub trait ferrosys::ext::Source
+pub trait ferrosys::ext::csum::Checksummer: crate::sealed::Sealed
+pub trait ferrosys::ext::dir::DirLayout: crate::sealed::Sealed
+pub trait ferrosys::ext::source::Source

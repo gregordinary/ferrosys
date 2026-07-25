@@ -68,6 +68,20 @@ With the `tar` feature enabled, an `ArchiveSource` parses a tar archive — its 
 timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` ACL records — into the
 same entries a `TreeBuilder` produces, so the rest of the pipeline is identical.
 
+It has two constructors, and they differ only in where a regular file's *contents*
+live. `ArchiveSource::from_reader` takes any stream and reads every body into memory.
+`ArchiveSource::from_path` opens the archive itself, records where each body lies, and
+reads it only when that file is placed — so a format needs the largest single member
+rather than the sum of them all. Both write byte-identical images. The handles keep the
+archive open, so it must not be modified in place until the format finishes; replacing
+it by writing a new file and renaming it over the old one is safe, because the original
+inode stays readable.
+
+A file's contents are a `FileContent`: either `Owned` bytes or a `Range` of a host file.
+Both coexist in one entry list, which is what lets a caller take an archive-backed list
+and replace one entry's contents with bytes it computed while every other entry stays on
+disk.
+
 ## Formatting
 
 `format` takes the source, the image size, and the identity and grow inputs in
@@ -111,6 +125,46 @@ afterward to depart from it. `Profile::of(feature)` names the family a set
 classifies to, which is what `Reader::profile` reports for an image on the way
 back in.
 
+A feature word is a promise about the structures the filesystem carries, so the words and
+the bytes written under them have to agree. `FeatureSet::validate` refuses a set that
+contradicts itself before any planning happens — `metadata_csum_seed` without the
+checksums it seeds, `orphan_file` without the journal its entries are written through,
+`resize_inode` at a 4096-byte block without `large_file`, since the resize inode is itself
+a file of 4 GiB. A source the set cannot describe is refused the same way and names the
+entry: extended attributes without `ext_attr`, a regular file of `LARGE_FILE_MIN_SIZE` or
+more without `large_file`. Nothing is silently dropped and no feature is silently added.
+
+### Pinning the bytes across versions
+
+Images are byte-reproducible: the UUID, the timestamps, and the hash seed are inputs, so
+the same source and the same options write the same bytes, always. That holds across
+versions of this crate too — but only for a feature set that is itself fixed.
+
+`FeatureSet::DEFAULT`, `EXT2`, and `EXT3` are fixed and stay fixed, so pinning to one of
+them pins the layout. `FeatureSet::LATEST` deliberately does not: it tracks what a
+current `mke2fs` writes for ext4, so it may gain a feature in any release and the bytes
+under it may change with it. Name `LATEST` when parity with the current tool is what you
+want, and `DEFAULT` when reproducible bytes are.
+
+To record exactly what a build resolved to, `FeatureSet::pin` emits the whole set as one
+canonical document — every feature word twice over, as exact bits and as readable names,
+plus the block and inode sizes that a feature-name list would omit:
+
+```text
+ferrosys-feature-pin 1
+compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file
+incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed
+ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+block_size 4096
+inode_size 256
+```
+
+Record it verbatim and compare it string for string on the next build: a difference is
+drift in the on-disk layout, surfaced as a diff a person reads rather than as changed
+image bytes nobody notices. `FeatureSet::EMPTY` is the base to replay a recorded list of
+feature names back through `with_feature`, which is how the readable half of a pin is
+checked against the exact half.
+
 Three more fields tune what the size alone would decide, each defaulting to what the
 size implies. `volume_name` labels the filesystem, up to sixteen bytes NUL-padded into
 `s_volume_name`. `inodes` (an `InodeCount`) sets how many inodes it holds — a
@@ -144,6 +198,21 @@ assert_eq!(layout.total_blocks, size / u64::from(layout.block_size));
 Every byte of the destination that is not written must read back as zero, which a
 freshly created file satisfies. Block numbers past 2^32 are written where the size
 needs them, so a filesystem beyond 16 TiB addresses its blocks correctly.
+
+Three things are held while the bytes stream out, and none of them is the image:
+
+- **The entry list**, and the inode model built from it, for the whole run. This grows
+  with the number of entries, not with their size.
+- **A file's contents, while it is placed.** How long that is depends on the source: an
+  entry holding `FileContent::Owned` bytes holds them from the moment the source was
+  built, so a list of them costs the sum of every file, while a `FileContent::Range` is
+  read at placement and dropped after, so a list of them costs the largest single file.
+  `ArchiveSource::from_path` is what makes that difference for a tar source.
+- **The allocator's used-block bitmap**, for the whole run, at one bit per filesystem
+  block: `total_blocks / 8` bytes, 128 MiB for a 4 TiB image at a 4 KiB block.
+
+So peak memory grows with the entry count, the largest file, and the block count — never
+with the image's size in bytes.
 
 ## Reading
 
@@ -210,6 +279,45 @@ what reaches them by the name a system actually uses.
 
 `scan` walks the whole image and reports every deviation it finds as a structured
 `Anomaly` rather than stopping at the first — a checksum that does not match, a
-reference out of range, a structure that does not parse. It reports what is wrong; it
-does not refuse the image. `verify_checksums` is the strict counterpart, failing on
-the first object whose stored checksum does not match its recomputed value.
+reference out of range, a structure that does not parse, an inode carrying a structure
+its superblock's feature words deny. It reports what is wrong; it does not refuse the
+image. `verify_checksums` is the strict counterpart, failing on the first object whose
+stored checksum does not match its recomputed value.
+
+`scan` is the path to point at an image you have no reason to trust. Every allocation it
+makes is bounded by the bytes the source holds rather than by a count the image claims:
+the groups and inodes it walks are capped at what the source can physically hold, each
+metadata block is read once however many references name it, and the findings stop at
+`ScanReport::MAX_ANOMALIES` with `ScanReport::is_truncated` recording that they did.
+`walk` is bounded the same way — a well-formed filesystem spends at least a directory
+record's worth of its own blocks per name, so the source's length bounds how many names
+it can describe. Reaching that bound is an error rather than a short list: a caller
+extracting a tree from a truncated walk would write an incomplete one and see success.
+
+A report projects to JSON, to a fixed-column table, and to a SARIF log. The JSON document
+opens with a `schema` field holding `SCAN_SCHEMA_VERSION`: a downstream parser depends on
+the emitted shape, and no Rust signature describes it, so the shape names its own version.
+
+### Opening options
+
+`Reader::open` reads from the start of a source, strictly, with the default limits.
+`Reader::open_with` takes an `OpenOptions` carrying everything else: where the filesystem
+begins within the source (a partition offset), the `ReadPolicy` to hold it to, a `Limits`
+capping what one read may allocate, and a `metadata_csum` seed to verify against when the
+image's stored seed and UUID no longer agree.
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::{Limits, OpenOptions, ReadPolicy, Reader};
+
+// A filesystem one mebibyte into a disk image, read leniently so a scan can describe
+// what is wrong with it, and held to a gigabyte per file read.
+let options = OpenOptions::new()
+    .base(1 << 20)
+    .policy(ReadPolicy::Lenient)
+    .limits(Limits::new().max_file_bytes(1 << 30));
+let mut reader = Reader::open_with(file, &options)?;
+```
+
+The limits default to imposing nothing, so an image of any size this crate wrote reads
+back whole at the default settings.

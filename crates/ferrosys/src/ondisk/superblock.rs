@@ -27,7 +27,18 @@ const INCOMPAT_64BIT: u32 = 0x0080;
 ///
 /// Fields are named for their `s_*` on-disk counterparts. Counts that ext4 splits
 /// into low and high words are held here as single logical values.
+///
+/// # Constructing one
+///
+/// Start from [`SuperBlock::default`] and assign the fields that differ. A
+/// `#[non_exhaustive]` structure cannot be written as a literal from outside
+/// this crate, and that is about the Rust type, not the format: the byte layout is
+/// [`read_from`](Self::read_from) and [`SIZE`](Self::SIZE), and neither of them
+/// changes. What the attribute buys is that this crate can widen its
+/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// being a breaking change for everyone reading an image.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct SuperBlock {
     /// Total inodes (`s_inodes_count`).
     pub inodes_count: u32,

@@ -20,7 +20,7 @@
 //! may contain any byte — a newline included, which a binary `system.posix_acl_*`
 //! attribute naming user or group 10 routinely does.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 use tar::{EntryType, Header};
 
@@ -57,8 +57,25 @@ pub(super) struct Member {
     pub link: Option<Vec<u8>>,
     /// The PAX records that apply to this member, in archive order.
     pub records: Vec<PaxRecord>,
-    /// The member's body bytes, empty for a type that has none.
-    pub data: Vec<u8>,
+    /// The member's body: its bytes, or where to find them in a seekable archive.
+    pub body: MemberBody,
+}
+
+/// A member's body, either read or located.
+///
+/// The eager parser reads every body; the seeking one records where each lies and moves
+/// on, which is what lets a whole archive's file contents stay on disk until each is
+/// placed.
+pub(super) enum MemberBody {
+    /// The bytes, read while parsing.
+    Bytes(Vec<u8>),
+    /// Where the bytes lie in the archive, which was verified to hold them.
+    Range {
+        /// Byte offset of the body within the archive file.
+        offset: u64,
+        /// Length of the body in bytes.
+        len: u64,
+    },
 }
 
 impl Member {
@@ -80,7 +97,41 @@ impl Member {
 ///
 /// An [`ArchiveError::Malformed`] if the block structure, a header checksum or a
 /// PAX record body cannot be read, and [`ArchiveError::Io`] if the stream fails.
-pub(super) fn read_members<R: Read>(mut reader: R) -> Result<Vec<Member>, ArchiveError> {
+pub(super) fn read_members<R: Read>(reader: R) -> Result<Vec<Member>, ArchiveError> {
+    read_members_with(reader, |r, size| Ok(MemberBody::Bytes(read_body(r, size)?)))
+}
+
+/// Parse an archive from a seekable source, recording where each member's body lies
+/// rather than reading it.
+///
+/// The archive is checked to actually hold every body it declares, so a range handed back
+/// here names bytes that were present at parse time — a truncated archive fails now, not
+/// when a file is placed.
+pub(super) fn read_members_seeking<R: Read + Seek>(
+    mut reader: R,
+) -> Result<Vec<Member>, ArchiveError> {
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+    read_members_with(reader, move |r, size| {
+        let offset = r.stream_position()?;
+        // Bodies are padded to a whole block, and the padding is part of the framing:
+        // skipping only the body would read the next header from the wrong offset.
+        let padded = size.next_multiple_of(BLOCK as u64);
+        let next = offset
+            .checked_add(padded)
+            .filter(|&next| next <= end)
+            .ok_or(ArchiveError::Malformed {
+                reason: "archive ends inside a member body",
+            })?;
+        r.seek(SeekFrom::Start(next))?;
+        Ok(MemberBody::Range { offset, len: size })
+    })
+}
+
+fn read_members_with<R: Read>(
+    mut reader: R,
+    mut take_body: impl FnMut(&mut R, u64) -> Result<MemberBody, ArchiveError>,
+) -> Result<Vec<Member>, ArchiveError> {
     let mut members = Vec::new();
     // The decoration accumulated for the member that comes next. A `g` header does
     // not consume it: PAX assigns an `x` header to the next member that carries a
@@ -129,7 +180,7 @@ pub(super) fn read_members<R: Read>(mut reader: R) -> Result<Vec<Member>, Archiv
                     path: Vec::new(),
                     link: None,
                     records: std::mem::take(&mut records),
-                    data: Vec::new(),
+                    body: MemberBody::Bytes(Vec::new()),
                 };
                 member.path = match long_path.take() {
                     Some(p) => p,
@@ -166,7 +217,7 @@ pub(super) fn read_members<R: Read>(mut reader: R) -> Result<Vec<Member>, Archiv
                     })?,
                     None => stored,
                 };
-                member.data = read_body(&mut reader, size)?;
+                member.body = take_body(&mut reader, size)?;
                 members.push(member);
             }
         }

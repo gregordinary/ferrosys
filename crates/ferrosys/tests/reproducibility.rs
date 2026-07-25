@@ -53,10 +53,7 @@ fn reproducibility_holds_at_every_block_size() {
     // The geometry differs per block size, but each is deterministic on its own.
     for bs in [1024u32, 2048, 4096] {
         let mut o = options();
-        o.feature = FeatureSet {
-            block_size: bs,
-            ..FeatureSet::default()
-        };
+        o.feature = FeatureSet::default().with_block_size(bs);
         let first = format(source(), 128 * MIB, o).expect("first");
         let second = format(source(), 128 * MIB, o).expect("second");
         assert_eq!(

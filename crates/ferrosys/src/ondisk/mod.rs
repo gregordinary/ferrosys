@@ -65,9 +65,11 @@ pub(crate) use xattr::{
 /// Each variant names the on-disk context that makes the failure diagnosable: the
 /// structure whose length fell short, or the magic number that did not match.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The input was shorter than the structure requires.
     #[error("{structure}: need {need} bytes, got {got}")]
+    #[non_exhaustive]
     TooShort {
         /// The structure being parsed.
         structure: &'static str,
@@ -78,6 +80,7 @@ pub enum ParseError {
     },
     /// A magic-number field did not hold its required value.
     #[error("{structure}: bad magic {found:#06x}, expected {expected:#06x}")]
+    #[non_exhaustive]
     BadMagic {
         /// The structure being parsed.
         structure: &'static str,
@@ -89,6 +92,7 @@ pub enum ParseError {
     /// A field held a value the format does not allow (e.g. a directory record
     /// length that runs past its block).
     #[error("{structure}: field {field} has invalid value {value}")]
+    #[non_exhaustive]
     InvalidField {
         /// The structure being parsed.
         structure: &'static str,

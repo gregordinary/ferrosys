@@ -16,7 +16,8 @@ use ferrosys::ext::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, GroupDescriptor, SuperBlock,
 };
 use ferrosys::ext::{
-    FeatureSet, HashSignedness, HashVersion, Incompat, Profile, ReadPolicy, Reader, ScanReport,
+    FeatureSet, HashSignedness, HashVersion, Incompat, OpenOptions, Profile, ReadPolicy, Reader,
+    ScanReport,
 };
 
 use crate::args::InspectArgs;
@@ -31,11 +32,15 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
     // The read collects rather than aborts: an image is worth describing even when it is
     // malformed, and what to make of the deviations is the verdict's business, not the
     // reader's. `--fail-on` sets where that verdict's line falls.
-    let mut reader = Reader::open_at(file, args.offset, ReadPolicy::Lenient).map_err(|source| {
-        Error::NotExt {
-            path: path.clone(),
-            source,
-        }
+    let mut reader = Reader::open_with(
+        file,
+        &OpenOptions::new()
+            .base(args.offset)
+            .policy(ReadPolicy::Lenient),
+    )
+    .map_err(|source| Error::NotExt {
+        path: path.clone(),
+        source,
     })?;
 
     let groups = if args.groups {
@@ -101,6 +106,7 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
         return Err(Error::Verdict {
             count: report.anomalies().len(),
             worst,
+            truncated: report.is_truncated(),
         });
     }
     Ok(())
@@ -138,9 +144,7 @@ fn cstr(bytes: &[u8]) -> &[u8] {
 /// no hash this tool knows.
 fn hash_name(sb: &SuperBlock) -> String {
     match HashVersion::from_u8(sb.def_hash_version) {
-        Some(HashVersion::Legacy) => "legacy".to_string(),
-        Some(HashVersion::HalfMd4) => "half_md4".to_string(),
-        Some(HashVersion::Tea) => "tea".to_string(),
+        Some(version) => version.to_string(),
         None => format!("unknown ({})", sb.def_hash_version),
     }
 }
@@ -440,10 +444,8 @@ mod tests {
             feature.incompat.contains(Incompat::FLEX_BG),
             "the default profile carries flex_bg"
         );
-        let mut sb = SuperBlock {
-            log_groups_per_flex: 4,
-            ..SuperBlock::default()
-        };
+        let mut sb = SuperBlock::default();
+        sb.log_groups_per_flex = 4;
         assert_eq!(flex_bg_size(&sb, feature), Some(16));
         sb.log_groups_per_flex = 31;
         assert_eq!(flex_bg_size(&sb, feature), Some(1 << 31));
@@ -462,14 +464,11 @@ mod tests {
     fn flex_size_is_one_when_the_feature_is_off() {
         // With flex_bg clear the field is meaningless, so the size is one group and the
         // raw exponent is never shifted.
-        let feature = FeatureSet {
-            incompat: FeatureSet::default().incompat.without(Incompat::FLEX_BG),
-            ..FeatureSet::default()
-        };
-        let sb = SuperBlock {
-            log_groups_per_flex: 40,
-            ..SuperBlock::default()
-        };
+        let feature = FeatureSet::default()
+            .with_feature("flex_bg", false)
+            .expect("flex_bg is a known feature");
+        let mut sb = SuperBlock::default();
+        sb.log_groups_per_flex = 40;
         assert_eq!(flex_bg_size(&sb, feature), Some(1));
     }
 }

@@ -28,6 +28,7 @@ pub const MIN_JOURNAL_BLOCKS: u32 = 1024;
 /// [`Compat::HAS_JOURNAL`](crate::feature::Compat::HAS_JOURNAL) from the feature set
 /// rather than choosing a size here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum JournalSize {
     /// Size the journal from the filesystem's block count.
     #[default]
@@ -58,14 +59,50 @@ pub fn default_journal_blocks(num_blocks: u64) -> Option<u32> {
     }
 }
 
+/// What a journal superblock records: the log's geometry and the filesystem it serves.
+///
+/// Every input to [`build_superblock`] is a field here rather than a parameter. The
+/// superblock's fixed fields are the ones a plain v2 log needs; the words the format
+/// reserves beside them — the journal feature words, the checksum type and seed a
+/// `csum_v3` log carries, the user array an external journal shares — arrive as fields
+/// when they are written, not as arguments every caller must pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub struct JournalParams {
+    /// The log's block size (`s_blocksize`), which is the filesystem's.
+    pub block_size: u32,
+    /// Total blocks in the log, including the superblock (`s_maxlen`).
+    pub journal_blocks: u32,
+    /// The filesystem UUID, which the journal records as its own (`s_uuid`).
+    pub uuid: [u8; 16],
+}
+
+impl JournalParams {
+    /// Parameters for an internal journal of `journal_blocks` blocks serving the
+    /// filesystem with UUID `uuid`.
+    #[must_use]
+    pub const fn new(block_size: u32, journal_blocks: u32, uuid: [u8; 16]) -> Self {
+        Self {
+            block_size,
+            journal_blocks,
+            uuid,
+        }
+    }
+}
+
 /// Build the jbd2 journal superblock — the journal's first block.
 ///
 /// The block is `block_size` bytes: the big-endian v2 superblock at its front and
 /// zero after. The log is freshly formatted, so `s_start` is zero (nothing to
-/// replay) and `s_sequence` is one. `uuid` is the filesystem UUID, which the journal
-/// records as its own.
+/// replay) and `s_sequence` is one. The filesystem UUID is what the journal records
+/// as its own.
 #[must_use]
-pub fn build_superblock(block_size: u32, journal_blocks: u32, uuid: &[u8; 16]) -> Vec<u8> {
+pub fn build_superblock(params: &JournalParams) -> Vec<u8> {
+    let &JournalParams {
+        block_size,
+        journal_blocks,
+        uuid,
+    } = params;
     let mut b = vec![0u8; block_size as usize];
     // journal_header_t.
     put_be_u32(&mut b, 0x00, JBD2_MAGIC);
@@ -79,7 +116,7 @@ pub fn build_superblock(block_size: u32, journal_blocks: u32, uuid: &[u8; 16]) -
     // 0x1c s_start — zero: an empty log with no transactions to replay.
     // 0x20 s_errno, 0x24..0x2c s_feature_{compat,incompat,ro_compat} — all zero: no
     // journal features on a plain v2 log.
-    b[0x30..0x40].copy_from_slice(uuid); // s_uuid
+    b[0x30..0x40].copy_from_slice(&uuid); // s_uuid
     put_be_u32(&mut b, 0x40, 1); // s_nr_users: one filesystem uses this journal
     // 0x44 s_dynsuper, 0x48 s_max_transaction, 0x4c s_max_trans_data — zero.
     // 0x50 s_checksum_type — zero: a v2 log carries no superblock checksum.
@@ -101,6 +138,7 @@ fn get_be_u32(buf: &[u8], off: usize) -> u32 {
 
 /// The parsed head of a jbd2 journal superblock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct JournalSuperblock {
     /// Log block size (`s_blocksize`).
     pub block_size: u32,
@@ -199,7 +237,7 @@ mod tests {
     fn superblock_pins_the_mke2fs_byte_layout() {
         // The 64 MiB reference image: block size 4096, 1024-block journal, fs UUID.
         let uuid = [0x11u8; 16];
-        let sb = build_superblock(4096, 1024, &uuid);
+        let sb = build_superblock(&JournalParams::new(4096, 1024, uuid));
         assert_eq!(sb.len(), 4096);
         assert_eq!(get_be_u32(&sb, 0x00), 0xc03b_3998);
         assert_eq!(get_be_u32(&sb, 0x04), 4);
@@ -218,7 +256,7 @@ mod tests {
     #[test]
     fn superblock_round_trips_through_the_reader() {
         let uuid = [0xabu8; 16];
-        let sb = build_superblock(4096, 8192, &uuid);
+        let sb = build_superblock(&JournalParams::new(4096, 8192, uuid));
         let parsed = JournalSuperblock::read_from(&sb).unwrap();
         assert_eq!(
             parsed,
@@ -236,7 +274,7 @@ mod tests {
 
     #[test]
     fn reader_rejects_a_non_journal_block() {
-        let mut sb = build_superblock(4096, 1024, &[0; 16]);
+        let mut sb = build_superblock(&JournalParams::new(4096, 1024, [0; 16]));
         sb[0] ^= 0xff;
         assert!(JournalSuperblock::read_from(&sb).is_err());
     }
@@ -247,7 +285,7 @@ mod tests {
         // A buffer that reaches the UUID yet stops short of `nr_users` — with a valid
         // magic and block type, so parsing gets past the early checks — must be refused
         // as too short rather than reading past its end.
-        let sb = build_superblock(4096, 1024, &[0; 16]);
+        let sb = build_superblock(&JournalParams::new(4096, 1024, [0; 16]));
         for len in 0x40..0x44 {
             let err = JournalSuperblock::read_from(&sb[..len]).unwrap_err();
             assert!(

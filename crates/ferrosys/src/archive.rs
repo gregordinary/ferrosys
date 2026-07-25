@@ -12,35 +12,48 @@
 //! An archive's own root member (`./`) describes the filesystem root: its mode,
 //! ownership, times, and extended attributes become the root directory's.
 //!
-//! Parsing is eager and fallible: [`ArchiveSource::from_reader`] reads the whole
-//! archive up front and returns an [`ArchiveError`] on a malformed or unsupported
-//! entry, so the [`Source`] the model later consumes is infallible. An entry type
-//! the model cannot represent is a typed error, never a silently dropped entry.
+//! Parsing is fallible up front and infallible after: both constructors read every
+//! header, path, and PAX record while parsing and return an [`ArchiveError`] on a
+//! malformed or unsupported entry, so the [`Source`] the model later consumes cannot
+//! fail. An entry type the model cannot represent is a typed error, never a silently
+//! dropped entry.
+//!
+//! The two constructors differ in where a regular file's *contents* live.
+//! [`ArchiveSource::from_reader`] takes any stream and reads every body into memory, so a
+//! format needs the sum of the archive's file bytes. [`ArchiveSource::from_path`] opens
+//! the archive itself, records where each body lies, and reads it only when that file is
+//! placed — so a format needs the largest single member. The handles keep the archive
+//! open, and it must not be modified in place until the format finishes.
 //!
 //! Framing the tar stream and parsing its PAX records is this module's own work
 //! (see `blocks`), so a PAX value carrying any byte — a newline included, which a
 //! binary ACL naming user or group 10 produces — is read intact.
 
+use std::fs::File;
 use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tar::EntryType;
 
 use crate::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
 use crate::ondisk::{Timestamp, Xattr};
-use crate::source::{EntryKind, Metadata, Source, SourceEntry};
+use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry};
 
 mod blocks;
 
-use blocks::{Member, PaxRecord};
+use blocks::{Member, MemberBody, PaxRecord};
 
 /// A failure reading or interpreting a tar archive.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ArchiveError {
     /// An I/O error reading the archive stream.
     #[error("reading archive: {0}")]
     Io(#[from] std::io::Error),
     /// An entry could not be interpreted.
     #[error("archive entry {}: {reason}", String::from_utf8_lossy(path))]
+    #[non_exhaustive]
     Bad {
         /// The offending entry's path.
         path: Vec<u8>,
@@ -52,6 +65,7 @@ pub enum ArchiveError {
         "archive entry {} has an unsupported type",
         String::from_utf8_lossy(path)
     )]
+    #[non_exhaustive]
     Unsupported {
         /// The offending entry's path.
         path: Vec<u8>,
@@ -60,6 +74,7 @@ pub enum ArchiveError {
     /// could not be read. The failure is in the framing rather than in one entry,
     /// so it names no path.
     #[error("malformed archive: {reason}")]
+    #[non_exhaustive]
     Malformed {
         /// What was wrong.
         reason: &'static str,
@@ -69,6 +84,7 @@ pub enum ArchiveError {
         "archive entry {} has an invalid ACL: {source}",
         String::from_utf8_lossy(path)
     )]
+    #[non_exhaustive]
     Acl {
         /// The offending entry's path.
         path: Vec<u8>,
@@ -78,6 +94,10 @@ pub enum ArchiveError {
 }
 
 /// A [`Source`] that yields the entries parsed from a tar archive.
+///
+/// Build one with [`from_reader`](Self::from_reader), which reads the whole archive into
+/// memory, or [`from_path`](Self::from_path), which leaves each file's bytes on disk
+/// until that file is placed. Both produce byte-identical images.
 pub struct ArchiveSource {
     entries: Vec<SourceEntry>,
 }
@@ -92,7 +112,45 @@ impl ArchiveSource {
     pub fn from_reader<R: Read>(reader: R) -> Result<Self, ArchiveError> {
         let entries = blocks::read_members(reader)?
             .into_iter()
-            .map(parse_entry)
+            .map(|m| parse_entry(m, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { entries })
+    }
+
+    /// Open the tar archive at `path` and parse it, leaving every file's bytes on disk
+    /// until the file is placed.
+    ///
+    /// This is the memory-shaped alternative to [`from_reader`](Self::from_reader): the
+    /// entry records, their paths, their metadata, and their extended attributes are read
+    /// up front exactly as they are there, but a regular file's *contents* become a
+    /// handle into the archive rather than a buffer. A format's peak memory becomes the
+    /// largest single file rather than the sum of every file, which for a rootfs archive
+    /// is the difference between gigabytes and megabytes.
+    ///
+    /// The archive is checked to hold every body it declares, so a truncated archive
+    /// fails here rather than part-way through writing an image.
+    ///
+    /// # The archive must not change until the format finishes
+    ///
+    /// The bytes are read when each file is placed, so an edit between parsing and
+    /// formatting reaches the image — as wrong bytes, not as an error. The descriptor is
+    /// held open for the source's whole life, which narrows the exposure to exactly the
+    /// case that matters: replacing the archive by writing a new file and renaming it
+    /// into place leaves the original inode readable and the format unaffected, while an
+    /// **in-place** modification or a truncation of the same inode does reach it.
+    ///
+    /// # Errors
+    ///
+    /// An [`ArchiveError`] if `path` cannot be opened, the archive cannot be read, or an
+    /// entry cannot be represented.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        let members = blocks::read_members_seeking(&file)?;
+        let backing = (Arc::new(file), path.to_path_buf());
+        let entries = members
+            .into_iter()
+            .map(|m| parse_entry(m, Some(&backing)))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { entries })
     }
@@ -133,13 +191,19 @@ struct Pax {
 }
 
 /// Parse one archive member into a [`SourceEntry`].
-fn parse_entry(member: Member) -> Result<SourceEntry, ArchiveError> {
+///
+/// `backing` is the open archive a located body is read from later, present only for a
+/// source built by [`ArchiveSource::from_path`].
+fn parse_entry(
+    member: Member,
+    backing: Option<&(Arc<File>, PathBuf)>,
+) -> Result<SourceEntry, ArchiveError> {
     let Member {
         header,
         path: raw_path,
         link,
         records,
-        data,
+        body,
     } = member;
     // The archive's root member (`./`) describes the filesystem root, which already
     // exists: the model applies its metadata to inode 2 rather than creating an inode.
@@ -198,7 +262,18 @@ fn parse_entry(member: Member) -> Result<SourceEntry, ArchiveError> {
     let kind = match header.entry_type() {
         // A regular file. Its body is held whole in memory, bounded by the file's own
         // physical bytes in the archive, so peak memory stays the sum of the files' sizes.
-        EntryType::Regular | EntryType::Continuous => EntryKind::File(data),
+        EntryType::Regular | EntryType::Continuous => EntryKind::File(match body {
+            MemberBody::Bytes(bytes) => FileContent::Owned(bytes),
+            MemberBody::Range { offset, len } => {
+                let (file, archive) = backing.expect("a located body comes from a backed parse");
+                FileContent::Range(FileRange::new(
+                    Arc::clone(file),
+                    archive.clone(),
+                    offset,
+                    len,
+                ))
+            }
+        }),
         EntryType::Directory => EntryKind::Directory,
         EntryType::Symlink => EntryKind::Symlink(link_target(link, &path)?),
         EntryType::Link => {

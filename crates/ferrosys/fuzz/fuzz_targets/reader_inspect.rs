@@ -9,12 +9,12 @@
 
 use std::io::Cursor;
 
-use ferrosys::ext::{ReadPolicy, Reader};
+use ferrosys::ext::{OpenOptions, ReadPolicy, Reader};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // `inspect` opens leniently: a malformed image is described, not rejected.
-    let Ok(mut reader) = Reader::open_at(Cursor::new(data), 0, ReadPolicy::Lenient) else {
+    let Ok(mut reader) = Reader::open_with(Cursor::new(data), &OpenOptions::new().policy(ReadPolicy::Lenient)) else {
         return;
     };
 

@@ -175,14 +175,27 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// second — the same convention the archive source reads back — so
 /// `Timestamp { secs: -6, nanos: 750_000_000 }` is written `-5.250000000`, which is the
 /// instant it names.
+///
+/// An inode's stored fraction is a thirty-bit field, so a filesystem this crate did not
+/// write can name more nanoseconds than there are in a second. Such a fraction is carried
+/// into the seconds before anything is written, so the record names the instant the two
+/// fields describe and always holds a nine-digit fraction — rather than a ten-digit one a
+/// reader would scale wrongly.
 #[must_use]
 pub fn pax_time(t: Timestamp) -> String {
+    // Normalize first: every case below assumes a fraction smaller than a second.
+    let t = Timestamp {
+        secs: t
+            .secs
+            .saturating_add(i64::from(t.nanos / Timestamp::NANOS_PER_SEC)),
+        nanos: t.nanos % Timestamp::NANOS_PER_SEC,
+    };
     if t.nanos == 0 {
         return t.secs.to_string();
     }
     if t.secs < 0 {
         let whole = t.secs + 1;
-        let frac = 1_000_000_000 - t.nanos;
+        let frac = Timestamp::NANOS_PER_SEC - t.nanos;
         // A time inside the last second before the epoch has no negative whole part to
         // carry the sign, so the sign is written onto the zero.
         if whole == 0 {
@@ -337,5 +350,39 @@ mod tests {
             "-0.500000000"
         );
         assert_eq!(pax_time(Timestamp::from_secs(-1)), "-1");
+    }
+
+    #[test]
+    fn a_pax_time_carries_an_over_long_fraction_into_the_seconds() {
+        // An inode's fraction is a thirty-bit field, so an image this crate did not write
+        // can name more nanoseconds than a second holds. The record still names the
+        // instant the two fields describe, with a nine-digit fraction: writing the raw
+        // value would make a ten-digit one, which a reader scales as a tenth of what was
+        // meant.
+        assert_eq!(
+            pax_time(Timestamp {
+                secs: 100,
+                nanos: 1_073_741_823 // the largest the field holds
+            }),
+            "101.073741823"
+        );
+        // The same on the negative side, where the fraction is written as the distance to
+        // the next second — the subtraction that an over-long fraction would otherwise
+        // take below zero.
+        assert_eq!(
+            pax_time(Timestamp {
+                secs: -6,
+                nanos: 1_073_741_823
+            }),
+            "-4.926258177"
+        );
+        // A whole number of extra seconds leaves no fraction at all.
+        assert_eq!(
+            pax_time(Timestamp {
+                secs: 10,
+                nanos: 2_000_000_000
+            }),
+            "12"
+        );
     }
 }

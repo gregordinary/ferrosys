@@ -82,6 +82,8 @@ mod ondisk;
 #[cfg(feature = "ext")]
 mod read;
 #[cfg(feature = "ext")]
+mod sealed;
+#[cfg(feature = "ext")]
 mod source;
 
 #[cfg(feature = "ext")]

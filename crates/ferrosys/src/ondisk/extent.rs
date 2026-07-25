@@ -31,7 +31,16 @@ pub const EXTENT_TAIL_LEN: usize = 4;
 /// Threshold above which a leaf's raw length field denotes an uninitialized
 /// extent: a stored `ee_len` greater than this encodes an uninitialized run of
 /// `ee_len - 32768` blocks.
+///
+/// It is also the longest *initialized* run one leaf holds (the kernel's
+/// `EXT_INIT_MAX_LEN`): a longer one would store a raw length past the threshold and so
+/// read back as an uninitialized run of a different length.
 const UNINIT_LEN_LIMIT: u16 = 32768;
+
+/// The longest *uninitialized* run one leaf holds (the kernel's
+/// `EXT_UNWRITTEN_MAX_LEN`): its length is stored offset by [`UNINIT_LEN_LIMIT`], so one
+/// block longer would overrun the sixteen-bit field.
+const UNINIT_MAX_LEN: u16 = UNINIT_LEN_LIMIT - 1;
 
 /// The header at the start of every extent-tree node (`struct ext4_extent_header`).
 ///
@@ -123,12 +132,18 @@ impl ExtentIdx {
 }
 
 /// A leaf entry (`struct ext4_extent`) mapping a logical run to a physical run.
+///
+/// One field, `ee_len`, carries both the length and the initialized flag, so not every
+/// combination of [`len`](Self::len) and [`initialized`](Self::initialized) is
+/// representable: [`to_bytes`](Self::to_bytes) states which, and rejects the rest rather
+/// than writing bytes that read back as a different run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ExtentLeaf {
     /// First logical block of the run (`ee_block`).
     pub block: u32,
     /// Length of the run in blocks. An initialized run holds at most 32768 blocks; an
-    /// uninitialized run at most 32767, since its length is stored offset by 32768.
+    /// uninitialized run at least one and at most 32767, since its length is stored
+    /// offset by 32768.
     pub len: u16,
     /// First physical block of the run (`ee_start_lo` + `ee_start_hi`).
     pub start: u64,
@@ -143,27 +158,43 @@ impl ExtentLeaf {
     pub const SIZE: usize = EXTENT_ENTRY_SIZE;
 
     /// Serialize to the twelve-byte on-disk form.
-    #[must_use]
-    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+    ///
+    /// `ee_len` encodes the length and the initialized flag in one sixteen-bit field: a
+    /// raw value up to 32768 is an initialized run of that many blocks, and a larger one
+    /// is an uninitialized run of `raw - 32768`. A run outside what that encoding
+    /// distinguishes has no bytes to write — an uninitialized run of zero blocks would
+    /// take the encoding of an *initialized* 32768-block run, and either kind past its
+    /// maximum would take the encoding of a shorter run of the other kind — so it is
+    /// refused rather than written as the different run it would read back as.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::InvalidField`] on a run `ee_len` does not encode: an initialized run
+    /// longer than 32768 blocks, or an uninitialized run of zero blocks or more than
+    /// 32767.
+    pub fn to_bytes(&self) -> Result<[u8; Self::SIZE], ParseError> {
+        let invalid = || ParseError::InvalidField {
+            structure: "ExtentLeaf",
+            field: "ee_len",
+            value: u64::from(self.len),
+        };
         let raw_len = if self.initialized {
+            if self.len > UNINIT_LEN_LIMIT {
+                return Err(invalid());
+            }
             self.len
         } else {
-            // An uninitialized run stores its length offset by 32768, so its own length
-            // is at most 32767. The writer emits initialized runs only, so a longer
-            // uninitialized run is a caller contract violation; saturate rather than
-            // overflow the field.
-            debug_assert!(
-                self.len < UNINIT_LEN_LIMIT,
-                "an uninitialized extent run holds at most 32767 blocks"
-            );
-            self.len.saturating_add(UNINIT_LEN_LIMIT)
+            if self.len == 0 || self.len > UNINIT_MAX_LEN {
+                return Err(invalid());
+            }
+            self.len + UNINIT_LEN_LIMIT
         };
         let mut b = [0u8; Self::SIZE];
         put_u32(&mut b, 0, self.block);
         put_u16(&mut b, 4, raw_len);
         put_u16(&mut b, 6, (self.start >> 32) as u16);
         put_u32(&mut b, 8, self.start as u32);
-        b
+        Ok(b)
     }
 
     /// Parse from the twelve-byte on-disk form, decoding the initialized/length
@@ -235,7 +266,7 @@ mod tests {
             start: 7,
             initialized: true,
         };
-        assert_eq!(ExtentLeaf::from_bytes(&e.to_bytes()), e);
+        assert_eq!(ExtentLeaf::from_bytes(&e.to_bytes().unwrap()), e);
     }
 
     #[test]
@@ -246,9 +277,72 @@ mod tests {
             start: 0x1_0000_0000,
             initialized: false,
         };
-        let d = ExtentLeaf::from_bytes(&e.to_bytes());
+        let d = ExtentLeaf::from_bytes(&e.to_bytes().unwrap());
         assert_eq!(d, e);
         // Uninitialized runs are encoded above the 32768 threshold.
-        assert_eq!(get_u16(&e.to_bytes(), 4), 8 + UNINIT_LEN_LIMIT);
+        assert_eq!(get_u16(&e.to_bytes().unwrap(), 4), 8 + UNINIT_LEN_LIMIT);
+    }
+
+    #[test]
+    fn every_encodable_leaf_round_trips_and_the_rest_are_refused() {
+        // `ee_len` carries the length and the initialized flag in one field, so the two
+        // kinds of run have different maxima and the encoding has edges. Each edge is
+        // checked from both sides: the longest run of each kind encodes and reads back as
+        // itself, and one block further is refused rather than written as the different
+        // run it would decode to.
+        let leaf = |len, initialized| ExtentLeaf {
+            block: 42,
+            len,
+            start: 1000,
+            initialized,
+        };
+        for (len, initialized) in [
+            (0, true), // a zero-length initialized run is representable
+            (1, true),
+            (UNINIT_LEN_LIMIT, true), // EXT_INIT_MAX_LEN: the longest initialized run
+            (1, false),
+            (UNINIT_MAX_LEN, false), // EXT_UNWRITTEN_MAX_LEN: the longest uninitialized
+        ] {
+            let e = leaf(len, initialized);
+            let bytes = e
+                .to_bytes()
+                .unwrap_or_else(|err| panic!("{e:?} must encode: {err}"));
+            assert_eq!(
+                ExtentLeaf::from_bytes(&bytes),
+                e,
+                "{e:?} did not read back as itself"
+            );
+        }
+
+        for (len, initialized, why) in [
+            (
+                0,
+                false,
+                "an uninitialized run of no blocks encodes as an initialized 32768-block run",
+            ),
+            (
+                UNINIT_LEN_LIMIT,
+                false,
+                "an uninitialized run of 32768 blocks overruns the field",
+            ),
+            (
+                UNINIT_LEN_LIMIT + 1,
+                true,
+                "an initialized run past 32768 blocks encodes as an uninitialized one",
+            ),
+        ] {
+            let e = leaf(len, initialized);
+            assert!(
+                matches!(
+                    e.to_bytes(),
+                    Err(ParseError::InvalidField {
+                        structure: "ExtentLeaf",
+                        field: "ee_len",
+                        value,
+                    }) if value == u64::from(len)
+                ),
+                "{e:?} must be refused: {why}"
+            );
+        }
     }
 }

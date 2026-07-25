@@ -68,7 +68,9 @@ assert!(contents.iter().any(|e| e.name == b"etc"));
   (a partition inside a whole-disk image), bounds-checking every field, so a malformed
   image is a typed error. A strict conformance policy rejects anything a conformant
   modern ext4 would not carry; a lenient scan walks the whole image and collects every
-  deviation as a typed anomaly, rendered as JSON, SARIF, or a table.
+  deviation as a typed anomaly, rendered as JSON, SARIF, or a table. The scan's every
+  allocation is bounded by the bytes the source holds rather than by a count the image
+  claims, so it is the path to point at an image built to be hostile.
 - **Foreign images** — the reader reads filesystems other tools wrote: any inode size,
   including the 128-byte inode; both the extent tree and the classic direct/indirect map
   that ext2 and ext3 use; and checksums verified against each object's own bytes, so a
@@ -76,14 +78,17 @@ assert!(contents.iter().any(|e| e.name == b"etc"));
   resolves a path through symbolic links against the image's own root.
 - **Streaming output** — `format_to` writes an image to any seekable destination,
   touching only the blocks the filesystem uses, so a file stays sparse and a filesystem
-  larger than memory is possible. `format` collects the same bytes in memory.
+  larger than memory is possible. `format` collects the same bytes in memory. A source
+  may hand back a file's contents as a handle rather than a buffer, so a format's peak
+  memory is the largest single file rather than the sum of them all.
 - **64-bit addressing** — block numbers beyond 2^32, for filesystems past 16 TiB.
 
 ## Features
 
 The `tar` feature (off by default) adds `ArchiveSource`, which builds a filesystem from
 a tar stream with its PAX timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*`
-ACL records. Without it, the crate depends only on `thiserror`.
+ACL records. `ArchiveSource::from_path` leaves each member's bytes on disk until that
+file is placed. Without the feature, the crate depends only on `thiserror`.
 
 ## Command line
 

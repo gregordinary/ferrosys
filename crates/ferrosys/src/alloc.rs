@@ -18,9 +18,11 @@ use crate::geometry::{BlockRange, Layout};
 
 /// A block allocation that could not be satisfied.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AllocError {
     /// Fewer free blocks remain than were requested.
     #[error("out of space: requested {requested} blocks, {available} free")]
+    #[non_exhaustive]
     OutOfSpace {
         /// Blocks requested.
         requested: u64,
@@ -35,6 +37,12 @@ pub enum AllocError {
 /// per-group bitmaps. Blocks past the filesystem's real size (the padding tail of
 /// the final group's bitmap) are marked used at construction so they are never
 /// handed out and serialize as the set padding bits an external checker expects.
+///
+/// It holds one bit per block of the whole filesystem, so it occupies
+/// `total_blocks / 8` bytes however the image is written: 128 MiB for a 4 TiB
+/// filesystem at a 4 KiB block, and 1 GiB for a 32 TiB one. That is the same bitmap the
+/// image itself carries, held once for the whole filesystem rather than a group at a
+/// time, because a single allocation may span groups.
 #[derive(Clone, Debug)]
 pub struct Allocator {
     /// The used bitmap, LSB-first, `bytes_per_group` bytes per group.
@@ -272,18 +280,15 @@ fn used_in_prefix(bits: &[u8], n: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::feature::FeatureSet;
-    use crate::geometry::{GrowReservation, InodeCount, ReservedRatio, plan_layout};
+    use crate::geometry::{GrowReservation, PlanRequest, plan_layout};
 
     const MIB: u64 = 1024 * 1024;
     const GROW_32G: u64 = 32 * 1024 * MIB;
 
     fn layout(mib: u64) -> Layout {
         plan_layout(
-            mib * MIB,
-            GrowReservation::UpTo(GROW_32G),
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            FeatureSet::default(),
+            &PlanRequest::new(mib * MIB, FeatureSet::default())
+                .grow(GrowReservation::UpTo(GROW_32G)),
         )
         .unwrap()
     }
@@ -299,14 +304,8 @@ mod tests {
             block_size: 1024,
             ..FeatureSet::default()
         };
-        let l = plan_layout(
-            64 * MIB,
-            GrowReservation::UpTo(GROW_32G),
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            fs,
-        )
-        .expect("plan");
+        let l = plan_layout(&PlanRequest::new(64 * MIB, fs).grow(GrowReservation::UpTo(GROW_32G)))
+            .expect("plan");
         assert_eq!(l.first_data_block, 1);
 
         let alloc = Allocator::new(&l);

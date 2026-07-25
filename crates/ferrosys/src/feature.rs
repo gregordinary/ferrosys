@@ -16,6 +16,28 @@
 
 use core::fmt;
 
+/// The size at or past which a regular file requires the `large_file` feature: 2 GiB.
+///
+/// A file this large no longer fits the signed 31-bit size the original ext2 revision
+/// stored, so the filesystem must advertise `large_file` for it. The kernel sets the
+/// feature when it writes such a file, and `e2fsck` faults an image that carries one
+/// without it. The bound is on regular files alone: a directory of any size, and every
+/// other file type, leaves the feature unneeded.
+pub const LARGE_FILE_MIN_SIZE: u64 = 0x8000_0000;
+
+/// The size the resize inode declares on a filesystem of `block_size` bytes.
+///
+/// The resize inode maps the reserved group-descriptor blocks through a classic block
+/// map, and its size field records the largest file that map's direct and double-indirect
+/// reach addresses — twelve direct blocks, one single-indirect block's worth, and one
+/// double-indirect block's worth — rather than the blocks it holds. That is the value
+/// `mke2fs` writes, and it grows with the square of the block size: 64 MiB at a
+/// 1024-byte block, 513 MiB at 2048, and 4 GiB at 4096.
+pub(crate) const fn resize_inode_size(block_size: u32) -> u64 {
+    let apb = block_size as u64 / 4; // block pointers one block holds
+    block_size as u64 * (12 + apb + apb * apb)
+}
+
 /// Generates a typed feature-word newtype over a `u32` bitfield.
 ///
 /// Each generated type wraps the little-endian on-disk feature word for one
@@ -280,7 +302,36 @@ feature_word! {
 /// This is the single value the geometry planner, the on-disk serializers, and the
 /// checksum and directory seams consult. Constructing it does not validate it;
 /// [`FeatureSet::validate`] rejects combinations that must never reach the disk.
+///
+/// # Building one
+///
+/// Start from a baseline constant and modify it. [`DEFAULT`](Self::DEFAULT),
+/// [`EXT2`](Self::EXT2), and [`EXT3`](Self::EXT3) are fixed family baselines,
+/// [`LATEST`](Self::LATEST) tracks current `mke2fs`, and [`EMPTY`](Self::EMPTY) carries
+/// no features at all — the base to replay a recorded list of feature names onto.
+/// [`Profile::feature_set`] names a baseline by family. From there,
+/// [`with_feature`](Self::with_feature) sets one feature by its on-disk name, and
+/// [`with_block_size`](Self::with_block_size) and
+/// [`with_inode_size`](Self::with_inode_size) set the two geometry values.
+///
+/// ```
+/// # use ferrosys::ext::{FeatureSet, Profile};
+/// let features = FeatureSet::DEFAULT
+///     .with_feature("orphan_file", false)
+///     .expect("orphan_file is a known feature")
+///     .with_block_size(1024);
+/// assert!(!features.has_orphan_file());
+/// assert_eq!(Profile::of(features), Profile::Ext4);
+/// ```
+///
+/// # Pinning an on-disk contract
+///
+/// A caller who needs the same bytes from a future release of this crate pins the whole
+/// set, not a list of feature names: [`pin`](Self::pin) emits every field as one
+/// canonical document to record and compare. See its documentation for why the feature
+/// names alone are not enough.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct FeatureSet {
     /// The `compat` feature word.
     pub compat: Compat,
@@ -304,6 +355,7 @@ pub struct FeatureSet {
 /// Planning rejects these rather than emitting an image an external checker would
 /// later fault, so the error names the exact conflict.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FeatureError {
     /// `meta_bg` was requested. It is the distributed group-descriptor layout this
     /// crate exists to avoid; reserved GDT blocks via `resize_inode` are used in its
@@ -322,10 +374,14 @@ pub enum FeatureError {
     /// writer builds; a set carrying it is ext4 by classification and must advertise
     /// `extent` to match the bytes written.
     #[error(
-        "{0} requires extent mapping: it belongs to the ext4 feature layer, not the \
+        "{feature} requires extent mapping: it belongs to the ext4 feature layer, not the \
          block-mapped ext2/ext3 baseline"
     )]
-    RequiresExtents(&'static str),
+    #[non_exhaustive]
+    RequiresExtents {
+        /// The on-disk name of the ext4-layer feature the non-extent set carries.
+        feature: &'static str,
+    },
     /// `flex_bg` was cleared on an extent-mapped set. The formatter packs each flex block
     /// group's bitmaps and inode tables together in the group's first member, so an
     /// extent-mapped image's physical layout is always a flex one; clearing the feature
@@ -353,24 +409,88 @@ pub enum FeatureError {
     /// file has no meaning on a filesystem with no journal.
     #[error("orphan_file requires has_journal: its entries are written through the journal")]
     OrphanFileWithoutJournal,
+    /// `resize_inode` was requested without `large_file` at a block size whose resize
+    /// inode is itself a large file. The resize inode is a regular file whose size field
+    /// records the reach of the classic block map rather than the blocks it holds, and
+    /// that reach grows with the square of the block size: at a 4096-byte block it is
+    /// 4 GiB, past [`LARGE_FILE_MIN_SIZE`], so the filesystem must advertise `large_file`
+    /// to describe its own resize inode. Smaller blocks put it under the bound and need no
+    /// such feature.
+    #[error(
+        "resize_inode requires large_file at a {block_size}-byte block: its resize inode \
+         declares {size} bytes, which is a large file"
+    )]
+    #[non_exhaustive]
+    ResizeInodeRequiresLargeFile {
+        /// The block size whose resize inode overruns the bound.
+        block_size: u32,
+        /// The size that resize inode declares.
+        size: u64,
+    },
     /// The block size is not a supported power-of-two byte count.
-    #[error("unsupported block size {0}: expected 1024, 2048, or 4096")]
-    BlockSize(u32),
+    #[error("unsupported block size {block_size}: expected 1024, 2048, or 4096")]
+    #[non_exhaustive]
+    BlockSize {
+        /// The block size that was requested.
+        block_size: u32,
+    },
     /// The inode size is not a supported power-of-two byte count of at least 128,
     /// or does not divide the block size.
-    #[error("unsupported inode size {0}: expected a power of two in 128..=block_size")]
-    InodeSize(u16),
+    #[error("unsupported inode size {inode_size}: expected a power of two in 128..=block_size")]
+    #[non_exhaustive]
+    InodeSize {
+        /// The inode size that was requested.
+        inode_size: u16,
+    },
 }
 
 impl FeatureSet {
+    /// A set carrying no features, with the default 4096-byte block and 256-byte inode.
+    ///
+    /// The base to build a set from a list of feature names: replay them through
+    /// [`with_feature`](Self::with_feature) and the words come out exactly. That is how a
+    /// caller verifies a recorded pin, so the empty base is part of the contract rather
+    /// than a convenience.
+    ///
+    /// The block and inode sizes are geometry, not features, so they hold their defaults
+    /// here; [`with_block_size`](Self::with_block_size) and
+    /// [`with_inode_size`](Self::with_inode_size) set them. The set is not writable as it
+    /// stands — it carries no `filetype`, which [`validate`](Self::validate) requires.
+    ///
+    /// ```
+    /// # use ferrosys::ext::FeatureSet;
+    /// let replayed = FeatureSet::DEFAULT
+    ///     .names()
+    ///     .iter()
+    ///     .try_fold(FeatureSet::EMPTY, |set, name| set.with_feature(name, true))
+    ///     .expect("every emitted name is a known feature");
+    /// assert_eq!(replayed.compat, FeatureSet::DEFAULT.compat);
+    /// assert_eq!(replayed.incompat, FeatureSet::DEFAULT.incompat);
+    /// assert_eq!(replayed.ro_compat, FeatureSet::DEFAULT.ro_compat);
+    /// ```
+    pub const EMPTY: Self = Self {
+        compat: Compat::NONE,
+        incompat: Incompat::NONE,
+        ro_compat: RoCompat::NONE,
+        block_size: 4096,
+        inode_size: 256,
+    };
+
     /// The default feature profile: the configuration used when the caller does not
-    /// choose otherwise.
+    /// choose otherwise, and the baseline [`Profile::Ext4`] names.
     ///
     /// On: `has_journal`, `ext_attr`, `resize_inode`, `dir_index`, `orphan_file`
     /// (compat); `filetype`, `extent`, `64bit`, `flex_bg`, `metadata_csum_seed` (incompat);
     /// `sparse_super`, `large_file`, `huge_file`, `dir_nlink`, `extra_isize`,
     /// `metadata_csum` (ro_compat). Inode size 256, and group descriptors take the
     /// 64-byte form. The block size is the default 4096; 1024 and 2048 are also valid.
+    ///
+    /// **This value is fixed.** It names one exact set of feature words and sizes, and it
+    /// keeps naming them: a filesystem formatted from `DEFAULT` at one version of this
+    /// crate is byte-identical to one formatted from `DEFAULT` at any other, given the
+    /// same inputs. That is what makes it safe to pin an on-disk contract to. Callers who
+    /// want the features a current `mke2fs` writes, whatever those become, name
+    /// [`LATEST`](Self::LATEST) instead.
     pub const DEFAULT: Self = Self {
         compat: Compat(
             Compat::HAS_JOURNAL.0
@@ -398,12 +518,29 @@ impl FeatureSet {
         inode_size: 256,
     };
 
-    /// The ext2 baseline: the feature words `mke2fs -t ext2` writes.
+    /// The features a current `mke2fs` writes for ext4 — **a moving target, by design.**
+    ///
+    /// Equal to [`DEFAULT`](Self::DEFAULT) today. It tracks upstream `e2fsprogs`, so it
+    /// may gain a feature in any release of this crate, and a filesystem formatted from it
+    /// may therefore differ byte for byte between two versions of this crate. That is the
+    /// point of it: a caller who wants parity with whatever `mke2fs` currently produces
+    /// names this, and accepts that the answer changes when `mke2fs` does.
+    ///
+    /// It is **unsuitable for pinning an on-disk contract.** A caller who needs
+    /// reproducible bytes across versions of this crate names [`DEFAULT`](Self::DEFAULT),
+    /// which is fixed, and records the resolved set with [`pin`](Self::pin).
+    pub const LATEST: Self = Self::DEFAULT;
+
+    /// The ext2 baseline: the feature words `mke2fs -t ext2` writes, and the baseline
+    /// [`Profile::Ext2`] names.
     ///
     /// On: `ext_attr`, `resize_inode`, `dir_index` (compat); `filetype` (incompat);
     /// `sparse_super`, `large_file` (ro_compat); inode size 256 and block size 4096. It
     /// carries no `extent` feature and no checksum, and the 256-byte inode's area past the
     /// 128-byte classic inode holds no `extra_isize`.
+    ///
+    /// Fixed, on the same terms as [`DEFAULT`](Self::DEFAULT): the ext2 feature layer is
+    /// complete and this constant does not move.
     pub const EXT2: Self = Self {
         compat: Compat(Compat::EXT_ATTR.0 | Compat::RESIZE_INODE.0 | Compat::DIR_INDEX.0),
         incompat: Incompat(Incompat::FILETYPE.0),
@@ -412,14 +549,37 @@ impl FeatureSet {
         inode_size: 256,
     };
 
-    /// The ext3 baseline: the feature words `mke2fs -t ext3` writes.
+    /// The ext3 baseline: the feature words `mke2fs -t ext3` writes, and the baseline
+    /// [`Profile::Ext3`] names.
     ///
     /// Exactly [`EXT2`](Self::EXT2) plus `has_journal` (compat `0x04`) — a jbd2 journal in
-    /// inode 8. Every other feature word and both sizes are ext2's.
+    /// inode 8. Every other feature word and both sizes are ext2's. Fixed, on the same
+    /// terms as [`DEFAULT`](Self::DEFAULT).
     pub const EXT3: Self = Self {
         compat: Compat(Self::EXT2.compat.0 | Compat::HAS_JOURNAL.0),
         ..Self::EXT2
     };
+
+    /// This set with the block size replaced: 1024, 2048, or 4096 bytes.
+    ///
+    /// The size is not checked here; [`validate`](Self::validate) rejects an unsupported
+    /// one with [`FeatureError::BlockSize`].
+    #[must_use]
+    pub const fn with_block_size(mut self, block_size: u32) -> Self {
+        self.block_size = block_size;
+        self
+    }
+
+    /// This set with the inode size replaced: a power of two from 128 up to the block
+    /// size.
+    ///
+    /// The size is not checked here; [`validate`](Self::validate) rejects an unsupported
+    /// one with [`FeatureError::InodeSize`].
+    #[must_use]
+    pub const fn with_inode_size(mut self, inode_size: u16) -> Self {
+        self.inode_size = inode_size;
+        self
+    }
 
     /// The number of bytes one group descriptor occupies on disk (`s_desc_size`):
     /// 64 when `64bit` is set, otherwise 32.
@@ -488,6 +648,23 @@ impl FeatureSet {
         self.ro_compat.contains(RoCompat::DIR_NLINK)
     }
 
+    /// True when the filesystem may carry extended attributes (`ext_attr`), inline in an
+    /// inode or in a dedicated attribute block. Without it an inode's `i_file_acl` must be
+    /// zero and no inode may carry an attribute, so a set of attributes is not
+    /// representable.
+    #[must_use]
+    pub const fn has_ext_attr(self) -> bool {
+        self.compat.contains(Compat::EXT_ATTR)
+    }
+
+    /// True when a regular file may reach [`LARGE_FILE_MIN_SIZE`] and beyond
+    /// (`large_file`), using the high half of the inode's size field. Without it every
+    /// regular file the filesystem holds must stay under that bound.
+    #[must_use]
+    pub const fn has_large_file(self) -> bool {
+        self.ro_compat.contains(RoCompat::LARGE_FILE)
+    }
+
     /// True when inode 7 maps the reserved group-descriptor-table blocks
     /// (`resize_inode`). Without it a filesystem carries no descriptor headroom and
     /// grows only offline, by relocating its descriptor table.
@@ -547,6 +724,79 @@ impl FeatureSet {
         out
     }
 
+    /// Every field of this set as one canonical document, for a caller pinning the bytes
+    /// a format produces.
+    ///
+    /// The document is the contract. A caller records what this emits — verbatim, as a
+    /// blob — and compares it string-for-string on a later build; a difference is drift in
+    /// the on-disk layout, surfaced as a diff a person reads rather than as changed image
+    /// bytes nobody notices. Comparison is exactly string equality: the rendering is
+    /// deterministic, ordered, and stable across releases of this crate under the version
+    /// on its first line.
+    ///
+    /// ```text
+    /// ferrosys-feature-pin 1
+    /// compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file
+    /// incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed
+    /// ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+    /// block_size 4096
+    /// inode_size 256
+    /// ```
+    ///
+    /// Each feature word appears twice over, and both halves are load-bearing: the hex is
+    /// exact and the names are readable, so a renamed feature fails on the half a person
+    /// reads while a changed bit fails on the half a machine reads. A bit no word names is
+    /// covered by the hex and reported as a trailing `unknown:0x…` so the readable half is
+    /// never quietly short.
+    ///
+    /// **This is why the pin is the whole set and not
+    /// [`names`](Self::names).** The feature names omit `block_size` and `inode_size`,
+    /// which are not features and change the on-disk bytes comprehensively; a contract
+    /// recorded from names alone would show no difference across a change to either.
+    /// Every field is emitted here, and the projection is written as an exhaustive
+    /// destructure so that a field added to [`FeatureSet`] is a compile error rather than
+    /// a silent omission from every recorded pin.
+    #[must_use]
+    pub fn pin(self) -> String {
+        // Exhaustive on purpose: see the note above. Do not replace with field accesses.
+        let Self {
+            compat,
+            incompat,
+            ro_compat,
+            block_size,
+            inode_size,
+        } = self;
+
+        let mut out = String::from("ferrosys-feature-pin 1\n");
+        push_pin_word(
+            &mut out,
+            "compat",
+            compat.bits(),
+            &compat.names(),
+            compat.unknown_bits(),
+        );
+        push_pin_word(
+            &mut out,
+            "incompat",
+            incompat.bits(),
+            &incompat.names(),
+            incompat.unknown_bits(),
+        );
+        push_pin_word(
+            &mut out,
+            "ro_compat",
+            ro_compat.bits(),
+            &ro_compat.names(),
+            ro_compat.unknown_bits(),
+        );
+        out.push_str("block_size ");
+        out.push_str(&block_size.to_string());
+        out.push_str("\ninode_size ");
+        out.push_str(&inode_size.to_string());
+        out.push('\n');
+        out
+    }
+
     /// This set with the feature named `name` turned on or off, or `None` when no word
     /// defines a feature by that name.
     ///
@@ -597,6 +847,9 @@ impl FeatureSet {
     /// - [`FeatureError::BlockSize`] if the block size is unsupported.
     /// - [`FeatureError::InodeSize`] if the inode size is unsupported or does not
     ///   divide the block size.
+    /// - [`FeatureError::ResizeInodeRequiresLargeFile`] if `resize_inode` is set without
+    ///   `large_file` at a block size whose resize inode reaches
+    ///   [`LARGE_FILE_MIN_SIZE`].
     /// - [`FeatureError::FlexBgRequired`] if an extent-mapped set clears `flex_bg`.
     /// - [`FeatureError::RequiresExtents`] if a non-extent (ext2/ext3) set carries a
     ///   feature from the ext4 layer.
@@ -618,7 +871,7 @@ impl FeatureSet {
         }
         match self.block_size {
             1024 | 2048 | 4096 => {}
-            other => return Err(FeatureError::BlockSize(other)),
+            other => return Err(FeatureError::BlockSize { block_size: other }),
         }
         let isize = self.inode_size as u32;
         if isize < 128
@@ -626,7 +879,22 @@ impl FeatureSet {
             || isize > self.block_size
             || !self.block_size.is_multiple_of(isize)
         {
-            return Err(FeatureError::InodeSize(self.inode_size));
+            return Err(FeatureError::InodeSize {
+                inode_size: self.inode_size,
+            });
+        }
+
+        // The resize inode is a regular file whose size records the classic block map's
+        // reach, which the block size squares: at 4096 bytes that is 4 GiB, and a regular
+        // file that large is what `large_file` exists to describe. The feature is required
+        // exactly where the size crosses the bound, so the smaller block sizes — whose
+        // resize inodes stay well under it — are left free of it.
+        let resize_size = resize_inode_size(self.block_size);
+        if self.has_resize_inode() && !self.has_large_file() && resize_size >= LARGE_FILE_MIN_SIZE {
+            return Err(FeatureError::ResizeInodeRequiresLargeFile {
+                block_size: self.block_size,
+                size: resize_size,
+            });
         }
 
         // Layout rules split on the extent discriminator — the same word [`Profile::of`]
@@ -644,28 +912,40 @@ impl FeatureSet {
             // feature is ext4 by classification, so the block-mapped path refuses it —
             // in the order the on-disk feature words fall.
             if self.has_flex_bg() {
-                return Err(FeatureError::RequiresExtents("flex_bg"));
+                return Err(FeatureError::RequiresExtents { feature: "flex_bg" });
             }
             if self.is_64bit() {
-                return Err(FeatureError::RequiresExtents("64bit"));
+                return Err(FeatureError::RequiresExtents { feature: "64bit" });
             }
             if self.has_metadata_csum() {
-                return Err(FeatureError::RequiresExtents("metadata_csum"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "metadata_csum",
+                });
             }
             if self.has_csum_seed() {
-                return Err(FeatureError::RequiresExtents("metadata_csum_seed"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "metadata_csum_seed",
+                });
             }
             if self.ro_compat.contains(RoCompat::HUGE_FILE) {
-                return Err(FeatureError::RequiresExtents("huge_file"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "huge_file",
+                });
             }
             if self.has_dir_nlink() {
-                return Err(FeatureError::RequiresExtents("dir_nlink"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "dir_nlink",
+                });
             }
             if self.ro_compat.contains(RoCompat::EXTRA_ISIZE) {
-                return Err(FeatureError::RequiresExtents("extra_isize"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "extra_isize",
+                });
             }
             if self.has_orphan_file() {
-                return Err(FeatureError::RequiresExtents("orphan_file"));
+                return Err(FeatureError::RequiresExtents {
+                    feature: "orphan_file",
+                });
             }
         }
         Ok(())
@@ -677,6 +957,26 @@ impl Default for FeatureSet {
     fn default() -> Self {
         Self::DEFAULT
     }
+}
+
+/// Append one feature word to a pin document: its label, its exact bits, then its
+/// feature names in ascending bit order, then any bit the word does not name.
+///
+/// The hex is zero-padded to eight digits so every word occupies the same width and a
+/// diff of two documents lines up column for column.
+fn push_pin_word(out: &mut String, label: &str, bits: u32, names: &[&str], unknown: u32) {
+    out.push_str(label);
+    out.push_str(" 0x");
+    out.push_str(&format!("{bits:08x}"));
+    for name in names {
+        out.push(' ');
+        out.push_str(name);
+    }
+    if unknown != 0 {
+        out.push_str(" unknown:0x");
+        out.push_str(&format!("{unknown:08x}"));
+    }
+    out.push('\n');
 }
 
 /// The ext filesystem family a [`FeatureSet`] presents: the profile a caller names when
@@ -760,9 +1060,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feature_words_match_the_pinned_profile() {
-        // The default profile carries exactly these feature words; a drift here is a
-        // drift from the feature set `mke2fs` writes.
+    fn the_default_set_is_frozen() {
+        // DEFAULT is fixed: a caller pins an on-disk contract to it and expects the same
+        // bytes from a later release of this crate. So these are not "the words today" —
+        // they are the words, and a change to any of them changes image bytes for every
+        // caller who never touched their configuration. Adding a feature to the default
+        // profile means adding it to LATEST, not here.
         let fs = FeatureSet::default();
         assert_eq!(
             fs.compat.bits(),
@@ -781,6 +1084,128 @@ mod tests {
         );
         assert_eq!(fs.block_size, 4096);
         assert_eq!(fs.inode_size, 256);
+        assert_eq!(fs, FeatureSet::DEFAULT);
+        assert_eq!(Profile::Ext4.feature_set(), FeatureSet::DEFAULT);
+    }
+
+    #[test]
+    fn latest_still_matches_the_frozen_default() {
+        // LATEST tracks the pinned `mke2fs`, whose defaults DEFAULT was frozen from, so
+        // the two agree today. When upstream adds a feature this assertion is the one that
+        // changes — deliberately, to record that the two have diverged — and DEFAULT stays
+        // exactly where it is.
+        assert_eq!(FeatureSet::LATEST, FeatureSet::DEFAULT);
+    }
+
+    #[test]
+    fn the_empty_set_carries_no_features() {
+        let empty = FeatureSet::EMPTY;
+        assert_eq!(empty.compat.bits(), 0);
+        assert_eq!(empty.incompat.bits(), 0);
+        assert_eq!(empty.ro_compat.bits(), 0);
+        assert!(empty.names().is_empty());
+        // The sizes are geometry rather than features, so they hold their defaults.
+        assert_eq!(empty.block_size, 4096);
+        assert_eq!(empty.inode_size, 256);
+        // And the set is not writable as it stands: `filetype` is required.
+        assert!(matches!(
+            empty.validate(),
+            Err(FeatureError::FiletypeRequired)
+        ));
+    }
+
+    #[test]
+    fn the_geometry_builders_replace_one_value_each() {
+        let fs = FeatureSet::DEFAULT
+            .with_block_size(1024)
+            .with_inode_size(128);
+        assert_eq!(fs.block_size, 1024);
+        assert_eq!(fs.inode_size, 128);
+        // Neither touches the feature words.
+        assert_eq!(fs.compat, FeatureSet::DEFAULT.compat);
+        assert_eq!(fs.incompat, FeatureSet::DEFAULT.incompat);
+        assert_eq!(fs.ro_compat, FeatureSet::DEFAULT.ro_compat);
+    }
+
+    #[test]
+    fn the_pin_document_is_the_recorded_contract() {
+        // A golden document. A consumer records this verbatim and compares it string for
+        // string, so any change to the rendering — a reordered word, a dropped field, a
+        // renamed feature — is a change to every recorded pin and must be deliberate. If
+        // this assertion needs editing, the version on the first line needs raising.
+        assert_eq!(
+            FeatureSet::DEFAULT.pin(),
+            "ferrosys-feature-pin 1\n\
+             compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file\n\
+             incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed\n\
+             ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize \
+             metadata_csum\n\
+             block_size 4096\n\
+             inode_size 256\n"
+        );
+        assert_eq!(
+            FeatureSet::EXT2.pin(),
+            "ferrosys-feature-pin 1\n\
+             compat 0x00000038 ext_attr resize_inode dir_index\n\
+             incompat 0x00000002 filetype\n\
+             ro_compat 0x00000003 sparse_super large_file\n\
+             block_size 4096\n\
+             inode_size 256\n"
+        );
+        assert_eq!(
+            FeatureSet::EMPTY.pin(),
+            "ferrosys-feature-pin 1\n\
+             compat 0x00000000\n\
+             incompat 0x00000000\n\
+             ro_compat 0x00000000\n\
+             block_size 4096\n\
+             inode_size 256\n"
+        );
+    }
+
+    #[test]
+    fn the_pin_records_geometry_the_feature_names_drop() {
+        // The reason the pin is the whole set: two sets with identical feature names but
+        // different geometry produce different images, and `names()` cannot tell them
+        // apart. The pin can, which is what makes it usable as a contract.
+        let a = FeatureSet::DEFAULT;
+        let b = FeatureSet::DEFAULT
+            .with_block_size(1024)
+            .with_inode_size(128);
+        assert_eq!(a.names(), b.names());
+        assert_ne!(a.pin(), b.pin());
+    }
+
+    #[test]
+    fn the_pin_names_replay_onto_an_empty_set() {
+        // Two projections checking each other. The pin carries each word twice — exact
+        // bits and readable names — and neither half is trusted alone: replaying the names
+        // from EMPTY must reproduce the bits. A renamed feature breaks the replay; a
+        // changed bit breaks the hex.
+        for set in [FeatureSet::DEFAULT, FeatureSet::EXT2, FeatureSet::EXT3] {
+            let replayed = set
+                .names()
+                .iter()
+                .try_fold(FeatureSet::EMPTY, |acc, name| acc.with_feature(name, true))
+                .expect("every name a set emits is a name a word resolves");
+            assert_eq!(replayed.compat, set.compat);
+            assert_eq!(replayed.incompat, set.incompat);
+            assert_eq!(replayed.ro_compat, set.ro_compat);
+        }
+    }
+
+    #[test]
+    fn the_pin_reports_a_bit_no_word_names() {
+        // A set read back from a foreign image can carry a feature this crate does not
+        // name. The hex covers it either way; the trailing `unknown:` marker keeps the
+        // readable half from being quietly short of the exact one.
+        let mut fs = FeatureSet::EMPTY;
+        fs.incompat = Incompat::from_bits(Incompat::FILETYPE.bits() | 0x0080_0000);
+        let pinned = fs.pin();
+        assert!(
+            pinned.contains("incompat 0x00800002 filetype unknown:0x00800000\n"),
+            "{pinned}"
+        );
     }
 
     #[test]
@@ -979,7 +1404,7 @@ mod tests {
                 .expect("a known name");
             assert_eq!(
                 fs.validate(),
-                Err(FeatureError::RequiresExtents(present)),
+                Err(FeatureError::RequiresExtents { feature: present }),
                 "ext2 + {name} is refused as an ext4-layer feature"
             );
         }
@@ -994,7 +1419,9 @@ mod tests {
             .expect("a known name");
         assert_eq!(
             fs.validate(),
-            Err(FeatureError::RequiresExtents("metadata_csum"))
+            Err(FeatureError::RequiresExtents {
+                feature: "metadata_csum"
+            })
         );
 
         // `orphan_file` needs `has_journal`, so ext3-plus-orphan reaches the layer check;
@@ -1004,8 +1431,65 @@ mod tests {
             .expect("a known name");
         assert_eq!(
             fs.validate(),
-            Err(FeatureError::RequiresExtents("orphan_file"))
+            Err(FeatureError::RequiresExtents {
+                feature: "orphan_file"
+            })
         );
+    }
+
+    #[test]
+    fn the_resize_inode_declares_the_size_mke2fs_writes() {
+        // The values `mke2fs 1.47.0` records in inode 7 at each block size, read back with
+        // `debugfs -R 'stat <7>'`. The formula squares the block size, so these are the
+        // three points the supported sizes land on — and the 4096 one is what puts the
+        // resize inode past the large-file bound.
+        assert_eq!(resize_inode_size(1024), 67_383_296);
+        assert_eq!(resize_inode_size(2048), 537_944_064);
+        assert_eq!(resize_inode_size(4096), 4_299_210_752);
+        assert!(resize_inode_size(1024) < LARGE_FILE_MIN_SIZE);
+        assert!(resize_inode_size(2048) < LARGE_FILE_MIN_SIZE);
+        assert!(resize_inode_size(4096) >= LARGE_FILE_MIN_SIZE);
+    }
+
+    #[test]
+    fn the_resize_inode_requires_large_file_where_its_size_needs_it() {
+        // The resize inode is a regular file, so at a 4096-byte block — where its declared
+        // size is 4 GiB — the filesystem must advertise `large_file` to describe its own
+        // reserved-descriptor map. `mke2fs -O ^large_file` sets the feature back for
+        // exactly this reason; this states the conflict rather than writing a profile the
+        // caller did not ask for.
+        let fs = FeatureSet::EXT2
+            .with_feature("large_file", false)
+            .expect("a known name");
+        assert_eq!(fs.block_size, 4096);
+        assert_eq!(
+            fs.validate(),
+            Err(FeatureError::ResizeInodeRequiresLargeFile {
+                block_size: 4096,
+                size: 4_299_210_752,
+            })
+        );
+
+        // The smaller block sizes put the resize inode well under the bound, so they
+        // format without the feature — as `mke2fs -b 1024 -O ^large_file` does.
+        for block_size in [1024, 2048] {
+            let fs = FeatureSet { block_size, ..fs };
+            assert_eq!(
+                fs.validate(),
+                Ok(()),
+                "a {block_size}-byte block needs no large_file for its resize inode"
+            );
+        }
+
+        // Dropping the resize inode drops the requirement with it: nothing else the
+        // formatter writes reaches the bound on its own.
+        let fs = FeatureSet {
+            block_size: 4096,
+            ..fs
+        }
+        .with_feature("resize_inode", false)
+        .expect("a known name");
+        assert_eq!(fs.validate(), Ok(()));
     }
 
     #[test]
@@ -1014,13 +1498,19 @@ mod tests {
             block_size: 3000,
             ..FeatureSet::default()
         };
-        assert_eq!(fs.validate(), Err(FeatureError::BlockSize(3000)));
+        assert_eq!(
+            fs.validate(),
+            Err(FeatureError::BlockSize { block_size: 3000 })
+        );
 
         let fs = FeatureSet {
             inode_size: 100,
             ..FeatureSet::default()
         };
-        assert_eq!(fs.validate(), Err(FeatureError::InodeSize(100)));
+        assert_eq!(
+            fs.validate(),
+            Err(FeatureError::InodeSize { inode_size: 100 })
+        );
 
         // 32-byte descriptors when 64bit is off.
         let mut fs = FeatureSet::default();

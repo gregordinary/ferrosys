@@ -16,11 +16,12 @@
 
 use std::collections::BTreeMap;
 
+use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE};
 use crate::ondisk::{
     FileType, Inode, Timestamp, Xattr, has_empty_name, longest_stored_name, split_for_storage,
     xattr_block_len,
 };
-use crate::source::{EntryKind, Metadata, Source, SourceEntry};
+use crate::source::{EntryKind, FileContent, Metadata, Source, SourceEntry};
 
 /// The widest device major number the on-disk encoding represents (12 bits).
 const MAX_DEVICE_MAJOR: u32 = (1 << 12) - 1;
@@ -59,6 +60,7 @@ const MODE_TYPE_MASK: u16 = 0o170000;
 /// worth more than one that refuses to guess at a byte. An unrepresentable byte becomes
 /// U+FFFD, so the rendering is lossy and the path is still recognizable.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ModelError {
     /// A path resolved to the root where a name was required — a hard link cannot
     /// target the root directory.
@@ -68,6 +70,7 @@ pub enum ModelError {
     /// entry that would place anything else there is rejected rather than applying its
     /// metadata to a directory it does not describe.
     #[error("entry {} names the root but is not a directory", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     RootNotDirectory {
         /// The offending path.
         path: Vec<u8>,
@@ -75,6 +78,7 @@ pub enum ModelError {
     /// The configured first user inode names an inode the filesystem reserves, so the
     /// entries would overwrite the root, `/lost+found`, or another reserved inode.
     #[error("the first user inode {given} is below {floor}, the first non-reserved inode")]
+    #[non_exhaustive]
     FirstUserInodeReserved {
         /// The configured value.
         given: u32,
@@ -87,6 +91,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.component)
     )]
+    #[non_exhaustive]
     InvalidComponent {
         /// The offending path.
         path: Vec<u8>,
@@ -97,24 +102,28 @@ pub enum ModelError {
     /// path twice is rejected rather than resolved by keeping the last entry, so the
     /// filesystem an ambiguous source would produce is never guessed at.
     #[error("path {} is used by more than one entry", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     Duplicate {
         /// The duplicated path.
         path: Vec<u8>,
     },
     /// An entry's parent directory was not declared.
     #[error("path {} has no parent directory", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     ParentMissing {
         /// The path whose parent is absent.
         path: Vec<u8>,
     },
     /// An entry's parent path exists but is not a directory.
     #[error("path {} has a parent that is not a directory", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     ParentNotDir {
         /// The path whose parent is not a directory.
         path: Vec<u8>,
     },
     /// An entry uses a path the filesystem reserves (such as `/lost+found`).
     #[error("path {} is reserved", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     ReservedPath {
         /// The reserved path.
         path: Vec<u8>,
@@ -125,6 +134,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.target)
     )]
+    #[non_exhaustive]
     HardlinkTargetMissing {
         /// The link's path.
         path: Vec<u8>,
@@ -138,6 +148,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.target)
     )]
+    #[non_exhaustive]
     HardlinkTargetIsDirectory {
         /// The link's path.
         path: Vec<u8>,
@@ -150,6 +161,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.target)
     )]
+    #[non_exhaustive]
     HardlinkCycle {
         /// The link's path.
         path: Vec<u8>,
@@ -162,6 +174,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.target)
     )]
+    #[non_exhaustive]
     TooManyLinks {
         /// The link's path.
         path: Vec<u8>,
@@ -173,6 +186,7 @@ pub enum ModelError {
         "symlink {} has a target of {len} bytes, more than a block holds",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     SymlinkTargetTooLong {
         /// The symlink's path.
         path: Vec<u8>,
@@ -181,6 +195,7 @@ pub enum ModelError {
     },
     /// A symlink has an empty target, which points nowhere.
     #[error("symlink {} has an empty target", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
     EmptySymlinkTarget {
         /// The symlink's path.
         path: Vec<u8>,
@@ -190,6 +205,7 @@ pub enum ModelError {
         "symlink {} has a target containing an embedded NUL",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     SymlinkTargetHasNul {
         /// The symlink's path.
         path: Vec<u8>,
@@ -201,6 +217,7 @@ pub enum ModelError {
          without the dir_nlink feature",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     DirectoryLinkCountOverflow {
         /// The directory's path.
         path: Vec<u8>,
@@ -214,6 +231,7 @@ pub enum ModelError {
         "device {} has out-of-range numbers {major}:{minor}",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     DeviceNumberTooLarge {
         /// The device node's path.
         path: Vec<u8>,
@@ -227,6 +245,7 @@ pub enum ModelError {
         "entry {} has an extended attribute name longer than 255 bytes",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     XattrNameTooLong {
         /// The entry's path.
         path: Vec<u8>,
@@ -242,6 +261,7 @@ pub enum ModelError {
         String::from_utf8_lossy(.path),
         String::from_utf8_lossy(.name)
     )]
+    #[non_exhaustive]
     InvalidXattrName {
         /// The entry's path.
         path: Vec<u8>,
@@ -257,11 +277,46 @@ pub enum ModelError {
         "entry {} has extended attributes spilling {needed} bytes past the inode, more than a block holds",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     XattrsTooLarge {
         /// The entry's path.
         path: Vec<u8>,
         /// Bytes the spilled attributes need in the block.
         needed: usize,
+    },
+    /// An entry carries extended attributes on a feature set without `ext_attr`, which is
+    /// the feature that says a filesystem holds any. Writing them regardless would leave
+    /// inodes pointing at an attribute block the feature words deny, which `e2fsck`
+    /// faults; dropping them would lose data the source supplied. Neither is done: the
+    /// conflict between the attributes and the profile is stated instead.
+    #[error(
+        "entry {} carries extended attributes, which the feature set cannot hold without \
+         ext_attr",
+        String::from_utf8_lossy(.path)
+    )]
+    #[non_exhaustive]
+    XattrsWithoutFeature {
+        /// The entry's path.
+        path: Vec<u8>,
+    },
+    /// A regular file reaches [`LARGE_FILE_MIN_SIZE`] on a feature set without
+    /// `large_file`, the feature that describes a file that large. The kernel sets the
+    /// feature when it writes such a file and `e2fsck` faults an image carrying one
+    /// without it, so the file is refused rather than written into a filesystem whose
+    /// feature words deny it.
+    #[error(
+        "file {} is {size} bytes, past the {limit} a regular file may reach without the \
+         large_file feature",
+        String::from_utf8_lossy(.path)
+    )]
+    #[non_exhaustive]
+    FileTooLargeWithoutFeature {
+        /// The file's path.
+        path: Vec<u8>,
+        /// The file's size in bytes.
+        size: u64,
+        /// The size a regular file must stay under without the feature.
+        limit: u64,
     },
     /// An entry carries a timestamp the on-disk format cannot represent: its seconds
     /// lie outside the range an ext4 inode holds, or its nanoseconds are not a valid
@@ -271,6 +326,7 @@ pub enum ModelError {
         "entry {} has a timestamp of {secs}s + {nanos}ns outside the representable range",
         String::from_utf8_lossy(.path)
     )]
+    #[non_exhaustive]
     TimestampOutOfRange {
         /// The entry's path.
         path: Vec<u8>,
@@ -283,6 +339,7 @@ pub enum ModelError {
 
 /// One entry inside a directory: a name pointing at an inode.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct DirChild {
     /// Entry name.
     pub name: Vec<u8>,
@@ -297,8 +354,8 @@ pub struct DirChild {
 pub enum Content {
     /// A directory's ordered entries, beginning with `.` and `..`.
     Directory(Vec<DirChild>),
-    /// A regular file's bytes.
-    File(Vec<u8>),
+    /// A regular file's contents, in memory or still on the host.
+    File(FileContent),
     /// A symlink whose target is stored inline in the inode block area.
     FastSymlink(Vec<u8>),
     /// A symlink whose target is stored in a data block.
@@ -318,6 +375,7 @@ pub enum Content {
 /// A modeled inode: its metadata and its contents, ready for the materializer to
 /// place and write.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct ModelInode {
     /// Inode number.
     pub number: u32,
@@ -374,6 +432,7 @@ impl ModelInode {
 /// The complete inode tree: every inode the source implies, plus the always-present
 /// root and `/lost+found`.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct FsModel {
     /// Inodes by number. Numbers are contiguous from [`ROOT_INO`] through
     /// `first_free_inode - 1` once the materializer's reserved inodes fill the gaps.
@@ -398,9 +457,15 @@ impl FsModel {
 
 /// Inputs the model needs beyond the source: the block size (which bounds a slow
 /// symlink target), the inode size (which fixes the inline extended-attribute
-/// region), the default time for the always-present directories, and the inode
-/// number the source's entries start at.
+/// region), the default time for the always-present directories, the inode number the
+/// source's entries start at, and the feature answers that decide which entries the
+/// filesystem can hold at all.
+///
+/// Build one with [`new`](Self::new), which derives every feature-driven field from one
+/// [`FeatureSet`] so they cannot disagree with the image the writer goes on to emit, then
+/// set [`fixed_time`](Self::fixed_time) if the format clamps timestamps.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ModelConfig {
     /// Block size in bytes.
     pub block_size: u32,
@@ -424,6 +489,14 @@ pub struct ModelConfig {
     /// when it does not, such a directory is rejected rather than given a sentinel no
     /// feature backs.
     pub dir_nlink: bool,
+    /// Whether the feature set permits extended attributes (`ext_attr`). When it does not,
+    /// an entry carrying any is rejected rather than written into a filesystem whose
+    /// feature words say it holds none.
+    pub ext_attr: bool,
+    /// Whether the feature set permits a regular file of [`LARGE_FILE_MIN_SIZE`] or more
+    /// (`large_file`). When it does not, a file that large is rejected rather than written
+    /// into a filesystem whose feature words say it holds no such file.
+    pub large_file: bool,
 }
 
 /// The four inode timestamps.
@@ -453,6 +526,32 @@ impl Times {
 }
 
 impl ModelConfig {
+    /// The configuration a `feature` set implies, for a source whose entries start at
+    /// `first_user_inode` and whose always-present directories take `default_time`.
+    ///
+    /// Five of the fields — the block and inode sizes, and the three feature answers —
+    /// are properties of the feature set alone, so they are read from it here rather than
+    /// supplied one by one. Wiring them by hand is how a model comes to judge a source
+    /// against a filesystem the writer is not about to emit: a `dir_nlink` answer that
+    /// says yes to a set without the feature, or an `ext_attr` answer that says yes to one
+    /// that cannot hold an attribute. There is one derivation, and this is it.
+    ///
+    /// [`fixed_time`](Self::fixed_time) starts unset — each entry keeps its own times —
+    /// and is set afterward by a format that clamps them.
+    #[must_use]
+    pub fn new(feature: FeatureSet, first_user_inode: u32, default_time: Timestamp) -> Self {
+        Self {
+            block_size: feature.block_size,
+            inode_size: feature.inode_size,
+            first_user_inode,
+            default_time,
+            fixed_time: None,
+            dir_nlink: feature.has_dir_nlink(),
+            ext_attr: feature.has_ext_attr(),
+            large_file: feature.has_large_file(),
+        }
+    }
+
     /// Resolve an entry's four timestamps: the fixed time on every field when set,
     /// otherwise the entry's access/change/modification times with the creation time
     /// derived from the modification time.
@@ -486,19 +585,27 @@ impl ModelConfig {
     }
 }
 
-/// Validate an entry's extended attributes: each name must be present, free of NUL, and
-/// unique within the set; names must fit `e_name_len`; and the set must fit the storage
-/// an inode commands — its inline region plus one xattr block, split exactly as the
-/// writer will split it. The name rules mirror the non-empty/no-NUL/unique discipline
-/// the path components enforce, and for the same reason — a name the on-disk format
-/// cannot represent as a distinct, addressable entry is rejected rather than written
-/// into a set that would silently lose attributes.
-fn validate_xattrs(
-    path: &[u8],
-    xattrs: &[Xattr],
-    block_size: u32,
-    inode_size: u16,
-) -> Result<(), ModelError> {
+/// Validate an entry's extended attributes: the feature set must say the filesystem holds
+/// attributes at all; each name must be present, free of NUL, and unique within the set;
+/// names must fit `e_name_len`; and the set must fit the storage an inode commands — its
+/// inline region plus one xattr block, split exactly as the writer will split it. The name
+/// rules mirror the non-empty/no-NUL/unique discipline the path components enforce, and
+/// for the same reason — a name the on-disk format cannot represent as a distinct,
+/// addressable entry is rejected rather than written into a set that would silently lose
+/// attributes.
+fn validate_xattrs(path: &[u8], xattrs: &[Xattr], config: &ModelConfig) -> Result<(), ModelError> {
+    if xattrs.is_empty() {
+        return Ok(());
+    }
+    // `ext_attr` is what says a filesystem carries attributes: the inline region and the
+    // external block both belong to it. A set on a profile without the feature is a
+    // conflict between the input and the words the image would advertise, so it is named
+    // before anything about the attributes themselves.
+    if !config.ext_attr {
+        return Err(ModelError::XattrsWithoutFeature {
+            path: path.to_vec(),
+        });
+    }
     for (i, x) in xattrs.iter().enumerate() {
         let reason = if has_empty_name(&x.name) {
             // An empty name is the end-of-list terminator under index 0 and an
@@ -526,13 +633,28 @@ fn validate_xattrs(
     }
     // The attributes that do not fit the inline region spill to the one block an
     // inode can charge; a spill the block cannot hold is the set's hard ceiling.
-    let region_len = Inode::inline_xattr_capacity_for(inode_size);
+    let region_len = Inode::inline_xattr_capacity_for(config.inode_size);
     let (_, spilled) = split_for_storage(xattrs, region_len);
     let needed = xattr_block_len(&spilled);
-    if !spilled.is_empty() && needed > block_size as usize {
+    if !spilled.is_empty() && needed > config.block_size as usize {
         return Err(ModelError::XattrsTooLarge {
             path: path.to_vec(),
             needed,
+        });
+    }
+    Ok(())
+}
+
+/// Reject a regular file the feature set cannot describe: one reaching
+/// [`LARGE_FILE_MIN_SIZE`] without `large_file`. The bound is on regular files alone —
+/// a directory of any size needs no such feature, which is also how `e2fsck` counts
+/// them.
+fn validate_file_size(path: &[u8], size: u64, config: &ModelConfig) -> Result<(), ModelError> {
+    if size >= LARGE_FILE_MIN_SIZE && !config.large_file {
+        return Err(ModelError::FileTooLargeWithoutFeature {
+            path: path.to_vec(),
+            size,
+            limit: LARGE_FILE_MIN_SIZE,
         });
     }
     Ok(())
@@ -644,12 +766,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         Some(entry) => {
             let times = config.times(&entry.meta);
             times.validate(&entry.path)?;
-            validate_xattrs(
-                &entry.path,
-                &entry.xattrs,
-                config.block_size,
-                config.inode_size,
-            )?;
+            validate_xattrs(&entry.path, &entry.xattrs, &config)?;
             let mut root = dir_inode(
                 ROOT_INO,
                 0o040000 | entry.meta.mode,
@@ -720,12 +837,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         let meta = &n.entry.meta;
         let times = config.times(meta);
         times.validate(&n.entry.path)?;
-        validate_xattrs(
-            &n.entry.path,
-            &n.entry.xattrs,
-            config.block_size,
-            config.inode_size,
-        )?;
+        validate_xattrs(&n.entry.path, &n.entry.xattrs, &config)?;
         let xattrs = n.entry.xattrs.clone();
         // Every kind but a directory shares this leaf construction; a directory's
         // content and link count are filled in during finalization.
@@ -757,10 +869,14 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
                     },
                 );
             }
-            EntryKind::File(bytes) => {
+            EntryKind::File(content) => {
+                // The length is known without reading, so a file the feature set cannot
+                // describe is refused here — naming its path — whether its bytes are in
+                // memory or still on the host.
+                validate_file_size(&n.entry.path, content.len(), &config)?;
                 inodes.insert(
                     ino,
-                    leaf(0o100000 | meta.mode, Content::File(bytes.clone())),
+                    leaf(0o100000 | meta.mode, Content::File(content.clone())),
                 );
             }
             EntryKind::Symlink(target) => {
@@ -1036,14 +1152,17 @@ mod tests {
     use crate::source::{Metadata, TreeBuilder};
 
     fn config() -> ModelConfig {
-        ModelConfig {
-            block_size: 4096,
-            inode_size: 256,
-            first_user_inode: FIRST_USER_INO,
-            default_time: Timestamp::from_secs(1_700_000_000),
-            fixed_time: None,
-            dir_nlink: true,
-        }
+        // The default feature set carries `dir_nlink`, `ext_attr`, and `large_file`, so
+        // the derived configuration says yes to all three; a test that needs one of them
+        // off overrides that field.
+        let cfg = ModelConfig::new(
+            FeatureSet::DEFAULT,
+            FIRST_USER_INO,
+            Timestamp::from_secs(1_700_000_000),
+        );
+        assert!(cfg.dir_nlink && cfg.ext_attr && cfg.large_file);
+        assert_eq!((cfg.block_size, cfg.inode_size), (4096, 256));
+        cfg
     }
 
     fn meta(mode: u16) -> Metadata {
@@ -1490,6 +1609,67 @@ mod tests {
             matches!(err, ModelError::XattrsTooLarge { needed: 4100, .. }),
             "the spill alone overflows a block, got {err:?}"
         );
+    }
+
+    #[test]
+    fn attributes_on_a_profile_without_ext_attr_are_refused() {
+        // `ext_attr` is the feature that says a filesystem holds attributes at all. A
+        // source carrying one on a profile without it is a conflict between the input and
+        // the words the image would advertise: writing the attribute anyway leaves an
+        // inode pointing at a block the feature word denies (which `e2fsck` faults), and
+        // dropping it silently loses what the source supplied. The conflict is named.
+        let cfg = ModelConfig {
+            ext_attr: false,
+            ..config()
+        };
+        let src = || {
+            TreeBuilder::new()
+                .file(b"/f".to_vec(), b"data".to_vec(), meta(0o644))
+                .xattr(b"user.a".to_vec(), b"1".to_vec())
+        };
+        let err = build_model(src(), cfg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModelError::XattrsWithoutFeature { ref path } if path == b"/f"
+            ),
+            "expected XattrsWithoutFeature naming the entry, got {err:?}"
+        );
+
+        // With the feature the same source builds, and a profile without it accepts every
+        // entry that carries no attribute.
+        build_model(src(), config()).expect("ext_attr holds the same set");
+        build_model(
+            TreeBuilder::new().file(b"/f".to_vec(), b"data".to_vec(), meta(0o644)),
+            cfg,
+        )
+        .expect("an entry with no attributes needs no feature");
+    }
+
+    #[test]
+    fn a_regular_file_past_the_large_file_bound_requires_the_feature() {
+        // The rule is checked against a size rather than against bytes, so it is exercised
+        // here without materializing two gigabytes: the bound is what `e2fsck` applies
+        // (`ext2fs_needs_large_file_feature`), and it is inclusive.
+        let with = config();
+        let without = ModelConfig {
+            large_file: false,
+            ..config()
+        };
+        let at = LARGE_FILE_MIN_SIZE;
+
+        assert!(validate_file_size(b"/f", at - 1, &without).is_ok());
+        let err = validate_file_size(b"/f", at, &without).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModelError::FileTooLargeWithoutFeature { size, limit, ref path }
+                    if size == LARGE_FILE_MIN_SIZE && limit == LARGE_FILE_MIN_SIZE && path == b"/f"
+            ),
+            "expected FileTooLargeWithoutFeature naming the file, got {err:?}"
+        );
+        // The feature is what lifts the bound.
+        assert!(validate_file_size(b"/f", at, &with).is_ok());
     }
 
     #[test]

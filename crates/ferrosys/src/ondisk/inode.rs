@@ -111,6 +111,12 @@ pub struct Timestamp {
     /// represented on disk; [`is_representable`](Self::is_representable) reports which.
     pub secs: i64,
     /// Nanoseconds within the second, `0..1_000_000_000`.
+    ///
+    /// A timestamp built for writing holds a valid fraction, and
+    /// [`is_representable`](Self::is_representable) is what confirms it before one
+    /// reaches an inode. A timestamp [`decode`](Self::decode)d from an image need not:
+    /// the on-disk field is thirty bits wide, so an inode this crate did not write can
+    /// name a fraction larger than a second and this field carries what the inode says.
     pub nanos: u32,
 }
 
@@ -164,6 +170,13 @@ impl Timestamp {
 
     /// Decode from the stored `(field, extra)` pair: the signed seconds field plus the
     /// epoch offset, and the nanoseconds from the extra word's upper bits.
+    ///
+    /// This is the kernel's `ext4_decode_extra_time`, and like it, it reports what the
+    /// inode holds rather than what a valid fraction would be: the extra word's upper
+    /// thirty bits reach 1 073 741 823, past the 1 000 000 000 that makes a second, so a
+    /// decoded [`nanos`](Self::nanos) is bounded by the field and not by the second it
+    /// divides. A caller that goes on to render or re-encode a decoded timestamp checks
+    /// it with [`is_representable`](Self::is_representable) first.
     #[must_use]
     pub const fn decode(field: u32, extra: u32) -> Self {
         let secs = (field as i32 as i64) + (((extra & 0x3) as i64) << 32);
@@ -204,7 +217,18 @@ pub(crate) fn decode_device(block0: u32, block1: u32) -> (u32, u32) {
 }
 
 /// An inode: one file's metadata and the 60-byte area that maps its blocks.
+///
+/// # Constructing one
+///
+/// Start from [`Inode::empty`], which sizes the extra area, and assign the fields that
+/// differ. A `#[non_exhaustive]` structure cannot be written as a literal from outside
+/// this crate, and that is about the Rust type, not the format: the byte layout is
+/// [`read_from`](Self::read_from), [`write_to`](Self::write_to), and the inode size the
+/// superblock declares, and none of them changes. What the attribute buys is that this crate can widen its
+/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// being a breaking change for everyone reading an image.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct Inode {
     /// Type and permission bits (`i_mode`): the `S_IF*` type in the high nibble and
     /// the permission bits below.

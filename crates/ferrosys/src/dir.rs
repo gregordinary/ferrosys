@@ -26,9 +26,11 @@ use crate::ondisk::{
 
 /// A failure packing a directory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DirError {
     /// A single entry is larger than a directory block can hold.
     #[error("directory entry needs {need} bytes, more than a {block_size}-byte block holds")]
+    #[non_exhaustive]
     EntryTooLarge {
         /// Bytes the entry's record needs.
         need: usize,
@@ -41,6 +43,7 @@ pub enum DirError {
     /// The directory holds more entry blocks than one level of index nodes can
     /// address.
     #[error("directory index needs {blocks} entry blocks, more than the {capacity} addressable")]
+    #[non_exhaustive]
     IndexTooLarge {
         /// Entry blocks the directory needs.
         blocks: usize,
@@ -69,6 +72,7 @@ pub enum DirBlockKind {
 
 /// One directory block: its bytes, and the kind of tail it reserves.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct DirBlock {
     /// The block's bytes, exactly one block long.
     pub bytes: Vec<u8>,
@@ -93,7 +97,12 @@ impl DirBlock {
 /// bytes and ready to write. The `"."` and `".."` entries are supplied by the caller
 /// as the first two entries, so this trait is only concerned with placement, not with
 /// a directory's required contents.
-pub trait DirLayout {
+///
+/// The trait is sealed: [`LinearDir`] and [`HtreeDir`] are its implementations and no
+/// other is possible. It is a seam so that the materializer can pick a layout from the
+/// feature set, not an extension point — the on-disk directory encodings are the ones
+/// the format defines, and a third would be an image no reader agrees with.
+pub trait DirLayout: crate::sealed::Sealed {
     /// Pack `entries` into `block_size`-byte directory blocks.
     ///
     /// # Errors
@@ -186,6 +195,8 @@ pub struct LinearDir {
     pub tail_len: usize,
 }
 
+impl crate::sealed::Sealed for LinearDir {}
+
 impl DirLayout for LinearDir {
     fn build_blocks(
         &self,
@@ -270,6 +281,8 @@ impl HtreeDir {
         hashed
     }
 }
+
+impl crate::sealed::Sealed for HtreeDir {}
 
 impl DirLayout for HtreeDir {
     fn build_blocks(

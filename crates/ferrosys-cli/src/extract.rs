@@ -28,7 +28,7 @@ use std::fs::File;
 use std::io::{self, Write};
 
 use ferrosys::ext::ondisk::{Inode, Timestamp, Xattr};
-use ferrosys::ext::{Acl, ReadPolicy, Reader, WalkEntry};
+use ferrosys::ext::{Acl, OpenOptions, ReadPolicy, Reader, WalkEntry};
 use tar::{Builder, EntryType, Header};
 
 use crate::args::{ExtractArgs, ExtractMode, Stream};
@@ -56,11 +56,15 @@ const IFSOCK: u16 = 0o140000;
 pub fn run(args: ExtractArgs) -> Result<(), Error> {
     let image = args.image.display().to_string();
     let file = File::open(&args.image).map_err(|e| Error::io(&args.image, e))?;
-    let mut reader = Reader::open_at(file, args.offset, ReadPolicy::Lenient).map_err(|source| {
-        Error::NotExt {
-            path: image,
-            source,
-        }
+    let mut reader = Reader::open_with(
+        file,
+        &OpenOptions::new()
+            .base(args.offset)
+            .policy(ReadPolicy::Lenient),
+    )
+    .map_err(|source| Error::NotExt {
+        path: image,
+        source,
     })?;
 
     match args.mode {
@@ -168,6 +172,7 @@ fn member(
         path,
         number,
         inode,
+        ..
     } = entry;
     let kind = inode.mode & IFMT;
     if kind == IFSOCK {

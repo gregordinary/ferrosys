@@ -30,8 +30,20 @@ pub enum Filesystem {
 #[non_exhaustive]
 pub enum DetectError {
     /// The source could not be read or sought.
-    #[error("i/o error: {0}")]
-    Io(String),
+    ///
+    /// The `kind` is [`std::io::Error`]'s own classification, carried separately so a
+    /// caller can tell a truncated image from an environment failure without matching on
+    /// the message text. It does not appear in the rendered message because `message` is
+    /// the underlying error rendered by [`std::io::Error`], which opens with the kind's
+    /// own description.
+    #[error("i/o error: {message}")]
+    #[non_exhaustive]
+    Io {
+        /// How the underlying [`std::io::Error`] classified itself.
+        kind: std::io::ErrorKind,
+        /// The error rendered as text, for a message a person reads.
+        message: String,
+    },
     /// The source is not a filesystem any family this build compiles in recognizes.
     #[error("unrecognized filesystem: no compiled-in family claims this image")]
     Unrecognized,
@@ -53,7 +65,7 @@ pub fn detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError> {
         use crate::read::{ReadError, Reader};
         match Reader::open(src) {
             Ok(reader) => Ok(Filesystem::Ext(reader.profile())),
-            Err(ReadError::Io(e)) => Err(DetectError::Io(e)),
+            Err(ReadError::Io { kind, message }) => Err(DetectError::Io { kind, message }),
             Err(_) => Err(DetectError::Unrecognized),
         }
     }

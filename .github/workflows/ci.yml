@@ -112,6 +112,28 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  public-api:
+    name: public API surface
+    runs-on: ubuntu-latest
+    env:
+      # Pinned; bump deliberately. rustdoc's JSON output is nightly-only and its schema
+      # is versioned — ci/public-api.py asserts the version it was written against, so a
+      # bump here that moves the schema fails the job rather than re-rendering the
+      # surface through a misread document.
+      FERROSYS_API_NIGHTLY: "nightly-2026-07-09"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned nightly for rustdoc JSON
+        run: rustup toolchain install "$FERROSYS_API_NIGHTLY" --profile minimal --no-self-update
+
+      # The on-disk bytes have e2fsprogs as an oracle; the public API surface has this.
+      # A `pub` item that leaks through a glob re-export, a field that disappears, an
+      # enum that loses `#[non_exhaustive]` — none of those fail a build, and all are
+      # breaking changes once the crate is published.
+      - name: Public API matches its snapshot
+        run: ci/public-api.sh
+
   msrv:
     name: MSRV 1.88
     runs-on: ubuntu-latest

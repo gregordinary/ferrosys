@@ -2,12 +2,12 @@
 //!
 //! The bytes stream out through the library's `format_to`, which writes only the blocks
 //! the filesystem uses, so a file destination stays sparse and an image far larger than
-//! memory can be written. The archive a `--from-tar` names is the exception: it is parsed
-//! whole, up front, so the memory a run needs is the sum of the bytes of the files the
-//! archive holds.
+//! memory can be written. A `--from-tar` archive named by path is opened and left on
+//! disk, each member read only as its file is placed, so the memory a run needs is the
+//! largest single member rather than the whole archive. An archive arriving on the
+//! standard input has nothing to seek back to and is read whole.
 
 use std::fs::{File, OpenOptions};
-use std::io::BufReader;
 use std::path::Path;
 
 use ferrosys::ext::{
@@ -33,9 +33,12 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
             let source = ArchiveSource::from_reader(stdin.lock())?;
             write(source, &args, options, &out)?
         }
+        // An archive named by path is opened by the library, which keeps every file's
+        // bytes on disk until the file is placed: peak memory is the largest single
+        // member rather than the whole archive. A stream on the standard input has no
+        // such option — there is nothing to seek back to — so it is read whole.
         Some(Stream::File(path)) => {
-            let file = File::open(path).map_err(|e| Error::io(path, e))?;
-            let source = ArchiveSource::from_reader(BufReader::new(file))?;
+            let source = ArchiveSource::from_path(path)?;
             write(source, &args, options, &out)?
         }
     };

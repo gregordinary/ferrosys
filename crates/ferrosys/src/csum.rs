@@ -7,29 +7,78 @@
 //! objects out is independent of whether checksums are on.
 //!
 //! This module is pure and side-effect free. When the feature is on, [`Crc32c`] is
-//! the active implementation: it reports checksums enabled and computes a real
+//! the active implementation: it reports [`CsumScheme::Crc32c`] and computes a real
 //! crc32c seeded from the filesystem UUID. When it is off, [`NullCsum`] reports
-//! checksums disabled and computes zero. Every checksum field is written through
+//! [`CsumScheme::None`] and computes zero. Every checksum field is written through
 //! this seam, so choosing between them is a change of implementation at one
 //! construction site — the materializer picks the one the feature set calls for.
+
+/// Which checksums a filesystem's metadata carries.
+///
+/// ext defines more than the two states "checksummed" and "not". `metadata_csum`
+/// ([`Crc32c`](CsumScheme::Crc32c)) protects every metadata object with a crc32c; the
+/// older `uninit_bg` (`GDT_CSUM`) protects the group descriptors alone with a crc16,
+/// while carrying the same uninitialized-bitmap accounting; and a filesystem may have
+/// neither. The two questions a caller asks — *is there a checksum field to fill in* and
+/// *do the uninit descriptor flags mean anything* — have the same answer under the first
+/// and the last scheme and different answers under the middle one, so they are asked
+/// separately rather than through one flag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
+pub enum CsumScheme {
+    /// No metadata checksums. Every checksum field is zero and the uninitialized-bitmap
+    /// accounting does not apply.
+    #[default]
+    None,
+    /// `metadata_csum`: a crc32c inside every metadata object, and the
+    /// uninitialized-bitmap accounting.
+    Crc32c,
+}
+
+impl CsumScheme {
+    /// Whether metadata objects carry an in-object checksum field this crate fills in.
+    ///
+    /// Gates the per-object checksum writes: the superblock, inodes, extent nodes,
+    /// directory blocks, bitmaps, and attribute blocks.
+    #[must_use]
+    pub const fn writes_object_checksums(self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Crc32c => true,
+        }
+    }
+
+    /// Whether the `INODE_UNINIT` / `BLOCK_UNINIT` / `ITABLE_ZEROED` descriptor flags and
+    /// the `bg_itable_unused` counts carry their meaning.
+    ///
+    /// A scheme without them writes `bg_flags` zero, because a flag no feature backs is
+    /// one a checker faults.
+    #[must_use]
+    pub const fn uninit_bg_semantics(self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Crc32c => true,
+        }
+    }
+}
 
 /// Computes the checksums ext4 stores inside its metadata objects.
 ///
 /// The one primitive is a seeded crc32c ([`crc32c`](Checksummer::crc32c)); each
 /// metadata object seeds it from the filesystem seed and its own identity (inode
-/// number, group number, block number) and feeds it the object's bytes. An
-/// implementation that reports [`enabled`](Checksummer::enabled) as `false` leaves
-/// every checksum field — and the uninit block-group descriptor flags that
-/// `metadata_csum` co-governs — unwritten; a caller must consult `enabled` before
-/// setting them.
-pub trait Checksummer {
-    /// Whether `metadata_csum` is active.
-    ///
-    /// Drives two things a caller must gate on: whether the in-object checksum
-    /// fields are populated, and whether the `INODE_UNINIT` / `BLOCK_UNINIT` /
-    /// `ITABLE_ZEROED` descriptor flags and `bg_itable_unused` counts carry their
-    /// checksummed meaning.
-    fn enabled(&self) -> bool;
+/// number, group number, block number) and feeds it the object's bytes. The
+/// [`scheme`](Checksummer::scheme) an implementation reports says which checksums the
+/// filesystem carries, and a caller gates every checksum field and every uninit
+/// descriptor flag on it.
+///
+/// The trait is sealed: [`Crc32c`] and [`NullCsum`] are its implementations and no other
+/// is possible. It is a seam so that laying objects out is independent of whether
+/// checksums are on, not an extension point — a substitute that compiled but computed
+/// the wrong value would produce an image this crate claims is checksummed and no
+/// checker accepts.
+pub trait Checksummer: crate::sealed::Sealed {
+    /// Which checksums this filesystem carries.
+    fn scheme(&self) -> CsumScheme;
 
     /// The base filesystem checksum seed — crc32c of the filesystem UUID — from
     /// which per-object seeds are derived. Zero when checksums are disabled.
@@ -43,7 +92,7 @@ pub trait Checksummer {
     fn crc32c(&self, seed: u32, data: &[u8]) -> u32;
 }
 
-/// The disabled checksummer: reports checksums off and computes zero.
+/// The disabled checksummer: reports [`CsumScheme::None`] and computes zero.
 ///
 /// This is the active implementation while `metadata_csum` is off. It writes no
 /// checksum bytes and requests none of the uninit-bg descriptor semantics, so an
@@ -52,9 +101,11 @@ pub trait Checksummer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NullCsum;
 
+impl crate::sealed::Sealed for NullCsum {}
+
 impl Checksummer for NullCsum {
-    fn enabled(&self) -> bool {
-        false
+    fn scheme(&self) -> CsumScheme {
+        CsumScheme::None
     }
 
     fn base_seed(&self) -> u32 {
@@ -98,9 +149,11 @@ impl Crc32c {
     }
 }
 
+impl crate::sealed::Sealed for Crc32c {}
+
 impl Checksummer for Crc32c {
-    fn enabled(&self) -> bool {
-        true
+    fn scheme(&self) -> CsumScheme {
+        CsumScheme::Crc32c
     }
 
     fn base_seed(&self) -> u32 {
@@ -117,9 +170,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_scheme_answers_the_two_questions_separately() {
+        // The two questions agree under both schemes this crate writes; they are asked
+        // separately because a third scheme — the crc16 `uninit_bg` group-descriptor
+        // checksum, which a foreign image may carry — answers them differently, and a
+        // single flag would have no way to say so.
+        assert!(!CsumScheme::None.writes_object_checksums());
+        assert!(!CsumScheme::None.uninit_bg_semantics());
+        assert!(CsumScheme::Crc32c.writes_object_checksums());
+        assert!(CsumScheme::Crc32c.uninit_bg_semantics());
+        // A filesystem with no checksums is the default: a scheme is something a feature
+        // set turns on.
+        assert_eq!(CsumScheme::default(), CsumScheme::None);
+    }
+
+    #[test]
     fn null_csum_is_disabled_and_zero() {
         let c = NullCsum;
-        assert!(!c.enabled());
+        assert_eq!(c.scheme(), CsumScheme::None);
         assert_eq!(c.base_seed(), 0);
         assert_eq!(c.crc32c(0, b"anything"), 0);
         assert_eq!(c.crc32c(0xdead_beef, &[1, 2, 3, 4]), 0);
@@ -130,7 +198,7 @@ mod tests {
         // The seam is consumed dynamically by the materializer; make sure it is
         // object-safe so the construction site can hold `&dyn Checksummer`.
         let c: &dyn Checksummer = &NullCsum;
-        assert!(!c.enabled());
+        assert_eq!(c.scheme(), CsumScheme::None);
         assert_eq!(c.crc32c(1, b""), 0);
     }
 
@@ -142,7 +210,7 @@ mod tests {
             0xf0, 0xe1, 0x70, 0x55, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0,
         ];
         let c = Crc32c::new(&uuid);
-        assert!(c.enabled());
+        assert_eq!(c.scheme(), CsumScheme::Crc32c);
         assert_eq!(c.base_seed(), 0x33D2_8425);
         // The primitive is the raw continuation, so an empty feed returns the seed.
         assert_eq!(c.crc32c(c.base_seed(), b""), 0x33D2_8425);
@@ -152,6 +220,6 @@ mod tests {
     fn crc32c_is_usable_as_a_trait_object() {
         let uuid = [0u8; 16];
         let c: &dyn Checksummer = &Crc32c::new(&uuid);
-        assert!(c.enabled());
+        assert_eq!(c.scheme(), CsumScheme::Crc32c);
     }
 }

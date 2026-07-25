@@ -43,10 +43,12 @@ impl BlockRange {
 
 /// A geometry that cannot be realized safely.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GeometryError {
     /// The filesystem is smaller than the minimum that can hold group 0's fixed
     /// overhead (superblock, descriptor table, bitmaps, inode table, root).
     #[error("filesystem of {blocks} blocks is too small: group 0 needs {overhead} for metadata")]
+    #[non_exhaustive]
     TooSmall {
         /// Total blocks requested.
         blocks: u64,
@@ -55,6 +57,7 @@ pub enum GeometryError {
     },
     /// The grow target is smaller than the filesystem being created.
     #[error("grow target {target} blocks is below the initial size {initial} blocks")]
+    #[non_exhaustive]
     GrowTargetTooSmall {
         /// The requested grow target in blocks.
         target: u64,
@@ -72,6 +75,7 @@ pub enum GeometryError {
         "grow target needs {needed} reserved GDT blocks but the resize inode can \
          represent at most {limit}; a larger target would require meta_bg"
     )]
+    #[non_exhaustive]
     GrowTargetTooLarge {
         /// Reserved GDT blocks the target would need.
         needed: u64,
@@ -88,6 +92,7 @@ pub enum GeometryError {
         "a filesystem of {blocks} blocks cannot reserve descriptor blocks: the resize \
          inode's block map is 32 bits wide and addresses at most {limit} blocks"
     )]
+    #[non_exhaustive]
     ReservationNeeds32BitBlocks {
         /// Blocks the filesystem would have.
         blocks: u64,
@@ -105,6 +110,7 @@ pub enum GeometryError {
     /// The geometry needs more block groups than the 32-bit group number the
     /// superblock and every group descriptor address them by can hold.
     #[error("filesystem of {blocks} blocks needs {groups} block groups, past the {limit} limit")]
+    #[non_exhaustive]
     TooManyGroups {
         /// Blocks the filesystem would have.
         blocks: u64,
@@ -117,6 +123,7 @@ pub enum GeometryError {
     /// holds. The inode count follows from the size and the bytes-per-inode ratio, so
     /// this is reached by sizing alone, and it is rejected rather than wrapped.
     #[error("filesystem of {blocks} blocks needs {inodes} inodes, past the {limit} limit")]
+    #[non_exhaustive]
     TooManyInodes {
         /// Blocks the filesystem would have.
         blocks: u64,
@@ -134,6 +141,7 @@ pub enum GeometryError {
         "inode density needs {inodes_per_group} inodes per group but a group's bitmap \
          indexes at most {limit}"
     )]
+    #[non_exhaustive]
     InodesTooDense {
         /// Inodes per group the requested count would need.
         inodes_per_group: u64,
@@ -148,6 +156,7 @@ pub enum GeometryError {
         "filesystem of {blocks} blocks needs the 64bit feature: a 32-bit block \
          number addresses at most {limit}"
     )]
+    #[non_exhaustive]
     BlockCountNeeds64Bit {
         /// Blocks the filesystem would have.
         blocks: u64,
@@ -157,6 +166,7 @@ pub enum GeometryError {
     /// The filesystem has more blocks than an extent maps. An extent leaf stores a
     /// 48-bit physical block number, so no file could reach the blocks past it.
     #[error("filesystem of {blocks} blocks exceeds the {limit} an extent addresses")]
+    #[non_exhaustive]
     BlockCountTooLarge {
         /// Blocks the filesystem would have.
         blocks: u64,
@@ -166,6 +176,7 @@ pub enum GeometryError {
     /// The final group is too small to hold the metadata its position requires (a
     /// backup copy, or the flex block group's packed tables).
     #[error("final group of {blocks} blocks cannot hold its {overhead} metadata blocks")]
+    #[non_exhaustive]
     FinalGroupTooSmall {
         /// Blocks in the final group.
         blocks: u64,
@@ -184,6 +195,7 @@ pub enum GeometryError {
 /// group, not into this group itself; only that head group physically holds the
 /// packed tables.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct GroupLayout {
     /// Group number.
     pub index: u32,
@@ -209,7 +221,17 @@ pub struct GroupLayout {
 /// per-group placements are in [`groups`](Layout::groups); the whole-filesystem
 /// geometry — group size, descriptor and reserved-descriptor block counts, inode
 /// density, and the grow target that sized the reservation — is on the struct.
+///
+/// [`plan_layout`] is how one is obtained, and it is the only way. The fields are not
+/// independent — the group count follows from the block count and the group size, the
+/// per-group bitmap and inode-table addresses follow from the flex-group packing, the
+/// reserved descriptor count follows from the grow target — and a set of them assembled
+/// by hand can satisfy every type in the struct while describing a filesystem no checker
+/// accepts. Planning is what makes them consistent, so it is the constructor; the fields
+/// stay public because reading them is exactly what the allocator, the materializer, and
+/// a caller inspecting a plan all do.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct Layout {
     /// The feature set this layout is planned for.
     pub feature: FeatureSet,
@@ -417,6 +439,7 @@ fn gdt_blocks_for(groups: u64, desc_size: u16, block_size: u32) -> u64 {
 /// this is the single input that bounds "resize-safe". It expresses intent, a
 /// deployment target or a policy, rather than a raw block count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum GrowReservation {
     /// Reserve nothing beyond the initial size: format at the final size, with no
     /// online-grow headroom. An unmounted `resize2fs` can still grow the image later,
@@ -457,6 +480,7 @@ pub enum GrowReservation {
 /// is an error, not a silently smaller filesystem. The size-driven default never reaches
 /// that ceiling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum InodeCount {
     /// Derive the count from the filesystem size and a bytes-per-inode ratio chosen from
     /// size-thresholded buckets, the way an inode table is sized by default.
@@ -539,22 +563,85 @@ impl Default for ReservedRatio {
     }
 }
 
-/// Plan the complete layout for a filesystem of `size_bytes` that may later grow,
-/// under `feature`, with descriptor headroom sized by `reservation`, `inodes` many
-/// inodes, and `reserved` blocks held back for the super-user.
+/// Everything the planner needs to lay out a filesystem: its size, its feature set, and
+/// the three sizing knobs a caller may name.
 ///
-/// The reservation sizes the reserved descriptor blocks; it is the only thing that
-/// bounds "resize-safe", so it is named outright rather than derived from `size_bytes` by
-/// a multiplier. [`GrowReservation::Max`], the default, reserves as much as the format
-/// allows. The inode count and reserved ratio are the other two sizing inputs a caller may
-/// name; both default to what the size alone implies ([`InodeCount::Auto`],
-/// [`ReservedRatio::DEFAULT`]).
+/// Every input to [`plan_layout`] is a field here rather than a parameter, so a geometry
+/// knob the planner grows — a cluster size, an explicit blocks-per-group, a RAID stride —
+/// arrives as a field a caller may ignore instead of as an argument every caller must
+/// pass. [`new`](Self::new) takes the two inputs that have no default and defaults the
+/// rest to what the size alone implies.
+///
+/// ```
+/// # use ferrosys::ext::{FeatureSet, GrowReservation, PlanRequest, plan_layout};
+/// let request = PlanRequest::new(64 << 20, FeatureSet::DEFAULT).grow(GrowReservation::UpTo(32 << 30));
+/// let layout = plan_layout(&request).expect("plan a 64 MiB filesystem");
+/// assert_eq!(layout.block_size, 4096);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub struct PlanRequest {
+    /// Size of the filesystem in bytes. The block count is this divided by the feature
+    /// set's block size, so a size that is not a whole number of blocks is rounded down.
+    pub size_bytes: u64,
+    /// The feature set the layout is planned for, carrying the block and inode sizes.
+    pub feature: FeatureSet,
+    /// How much reserved descriptor headroom to build in, sizing the reserved GDT blocks
+    /// that make the image resize-safe. This is the only thing that bounds "resize-safe",
+    /// so it is named outright rather than derived from the size by a multiplier.
+    /// Defaults to [`GrowReservation::Max`], which reserves as much as the format allows.
+    pub grow: GrowReservation,
+    /// How many inodes to provide. Defaults to [`InodeCount::Auto`], the size-driven
+    /// count.
+    pub inodes: InodeCount,
+    /// The share of blocks held back for the super-user. Defaults to
+    /// [`ReservedRatio::DEFAULT`], 5%.
+    pub reserved: ReservedRatio,
+}
+
+impl PlanRequest {
+    /// A request for a filesystem of `size_bytes` under `feature`, with every sizing knob
+    /// at the value the size alone implies.
+    #[must_use]
+    pub const fn new(size_bytes: u64, feature: FeatureSet) -> Self {
+        Self {
+            size_bytes,
+            feature,
+            grow: GrowReservation::Max,
+            inodes: InodeCount::Auto,
+            reserved: ReservedRatio::DEFAULT,
+        }
+    }
+
+    /// This request with the grow reservation replaced.
+    #[must_use]
+    pub const fn grow(mut self, grow: GrowReservation) -> Self {
+        self.grow = grow;
+        self
+    }
+
+    /// This request with the inode count replaced.
+    #[must_use]
+    pub const fn inodes(mut self, inodes: InodeCount) -> Self {
+        self.inodes = inodes;
+        self
+    }
+
+    /// This request with the super-user reservation replaced.
+    #[must_use]
+    pub const fn reserved(mut self, reserved: ReservedRatio) -> Self {
+        self.reserved = reserved;
+        self
+    }
+}
+
+/// Plan the complete layout for a filesystem that may later grow.
 ///
 /// # Errors
 ///
 /// - [`GeometryError::Feature`] if the feature set is invalid.
 /// - [`GeometryError::GrowTargetTooSmall`] if a [`GrowReservation::UpTo`] target is
-///   below `size_bytes`.
+///   below the requested size.
 /// - [`GeometryError::TooSmall`] if the filesystem cannot hold group 0's metadata.
 /// - [`GeometryError::GrowTargetTooLarge`] if a [`GrowReservation::UpTo`] target needs
 ///   more reserved blocks than the resize inode can represent.
@@ -569,13 +656,14 @@ impl Default for ReservedRatio {
 ///   a group than its one-block bitmap indexes.
 /// - [`GeometryError::FinalGroupTooSmall`] if the last group cannot hold its
 ///   metadata.
-pub fn plan_layout(
-    size_bytes: u64,
-    reservation: GrowReservation,
-    inodes: InodeCount,
-    reserved: ReservedRatio,
-    feature: FeatureSet,
-) -> Result<Layout, GeometryError> {
+pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
+    let &PlanRequest {
+        size_bytes,
+        feature,
+        grow: reservation,
+        inodes,
+        reserved,
+    } = request;
     feature.validate()?;
 
     let block_size = feature.block_size;
@@ -1005,11 +1093,8 @@ mod tests {
 
     fn plan(mib: u64) -> Layout {
         plan_layout(
-            mib * MIB,
-            GrowReservation::UpTo(GROW_32G),
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            FeatureSet::default(),
+            &PlanRequest::new(mib * MIB, FeatureSet::default())
+                .grow(GrowReservation::UpTo(GROW_32G)),
         )
         .expect("plan")
     }
@@ -1020,14 +1105,8 @@ mod tests {
             block_size,
             ..FeatureSet::default()
         };
-        plan_layout(
-            mib * MIB,
-            GrowReservation::UpTo(GROW_32G),
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            fs,
-        )
-        .expect("plan")
+        plan_layout(&PlanRequest::new(mib * MIB, fs).grow(GrowReservation::UpTo(GROW_32G)))
+            .expect("plan")
     }
 
     /// Plan with the default inode density and reserved ratio: the two inputs every test
@@ -1037,24 +1116,16 @@ mod tests {
         reservation: GrowReservation,
         feature: FeatureSet,
     ) -> Result<Layout, GeometryError> {
-        plan_layout(
-            size_bytes,
-            reservation,
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            feature,
-        )
+        plan_layout(&PlanRequest::new(size_bytes, feature).grow(reservation))
     }
 
     /// Plan with a specific inode count and no grow reservation, isolating the inode
     /// density from the reserved descriptor blocks.
     fn plan_inodes(mib: u64, inodes: InodeCount) -> Layout {
         plan_layout(
-            mib * MIB,
-            GrowReservation::None,
-            inodes,
-            ReservedRatio::DEFAULT,
-            FeatureSet::default(),
+            &PlanRequest::new(mib * MIB, FeatureSet::default())
+                .grow(GrowReservation::None)
+                .inodes(inodes),
         )
         .expect("plan")
     }
@@ -1068,11 +1139,9 @@ mod tests {
             ..FeatureSet::default()
         };
         plan_layout(
-            mib * MIB,
-            GrowReservation::None,
-            inodes,
-            ReservedRatio::DEFAULT,
-            fs,
+            &PlanRequest::new(mib * MIB, fs)
+                .grow(GrowReservation::None)
+                .inodes(inodes),
         )
         .expect("plan")
     }
@@ -1080,11 +1149,9 @@ mod tests {
     /// Plan with a specific reserved ratio and no grow reservation.
     fn plan_reserved(mib: u64, reserved: ReservedRatio) -> Layout {
         plan_layout(
-            mib * MIB,
-            GrowReservation::None,
-            InodeCount::Auto,
-            reserved,
-            FeatureSet::default(),
+            &PlanRequest::new(mib * MIB, FeatureSet::default())
+                .grow(GrowReservation::None)
+                .reserved(reserved),
         )
         .expect("plan")
     }
@@ -1133,14 +1200,7 @@ mod tests {
             block_size,
             ..feature
         };
-        plan_layout(
-            mib * MIB,
-            GrowReservation::None,
-            InodeCount::Auto,
-            ReservedRatio::DEFAULT,
-            fs,
-        )
-        .expect("plan")
+        plan_layout(&PlanRequest::new(mib * MIB, fs).grow(GrowReservation::None)).expect("plan")
     }
 
     #[test]
@@ -1434,11 +1494,9 @@ mod tests {
         };
         for (request, want_ipg) in [(4090u32, 4088u32), (4094, 4096), (4097, 4096)] {
             let l = plan_layout(
-                16 * MIB,
-                GrowReservation::None,
-                InodeCount::Count(request),
-                ReservedRatio::DEFAULT,
-                fs,
+                &PlanRequest::new(16 * MIB, fs)
+                    .grow(GrowReservation::None)
+                    .inodes(InodeCount::Count(request)),
             )
             .expect("plan");
             assert_eq!(l.group_count, 1, "16 MiB at 2048-byte blocks is one group");
@@ -1464,11 +1522,9 @@ mod tests {
         // A group's inode bitmap indexes 32768 inodes at a 4 KiB block. An absolute count
         // that needs more per group is refused rather than silently reduced.
         let too_many = plan_layout(
-            64 * MIB,
-            GrowReservation::None,
-            InodeCount::Count(40000),
-            ReservedRatio::DEFAULT,
-            FeatureSet::default(),
+            &PlanRequest::new(64 * MIB, FeatureSet::default())
+                .grow(GrowReservation::None)
+                .inodes(InodeCount::Count(40000)),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1479,11 +1535,9 @@ mod tests {
         // A ratio of one inode per 1024 bytes is four per block, 131072 in a single group
         // — four times what the bitmap holds — and is refused the same way, not capped.
         let too_dense = plan_layout(
-            64 * MIB,
-            GrowReservation::None,
-            InodeCount::BytesPerInode(NonZeroU64::new(1024).unwrap()),
-            ReservedRatio::DEFAULT,
-            FeatureSet::default(),
+            &PlanRequest::new(64 * MIB, FeatureSet::default())
+                .grow(GrowReservation::None)
+                .inodes(InodeCount::BytesPerInode(NonZeroU64::new(1024).unwrap())),
         )
         .unwrap_err();
         assert!(matches!(too_dense, GeometryError::InodesTooDense { .. }));

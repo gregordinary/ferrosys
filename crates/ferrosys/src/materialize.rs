@@ -24,14 +24,15 @@ use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 
 use crate::alloc::{AllocError, Allocator};
-use crate::csum::{Checksummer, Crc32c, NullCsum};
+use crate::csum::{Checksummer, Crc32c, CsumScheme, NullCsum};
 use crate::dir::{DirBlock, DirBlockKind, DirError, DirLayout, HtreeDir, LinearDir};
 use crate::extent::{
     ExtentError, build_leaves, build_tree, node_capacity, plan_tree, tail_offset, write_node,
 };
-use crate::feature::{FeatureSet, Profile};
+use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE, Profile, resize_inode_size};
 use crate::geometry::{
-    BlockRange, GeometryError, GrowReservation, InodeCount, Layout, ReservedRatio, plan_layout,
+    BlockRange, GeometryError, GrowReservation, InodeCount, Layout, PlanRequest, ReservedRatio,
+    plan_layout,
 };
 use crate::hash::{HashSignedness, HashVersion};
 use crate::journal::{self, JournalSize};
@@ -115,7 +116,11 @@ impl ErrorBehavior {
 }
 
 /// Options controlling a format that do not come from the source or the size.
+///
+/// Build one with [`new`](Self::new), which takes the three identity inputs every image
+/// needs and defaults the rest, then set the fields a format departs from the default on.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct FormatOptions {
     /// The 16-byte filesystem UUID (`s_uuid`), supplied by the caller.
     pub uuid: [u8; 16],
@@ -199,6 +204,20 @@ impl FormatOptions {
         }
     }
 
+    /// The geometry planner's inputs for a filesystem of `size_bytes` under these
+    /// options: the feature set and the three sizing knobs, gathered into the request
+    /// [`plan_layout`] takes.
+    ///
+    /// This is the one place the format options become a plan, so a geometry knob added
+    /// here reaches the planner once rather than at every entry point that formats.
+    #[must_use]
+    pub const fn plan_request(&self, size_bytes: u64) -> PlanRequest {
+        PlanRequest::new(size_bytes, self.feature)
+            .grow(self.grow)
+            .inodes(self.inodes)
+            .reserved(self.reserved)
+    }
+
     /// Seed the feature set from an ext filesystem profile, replacing
     /// [`feature`](Self::feature) with the baseline words `mke2fs -t` writes for that
     /// family. Sugar for `options.feature = profile.feature_set()`, chainable from
@@ -213,6 +232,7 @@ impl FormatOptions {
 
 /// A failure formatting an image.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FormatError {
     /// Writing to the destination failed.
     #[error(transparent)]
@@ -237,6 +257,7 @@ pub enum FormatError {
     Parse(#[from] ParseError),
     /// The source needs more inodes than the geometry provides.
     #[error("source needs {needed} inodes but the filesystem has {available}")]
+    #[non_exhaustive]
     TooManyInodes {
         /// Inodes the source needs.
         needed: u32,
@@ -246,11 +267,26 @@ pub enum FormatError {
     /// A journal was requested but the size is below the minimum jbd2 accepts, or the
     /// filesystem is too small to hold even the minimum journal.
     #[error("journal of {requested} blocks is below the minimum of {minimum}")]
+    #[non_exhaustive]
     JournalTooSmall {
         /// Journal blocks requested (zero when the filesystem is too small for any).
         requested: u32,
         /// The minimum journal size in blocks.
         minimum: u32,
+    },
+    /// A regular file the filesystem provides for itself reaches
+    /// [`LARGE_FILE_MIN_SIZE`] on a feature set without `large_file`, which is the
+    /// feature that describes such a file. Only a journal sized past the bound by an
+    /// explicit [`JournalSize::Blocks`] reaches this: the resize inode's pairing is
+    /// settled at plan time by [`FeatureSet::validate`], the orphan file is bounded far
+    /// below it, and a source entry is refused by the model, which can name its path.
+    #[error("the {what} is {size} bytes, a large file on a filesystem without large_file")]
+    #[non_exhaustive]
+    LargeFileWithoutFeature {
+        /// The structure whose size crosses the bound.
+        what: &'static str,
+        /// The size it declares.
+        size: u64,
     },
     /// A block the resize inode must map lies past what its block map addresses. The
     /// map is a classic 32-bit block map, and the geometry reserves descriptor blocks
@@ -258,6 +294,7 @@ pub enum FormatError {
     /// the map means the two disagree. It is refused rather than truncated into a
     /// pointer at the wrong block.
     #[error("the resize inode's 32-bit block map cannot name block {block}")]
+    #[non_exhaustive]
     ResizeMapNeeds32BitBlocks {
         /// The block the map would have had to name.
         block: u64,
@@ -272,15 +309,29 @@ pub enum FormatError {
     /// this refuses the image rather than writing a directory that points at the wrong
     /// file.
     #[error("the orphan file's inode {inode} is already held by an entry")]
+    #[non_exhaustive]
     OrphanInodeInUse {
         /// The contested inode number.
         inode: u32,
+    },
+    /// The image does not fit in memory on this platform: its byte count exceeds what a
+    /// `usize` addresses, which a 32-bit target reaches at 4 GiB. [`format_to`] streams an
+    /// image of any size to a seekable destination and is the path for one this large.
+    #[error(
+        "an image of {bytes} bytes exceeds what this platform addresses in memory; \
+         stream it with format_to"
+    )]
+    #[non_exhaustive]
+    ImageTooLargeInMemory {
+        /// The image's size in bytes.
+        bytes: u64,
     },
     /// The format-time clock ([`FormatOptions::time`]) lies outside the range the
     /// superblock's 32-bit time fields hold: seconds in `[0, 2^32)`, from 1970 to 2106.
     /// It is refused rather than truncated to a different instant. Per-file timestamps
     /// span a wider range; this bound is on the filesystem's own creation clock.
     #[error("format time of {secs}s is outside the superblock range [0, 2^32) seconds")]
+    #[non_exhaustive]
     FormatTimeOutOfRange {
         /// The out-of-range seconds value.
         secs: i64,
@@ -341,46 +392,33 @@ impl Image {
     }
 }
 
-/// Format a filesystem of `size_bytes` populated from `source`.
+/// Format a filesystem of `size_bytes` populated from `source`, assembling the whole
+/// image in memory.
+///
+/// The image is held as one buffer of its full size, so this needs as much memory as the
+/// filesystem is large. [`format_to`] writes the same bytes to a seekable destination
+/// without ever holding them all.
 ///
 /// # Errors
 ///
 /// A [`FormatError`] if the geometry, model, allocation, or serialization cannot be
-/// realized.
+/// realized, or [`FormatError::ImageTooLargeInMemory`] if the image is larger than this
+/// platform addresses.
 pub fn format(
     source: impl Source,
     size_bytes: u64,
     options: FormatOptions,
 ) -> Result<Image, FormatError> {
-    options.validate_format_time()?;
+    let (layout, model) = prepare(source, size_bytes, &options)?;
     let feature = options.feature;
-    let layout = plan_layout(
-        size_bytes,
-        options.grow,
-        options.inodes,
-        options.reserved,
-        feature,
-    )?;
-    let model = build_model(
-        source,
-        ModelConfig {
-            block_size: feature.block_size,
-            inode_size: feature.inode_size,
-            first_user_inode: first_user_inode(&feature),
-            default_time: options.time,
-            fixed_time: options.fixed_time,
-            dir_nlink: feature.has_dir_nlink(),
-        },
-    )?;
-    if model.used_inode_count() > layout.total_inodes {
-        return Err(FormatError::TooManyInodes {
-            needed: model.used_inode_count(),
-            available: layout.total_inodes,
-        });
-    }
 
-    let bytes = vec![0u8; (layout.total_blocks * u64::from(layout.block_size)) as usize];
-    let mut sink = std::io::Cursor::new(bytes);
+    // The whole image is one buffer, so its size must be one this platform can address:
+    // a 32-bit target holds no 4 GiB image, and a cast would silently size the buffer to
+    // the low bits of the count and write a filesystem into the wrong number of bytes.
+    let image_bytes = layout.total_blocks * u64::from(layout.block_size);
+    let len = usize::try_from(image_bytes)
+        .map_err(|_| FormatError::ImageTooLargeInMemory { bytes: image_bytes })?;
+    let mut sink = std::io::Cursor::new(vec![0u8; len]);
     let mut writer = Writer::new(&layout, &feature, options, &mut sink);
     writer.materialize(&model)?;
     Ok(Image {
@@ -398,9 +436,26 @@ pub fn format(
 /// holds that is not written must read back as zero — a freshly created file, or one
 /// truncated to zero length, satisfies that.
 ///
-/// Each source entry's content is held in memory while it is placed, so peak memory
-/// is bounded by the largest single file, not by the image size: a multi-gigabyte
-/// file needs multi-gigabyte memory even though the image streams out block by block.
+/// # Memory
+///
+/// Three things are held while the image streams out, and none of them is the image:
+///
+/// - **The entry list.** Every [`SourceEntry`](crate::source::SourceEntry) the source yields — its path, metadata,
+///   and extended attributes — is materialized before the first block is written, and the
+///   inode model built from it is held until the last one is. This grows with the number
+///   of entries, not with their size.
+/// - **A file's contents, while it is placed.** How long that is depends on what the
+///   source supplies. A [`FileContent::Owned`](crate::source::FileContent::Owned) entry
+///   holds its bytes from the moment the source is built, so a list of them costs the sum
+///   of every file. A [`FileContent::Range`](crate::source::FileContent::Range) is read at
+///   placement and dropped after, so a list of them costs the largest single file.
+///   [`ArchiveSource::from_path`](crate::archive::ArchiveSource::from_path) is the
+///   difference for a tar source.
+/// - **The allocator's used-block bitmap**, for the whole run, at one bit per filesystem
+///   block: `total_blocks / 8` bytes, 128 MiB for a 4 TiB image at a 4 KiB block.
+///
+/// So peak memory grows with the entry count, the largest file, and the filesystem's
+/// block count — never with the image's size in bytes.
 ///
 /// # Errors
 ///
@@ -412,37 +467,39 @@ pub fn format_to(
     options: FormatOptions,
     mut sink: impl Write + Seek,
 ) -> Result<Layout, FormatError> {
+    let (layout, model) = prepare(source, size_bytes, &options)?;
+    let feature = options.feature;
+    let mut writer = Writer::new(&layout, &feature, options, &mut sink);
+    writer.materialize(&model)?;
+    writer.extend_to_full_size()?;
+    Ok(layout)
+}
+
+/// Everything a format decides before a byte is written: the layout the geometry planner
+/// produces and the inode model the source builds, checked against each other.
+///
+/// Both entry points call this, so a knob added to [`FormatOptions`] reaches them both at
+/// once. Two paths that derived this separately would be two paths that could disagree,
+/// and a disagreement between them is not a compile error — it is one entry point
+/// formatting differently from the other.
+fn prepare(
+    source: impl Source,
+    size_bytes: u64,
+    options: &FormatOptions,
+) -> Result<(Layout, FsModel), FormatError> {
     options.validate_format_time()?;
     let feature = options.feature;
-    let layout = plan_layout(
-        size_bytes,
-        options.grow,
-        options.inodes,
-        options.reserved,
-        feature,
-    )?;
-    let model = build_model(
-        source,
-        ModelConfig {
-            block_size: feature.block_size,
-            inode_size: feature.inode_size,
-            first_user_inode: first_user_inode(&feature),
-            default_time: options.time,
-            fixed_time: options.fixed_time,
-            dir_nlink: feature.has_dir_nlink(),
-        },
-    )?;
+    let layout = plan_layout(&options.plan_request(size_bytes))?;
+    let mut config = ModelConfig::new(feature, first_user_inode(&feature), options.time);
+    config.fixed_time = options.fixed_time;
+    let model = build_model(source, config)?;
     if model.used_inode_count() > layout.total_inodes {
         return Err(FormatError::TooManyInodes {
             needed: model.used_inode_count(),
             available: layout.total_inodes,
         });
     }
-
-    let mut writer = Writer::new(&layout, &feature, options, &mut sink);
-    writer.materialize(&model)?;
-    writer.extend_to_full_size()?;
-    Ok(layout)
+    Ok((layout, model))
 }
 
 /// The mutable state of one format: the destination, the allocator, and the inodes
@@ -619,10 +676,15 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
                     inode.flags = inode.flags | InodeFlags::INDEX;
                 }
             }
-            Content::File(bytes) => {
-                let blocks = chunk_into_blocks(bytes, self.block_size);
+            Content::File(content) => {
+                // The bytes are read here, at placement, rather than held from the moment
+                // the source was built: peak memory is the largest single file rather than
+                // every file at once. A source that supplied them owned pays nothing extra
+                // — the read hands back what it already holds.
+                let bytes = content.read()?;
+                let blocks = chunk_into_blocks(&bytes, self.block_size);
                 self.place_blocks(minode.number, &mut inode, &blocks)?;
-                inode.size = bytes.len() as u64;
+                inode.size = content.len();
             }
             Content::SlowSymlink(target) => {
                 let blocks = chunk_into_blocks(target, self.block_size);
@@ -654,6 +716,10 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// and the rest spill to a freshly allocated external block charged to the inode.
     /// The split is [`split_for_storage`]'s, the same one the model validated against,
     /// so a set that reaches here always fits.
+    ///
+    /// The model also settled that this filesystem holds attributes at all: a non-empty
+    /// set on a feature word without `ext_attr` is refused there, naming the entry, so
+    /// what reaches here is a set the emitted feature words describe.
     fn encode_xattrs(&mut self, inode: &mut Inode, xattrs: &[Xattr]) -> Result<(), FormatError> {
         if xattrs.is_empty() {
             return Ok(());
@@ -672,7 +738,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             let signed = matches!(self.options.hash_signedness, HashSignedness::Signed);
             let mut block = encode_block(&spilled, self.block_size, signed);
             let phys = self.alloc.allocate_one()?;
-            if self.csum.enabled() {
+            if self.csum.scheme().writes_object_checksums() {
                 // The xattr block checksum (`h_checksum` at offset 16, zero in the
                 // encoded block) covers the whole block, seeded from the filesystem
                 // seed and the block number as a little-endian 64-bit value.
@@ -832,7 +898,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// from the filesystem seed, the owning inode's number, and its generation (zero
     /// here). With checksums off the tail stays zero, as the node reserved it.
     fn write_extent_node_checksum(&self, ino: u32, buf: &mut [u8]) {
-        if !self.csum.enabled() {
+        if !self.csum.scheme().writes_object_checksums() {
             return;
         }
         let tail = tail_offset(self.block_size);
@@ -847,7 +913,11 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     fn empty_dir_block(&self) -> Vec<u8> {
         // The block reserves a checksum tail only under `metadata_csum`; without it the
         // empty slot spans the whole block, as mke2fs writes a non-checksummed directory.
-        let tail_len = if self.csum.enabled() { DIR_TAIL_LEN } else { 0 };
+        let tail_len = if self.csum.scheme().writes_object_checksums() {
+            DIR_TAIL_LEN
+        } else {
+            0
+        };
         let usable = self.block_size - tail_len;
         let mut block = vec![0u8; self.block_size];
         put_u32(&mut block, 0, 0); // inode 0 — an unused slot
@@ -870,7 +940,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// eight-byte tail with the checksum field zeroed — the two tails differ in size,
     /// in position, and in what they cover.
     fn write_dir_checksums(&self, dir_ino: u32, blocks: &mut [DirBlock]) {
-        if !self.csum.enabled() {
+        if !self.csum.scheme().writes_object_checksums() {
             return;
         }
         let seed = self.csum.base_seed();
@@ -984,9 +1054,23 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// fragmented allocation otherwise.
     fn materialize_journal_inode(&mut self) -> Result<Inode, FormatError> {
         let blocks = self.journal_block_count()?;
+        // The journal is a regular file, so a log an explicit size pushed to 2 GiB needs
+        // `large_file` like any other. The heuristic never reaches that far; an explicit
+        // block count can, and the conflict is stated rather than written to disk.
+        let size = u64::from(blocks) * u64::from(self.feature.block_size);
+        if size >= LARGE_FILE_MIN_SIZE && !self.feature.has_large_file() {
+            return Err(FormatError::LargeFileWithoutFeature {
+                what: "journal",
+                size,
+            });
+        }
         // The image starts zeroed, so only the first block — the jbd2 superblock — needs
         // writing; the rest of the log is already the zero blocks it must be.
-        let sb = journal::build_superblock(self.feature.block_size, blocks, &self.options.uuid);
+        let sb = journal::build_superblock(&journal::JournalParams::new(
+            self.feature.block_size,
+            blocks,
+            self.options.uuid,
+        ));
 
         let mut inode = self.new_inode();
         inode.mode = 0o100600;
@@ -1011,7 +1095,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             let physical = self.build_classic_map(&mut inode, blocks as usize)?;
             self.write_block(physical[0], &sb)?;
         }
-        inode.size = u64::from(blocks) * u64::from(self.feature.block_size);
+        inode.size = size;
 
         // Back the block map up into the superblock: the 15 i_block words, then the
         // high and low halves of the size.
@@ -1096,9 +1180,10 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             self.write_block(ind_block, &ind)?;
         }
 
-        // The map hangs entirely off the double-indirect slot (index 13).
-        let apb = u64::from(self.layout.block_size) / 4;
-        inode.size = u64::from(self.layout.block_size) * (12 + apb + apb * apb);
+        // The map hangs entirely off the double-indirect slot (index 13). The size records
+        // the classic map's reach rather than the blocks reserved, which is what makes the
+        // resize inode a large file at a 4096-byte block — the pairing `validate` enforces.
+        inode.size = resize_inode_size(self.layout.block_size);
         let data_blocks = 1 + u64::from(reserved) + u64::from(reserved) * backups.len() as u64;
         inode.blocks = data_blocks * self.sectors_per_block();
         put_u32(&mut inode.block, 13 * 4, map_block(dind_block)?);
@@ -1110,7 +1195,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         let ipg = self.layout.inodes_per_group;
         let inode_size = self.feature.inode_size;
         let isize = inode_size as usize;
-        let enabled = self.csum.enabled();
+        let writes_checksums = self.csum.scheme().writes_object_checksums();
         let seed = self.csum.base_seed();
         // Held aside so each write may borrow the sink mutably; the inodes go back
         // afterwards, because the superblock's accounting still reads them.
@@ -1127,13 +1212,13 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // Under `metadata_csum` an unused inode still carries the `i_extra_isize` and
             // the crc32c the checksum pass writes below, so the zeroing is confined to the
             // family that has no checksums to write.
-            if !enabled && inode.mode == 0 && inode.links_count == 0 {
+            if !writes_checksums && inode.mode == 0 && inode.links_count == 0 {
                 bytes.iter_mut().for_each(|b| *b = 0);
                 self.write_at(offset, &bytes)?;
                 continue;
             }
             inode.write_to(&mut bytes, inode_size)?;
-            if enabled {
+            if writes_checksums {
                 // The inode checksum covers the whole inode with its checksum fields
                 // taken as zero — they are zero in `bytes` here, because the field this
                 // is about to fill in serialized from a zero `Inode::checksum`.
@@ -1171,11 +1256,19 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             }
         }
 
-        let enabled = self.csum.enabled();
+        let uninit_bg = self.csum.scheme().uninit_bg_semantics();
         let last_group = self.layout.group_count - 1;
         let seed = self.csum.base_seed();
+        // The bytes of each bitmap the checksum covers, as the kernel measures them:
+        // `ext4_block_bitmap_csum_set` takes `clusters_per_group / 8`, which is exact
+        // because a group's block count is always a multiple of eight, while
+        // `ext4_inode_bitmap_csum_set` takes `(inodes_per_group + 7) / 8` — rounding up,
+        // so a count that is not a multiple of eight still has its final partial byte
+        // covered. The planner and `mke2fs` both round the inode count down to a multiple
+        // of eight, so the two forms agree on every image either writes; the kernel's is
+        // used so they also agree on one that does not.
         let bb_len = (self.layout.blocks_per_group / 8) as usize;
-        let ib_len = (ipg / 8) as usize;
+        let ib_len = ipg.div_ceil(8) as usize;
 
         for g in 0..self.layout.group_count {
             let gl = &self.layout.groups[g as usize];
@@ -1187,8 +1280,8 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // the packed tables, and the final group. An uninitialized bitmap is
             // written zero and its checksum field left zero; the group is derived from
             // its layout instead.
-            let inode_uninit = enabled && used_inodes == 0;
-            let block_uninit = enabled
+            let inode_uninit = uninit_bg && used_inodes == 0;
+            let block_uninit = uninit_bg
                 && !self.layout.is_flex_head(g)
                 && g != last_group
                 && self.group_is_dataless(g);
@@ -1224,7 +1317,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // marks an initialized inode table, the two UNINIT bits an uninitialized bitmap.
             // Without the feature the whole field is zero, as `mke2fs` writes it, rather than
             // a flag no feature backs.
-            let mut flags = if enabled { BG_INODE_ZEROED } else { 0 };
+            let mut flags = if uninit_bg { BG_INODE_ZEROED } else { 0 };
             if inode_uninit {
                 flags |= BG_INODE_UNINIT;
             }
@@ -1242,7 +1335,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
                 flags,
                 // The count of never-used inodes at the tail of the table lets a
                 // checker skip scanning them; meaningful only under metadata_csum.
-                itable_unused: if enabled { ipg - used_inodes } else { 0 },
+                itable_unused: if uninit_bg { ipg - used_inodes } else { 0 },
                 checksum: 0,
                 block_bitmap_csum,
                 inode_bitmap_csum,
@@ -1282,9 +1375,14 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// The group descriptor checksum (`bg_checksum`): the low 16 bits of a crc32c
     /// over the filesystem seed, the group number, and the descriptor bytes with the
     /// checksum field taken as zero. Zero when checksums are off.
+    ///
+    /// This is the one field whose *algorithm* the checksum scheme names rather than
+    /// merely switching on and off, so it reads the scheme itself: a scheme added to
+    /// [`CsumScheme`] is a compile error here, which is where the choice belongs.
     fn group_desc_csum(&self, group: u32, desc: &GroupDescriptor, desc_size: usize) -> u16 {
-        if !self.csum.enabled() {
-            return 0;
+        match self.csum.scheme() {
+            CsumScheme::None => return 0,
+            CsumScheme::Crc32c => {}
         }
         let mut buf = [0u8; GroupDescriptor::SIZE_64];
         desc.write_to(&mut buf[..desc_size], desc_size)
@@ -1427,7 +1525,12 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         } else {
             0
         };
-        sb.checksum_type = if self.csum.enabled() { 1 } else { 0 };
+        // `s_checksum_type` names the algorithm: 1 is crc32c, and a filesystem with no
+        // object checksums leaves it zero.
+        sb.checksum_type = match self.csum.scheme() {
+            CsumScheme::None => 0,
+            CsumScheme::Crc32c => 1,
+        };
         // The filesystem's own bookkeeping as the kernel's ext4_calculate_overhead()
         // accounts it: the per-group metadata plus the internal journal's full footprint
         // (the orphan file is ordinary file data to that accounting). That footprint is
@@ -1598,28 +1701,16 @@ mod tests {
         let options = opts();
         let feature = options.feature;
         assert!(feature.has_orphan_file());
-        let layout = plan_layout(
-            64 * MIB,
-            options.grow,
-            options.inodes,
-            options.reserved,
-            feature,
-        )
-        .expect("layout");
+        let layout = plan_layout(&options.plan_request(64 * MIB)).expect("layout");
         let model = build_model(
             TreeBuilder::new().file(
                 b"/f".to_vec(),
                 b"x".to_vec(),
                 crate::source::Metadata::new(0o644, options.time),
             ),
-            ModelConfig {
-                block_size: feature.block_size,
-                inode_size: feature.inode_size,
-                first_user_inode: ORPHAN_INO, // the collision a stale derivation produces
-                default_time: options.time,
-                fixed_time: options.fixed_time,
-                dir_nlink: feature.has_dir_nlink(),
-            },
+            // The collision a stale derivation produces: entries starting at the inode
+            // the orphan file takes.
+            ModelConfig::new(feature, ORPHAN_INO, options.time),
         )
         .expect("model");
         assert!(model.inodes.contains_key(&ORPHAN_INO), "the entry took it");
@@ -1864,6 +1955,54 @@ mod tests {
         let jsb = r.journal_superblock().unwrap().expect("journal");
         assert_eq!(jsb.max_len, 2048);
         assert_eq!(r.inode(8).unwrap().size, 2048 * 4096);
+    }
+
+    #[test]
+    fn a_journal_past_the_large_file_bound_is_rejected_without_the_feature() {
+        // The journal is a regular file, so a log an explicit size pushed to 2 GiB needs
+        // `large_file` like any other. A 1024-byte block keeps the resize inode under the
+        // bound, so this profile is otherwise valid without the feature — which is what
+        // leaves the journal as the one structure that reaches it. The check runs before
+        // any journal block is allocated, so no filesystem large enough to hold the log
+        // has to exist for it to fire.
+        let mut o = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16])
+            .profile(Profile::Ext3);
+        o.feature.block_size = 1024;
+        o.feature = o
+            .feature
+            .with_feature("large_file", false)
+            .expect("a known name");
+        o.grow = GrowReservation::None;
+        o.journal = JournalSize::Blocks(2 * 1024 * 1024); // 2 GiB at a 1024-byte block
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("expected LargeFileWithoutFeature");
+        };
+        assert!(
+            matches!(
+                err,
+                FormatError::LargeFileWithoutFeature {
+                    what: "journal",
+                    size
+                } if size == 2 * 1024 * MIB
+            ),
+            "expected LargeFileWithoutFeature for the journal, got {err:?}"
+        );
+
+        // The same journal is written where the feature permits it — the rule is about
+        // the pairing, not about the size alone.
+        let mut o = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16])
+            .profile(Profile::Ext3);
+        o.feature.block_size = 1024;
+        o.grow = GrowReservation::None;
+        o.journal = JournalSize::Blocks(2 * 1024 * 1024);
+        assert!(o.feature.has_large_file());
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("a 2 GiB log does not fit a 64 MiB image");
+        };
+        assert!(
+            matches!(err, FormatError::Alloc(_)),
+            "the feature check must give way to the allocator, got {err:?}"
+        );
     }
 
     #[test]

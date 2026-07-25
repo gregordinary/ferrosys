@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ferrosys::ext::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
-use ferrosys::ext::{Profile, ReadPolicy, Reader, Severity, Xattr};
+use ferrosys::ext::{OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr};
 use util::{available, e2fsck_clean, tool};
 
 /// The contents of a file in the source tree, keyed by its path in the image.
@@ -207,7 +207,7 @@ fn mke2fs(case: &Case, tree: &Path, dir: &Path) -> PathBuf {
 /// not have. Returns the reader, so the caller can go on to read the filesystem.
 fn scan_clean(path: &Path, what: &str) -> Reader<std::fs::File> {
     let file = std::fs::File::open(path).expect("open image");
-    let mut reader = Reader::open_at(file, 0, ReadPolicy::Lenient)
+    let mut reader = Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient))
         .unwrap_or_else(|e| panic!("{what}: open: {e}"));
     let report = reader.scan();
     let bad: Vec<_> = report
@@ -287,7 +287,7 @@ fn read_back(reader: &mut Reader<std::fs::File>, what: &str) {
     assert!(
         matches!(
             reader.lookup(b"/loop_a"),
-            Err(ferrosys::ext::ReadError::SymlinkLoop(_))
+            Err(ferrosys::ext::ReadError::SymlinkLoop { .. })
         ),
         "{what}: a symlink cycle did not terminate as a loop"
     );
@@ -335,7 +335,8 @@ fn the_scan_faults_a_corrupt_block_map() {
     // filesystem. e2fsck must object, and so must the scan.
     let offset = {
         let file = std::fs::File::open(&image).expect("open");
-        let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+        let mut r =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
         let (number, _) = r.lookup(b"/etc/hostname").expect("lookup");
         let sb = r.superblock();
         let (ipg, isize, bs) = (
@@ -360,7 +361,8 @@ fn the_scan_faults_a_corrupt_block_map() {
     );
 
     let file = std::fs::File::open(&image).expect("open");
-    let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+    let mut r =
+        Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
     let report = r.scan();
     assert!(
         !report.is_clean(),
@@ -603,7 +605,8 @@ fn a_final_dir_entry_in_the_last_twelve_bytes_is_read() {
     // Locate /probe (its inode number and its single data block) and /probe/z's inode.
     let (probe_no, probe_block, z_no, block_size) = {
         let file = std::fs::File::open(&image).expect("open");
-        let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+        let mut r =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
         let (probe_no, probe) = r.lookup(b"/probe").expect("lookup /probe");
         let (z_no, _) = r.lookup(b"/probe/z").expect("lookup /probe/z");
         // ext2 is block-mapped, so i_block[0] is the directory's first data block.
@@ -638,7 +641,8 @@ fn a_final_dir_entry_in_the_last_twelve_bytes_is_read() {
 
     // The reader must return `z` — the entry a twelve-byte-tail assumption would drop.
     let file = std::fs::File::open(&image).expect("open");
-    let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+    let mut r =
+        Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
     let (_, probe) = r.lookup(b"/probe").expect("lookup /probe");
     let names: Vec<Vec<u8>> = r
         .read_dir(&probe)
@@ -696,7 +700,8 @@ fn a_directory_entry_name_that_traverses_is_flagged_and_never_walked() {
 
     let (probe_no, probe_block, z_no, block_size) = {
         let file = std::fs::File::open(&image).expect("open");
-        let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+        let mut r =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
         let (probe_no, probe) = r.lookup(b"/probe").expect("lookup /probe");
         let (z_no, _) = r.lookup(b"/probe/z").expect("lookup /probe/z");
         let block = u32::from_le_bytes(probe.block[0..4].try_into().unwrap());
@@ -721,7 +726,8 @@ fn a_directory_entry_name_that_traverses_is_flagged_and_never_walked() {
     std::fs::write(&image, &bytes).expect("write back");
 
     let file = std::fs::File::open(&image).expect("open");
-    let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+    let mut r =
+        Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
 
     // The scan reports the hostile name as a structural fault filed against /probe.
     let report = r.scan();
@@ -806,7 +812,8 @@ fn a_scattered_inode_above_the_dense_cutoff_is_scanned() {
     // Locate the stranded inode, and confirm it really is above the dense cutoff.
     let (high_no, cutoff, offset) = {
         let file = std::fs::File::open(&image).expect("open");
-        let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+        let mut r =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
         let (high_no, _) = r.lookup(b"/f12").expect("lookup /f12 (the stranded file)");
         let sb = r.superblock();
         let cutoff = sb.inodes_count.saturating_sub(sb.free_inodes_count);
@@ -836,7 +843,8 @@ fn a_scattered_inode_above_the_dense_cutoff_is_scanned() {
     std::fs::write(&image, &bytes).expect("write back");
 
     let file = std::fs::File::open(&image).expect("open");
-    let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+    let mut r =
+        Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
     let report = r.scan();
     assert!(
         report
@@ -1295,7 +1303,8 @@ fn a_shared_xattr_block_reads_on_both_files() {
     // Where the block landed, and /b's accounting before the second reference.
     let (ea_block, b_blocks) = {
         let file = std::fs::File::open(&image).expect("open");
-        let mut r = Reader::open_at(file, 0, ReadPolicy::Lenient).expect("open");
+        let mut r =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
         let (_, a) = r.lookup(b"/a").expect("lookup /a");
         assert_ne!(
             a.file_acl, 0,
@@ -1364,6 +1373,126 @@ fn a_shared_xattr_block_reads_on_both_files() {
             attrs.get(b"user.shared".as_slice()),
             Some(&value),
             "{path} did not read the shared attribute back"
+        );
+    }
+}
+
+/// A feature word promises what the filesystem's structures look like, so an inode that
+/// carries a structure the word denies makes the image self-contradictory — and every one
+/// of these is something `e2fsck` faults.
+///
+/// The writer refuses to emit such a pair, which means an image carrying one always came
+/// from somewhere else. That is what this gate builds: `mke2fs` writes a filesystem whose
+/// feature words genuinely lack the feature, `debugfs` gives one inode the structure those
+/// words deny, and then the two judges must agree — `e2fsck` faults the image, and the
+/// scan reports the same disagreement rather than calling it clean.
+#[test]
+fn feature_incoherent_foreign_images_are_flagged() {
+    if !available("mke2fs") || !available("e2fsck") || !available("debugfs") {
+        return;
+    }
+
+    /// One incoherence: the feature to build without, the `debugfs` edit that introduces
+    /// the structure that feature would have covered, and a phrase from the anomaly it
+    /// must produce.
+    struct Incoherence {
+        what: &'static str,
+        /// `-O` argument: the feature cleared, so the words really do lack it.
+        without: &'static str,
+        /// The `debugfs -R` request that gives an inode the denied structure.
+        request: &'static str,
+        /// A phrase the reported anomaly's detail carries.
+        detail: &'static str,
+        severity: Severity,
+    }
+
+    let cases = [
+        Incoherence {
+            what: "an attribute block on a filesystem without ext_attr",
+            without: "^ext_attr",
+            // Any block inside the filesystem: what makes this an incoherence is the
+            // pointer existing at all, not where it points.
+            request: "sif /etc/hostname file_acl 500",
+            detail: "attribute block",
+            severity: Severity::Structural,
+        },
+        Incoherence {
+            what: "a 2 GiB regular file on a filesystem without large_file",
+            without: "^large_file",
+            request: "sif /etc/hostname size 0x80000000",
+            detail: "regular file",
+            severity: Severity::Conformance,
+        },
+        Incoherence {
+            what: "a hash-indexed directory on a filesystem without dir_index",
+            without: "^dir_index",
+            request: "sif /etc flags 0x1000",
+            detail: "hash-indexed",
+            severity: Severity::Conformance,
+        },
+    ];
+
+    for case in cases {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tree = dir.path().join("tree");
+        build_tree(&tree).expect("build source tree");
+        // A 1024-byte block keeps `mke2fs` from reasserting `large_file` for its own
+        // resize inode, so each of these filesystems really is written without the
+        // feature the case is about.
+        let case_fs = Case {
+            what: case.what,
+            fs_type: "ext2",
+            block_size: 1024,
+            inode_size: 256,
+            features: case.without,
+        };
+        let image = mke2fs(&case_fs, &tree, dir.path());
+
+        // The filesystem is sound before the edit, so what follows is the edit's doing.
+        e2fsck_clean(&image)
+            .unwrap_or_else(|e| panic!("{}: the image was already faulted:\n{e}", case.what));
+        {
+            let file = std::fs::File::open(&image).expect("open image");
+            let mut reader =
+                Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient))
+                    .expect("open");
+            assert!(
+                reader.scan().is_clean(),
+                "{}: the image was already anomalous",
+                case.what
+            );
+        }
+
+        run_debugfs(&image, dir.path(), "incoherence.txt", case.request);
+
+        // `e2fsck` faults it, which is what makes this an incoherence rather than a
+        // preference.
+        assert!(
+            e2fsck_clean(&image).is_err(),
+            "{}: e2fsck accepts the edit, so there is nothing to flag",
+            case.what
+        );
+
+        let file = std::fs::File::open(&image).expect("open image");
+        let mut reader =
+            Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)).expect("open");
+        let report = reader.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.detail.contains(case.detail))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: the scan calls this image clean where e2fsck faults it:\n{}",
+                    case.what,
+                    report.to_table()
+                )
+            });
+        assert_eq!(found.severity, case.severity, "{}", case.what);
+        assert!(
+            found.location.inode.is_some(),
+            "{}: the anomaly names the inode it was found on",
+            case.what
         );
     }
 }

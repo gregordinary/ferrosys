@@ -28,7 +28,8 @@ Both build on Rust 1.88 or newer.
   extended attributes, POSIX ACLs, metadata checksums, a jbd2 journal, and an orphan file.
 - **A robust reader** — bounds-checks every field into typed errors, reads foreign images
   other tools wrote, and scans a whole image into typed anomalies rendered as JSON, SARIF,
-  or a table.
+  or a table, allocating in proportion to the bytes an image holds rather than to what it
+  claims.
 - **Built for scale** — streaming output keeps images sparse and larger than memory, with
   64-bit block addressing for filesystems past 16 TiB.
 

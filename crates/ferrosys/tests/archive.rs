@@ -13,7 +13,10 @@ use tar::{Builder, EntryType, Header};
 
 use ferrosys::ext::acl::{Acl, AclQualifier};
 use ferrosys::ext::ondisk::Timestamp;
-use ferrosys::ext::{ArchiveError, ArchiveSource, FormatOptions, GrowReservation, Reader, format};
+use ferrosys::ext::{
+    ArchiveError, ArchiveSource, EntryKind, FileContent, FormatOptions, GrowReservation, Reader,
+    Source, format,
+};
 use util::{available, e2fsck_clean};
 
 const MIB: u64 = 1024 * 1024;
@@ -202,6 +205,126 @@ fn archive_source_round_trips_and_checks_clean() {
         f.write_all(image.as_bytes()).unwrap();
         f.flush().unwrap();
         e2fsck_clean(f.path()).expect("archive-built image checks clean");
+    }
+}
+
+#[test]
+fn opening_an_archive_by_path_writes_the_same_image_as_reading_it_whole() {
+    // The lazy path is a memory profile, not a different filesystem. Every member's
+    // contents are read at placement instead of at parse, and the bytes that reach the
+    // image must be identical — a difference here is silently wrong image data, which is
+    // the worst failure this project has.
+    let tar_bytes = build_archive();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&tar_bytes).unwrap();
+    file.flush().unwrap();
+
+    let eager = format(
+        ArchiveSource::from_reader(&tar_bytes[..]).expect("parse whole"),
+        64 * MIB,
+        opts(),
+    )
+    .expect("format from a read archive");
+    let lazy = format(
+        ArchiveSource::from_path(file.path()).expect("parse by path"),
+        64 * MIB,
+        opts(),
+    )
+    .expect("format from an archive left on disk");
+
+    assert_eq!(
+        eager.as_bytes(),
+        lazy.as_bytes(),
+        "an archive read whole and one left on disk wrote different images"
+    );
+}
+
+#[test]
+fn an_archive_opened_by_path_leaves_its_file_contents_on_disk() {
+    // The type change alone buys nothing: the win only arrives if the source actually
+    // hands back handles. This is what checks that it does — and that a directory, which
+    // has no contents, is unaffected.
+    let tar_bytes = build_archive();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&tar_bytes).unwrap();
+    file.flush().unwrap();
+
+    let entries = ArchiveSource::from_path(file.path())
+        .expect("parse by path")
+        .into_entries();
+    let hostname = entries
+        .iter()
+        .find(|e| e.path == b"/etc/hostname")
+        .expect("the archive holds /etc/hostname");
+    let EntryKind::File(content) = &hostname.kind else {
+        panic!("/etc/hostname is not a file: {:?}", hostname.kind);
+    };
+    assert!(
+        matches!(content, FileContent::Range(_)),
+        "an archive opened by path held a file's bytes in memory: {content:?}"
+    );
+    // The length is known without reading, which is what the model's size check needs.
+    assert_eq!(content.len(), b"ferrosys\n".len() as u64);
+    assert_eq!(content.read().expect("read the range"), b"ferrosys\n");
+
+    // Read whole, the same member's contents are owned.
+    let owned = ArchiveSource::from_reader(&tar_bytes[..])
+        .expect("parse whole")
+        .into_entries();
+    let hostname = owned
+        .iter()
+        .find(|e| e.path == b"/etc/hostname")
+        .expect("the archive holds /etc/hostname");
+    assert!(matches!(
+        &hostname.kind,
+        EntryKind::File(FileContent::Owned(_))
+    ));
+}
+
+#[test]
+fn owned_and_located_contents_coexist_in_one_entry_list() {
+    // A caller that rewrites one file of a tree it is otherwise passing through replaces
+    // that entry's contents with bytes it computed, while every other entry stays backed
+    // by the archive. Both provenances must survive in the same list.
+    let tar_bytes = build_archive();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&tar_bytes).unwrap();
+    file.flush().unwrap();
+
+    let mut entries = ArchiveSource::from_path(file.path())
+        .expect("parse by path")
+        .into_entries();
+    for entry in &mut entries {
+        if entry.path == b"/etc/hostname" {
+            entry.kind = EntryKind::File(FileContent::Owned(b"spliced\n".to_vec()));
+        }
+    }
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(&e.kind, EntryKind::File(FileContent::Range(_)))),
+        "the splice replaced every located entry, not just the one"
+    );
+
+    let image = format(Spliced(entries), 64 * MIB, opts()).expect("format a mixed list");
+    let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+    let (_, hostname) = r.lookup(b"/etc/hostname").expect("lookup /etc/hostname");
+    assert_eq!(r.read_data(&hostname).unwrap(), b"spliced\n");
+    // And an archive-backed neighbour still came through its handle.
+    let (_, passwd) = r.lookup(b"/etc/passwd").expect("lookup /etc/passwd");
+    assert_eq!(
+        r.read_data(&passwd).unwrap(),
+        b"root:x:0:0:root:/root:/bin/sh\n"
+    );
+}
+
+/// A source over an entry list a caller has already edited — the shape a consumer that
+/// filters, sorts, or splices between parsing and formatting ends up with.
+struct Spliced(Vec<ferrosys::ext::SourceEntry>);
+
+impl Source for Spliced {
+    fn into_entries(self) -> Vec<ferrosys::ext::SourceEntry> {
+        self.0
     }
 }
 

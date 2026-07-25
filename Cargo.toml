@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -27,6 +27,7 @@ tempfile = "3"
 proptest = "1"
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.1"` resolves `>=0.1.0, <0.2.0` — the published
-# `ferrosys` a released `ferrosys-cli` builds against.
-ferrosys = { path = "crates/ferrosys", version = "0.1" }
+# minor is the breaking axis, so `"0.2"` resolves `>=0.2.0, <0.3.0` — the published
+# `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
+# version bump.
+ferrosys = { path = "crates/ferrosys", version = "0.2" }

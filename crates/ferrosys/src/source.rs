@@ -11,7 +11,191 @@
 //! hold — a name over 255 bytes, an unresolvable hard link — becomes a typed error
 //! there, never a silently dropped or truncated entry.
 
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use crate::ondisk::{Timestamp, Xattr};
+
+/// A regular file's contents: either bytes in memory, or a range of a file on the host
+/// read at the moment it is placed.
+///
+/// The two coexist in one entry list, deliberately. A source that maps an on-host archive
+/// yields handles; a caller that computes an entry's bytes — rewriting one file of a tree
+/// it is otherwise passing through — supplies them owned, in the same `Vec<SourceEntry>`.
+///
+/// # Why this is not just `Vec<u8>`
+///
+/// A format's peak memory is otherwise the sum of every file it writes, because every
+/// file's bytes are built before the first block is placed. A handle defers the bytes
+/// until the file is written, so the peak becomes the largest single file rather than the
+/// total.
+///
+/// The [`len`](Self::len) is known without reading, which is what lets the model check a
+/// file against the `large_file` feature — and name the offending path — before any bytes
+/// are read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FileContent {
+    /// Bytes held in memory.
+    Owned(Vec<u8>),
+    /// A range of a file on the host, read when the content is placed.
+    Range(FileRange),
+}
+
+impl FileContent {
+    /// The file's length in bytes, without reading it.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Owned(bytes) => bytes.len() as u64,
+            Self::Range(range) => range.len(),
+        }
+    }
+
+    /// Whether the file is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The file's bytes, reading them from the host if they are not already in memory.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::Error`] if the backing file cannot be read — including the case where
+    /// it is shorter than the range claims, which means the file changed after the source
+    /// that named it was built.
+    pub fn read(&self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Owned(bytes) => Ok(bytes.clone()),
+            Self::Range(range) => range.read(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for FileContent {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
+    }
+}
+
+impl From<FileRange> for FileContent {
+    fn from(range: FileRange) -> Self {
+        Self::Range(range)
+    }
+}
+
+/// A range of bytes within a file on the host, held open for the length of a format.
+///
+/// The handle owns its share of the open file, so an entry carrying one is a plain owned
+/// value: no lifetime parameter reaches [`SourceEntry`], and a caller may hold, clone,
+/// sort, and splice a list of them freely.
+///
+/// # The file must not change while the source is alive
+///
+/// The bytes are read when the file is placed, not when the source is built, so an edit
+/// in between reaches the image. Holding the descriptor open narrows this usefully: a
+/// replacement written to a new file and renamed into place leaves the original inode
+/// readable and the format unaffected. What does reach the image is an **in-place**
+/// modification or a truncation of the same inode — and it reaches it as wrong bytes
+/// rather than as an error, unless the file shrank enough for the read to run short.
+#[derive(Clone)]
+pub struct FileRange {
+    /// The open file. Shared so a handle is owned rather than borrowed, and so a whole
+    /// archive's worth of handles costs one descriptor.
+    file: Arc<File>,
+    /// The path it was opened from, for diagnostics and identity.
+    path: Arc<PathBuf>,
+    offset: u64,
+    len: u64,
+}
+
+impl FileRange {
+    /// A handle to `len` bytes at `offset` in `file`, which was opened from `path`.
+    ///
+    /// The path is carried for diagnostics and identity; it is not re-opened, so the
+    /// range keeps reading the file this descriptor names even if the path is replaced.
+    #[must_use]
+    pub fn new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self {
+        Self {
+            file,
+            path: Arc::new(path.into()),
+            offset,
+            len,
+        }
+    }
+
+    /// The path the backing file was opened from.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    /// Byte offset of the range within the backing file.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Length of the range in bytes.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the range is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Read the range's bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::Error`] if the file cannot be read, or if it is shorter than the range
+    /// claims — which is what a file edited after the source was built looks like.
+    pub fn read(&self) -> std::io::Result<Vec<u8>> {
+        let len = usize::try_from(self.len).map_err(|_| {
+            std::io::Error::other(format!(
+                "{}: {} bytes at offset {} is more than this platform addresses",
+                self.path.display(),
+                self.len,
+                self.offset
+            ))
+        })?;
+        // An independent descriptor, so the read carries its own cursor: a shared one
+        // would make two handles into the same file interfere.
+        let mut handle = self.file.try_clone()?;
+        handle.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = vec![0u8; len];
+        handle.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+impl PartialEq for FileRange {
+    /// Two handles are equal when they name the same range of the same path. The open
+    /// descriptors are not compared: a path re-opened is the same range by every measure
+    /// a caller can act on.
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.offset == other.offset && self.len == other.len
+    }
+}
+
+impl Eq for FileRange {}
+
+impl std::fmt::Debug for FileRange {
+    /// The range, without the descriptor: `FileRange { path, offset, len }`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileRange")
+            .field("path", &self.path)
+            .field("offset", &self.offset)
+            .field("len", &self.len)
+            .finish()
+    }
+}
 
 /// Ownership, permission bits, and timestamps for one entry.
 ///
@@ -78,8 +262,9 @@ impl Metadata {
 pub enum EntryKind {
     /// A directory.
     Directory,
-    /// A regular file with the given contents.
-    File(Vec<u8>),
+    /// A regular file with the given contents, held in memory or read from the host
+    /// when the file is placed.
+    File(FileContent),
     /// A symbolic link to the given target path.
     Symlink(Vec<u8>),
     /// A hard link: another name for the entry already present at `target`, which may
@@ -176,7 +361,7 @@ impl TreeBuilder {
     pub fn file(
         mut self,
         path: impl Into<Vec<u8>>,
-        contents: impl Into<Vec<u8>>,
+        contents: impl Into<FileContent>,
         meta: Metadata,
     ) -> Self {
         self.push(path, EntryKind::File(contents.into()), meta);

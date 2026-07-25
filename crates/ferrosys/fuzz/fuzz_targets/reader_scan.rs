@@ -6,7 +6,7 @@
 
 use std::io::Cursor;
 
-use ferrosys::ext::{ReadPolicy, Reader};
+use ferrosys::ext::{OpenOptions, ReadPolicy, Reader};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -40,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
 
     // At a nonzero base offset, exercising the base-relative accessors that read a
     // filesystem embedded inside a larger image.
-    if let Ok(mut reader) = Reader::open_at(Cursor::new(data), 512, ReadPolicy::Lenient) {
+    if let Ok(mut reader) = Reader::open_with(Cursor::new(data), &OpenOptions::new().base(512).policy(ReadPolicy::Lenient)) {
         let _ = reader.scan();
     }
 });
