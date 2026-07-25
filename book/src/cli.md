@@ -7,7 +7,8 @@ surface for anyone not writing Rust.
 ```console
 $ ferrosys format  --size SIZE --uuid HEX --time SECS [options] OUT.img
 $ ferrosys inspect [options] IMAGE
-$ ferrosys extract [options] IMAGE (--to-tar F|- | --cat PATH | --list)
+$ ferrosys extract [options] IMAGE (--to-tar F|- | --cat PATH | --stat PATH | --list)
+$ ferrosys detect  [options] IMAGE
 ```
 
 Install it from the workspace:
@@ -63,17 +64,53 @@ The image streams out through the library's streaming writer, which touches only
 blocks the filesystem uses, so the file stays sparse and a filesystem far larger than
 memory can be written.
 
-Two things about `format` are worth knowing before you meet them:
+### Where the contents come from
 
-**`--from-tar` holds the archive's contents in memory.** The source yields each file's
-bytes as a value, so peak memory is the sum of the bytes of the files the archive holds.
-A large rootfs needs the memory to match.
+`--from-tar FILE` and `--from-dir DIR` are the two sources; without either, the filesystem
+is empty but for `/lost+found`. Giving both is a usage error, since nothing here decides
+the rules for a merge.
+
+**`--from-tar FILE`** reads an uncompressed tar archive. A named file is left on disk and
+each member is read as its file is placed, so peak memory is the largest single member,
+not the archive. `--from-tar -` reads the standard input, which cannot be sought back over
+and so is held whole — that is the one case where a large archive needs the memory to
+match. A compressed archive is named as such rather than reported as malformed tar:
+
+```console
+$ gunzip -c rootfs.tar.gz | ferrosys format ... --from-tar - rootfs.img
+```
+
+**`--from-dir DIR`** walks a directory tree on this machine. `DIR` itself becomes the
+filesystem root, and modes, ownership, all three times, symlinks, hard links, device,
+FIFO and socket nodes, and extended attributes with their POSIX ACLs all come across.
+Each file is read as it is placed, so peak memory is the largest single file.
+
+The walk records the uid and gid the host files carry, which for a build that does not run
+as root is that user's own. **`--owner UID:GID` replaces them**, and a rootless build
+almost always wants `--owner 0:0`:
+
+```console
+$ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 \
+      --from-dir staging/rootfs --owner 0:0 rootfs.img
+```
+
+### Two more things about `format`
 
 **The destination must be a regular file.** A format writes only the blocks the
 filesystem uses and extends the file to its full size with a single byte at the end, so
 every byte it does not write must already read as zero — which creating or truncating a
 regular file guarantees and a block device does not. Formatting a device would leave
 whatever it held interleaved with the new filesystem, so the tool refuses.
+
+**A failing run leaves the destination alone.** The source is parsed, the geometry planned,
+and the inode model built and checked *before* the destination is opened, so a run that
+cannot succeed never truncates the image already at that path. `--dry-run` goes one step
+further and reports the geometry the command would realize without opening the destination
+at all; `--atomic` covers the other end, writing to a sibling temporary file and renaming
+it over the destination once the image is whole, so a failure part-way through the write is
+not visible either. Note what `--atomic` costs: the destination becomes a *new* file, so
+its mode comes from this process's umask and any ownership, ACLs, or extra hard links the
+old file carried do not survive the rename. Without it the image is written in place.
 
 ### Choosing a base filesystem
 
@@ -150,8 +187,33 @@ reservation is reproducible to the block.
 
 ```console
 $ ferrosys format --size 64M --uuid "$(uuidgen)" --time 1 --json fs.img
-{"version":1,"uuid":"...","blocks":16384,"groups":1,"reserved_gdt_blocks":1024,...}
+{"schema":1,"uuid":"f0e17055-...","volume_name":"","created":1,"profile":"ext4",...}
 ```
+
+Every JSON document this tool writes opens with the same `"schema"` field: the shape is a
+contract of its own that no command-line signature describes, so it names its own version.
+The receipt also carries `free_blocks` and `free_inodes`, read back from the filesystem
+that was just written — a format's overhead is otherwise invisible, and on a small image
+it is most of it. On a `--dry-run`, where no filesystem was written to have them, both are
+`null` and `"written"` is `false`.
+
+### A small partition
+
+A format's defaults are sized for a general-purpose filesystem, and on a small one they
+cost more than they are worth. Two of them dominate: the growth headroom (`--grow`) and the
+journal, which is a real file costing its size in free space — 4 MiB of a 16 MiB
+filesystem. On a partition that will not grow and does not need a journal, say so:
+
+```console
+$ ferrosys format --size 16M --uuid "$(uuidgen)" --time 1700000000 \
+      -t ext2 --grow none --reserved-percent 0 boot.img
+```
+
+That leaves 3830 of the 16 MiB image's 4096 blocks free — 93.5% of it usable — against
+2710 at the defaults. Keep the journal (`-t ext3`) if the partition will be mounted
+read-write and power loss is a real risk; drop it when the partition is written once and
+read afterwards, which is what a boot partition usually is. The format summary reports what
+was reserved and what is left free, so the cost of any combination is one command away.
 
 ## `inspect`
 
@@ -194,7 +256,7 @@ least these findings, and the rest of it went unread — so the verdict it reach
 called bad.
 
 `--groups` adds every block group's descriptor. `--json` reports the same data as a JSON
-document carrying a `"version"` field, the feature names split by word, the ext2/ext3/ext4
+document carrying a `"schema"` field, the feature names split by word, the ext2/ext3/ext4
 profile those words classify to, the unknown feature bits (reported whether or not there
 are any, so an image carrying a feature the tool does not know can never read as one it
 understood), and the scan's findings.
@@ -221,7 +283,7 @@ $ ferrosys inspect --offset 1M disk.img
 
 ## `extract`
 
-Exactly one of three things comes out.
+Exactly one of four things comes out.
 
 **A tar archive.** Ownership, modes, symlinks, hard links, and device and FIFO nodes
 travel in the header; the paths, the ids, the times (to the nanosecond, and negative for
@@ -263,7 +325,66 @@ lrwxrwxrwx   1      0      0         17 2023-11-14T22:13:20Z /etc/mtab -> /proc/
 
 `--list --json` produces the same listing as a JSON document, with each entry's inode
 number — which is what tells one file with two names from two files with the same
-contents.
+contents — its extended attributes, and any POSIX ACL decoded into readable entries.
+
+**One path's metadata**, which is the answer to "what is `/usr/bin/ping`, exactly" without
+listing a hundred thousand other lines:
+
+```console
+$ ferrosys extract rootfs.img --stat /usr/bin/ping
+Path:                   /usr/bin/ping
+Inode:                  15
+Type:                   file
+Mode:                   0755 (-rwxr-xr-x)
+Owner:                  0:0
+Links:                  1
+Size:                   76672
+Blocks:                 152
+Accessed:               2023-11-14T22:13:20Z
+Modified:               2023-11-14T22:13:20Z
+Changed:                2023-11-14T22:13:20Z
+Created:                2023-11-14T22:13:20Z
+Xattr security.capability: 0x0100000200200000...
+```
+
+It reports the type, the mode both ways, ownership, link count, size, all four times, a
+device node's numbers, a symlink's target, and every extended attribute — with a stored
+POSIX ACL decoded rather than shown as bytes. A path naming a symlink describes the link
+itself, not its target. `--json` reports the same as a document.
+
+In a JSON document the `mode` field is the permission bits as a **decimal** number, since
+JSON has no octal literal — `509` is `0o775` — and `mode_octal` beside it carries the usual
+spelling.
+
+### Reading an image you do not trust
+
+A file's size is the image's own claim about it, and a sparse file legitimately dwarfs the
+filesystem holding it, so nothing structural bounds what `--cat` would allocate.
+`--max-file-bytes N` is the bound to set on an image that has not earned trust:
+
+```console
+$ ferrosys extract suspect.img --cat /etc/passwd --max-file-bytes 64M
+```
+
+Over the cap the read is an **error**, not a short file. A truncated file that looked
+whole would be the worse outcome: a pipeline would carry it forward and never know.
+
+## `detect`
+
+```console
+$ ferrosys detect rootfs.img
+ext4
+$ ferrosys detect --offset 1M disk.img
+ext2
+```
+
+One word on the standard output — `ext2`, `ext3`, `ext4`, or `unrecognized` — so it reads
+well in a shell test, and `--json` for a document. `--offset` points it at a partition
+inside a whole-disk image or a region a carver located.
+
+This asks what an image *is*, not whether it is sound: an image with a quirk `inspect`
+would refuse still classifies here. An unrecognized image exits 8, since there is no
+filesystem to have an opinion about.
 
 ## A round trip, end to end
 

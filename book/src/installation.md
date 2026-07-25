@@ -14,15 +14,21 @@ or by editing `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrosys = "0.1"
+ferrosys = "0.2"
 ```
 
-The default build is pure Rust and needs only the Rust toolchain. The archive
-source (`format --from-tar`) lives behind the `tar` feature:
+The default build is pure Rust and depends only on `thiserror`. Three features
+add to it, each off by default:
+
+| Feature | What it adds | What it depends on |
+|---|---|---|
+| `tar` | `ArchiveSource` and `ArchiveSink`: a filesystem built from a tar stream, and one written back out as one, with PAX times, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` records | `tar` |
+| `dir` | `DirectorySource`: a filesystem built from a directory tree on this machine, with its modes, ownership, times, hard links, special files, and extended attributes | `rustix` |
+| `serde` | `Serialize` on the scan taxonomy, the planned geometry, and the feature model, for embedding them in a document of your own | `serde` |
 
 ```toml
 [dependencies]
-ferrosys = { version = "0.1", features = ["tar"] }
+ferrosys = { version = "0.2", features = ["tar", "dir"] }
 ```
 
 The [API reference](./api-reference.md) documents the public surface.

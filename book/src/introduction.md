@@ -8,7 +8,8 @@ A formatter writes an image from a description of its contents — directories,
 files, symlinks, hard links, device / FIFO / socket nodes, extended attributes,
 and POSIX ACLs, each with its ownership, modes, and access / change / modification
 times — and a reader parses an image back. The contents come from a programmatic
-builder or, with the `tar` feature, from a tar archive and its PAX metadata. The
+builder, from a tar archive and its PAX metadata (the `tar` feature), or from a
+directory tree on the machine doing the building (the `dir` feature). The
 image carries real superblock and descriptor backups and reserved descriptor
 blocks sized to a grow target — a maximum the caller names, or every block the
 format can reserve when the caller names none — so the filesystem grows in place
@@ -32,7 +33,8 @@ It is at once:
   whatever machine builds the image;
 - **resize-safe** in the on-disk geometry it writes;
 - **unbounded by memory** — `format_to` streams an image to a seekable
-  destination, writing only the blocks the filesystem uses.
+  destination, writing only the blocks the filesystem uses, and a read windows its
+  way through a file rather than holding it.
 
 ## This guide
 

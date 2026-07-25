@@ -38,9 +38,9 @@ an ACL is encoded and attached under its `system.posix_acl_*` name:
 
 ```rust
 # extern crate ferrosys;
-use ferrosys::ext::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
+use ferrosys::ext::acl::{EXEC, READ, WRITE};
 use ferrosys::ext::ondisk::Timestamp;
-use ferrosys::ext::{Metadata, TreeBuilder};
+use ferrosys::ext::{Acl, AclEntry, AclQualifier, Metadata, TreeBuilder};
 
 let time = Timestamp::from_secs(1_700_000_000);
 let acl = Acl::new(vec![
@@ -77,10 +77,45 @@ archive open, so it must not be modified in place until the format finishes; rep
 it by writing a new file and renaming it over the old one is safe, because the original
 inode stays readable.
 
+With the `dir` feature enabled, a `DirectorySource` walks a directory tree on this machine
+into the same entries. The directory it is pointed at becomes the filesystem root, and
+everything under it keeps its path relative to that: modes, ownership, all three times to
+the nanosecond, symlinks (recorded, never followed), hard links, device, FIFO and socket
+nodes, and extended attributes with their POSIX ACLs, which are translated from the
+version-2 form the syscall boundary speaks into the compact form ext stores.
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::{DirectorySource, FormatOptions, format_to};
+
+// A build that does not run as root records its own uid on every file it walks, so the
+// override is what makes the image root-owned.
+let source = DirectorySource::from_path("staging/rootfs")?.owner(0, 0);
+let out = std::fs::File::create("rootfs.img")?;
+format_to(source, 512 << 20, options, out)?;
+```
+
+The walk sorts its entries by path and its attributes by name, and where several names
+share an inode the first in that sorted order carries the file while the rest become hard
+links to it — so the same tree walks to the same image whatever order the host listed its
+directories in. Each file's bytes are read as that file is placed and no descriptor is
+held in between, so a tree may hold any number of files and the peak memory is the largest
+single one.
+
 A file's contents are a `FileContent`: either `Owned` bytes or a `Range` of a host file.
 Both coexist in one entry list, which is what lets a caller take an archive-backed list
 and replace one entry's contents with bytes it computed while every other entry stays on
-disk.
+disk. `TreeBuilder::file` takes anything that converts into one — a `Vec<u8>`, a `String`,
+a borrowed `&[u8]`, `&[u8; N]`, or `&str`, each copied into the entry, or a `FileRange`,
+which names host bytes and reads them when the file is placed. `FileContent::read` hands
+back a `Cow`, so owned bytes are borrowed rather than copied and a format never holds two
+copies of one file.
+
+A `FileRange` comes in two forms. `FileRange::new` carries an open descriptor, shared, so
+a hundred ranges into one archive cost one descriptor; `FileRange::at_path` carries the
+path alone and opens it for each read, which is what lets a source name a range in each of
+a hundred thousand separate files. Either way the bytes are read when the file is placed,
+so the file must not be modified in place before the format finishes.
 
 ## Formatting
 
@@ -165,6 +200,36 @@ image bytes nobody notices. `FeatureSet::EMPTY` is the base to replay a recorded
 feature names back through `with_feature`, which is how the readable half of a pin is
 checked against the exact half.
 
+### Deciding everything before the destination is touched
+
+A format writes only the blocks the filesystem uses, so every byte of the destination it
+does not write must already read as zero — which means creating the file, or truncating one
+that is already there, is part of formatting rather than something done beforehand. A run
+that then failed would have destroyed what was at that path for nothing.
+
+`FormatPlan` is the fallible half of a format as a value, and it is what makes that
+impossible. `FormatPlan::new` takes the source, the size, and the options and does every
+piece of work that can fail — parsing the source, planning the geometry, building the
+inode model and checking it against that geometry, sizing the journal. What it returns can
+only be written:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::FormatPlan;
+
+// Nothing has been opened yet; a failure here leaves whatever is at the path untouched.
+let plan = FormatPlan::new(source, 512 << 20, options)?;
+println!("{} blocks, {} inodes used", plan.layout().total_blocks, plan.used_inodes());
+
+let out = std::fs::File::create("rootfs.img")?;
+let layout = plan.write_to(out)?;
+```
+
+`format` and `format_to` both route through it, so there is one derivation of a layout
+rather than two. `layout()` and `used_inodes()` report what the write will realize before
+a byte is written, which is what a caller reporting a geometry, or deciding whether to
+write at all, needs.
+
 Three more fields tune what the size alone would decide, each defaulting to what the
 size implies. `volume_name` labels the filesystem, up to sixteen bytes NUL-padded into
 `s_volume_name`. `inodes` (an `InodeCount`) sets how many inodes it holds — a
@@ -237,6 +302,45 @@ let (_, file) = reader.lookup(b"/greeting").unwrap();
 assert_eq!(reader.read_data(&file).unwrap(), b"hello\n");
 ```
 
+### Reading without holding the file
+
+`read_data` returns a whole file, which is right for a configuration file and wrong for a
+kernel image. Three methods read without ever holding one:
+
+- **`read_into(&inode, offset, buf)`** fills `buf` from `offset` and returns how many bytes
+  it read, short only at the end of the file. It maps a window of the file at a time, so
+  reading the last megabyte of a large file does not build the whole mapping first.
+- **`read_data_to(&inode, writer)`** streams the whole file to any `Write`, a window at a
+  time, and returns the byte count. Peak memory is the window, whatever the file's size.
+- **`walk_with(|reader, entry| …)`** walks the tree lazily, handing each entry to the
+  callback as it is reached rather than collecting the whole listing first. The callback
+  receives the reader, so it may read each file as it walks. It is generic over the
+  callback's error type, so a consumer's own failure comes straight back out.
+
+```rust,ignore
+# extern crate ferrosys;
+// Copy every regular file out of the image without holding any of them.
+reader.walk_with(|reader, entry| -> Result<(), MyError> {
+    if entry.inode.mode & 0o170000 == 0o100000 {   // a regular file
+        let mut out = std::fs::File::create(destination(&entry.path))?;
+        reader.read_data_to(&entry.inode, &mut out)?;
+    }
+    Ok(())
+})?;
+```
+
+`walk` collects the whole listing into a `Vec` and is what to reach for when the tree,
+rather than its contents, is the subject.
+
+With the `tar` feature enabled, `ArchiveSink` is that loop already written:
+`ArchiveSink::new(writer).write_tree(&mut reader)` streams the whole filesystem out as a
+tar archive — ownership, modes, times to the nanosecond, symlinks, hard links, device and
+FIFO nodes, extended attributes, and POSIX ACLs, all carried in PAX records — with each
+member's body streamed rather than buffered. An archive that makes the round trip through
+`ArchiveSource` describes the same filesystem at both ends. A socket has no tar entry type
+at all, so a filesystem holding one is a typed error rather than an archive quietly missing
+a file.
+
 ### Filesystems other tools made
 
 The reader reads any conformant ext image, whatever tool wrote it. It follows the
@@ -288,14 +392,19 @@ stored checksum does not match its recomputed value.
 makes is bounded by the bytes the source holds rather than by a count the image claims:
 the groups and inodes it walks are capped at what the source can physically hold, each
 metadata block is read once however many references name it, and the findings stop at
-`ScanReport::MAX_ANOMALIES` with `ScanReport::is_truncated` recording that they did.
+`Limits::max_anomalies` — `ScanReport::MAX_ANOMALIES` unless you set another — with
+`ScanReport::is_truncated` recording that they did. A truncated report is a floor: the
+image holds at least these findings, `worst_severity` and `has_fatal` are floors too, and
+`is_clean` is false whatever the report holds, since a scan that stopped short never saw
+enough to call an image clean.
+
 `walk` is bounded the same way — a well-formed filesystem spends at least a directory
 record's worth of its own blocks per name, so the source's length bounds how many names
 it can describe. Reaching that bound is an error rather than a short list: a caller
 extracting a tree from a truncated walk would write an incomplete one and see success.
 
 A report projects to JSON, to a fixed-column table, and to a SARIF log. The JSON document
-opens with a `schema` field holding `SCAN_SCHEMA_VERSION`: a downstream parser depends on
+opens with a `schema` field holding `ext::read::SCAN_SCHEMA_VERSION`: a downstream parser depends on
 the emitted shape, and no Rust signature describes it, so the shape names its own version.
 
 ### Opening options
@@ -320,4 +429,32 @@ let mut reader = Reader::open_with(file, &options)?;
 ```
 
 The limits default to imposing nothing, so an image of any size this crate wrote reads
-back whole at the default settings.
+back whole at the default settings. `max_file_bytes` bounds the logical-to-physical
+mapping a read builds as well as the buffer it returns: the mapping costs eight bytes per
+logical block against one byte per byte returned, so on the crafted `i_size` the cap
+exists for it is the larger of the two.
+
+A file past the cap is a `ReadError::FileTooLarge` naming the size and the bound — not a
+short read. A truncated file that looked like a whole one would be the worse outcome by
+far: a caller extracting a tree would write it out, see success, and carry a silently
+incomplete file forward. Where a large file is legitimate, `read_data_to` streams it
+without the cap applying to a buffer that is never allocated.
+
+## Saying what an image is
+
+`detect` reads a source and reports the `Filesystem` family it holds — the crate root's
+own vocabulary, independent of which families are compiled in. `detect_with` does the same
+at an offset within the source, for a partition inside a whole-disk image or a region a
+carver located:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::{DetectOptions, Filesystem, detect_with};
+
+let what = detect_with(disk, &DetectOptions::new().base(1 << 20))?;
+assert!(matches!(what, Filesystem::Ext4));
+```
+
+Detection asks what an image *is*, not whether it is sound: it classifies leniently, so an
+image with a quirk a strict read would refuse still answers here. `Reader` and `scan` are
+what say whether a filesystem is well-formed.

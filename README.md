@@ -13,8 +13,8 @@ This Cargo workspace holds two crates:
 Both build on Rust 1.88 or newer.
 
 > **Status:** under active development. The APIs are not yet stable. Following Cargo's
-> `0.x` semantics, a breaking change bumps the minor version — a `"0.1"` requirement
-> resolves `>=0.1.0, <0.2.0`, so a breaking release reaches no one unasked.
+> `0.x` semantics, a breaking change bumps the minor version, and a `0.x` requirement
+> resolves only within that minor — so a breaking release reaches no one unasked.
 
 ## Highlights
 
@@ -30,8 +30,13 @@ Both build on Rust 1.88 or newer.
   other tools wrote, and scans a whole image into typed anomalies rendered as JSON, SARIF,
   or a table, allocating in proportion to the bytes an image holds rather than to what it
   claims.
-- **Built for scale** — streaming output keeps images sparse and larger than memory, with
-  64-bit block addressing for filesystems past 16 TiB.
+- **Built for scale** — streaming in both directions: a format writes only the blocks the
+  filesystem uses, so an image stays sparse and may be larger than memory, and a read
+  windows its way through a file rather than holding it, so pulling a multi-gigabyte file
+  out of an image costs a working set. 64-bit block addressing reaches past 16 TiB.
+- **Sources** — a programmatic tree, a tar archive, or a directory on this machine, each
+  handing a file's bytes over as a handle so a format's peak memory is the largest single
+  file rather than the sum of them all.
 
 The [crate README](crates/ferrosys/README.md) and the
 [guide](https://gregordinary.github.io/ferrosys/) carry the complete feature list.
@@ -47,10 +52,11 @@ $ ferrosys inspect rootfs.img
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
 ```
 
-`format` writes a filesystem, `inspect` reports on one and says whether it is sound, and
-`extract` reads the contents back out — as a tar archive, one file's bytes, or a listing.
-The identifiers and timestamps are inputs, so the same inputs write the same image every
-time. The exit codes mirror `e2fsck`'s. See the guide's
+`format` writes a filesystem — from a tar archive, a directory tree, or empty — `inspect`
+reports on one and says whether it is sound, `extract` reads the contents back out as a
+tar archive, one file's bytes, one path's metadata, or a listing, and `detect` says which
+filesystem an image holds. The identifiers and timestamps are inputs, so the same inputs
+write the same image every time. The exit codes mirror `e2fsck`'s. See the guide's
 [command-line chapter](https://gregordinary.github.io/ferrosys/cli.html).
 
 ## Build and test
