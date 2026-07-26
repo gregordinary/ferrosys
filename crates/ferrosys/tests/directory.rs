@@ -141,22 +141,20 @@ fn the_same_tree_walks_to_the_same_bytes() {
     let host = tempfile::tempdir().expect("temp dir");
     build_tree(host.path());
 
-    let first = format(
-        DirectorySource::from_path(host.path())
-            .expect("walk")
-            .owner(0, 0),
-        16 * MIB,
-        opts(),
-    )
-    .expect("format");
-    let second = format(
-        DirectorySource::from_path(host.path())
-            .expect("walk")
-            .owner(0, 0),
-        16 * MIB,
-        opts(),
-    )
-    .expect("format");
+    // Both walks record their metadata before either format runs. A format reads each
+    // file's bytes as it places them, and on a filesystem that maintains access times a
+    // read moves the atime the next walk would record -- a property of the host, not of
+    // the walk. Stating both walks first holds the tree still, so what the comparison
+    // below answers is whether one tree walks to one image.
+    let first_walk = DirectorySource::from_path(host.path())
+        .expect("walk")
+        .owner(0, 0);
+    let second_walk = DirectorySource::from_path(host.path())
+        .expect("walk")
+        .owner(0, 0);
+
+    let first = format(first_walk, 16 * MIB, opts()).expect("format");
+    let second = format(second_walk, 16 * MIB, opts()).expect("format");
     assert_eq!(
         first.as_bytes(),
         second.as_bytes(),
