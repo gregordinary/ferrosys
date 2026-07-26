@@ -5,8 +5,10 @@ target/
 corpus/
 artifacts/
 coverage/
-# Only the curated `.img` seeds are sources. A run mistakenly pointed at `seeds/` as its
+# Only the curated seeds are sources: the `.img` images the reader targets read and the
+# `.tar` archives the archive target parses. A run mistakenly pointed at `seeds/` as its
 # working corpus scatters sha1-named discoveries there; those are artifacts and must not
 # be committable.
 seeds/*/*
 !seeds/*/*.img
+!seeds/*/*.tar
