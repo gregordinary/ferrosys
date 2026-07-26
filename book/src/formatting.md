@@ -102,10 +102,17 @@ format_to(source, 512 << 20, options, out)?;
 
 The walk sorts its entries by path and its attributes by name, and where several names
 share an inode the first in that sorted order carries the file while the rest become hard
-links to it — so the same tree walks to the same image whatever order the host listed its
-directories in. Each file's bytes are read as that file is placed and no descriptor is
+links to it — so the same tree walks to the same entry list whatever order the host listed
+its directories in. Each file's bytes are read as that file is placed and no descriptor is
 held in between, so a tree may hold any number of files and the peak memory is the largest
 single one.
+
+The times on those entries are the host's. A walk reads every directory and every symlink
+to learn what it holds, and a host that maintains access times records that read, so the
+access time an entry carries is the one the host held when the walk reached it. A tree
+read from a `noatime` mount walks to the same bytes every time; where the host moves those
+times and the bytes must not move with them, set the times on the entries a source of your
+own yields.
 
 A file's contents are a `FileContent`: either `Owned` bytes or a `Range` of a host file.
 Both coexist in one entry list, which is what lets a caller take an archive-backed list

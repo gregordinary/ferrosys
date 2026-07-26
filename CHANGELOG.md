@@ -28,10 +28,12 @@ constructor or a baseline constant rather than a struct literal.
   a host directory tree, which is what `mke2fs -d` does: modes, ownership, all three
   times to the nanosecond, symlinks (recorded, never followed), hard links coalesced by
   inode, device, FIFO and socket nodes, and extended attributes with their POSIX ACLs.
-  Entries sort by path and attributes by name, so one tree always walks to one image;
-  each file's bytes are read as that file is placed, so peak memory is the largest
-  single file. `owner(uid, gid)` replaces host ownership, for a build that does not run
-  as root. Failures are a typed `HostError`. Adds one dependency, `rustix`.
+  Entries sort by path and attributes by name, so one tree always walks to one entry
+  list, whatever order the host's directories are read in; the times on that list are the
+  host's, including the access times a walk of an atime-keeping host moves as it reads.
+  Each file's bytes are read as that file is placed, so peak memory is the largest single
+  file. `owner(uid, gid)` replaces host ownership, for a build that does not run as root.
+  Failures are a typed `HostError`. Adds one dependency, `rustix`.
 - **`FormatPlan`** — the fallible half of a format as a value. `FormatPlan::new` parses
   the source, plans the geometry, builds and checks the inode model, and sizes the
   journal; `layout()` and `used_inodes()` report what the write will realize, and
@@ -177,7 +179,7 @@ constructor or a baseline constant rather than a struct literal.
   most its anomaly cap. The hostile-name check walks a directory's blocks itself, so a
   directory holding a malformed record is still checked for a name carrying `/` or a NUL.
 - **`Source::into_entries` returns a `Vec`, and that is a decision.** Inode numbers are
-  assigned in sorted path order, which is what makes two formats of one tree
+  assigned in sorted path order, which is what makes two formats of one entry list
   byte-identical, so the model materializes and sorts the whole list whatever a source
   hands over. The bound is the entry count, not the bytes, since a file's contents may
   stay a `FileContent::Range` until it is placed.

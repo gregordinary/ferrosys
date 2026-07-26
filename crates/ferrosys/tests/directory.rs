@@ -13,7 +13,7 @@ use std::path::Path;
 
 use ferrosys::ext::ondisk::{Inode, Timestamp};
 use ferrosys::ext::{
-    DirectorySource, FormatOptions, GrowReservation, HostError, Reader, Source, format,
+    DirectorySource, FormatOptions, GrowReservation, HostError, Reader, Source, SourceEntry, format,
 };
 use util::{available, e2fsck_clean};
 
@@ -134,31 +134,46 @@ fn a_host_tree_formats_into_an_image_that_holds_what_it_held() {
     }
 }
 
+/// Access time, dropped so the comparison below sees the fields a walk decides.
+///
+/// A walk reads every directory and every symlink to learn what they hold, and a host
+/// that maintains access times records that read -- so a walk moves the access times the
+/// next walk reads back. That time is the host's answer, not the walk's.
+fn without_atimes(mut entries: Vec<SourceEntry>) -> Vec<SourceEntry> {
+    for entry in &mut entries {
+        entry.meta.atime = Timestamp::from_secs(0);
+    }
+    entries
+}
+
 #[test]
-fn the_same_tree_walks_to_the_same_bytes() {
-    // Inode numbers follow sorted path order, so the image is a function of the tree and
-    // not of the order the host listed its directories in.
+fn the_same_tree_walks_to_the_same_entries() {
+    // Entries sort by path and attributes by name, so the list is a function of the tree
+    // and not of the order the host listed its directories in. Everything the walk
+    // decides is compared: the paths and their order, which name of an inode carries the
+    // contents and which become hard links, modes, ownership, change and modification
+    // times, symlink targets, device numbers, and each entry's attributes in order. That
+    // one such list formats to one image is the byte-reproducibility gate's subject; this
+    // one holds the walk to producing one list.
     let host = tempfile::tempdir().expect("temp dir");
     build_tree(host.path());
 
-    // Both walks record their metadata before either format runs. A format reads each
-    // file's bytes as it places them, and on a filesystem that maintains access times a
-    // read moves the atime the next walk would record -- a property of the host, not of
-    // the walk. Stating both walks first holds the tree still, so what the comparison
-    // below answers is whether one tree walks to one image.
-    let first_walk = DirectorySource::from_path(host.path())
+    let first = DirectorySource::from_path(host.path())
         .expect("walk")
-        .owner(0, 0);
-    let second_walk = DirectorySource::from_path(host.path())
+        .owner(0, 0)
+        .into_entries();
+    let second = DirectorySource::from_path(host.path())
         .expect("walk")
-        .owner(0, 0);
+        .owner(0, 0)
+        .into_entries();
 
-    let first = format(first_walk, 16 * MIB, opts()).expect("format");
-    let second = format(second_walk, 16 * MIB, opts()).expect("format");
+    // The tree the comparison runs over, so an equality over two empty lists cannot pass
+    // for agreement.
+    assert_eq!(first.len(), 9, "root, 3 dirs, 2 files, link, alias, fifo");
     assert_eq!(
-        first.as_bytes(),
-        second.as_bytes(),
-        "two walks of one tree write the same image"
+        without_atimes(first),
+        without_atimes(second),
+        "two walks of one tree yield the same entries"
     );
 }
 

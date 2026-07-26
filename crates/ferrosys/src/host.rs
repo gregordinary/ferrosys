@@ -19,6 +19,14 @@
 //! read in. Where several names share an inode, the first in that sorted order carries the
 //! contents and the rest become hard links to it.
 //!
+//! The times an entry carries are the host's. A walk reads every directory and every
+//! symlink to learn what it holds, and a host that maintains access times records that
+//! read, so the access time a walk reports is the one the host held when that entry was
+//! reached. Two walks of one tree agree on everything the walk decides; they agree on
+//! access times where the host holds them still, as a tree read from a `noatime` mount
+//! does. A caller that needs the times fixed whatever the host does builds its entries
+//! with [`Metadata::with_times`] and yields them from a source of its own.
+//!
 //! # Ownership
 //!
 //! Each entry records the uid and gid the host file carries.
