@@ -130,6 +130,47 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  cross:
+    name: cross-target check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The library's directory source is Linux's, and the CLI reaches it. Nothing
+          # else in either crate is platform-specific, so what these two prove is that
+          # `cargo add ferrosys` and `cargo install ferrosys-cli` compile off Linux —
+          # which no other job here builds, and which a published crate makes visible
+          # the moment someone tries it.
+          - target: x86_64-apple-darwin
+            # macOS carries `std::os::unix`, so the gates compile there too and the
+            # check covers them.
+            flags: --all-targets
+          - target: x86_64-pc-windows-msvc
+            # Windows does not, and the gates are Unix by construction — they set unix
+            # permissions, build device nodes, and shell out to `e2fsck`. What is
+            # checked here is what a consumer compiles: the library and the binary.
+            flags: ""
+          # A 32-bit target, where `usize` is the narrow one: the crate models that case
+          # deliberately (an image larger than the address space is a typed error, and
+          # every on-disk length an image claims is added under a checked width), and
+          # nothing else in this workflow compiles it.
+          - target: i686-unknown-linux-gnu
+            flags: --all-targets
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain and target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      # `check`, not `build`: it type-checks the whole crate graph for the target
+      # without needing that platform's linker, which is the whole of what is being
+      # asked here.
+      - name: Check
+        run: cargo check --workspace --all-features --target "${{ matrix.target }}" ${{ matrix.flags }}
+
   public-api:
     name: public API surface
     runs-on: ubuntu-latest

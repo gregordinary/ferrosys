@@ -85,6 +85,12 @@ filesystem root, and modes, ownership, all three times, symlinks, hard links, de
 FIFO and socket nodes, and extended attributes with their POSIX ACLs all come across.
 Each file is read as it is placed, so peak memory is the largest single file.
 
+The walk records Linux inode metadata and Linux extended attributes, so this is the one
+option carried out on Linux alone; a binary built elsewhere refuses it by name and exits
+8, having opened nothing. Every other part of the tool — an empty filesystem,
+`--from-tar`, `inspect`, `extract`, `detect`, and every geometry option — is the same on
+every platform.
+
 The walk records the uid and gid the host files carry, which for a build that does not run
 as root is that user's own. **`--owner UID:GID` replaces them**, and a rootless build
 almost always wants `--owner 0:0`:

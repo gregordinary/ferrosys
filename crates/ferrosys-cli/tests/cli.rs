@@ -531,6 +531,10 @@ fn e2fsck_clean(image: &Path) {
     );
 }
 
+// Walking a tree records Linux inode metadata and Linux extended attributes, so the
+// library builds its directory source on Linux alone and `--from-dir` is carried out
+// there. The gate below this one is the other half of that contract.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn an_image_built_from_a_directory_holds_what_the_tree_held() {
     use std::os::unix::fs::PermissionsExt;
@@ -584,6 +588,42 @@ fn an_image_built_from_a_directory_holds_what_the_tree_held() {
     if available("e2fsck") {
         e2fsck_clean(Path::new(image));
     }
+}
+
+// The other half: where there is no directory source, `--from-dir` says so and the
+// destination is left alone, the same as every other planning failure.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[test]
+fn from_dir_is_refused_where_there_is_no_directory_source() {
+    let dir = scratch();
+    let tree = at(&dir, "staging");
+    std::fs::create_dir(&tree).expect("staging");
+
+    let image = at(&dir, "fs.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+        image.to_str().expect("a text path"),
+    ]);
+    // Not a usage error: the command line is understood, and the tool cannot carry it out.
+    assert_eq!(
+        code(&out),
+        OPERATIONAL,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--from-dir"), "{said}");
+    assert!(said.contains("--from-tar"), "{said}");
+    // The refusal happens while planning, so nothing was created at the destination.
+    assert!(!image.exists(), "the destination was created anyway");
 }
 
 #[test]

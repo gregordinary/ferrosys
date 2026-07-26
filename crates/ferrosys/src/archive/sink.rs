@@ -221,10 +221,19 @@ impl<W: Write> ArchiveSink<W> {
         }
 
         // A regular file's bytes are streamed out of the filesystem rather than held: the
-        // size is the inode's, and the reader fills the archive from the blocks as it goes.
-        // Everything else has no body at all — a hard link's contents belong to the inode
-        // the first name wrote.
-        let size = if m.streams_data { m.inode.size } else { 0 };
+        // reader fills the archive from the blocks as it goes. Everything else has no body
+        // at all — a hard link's contents belong to the inode the first name wrote.
+        //
+        // The size declared is the length the body will actually run to, which is what the
+        // reader will yield rather than what the inode's size field claims: the two agree
+        // for every file a mapping reaches, and above the logical ceiling a map addresses
+        // the field is the larger. A header promising more than the body carries is an
+        // archive a reader that trusts it mis-frames.
+        let size = if m.streams_data {
+            reader.file_len(&m.inode)
+        } else {
+            0
+        };
         header.set_size(size);
         header.set_cksum();
         if size == 0 {

@@ -49,7 +49,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use ferrosys::DetectError;
-use ferrosys::ext::{ArchiveError, FormatError, GeometryError, HostError, ReadError, Severity};
+// The directory source `--from-dir` walks with, and the failures it reports, exist on the
+// platform the library builds it for. Every other command and option is the same
+// everywhere; `format::from_dir` is where the difference is confined.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use ferrosys::ext::HostError;
+use ferrosys::ext::{ArchiveError, FormatError, GeometryError, ReadError, Severity};
 
 use crate::args::{Command, Topic, UsageError};
 
@@ -118,8 +123,17 @@ pub enum Error {
     #[error(transparent)]
     Archive(#[from] ArchiveError),
     /// The source directory tree could not be walked.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[error(transparent)]
     Host(#[from] HostError),
+    /// `--from-dir` was given on a platform that has no directory source to walk with.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[error(
+        "--from-dir is not available on this platform: walking a tree records Linux inode \
+         metadata and Linux extended attributes, so the directory source is built on Linux \
+         alone. --from-tar reads an archive anywhere"
+    )]
+    NoDirectorySource,
     /// The image could not be read as far as it had to be.
     #[error("reading the image: {0}")]
     ImageIo(String),
@@ -201,13 +215,19 @@ impl Error {
                 _ => exit::IMAGE_BAD,
             },
             Error::Archive(ArchiveError::Acl { .. }) => exit::IMAGE_BAD,
+            // A tree that cannot be walked and a platform with no walk to run are both
+            // failures to carry the command out, so both land here; only one of them
+            // exists in any one build.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Error::Host(_) => exit::OPERATIONAL,
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            Error::NoDirectorySource => exit::OPERATIONAL,
             Error::Io { .. }
             | Error::NotARegularFile(_)
             | Error::NotDetected { .. }
             | Error::NotExt { .. }
             | Error::Format(_)
             | Error::Archive(_)
-            | Error::Host(_)
             | Error::ImageIo(_)
             | Error::NoSuchPath(_)
             | Error::NotAFile(_) => exit::OPERATIONAL,
@@ -361,7 +381,9 @@ contents (at most one):
                        times, symlinks, hard links, device and FIFO nodes, sockets, and
                        extended attributes with their POSIX ACLs are all carried; symlinks
                        are recorded, never followed. Each file is read as it is placed, so
-                       peak memory is the largest single file
+                       peak memory is the largest single file. Walking a tree records Linux
+                       inode metadata and Linux extended attributes, so this option is
+                       carried out on Linux alone; --from-tar reads an archive anywhere
   --owner UID:GID      own every entry of a --from-dir tree by this user and group,
                        whatever the host files say. A build that does not run as root
                        usually wants --owner 0:0: without it the image is owned by the
@@ -470,7 +492,10 @@ options:
                        rather than on ext
 
 The whole image is scanned unless --quick says otherwise, so an image that is bad is
-reported as bad (exit 4) rather than merely described.
+reported as bad (exit 4) rather than merely described. What counts as bad is --fail-on,
+which defaults to `integrity`: a filesystem whose own bytes contradict each other fails,
+and a valid ext filesystem that another tool wrote does not. That is the default a CI
+gate inherits, and `--fail-on conformance` is the stricter line to draw deliberately.
 ";
 
 const EXTRACT_HELP: &str = "\

@@ -62,10 +62,18 @@ pub struct DxEntry {
 
 /// Index entries a block holds, given where its count begins. Under `metadata_csum`
 /// one slot is given up to the checksum tail.
+///
+/// Both sizes are the caller's, and a block whose count begins past its own end — or
+/// whose only slot is the one the tail claims — holds no entries: the answer is zero
+/// rather than a count that would index outside the block.
 #[must_use]
 pub const fn dx_limit(block_size: usize, count_offset: usize, checksums: bool) -> usize {
-    let slots = (block_size - count_offset) / DX_ENTRY_LEN;
-    if checksums { slots - 1 } else { slots }
+    let slots = block_size.saturating_sub(count_offset) / DX_ENTRY_LEN;
+    if checksums {
+        slots.saturating_sub(1)
+    } else {
+        slots
+    }
 }
 
 /// Byte offset of the checksum tail: immediately past the last entry slot the block
@@ -318,6 +326,20 @@ mod tests {
         assert_eq!(dx_limit(BS, DX_NODE_COUNT_OFFSET, false), 511);
         assert_eq!(dx_limit(BS, DX_NODE_COUNT_OFFSET, true), 510);
         assert_eq!(dx_tail_offset(DX_NODE_COUNT_OFFSET, 510), 4088);
+    }
+
+    #[test]
+    fn a_block_with_no_room_for_an_entry_holds_none() {
+        // Both sizes are the caller's. A count that begins at or past the block's end
+        // leaves nothing to divide, and a block whose one slot is the tail's leaves
+        // nothing to index — each answers zero, so nothing derived from the count
+        // reaches outside the block.
+        assert_eq!(dx_limit(32, 32, false), 0);
+        assert_eq!(dx_limit(32, 64, false), 0);
+        assert_eq!(dx_limit(0, DX_ROOT_COUNT_OFFSET, true), 0);
+        // Exactly one slot: none of it survives the tail.
+        assert_eq!(dx_limit(DX_ENTRY_LEN + 8, 8, false), 1);
+        assert_eq!(dx_limit(DX_ENTRY_LEN + 8, 8, true), 0);
     }
 
     /// The exact bytes e2fsprogs writes for a three-child root over inode 12 whose

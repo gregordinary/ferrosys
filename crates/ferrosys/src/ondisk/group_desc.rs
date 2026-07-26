@@ -94,12 +94,17 @@ impl GroupDescriptor {
     /// `desc_size` is [`SIZE_32`](Self::SIZE_32) or [`SIZE_64`](Self::SIZE_64). The
     /// 64-byte form additionally writes the high halves; the 32-byte form writes
     /// only the low halves, so any value that does not fit in 32/16 bits is
-    /// truncated by the caller's choice of width.
+    /// truncated by the caller's choice of width. A size between the two writes the
+    /// 32-byte form and leaves the rest of `buf` alone.
     ///
     /// # Errors
     ///
-    /// [`ParseError::TooShort`] if `buf` is smaller than `desc_size`.
+    /// [`ParseError::InvalidField`] if `desc_size` is below [`SIZE_32`](Self::SIZE_32),
+    /// which is the smallest descriptor the format has: every field this writes lies
+    /// within those 32 bytes. [`ParseError::TooShort`] if `buf` is smaller than
+    /// `desc_size`.
     pub fn write_to(&self, buf: &mut [u8], desc_size: usize) -> Result<(), ParseError> {
+        Self::check_desc_size(desc_size)?;
         if buf.len() < desc_size {
             return Err(ParseError::TooShort {
                 structure: "GroupDescriptor",
@@ -138,10 +143,17 @@ impl GroupDescriptor {
 
     /// Parse `desc_size` bytes from `buf`.
     ///
+    /// A size between [`SIZE_32`](Self::SIZE_32) and [`SIZE_64`](Self::SIZE_64) reads the
+    /// 32-byte form and leaves the high halves zero.
+    ///
     /// # Errors
     ///
-    /// [`ParseError::TooShort`] if `buf` is smaller than `desc_size`.
+    /// [`ParseError::InvalidField`] if `desc_size` is below [`SIZE_32`](Self::SIZE_32),
+    /// which is the smallest descriptor the format has: every field this reads lies
+    /// within those 32 bytes. [`ParseError::TooShort`] if `buf` is smaller than
+    /// `desc_size`.
     pub fn read_from(buf: &[u8], desc_size: usize) -> Result<Self, ParseError> {
+        Self::check_desc_size(desc_size)?;
         if buf.len() < desc_size {
             return Err(ParseError::TooShort {
                 structure: "GroupDescriptor",
@@ -178,6 +190,24 @@ impl GroupDescriptor {
             block_bitmap_csum: u32::from(get_u16(buf, 0x18)) | (u32::from(bbc_hi) << 16),
             inode_bitmap_csum: u32::from(get_u16(buf, 0x1a)) | (u32::from(ibc_hi) << 16),
         })
+    }
+
+    /// Reject a `desc_size` the structure cannot occupy.
+    ///
+    /// `desc_size` is a width the caller chooses, and the two directions above address
+    /// every field within the first 32 bytes unconditionally — so a smaller size is not a
+    /// shorter descriptor, it is a value the format has no form for. Checking it against
+    /// the structure's own minimum is what separates that from `buf` merely being too
+    /// small to hold the size asked for, which [`ParseError::TooShort`] reports.
+    fn check_desc_size(desc_size: usize) -> Result<(), ParseError> {
+        if desc_size < Self::SIZE_32 {
+            return Err(ParseError::InvalidField {
+                structure: "GroupDescriptor",
+                field: "s_desc_size",
+                value: desc_size as u64,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -271,5 +301,61 @@ mod tests {
             d.write_to(&mut buf, GroupDescriptor::SIZE_64),
             Err(ParseError::TooShort { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_a_descriptor_size_below_the_smallest_form() {
+        // The width is the caller's to choose, and both directions address every field in
+        // the first 32 bytes. A smaller size names no descriptor the format has, so it is
+        // refused as the field it is rather than reaching an offset past the buffer.
+        let d = sample();
+        let mut buf = [0u8; GroupDescriptor::SIZE_64];
+        for desc_size in [0, 1, 16, GroupDescriptor::SIZE_32 - 1] {
+            assert!(
+                matches!(
+                    d.write_to(&mut buf, desc_size),
+                    Err(ParseError::InvalidField {
+                        structure: "GroupDescriptor",
+                        field: "s_desc_size",
+                        ..
+                    })
+                ),
+                "write_to accepted desc_size {desc_size}"
+            );
+            assert!(
+                matches!(
+                    GroupDescriptor::read_from(&buf, desc_size),
+                    Err(ParseError::InvalidField {
+                        structure: "GroupDescriptor",
+                        field: "s_desc_size",
+                        ..
+                    })
+                ),
+                "read_from accepted desc_size {desc_size}"
+            );
+        }
+        // The size is checked before the buffer, so a short buffer at a refused size is
+        // still reported as the size being wrong — that is the fault a caller can fix.
+        assert!(matches!(
+            GroupDescriptor::read_from(&[0u8; 16], 16),
+            Err(ParseError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn round_trips_a_width_between_the_two_forms() {
+        // A size at or above the minimum but below the 64-byte form writes and reads the
+        // 32-byte one: the high halves are absent, so they round-trip as zero.
+        let d = sample();
+        let mut buf = [0u8; GroupDescriptor::SIZE_64];
+        for desc_size in [GroupDescriptor::SIZE_32, 40, GroupDescriptor::SIZE_64 - 1] {
+            d.write_to(&mut buf, desc_size)
+                .expect("a serializable width");
+            assert_eq!(
+                GroupDescriptor::read_from(&buf, desc_size).expect("read back"),
+                d,
+                "desc_size {desc_size}"
+            );
+        }
     }
 }

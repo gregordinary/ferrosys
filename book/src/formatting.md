@@ -84,6 +84,11 @@ the nanosecond, symlinks (recorded, never followed), hard links, device, FIFO an
 nodes, and extended attributes with their POSIX ACLs, which are translated from the
 version-2 form the syscall boundary speaks into the compact form ext stores.
 
+The metadata and the extended attributes the walk reads are Linux's, so `DirectorySource`
+is built on Linux; on another platform the feature compiles and the type is absent, and
+`ArchiveSource` is the portable way to describe a tree. Everything else the crate
+does — planning, writing, reading, and scanning — is the same everywhere.
+
 ```rust,ignore
 # extern crate ferrosys;
 use ferrosys::ext::{DirectorySource, FormatOptions, format_to};

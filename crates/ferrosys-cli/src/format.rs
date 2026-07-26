@@ -20,13 +20,22 @@
 //! `--atomic` goes further, for the case where a failure part-way through the writing must
 //! not be visible either: the image is written to a sibling temporary file, flushed to
 //! disk, and renamed over the destination once it is complete.
+//!
+//! # `--from-dir` is Linux's
+//!
+//! Walking a host tree records Linux inode metadata and Linux extended attributes, so the
+//! library builds its directory source on Linux alone. Everything else here — an empty
+//! filesystem, `--from-tar`, and every geometry option — is the same on every platform, so
+//! this module carries the boundary rather than the whole tool: [`from_dir`] is the walk on
+//! Linux and a typed refusal elsewhere.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use ferrosys::ext::DirectorySource;
 use ferrosys::ext::{
-    ArchiveSource, DirectorySource, FormatOptions, FormatPlan, Layout, Profile, Reader, Source,
-    TreeBuilder,
+    ArchiveSource, FormatOptions, FormatPlan, Layout, Profile, Reader, Source, TreeBuilder,
 };
 
 use crate::args::{Contents, FormatArgs, Stream};
@@ -59,15 +68,8 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
             plan(ArchiveSource::from_path(path)?, &args, options)?
         }
         // A walked tree names each file rather than reading it, so peak memory here is the
-        // largest single file too. The ownership override is applied to the walk, since it
-        // is what records the host's ids in the first place.
-        Some(Contents::Dir(path)) => {
-            let mut source = DirectorySource::from_path(path)?;
-            if let Some((uid, gid)) = args.owner {
-                source = source.owner(uid, gid);
-            }
-            plan(source, &args, options)?
-        }
+        // largest single file too.
+        Some(Contents::Dir(path)) => from_dir(path, &args, options)?,
     };
 
     // A dry run reports the geometry the plan realizes and stops. The layout is the same
@@ -94,6 +96,33 @@ fn plan(
     options: FormatOptions,
 ) -> Result<FormatPlan, Error> {
     Ok(FormatPlan::new(source, args.size, options)?)
+}
+
+/// Plan a format from a walked directory tree.
+///
+/// The ownership override is applied to the walk, since it is what records the host's ids
+/// in the first place.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn from_dir(path: &Path, args: &FormatArgs, options: FormatOptions) -> Result<FormatPlan, Error> {
+    let mut source = DirectorySource::from_path(path)?;
+    if let Some((uid, gid)) = args.owner {
+        source = source.owner(uid, gid);
+    }
+    plan(source, args, options)
+}
+
+/// The same, on a platform the library builds no directory source for: a named failure
+/// rather than a walk.
+///
+/// The refusal is the whole of what `--from-dir` does here, and it happens before the
+/// destination is opened, like every other planning failure.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn from_dir(
+    _path: &Path,
+    _args: &FormatArgs,
+    _options: FormatOptions,
+) -> Result<FormatPlan, Error> {
+    Err(Error::NoDirectorySource)
 }
 
 /// Report the geometry: the receipt a machine reads on the standard output, or the summary

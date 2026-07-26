@@ -64,6 +64,7 @@
 #[non_exhaustive] pub ferrosys::ext::HostError::Acl
 #[non_exhaustive] pub ferrosys::ext::HostError::Io
 #[non_exhaustive] pub ferrosys::ext::HostError::NotADirectory
+#[non_exhaustive] pub ferrosys::ext::HostError::RepeatedDirectory
 #[non_exhaustive] pub ferrosys::ext::HostError::Unsupported
 #[non_exhaustive] pub ferrosys::ext::ModelError::DeviceNumberTooLarge
 #[non_exhaustive] pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow
@@ -985,6 +986,8 @@ pub ferrosys::ext::HostError::Acl::source: crate::acl::AclError
 pub ferrosys::ext::HostError::Io::path: std::path::PathBuf
 pub ferrosys::ext::HostError::Io::source: std::io::Error
 pub ferrosys::ext::HostError::NotADirectory::path: std::path::PathBuf
+pub ferrosys::ext::HostError::RepeatedDirectory::first: std::path::PathBuf
+pub ferrosys::ext::HostError::RepeatedDirectory::path: std::path::PathBuf
 pub ferrosys::ext::HostError::Unsupported::path: std::path::PathBuf
 pub ferrosys::ext::HtreeDir::checksums: bool
 pub ferrosys::ext::HtreeDir::seed: [u8; 16]

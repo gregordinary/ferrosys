@@ -27,7 +27,9 @@ ext4
   reservation, block size, inode count, reserved percentage, volume label, journal size,
   feature set, and directory hash are all options. `--dry-run` reports the geometry
   without opening the destination, and `--atomic` publishes the image only once it is
-  whole.
+  whole. Walking a tree records Linux inode metadata and Linux extended attributes, so
+  `--from-dir` is carried out on Linux; `--from-tar` reads an archive on any platform the
+  binary builds for.
 - **`inspect`** reports what a filesystem says about itself and whether it is sound —
   as a table a person reads, as JSON, or as SARIF for a pipeline that ingests findings.
   A full scan walks every group descriptor, bitmap, inode, and extent tree, collecting

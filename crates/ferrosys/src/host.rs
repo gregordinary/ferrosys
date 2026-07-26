@@ -82,6 +82,20 @@ pub enum HostError {
         #[source]
         source: crate::acl::AclError,
     },
+    /// Two paths in the tree name one directory, which a bind mount produces.
+    #[error(
+        "{}: is the same directory as {} — walking it again would write that subtree \
+         into the image a second time, and a mount of an ancestor would never end",
+        path.display(),
+        first.display()
+    )]
+    #[non_exhaustive]
+    RepeatedDirectory {
+        /// The second path found for the directory.
+        path: PathBuf,
+        /// The path the directory was already reached by.
+        first: PathBuf,
+    },
 }
 
 /// A [`Source`] that yields the entries walked from a directory on the host.
@@ -112,12 +126,15 @@ impl DirectorySource {
     ///
     /// Symlinks are recorded as symlinks and never followed, so a link pointing outside
     /// the tree is written as the link it is. Every directory below `root` is descended,
-    /// including one on another mounted filesystem.
+    /// including one on another mounted filesystem — but each is descended once: two paths
+    /// naming a single directory, which a bind mount produces, is
+    /// [`HostError::RepeatedDirectory`] rather than a second copy of that subtree in the
+    /// image or, where what is mounted is an ancestor, a walk with no end.
     ///
     /// # Errors
     ///
     /// A [`HostError`] if `root` is not a directory, if any path under it cannot be read,
-    /// or if a stored ACL cannot be translated.
+    /// if a stored ACL cannot be translated, or if one directory is reached by two paths.
     pub fn from_path(root: impl AsRef<Path>) -> Result<Self, HostError> {
         let root = root.as_ref();
         // The root is followed if it is itself a symlink — it names the tree to walk, and
@@ -130,6 +147,15 @@ impl DirectorySource {
             });
         }
 
+        // Which directory each path reached, by the identity the host gives it. Symlinks
+        // are never followed, so the one shape that still puts a directory in the tree
+        // twice is a bind mount of it elsewhere under `root` — and where what is mounted
+        // is an ancestor, the second walk of it finds the mount again, without end. Each
+        // directory is entered once and the second path for one is named as the fault,
+        // since an image built from that tree would otherwise hold two copies of a
+        // subtree the host holds once.
+        let mut entered: BTreeMap<(u64, u64), PathBuf> =
+            BTreeMap::from([((meta.dev(), meta.ino()), root.to_path_buf())]);
         // The whole tree is collected before any entry is built, so the sort that fixes
         // which name owns a shared inode happens over the complete list.
         let mut found: Vec<(Vec<u8>, PathBuf, std::fs::Metadata)> =
@@ -146,6 +172,17 @@ impl DirectorySource {
                 // is what is recorded and a link to a directory is not descended into.
                 let meta = entry.metadata().map_err(io_at(&host_path))?;
                 if meta.is_dir() {
+                    match entered.entry((meta.dev(), meta.ino())) {
+                        Entry::Occupied(first) => {
+                            return Err(HostError::RepeatedDirectory {
+                                path: host_path,
+                                first: first.get().clone(),
+                            });
+                        }
+                        Entry::Vacant(slot) => {
+                            slot.insert(host_path.clone());
+                        }
+                    }
                     pending.push((host_path.clone(), image_path.clone()));
                 }
                 found.push((image_path, host_path, meta));
@@ -749,5 +786,47 @@ mod tests {
         } else {
             eprintln!("SKIPPED: {} holds no POSIX ACL", file.display());
         }
+    }
+
+    #[test]
+    fn every_directory_in_an_ordinary_tree_is_its_own() {
+        // The walk-once rule is over the identity the host gives a directory, so distinct
+        // directories — including ones under a name shared with a file elsewhere, and an
+        // empty one — are each entered on their own.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("a/log")).expect("a/log");
+        std::fs::create_dir_all(root.join("b/log")).expect("b/log");
+        std::fs::create_dir(root.join("empty")).expect("empty");
+        std::fs::write(root.join("a/log/messages"), b"\n").expect("messages");
+
+        let source = DirectorySource::from_path(root).expect("walk the tree");
+        assert_eq!(
+            paths(&source),
+            [
+                "/",
+                "/a",
+                "/a/log",
+                "/a/log/messages",
+                "/b",
+                "/b/log",
+                "/empty"
+            ]
+        );
+    }
+
+    #[test]
+    fn one_directory_under_two_paths_names_both_of_them() {
+        // A bind mount is what puts a directory in a tree twice, and making one needs
+        // privileges this gate does not have — so what is asserted here is the report,
+        // which is the part a caller acts on: it names the path that was refused and the
+        // path the directory was already reached by, so the tree can be fixed.
+        let said = HostError::RepeatedDirectory {
+            path: PathBuf::from("/staging/rootfs/mnt"),
+            first: PathBuf::from("/staging/rootfs"),
+        }
+        .to_string();
+        assert!(said.contains("/staging/rootfs/mnt"), "{said}");
+        assert!(said.contains("/staging/rootfs"), "{said}");
     }
 }

@@ -156,14 +156,22 @@ pub struct TreeShape {
 
 /// The number of entries that fit in a node of `node_bytes` bytes: one 12-byte
 /// header plus 12-byte entries.
+///
+/// `node_bytes` is a size the caller supplies, and a node smaller than its own header
+/// holds no entries — so anything below [`EXTENT_ENTRY_SIZE`] is zero rather than a
+/// length that overruns the node it describes.
 #[must_use]
 pub const fn node_capacity(node_bytes: usize) -> usize {
-    (node_bytes - EXTENT_ENTRY_SIZE) / EXTENT_ENTRY_SIZE
+    node_bytes.saturating_sub(EXTENT_ENTRY_SIZE) / EXTENT_ENTRY_SIZE
 }
 
 /// Byte offset of an external node's checksum tail: past the header and every entry
 /// the node can hold. The bytes a full node leaves over are exactly where ext4 keeps
 /// the tail, so reserving it costs no entry capacity.
+///
+/// A node with no room for entries has none for a tail either, and the offset is then
+/// past the node's own end — which the write it is handed to rejects, as it does any
+/// offset a buffer does not reach.
 #[must_use]
 pub const fn tail_offset(node_bytes: usize) -> usize {
     EXTENT_ENTRY_SIZE * (node_capacity(node_bytes) + 1)
@@ -554,6 +562,29 @@ mod tests {
         // begins, and the tail's four bytes close the block.
         assert_eq!(tail_offset(4096), 4092);
         assert_eq!(tail_offset(4096) + 4, 4096);
+    }
+
+    #[test]
+    fn a_node_smaller_than_its_header_holds_no_entries() {
+        // `node_bytes` is a size the caller supplies, and one below a single header
+        // describes no node at all. The capacity is zero, not a length that would
+        // overrun the bytes it was measured against.
+        assert_eq!(node_capacity(0), 0);
+        assert_eq!(node_capacity(EXTENT_ENTRY_SIZE - 1), 0);
+        assert_eq!(node_capacity(EXTENT_ENTRY_SIZE), 0);
+        assert_eq!(node_capacity(2 * EXTENT_ENTRY_SIZE), 1);
+        // With no entries there is nowhere in the node for a tail either, so the offset
+        // lands past its end — where the write that takes it refuses, as it does any
+        // offset the buffer does not reach.
+        assert_eq!(tail_offset(0), EXTENT_ENTRY_SIZE);
+        assert!(matches!(
+            write_node(
+                &ExtentNode::Leaves(Vec::new()),
+                node_capacity(4),
+                &mut [0u8; 4]
+            ),
+            Err(ExtentError::NodeTooSmall { .. })
+        ));
     }
 
     #[test]

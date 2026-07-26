@@ -444,8 +444,19 @@ fn parse_entries(
         let value = if value_inum != 0 {
             Vec::new()
         } else {
+            // `value_size` is the image's own claim and spans the whole `u32` range, so
+            // the end of the value is computed under a checked width: on a target whose
+            // `usize` is 32 bits the sum wraps, and a wrapped end names a range inside the
+            // buffer that `get` would hand back as the attribute's bytes.
             let vstart = value_base + value_offs;
-            buf.get(vstart..vstart + value_size)
+            let vend = vstart
+                .checked_add(value_size)
+                .ok_or(ParseError::InvalidField {
+                    structure: "XattrEntry",
+                    field: "e_value_size",
+                    value: value_size as u64,
+                })?;
+            buf.get(vstart..vend)
                 .ok_or(ParseError::InvalidField {
                     structure: "XattrEntry",
                     field: "e_value_offs",
@@ -668,6 +679,44 @@ mod tests {
         assert!(
             attrs[0].value.is_empty(),
             "the external value is not read as inline bytes"
+        );
+    }
+
+    #[test]
+    fn a_value_size_that_spans_the_address_space_is_refused() {
+        // `e_value_size` is the image's own claim and spans the whole `u32` range, so the
+        // end of a value is computed under a checked width. The value it names is refused
+        // either way; which field is at fault depends on how wide `usize` is, and the
+        // refusal does not.
+        let mut block = vec![0u8; 4096];
+        put_u32(&mut block, 0, XATTR_MAGIC);
+        let off = BLOCK_HEADER_LEN;
+        block[off] = 4; // e_name_len: "test"
+        block[off + 1] = 1; // e_name_index: user
+        put_u16(&mut block, off + 2, 64); // e_value_offs: inside the block
+        put_u32(&mut block, off + 4, 0); // e_value_inum: the value is meant to be here
+        put_u32(&mut block, off + 8, u32::MAX); // e_value_size
+        block[off + ENTRY_HEADER_LEN..off + ENTRY_HEADER_LEN + 4].copy_from_slice(b"test");
+
+        // On a 64-bit `usize` the sum is exact and simply lies outside the block; on a
+        // 32-bit one the sum itself does not fit, which is where a wrapping add would
+        // hand back a range the block does contain.
+        let expected = if usize::BITS >= 64 {
+            "e_value_offs"
+        } else {
+            "e_value_size"
+        };
+        let err = parse_block(&block).expect_err("a value larger than the block is refused");
+        assert!(
+            matches!(
+                err,
+                ParseError::InvalidField {
+                    structure: "XattrEntry",
+                    field,
+                    ..
+                } if field == expected
+            ),
+            "{err:?}"
         );
     }
 

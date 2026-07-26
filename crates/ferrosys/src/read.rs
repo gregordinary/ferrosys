@@ -1777,6 +1777,9 @@ impl<R: Read + Seek> Reader<R> {
         // two from `EXT4_MIN_DESC_SIZE_64BIT` (64) up to the block size. A 32-byte value
         // would read a 64-bit table at half its stride and check it at the wrong width; a
         // value past the block size would run each descriptor beyond its own block.
+        //
+        // This is also the bound [`desc_size`](Self::desc_size) rests on: it is what makes
+        // every width the reader hands the on-disk layer one that layer has a form for.
         if feature.is_64bit()
             && (!sb.desc_size.is_power_of_two()
                 || usize::from(sb.desc_size) < GroupDescriptor::SIZE_64
@@ -1896,8 +1899,20 @@ impl<R: Read + Seek> Reader<R> {
     /// whatever the word happens to hold. Honoring a stale 64 there would read every
     /// descriptor at the wrong offset and check it at the wrong checksum width, so the
     /// feature bit decides and the field is consulted only when it is meaningful.
+    ///
+    /// What bounds the `64bit` arm is [`open_with`](Self::open_with), which refuses any
+    /// image whose `s_desc_size` is not a power of two from
+    /// [`GroupDescriptor::SIZE_64`] up to the block size: no opened reader reaches here
+    /// with a smaller one. The clamp restates that floor where the value is used, so the
+    /// width handed to the on-disk layer is one it has a form for however the field was
+    /// arrived at.
     fn desc_size(&self) -> usize {
         if self.feature.is_64bit() {
+            debug_assert!(
+                usize::from(self.sb.desc_size) >= GroupDescriptor::SIZE_64,
+                "open_with admitted a 64bit image with s_desc_size {}",
+                self.sb.desc_size
+            );
             self.sb.desc_size.max(GroupDescriptor::SIZE_32 as u16) as usize
         } else {
             GroupDescriptor::SIZE_32
@@ -3101,8 +3116,11 @@ impl<R: Read + Seek> Reader<R> {
                 else {
                     break; // this block is malformed from here on; the next one may not be
                 };
+                // The same guard `read_dir` carries, for the same reason: `read_from`
+                // returns nothing shorter than an eight-byte header, and a scan that could
+                // stop advancing would never finish the image.
                 if rec_len == 0 {
-                    break; // a zero-length record advances nowhere
+                    break;
                 }
                 if entry.inode != 0 && name_is_hostile(&entry.name) {
                     out.push(hostile_name_anomaly(ino));
@@ -3782,7 +3800,11 @@ impl<R: Read + Seek> Reader<R> {
     /// whatever the field claims. A size past the 2^32-block logical ceiling cannot be
     /// mapped past it. And a directory holds no holes, so it cannot span more blocks than
     /// the image has; both bounds come from [`logical_block_count`](Self::logical_block_count).
-    fn file_len(&mut self, inode: &Inode) -> u64 {
+    ///
+    /// This is the length every read of an inode's data yields, so it is also the length
+    /// anything declaring that data — a tar member's header — must state, or the
+    /// declaration and the bytes disagree.
+    pub(crate) fn file_len(&mut self, inode: &Inode) -> u64 {
         if !maps_data(inode, self.block_size) {
             return 0;
         }
@@ -3910,6 +3932,11 @@ impl<R: Read + Seek> Reader<R> {
             // it.
             while off < self.block_size {
                 let (entry, rec_len) = DirEntry::read_from(&block[off..], self.block_size)?;
+                // [`DirEntry::read_from`] returns no record shorter than the eight-byte
+                // header it parses, so `off` always advances and this cannot fire. It
+                // guards that invariant rather than describing a record an image holds: a
+                // zero-length one would turn the walk below into the one thing a reader of
+                // hostile bytes must never do.
                 if rec_len == 0 {
                     return Err(ReadError::BadDirectory);
                 }
@@ -4202,6 +4229,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_size_past_the_logical_ceiling_is_not_a_length_a_read_yields() {
+        // A file's size field is the image's own claim; the length a read yields is what
+        // the map reaches, and no map reaches past 2^32 logical blocks. Anything that
+        // declares an inode's data ahead of streaming it — a tar member's header — states
+        // the second, or it promises bytes the body will never carry.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new().file(
+            b"/hello".to_vec(),
+            b"hi\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+        let image = format(source, 64 * MIB, opts()).unwrap();
+        let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+        let (_, mut inode) = r.lookup(b"/hello").unwrap();
+        assert_eq!(r.file_len(&inode), 3);
+
+        // 16 TiB at a 4 KiB block is the whole logical reach of a map; past it the size
+        // field is the only thing saying the bytes are there.
+        let ceiling = MAX_LOGICAL_BLOCKS * r.block_size as u64;
+        for claimed in [ceiling + 1, ceiling * 2, u64::MAX] {
+            inode.size = claimed;
+            assert_eq!(r.file_len(&inode), ceiling, "claimed {claimed}");
+        }
+        // Below the ceiling the two agree, so nothing an ordinary image holds is narrowed.
+        inode.size = ceiling;
+        assert_eq!(r.file_len(&inode), ceiling);
     }
 
     /// The walk as a path-to-inode map, for the tests that ask what is at a path rather

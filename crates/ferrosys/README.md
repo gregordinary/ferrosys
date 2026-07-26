@@ -89,7 +89,15 @@ assert!(contents.iter().any(|e| e.name == b"etc"));
 
 ## Features
 
-Three, each off by default. Without them the crate depends only on `thiserror`.
+Four. `ext` is on by default and is the whole filesystem surface — the formatter, the
+reader, the feature model, and the on-disk structures, all reached through the `ext`
+module. Turning it off leaves the family-agnostic substrate the crate root carries: the
+`crc32c` primitive and `detect`, which says which filesystem an image holds. That is the
+build for a consumer that classifies images without reading them.
+
+The other three are off by default, so a build that wants none of them depends only on
+`thiserror`. Each enables `ext`, since each is a way of describing or emitting an ext
+filesystem.
 
 - **`tar`** — `ArchiveSource` builds a filesystem from a tar stream with its PAX
   timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` ACL records;
@@ -100,7 +108,9 @@ Three, each off by default. Without them the crate depends only on `thiserror`.
   socket nodes, and extended attributes with their POSIX ACLs. Each file's bytes are read
   as that file is placed and no descriptor is held in between, so the tree may hold any
   number of files. `owner(uid, gid)` replaces the host's ownership, which is what a build
-  that does not run as root wants.
+  that does not run as root wants. The metadata and attributes the walk reads are Linux's,
+  so the type is built there; elsewhere the feature compiles to nothing and
+  `ArchiveSource` is the portable way to describe a tree.
 - **`serde`** — `Serialize` on the scan taxonomy (`Anomaly`, `ScanReport`, `Severity`,
   `Category`, `Location`), the planned geometry (`Layout`, `GroupLayout`, `BlockRange`),
   and the feature model (`FeatureSet`, `Profile`), for a consumer embedding them in a

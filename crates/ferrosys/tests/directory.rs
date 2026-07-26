@@ -2,8 +2,9 @@
 //! into a source, format an image, and confirm the image reads back what the tree held and
 //! (where `e2fsck` is present) checks clean.
 //!
-//! Runs only with the `dir` feature enabled.
-#![cfg(feature = "dir")]
+//! Runs where the directory source is built: with the `dir` feature enabled, on the
+//! platform whose inode metadata and extended attributes the walk reads.
+#![cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
 
 mod util;
 
