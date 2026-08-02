@@ -108,9 +108,11 @@ filesystem.
   socket nodes, and extended attributes with their POSIX ACLs. Each file's bytes are read
   as that file is placed and no descriptor is held in between, so the tree may hold any
   number of files. `owner(uid, gid)` replaces the host's ownership, which is what a build
-  that does not run as root wants. The metadata and attributes the walk reads are Linux's,
-  so the type is built there; elsewhere the feature compiles to nothing and
-  `ArchiveSource` is the portable way to describe a tree.
+  that does not run as root wants. `DirectorySink` writes a filesystem back out as a tree,
+  creating each directory and then opening it so a name in the image can never reach a
+  place the destination does not contain. The metadata and attributes both read are
+  Linux's, so the types are built there; elsewhere the feature compiles to nothing and
+  `ArchiveSource` and `ArchiveSink` are the portable way to describe and emit a tree.
 - **`serde`** — `Serialize` on the scan taxonomy (`Anomaly`, `ScanReport`, `Severity`,
   `Category`, `Location`), the planned geometry (`Layout`, `GroupLayout`, `BlockRange`),
   and the feature model (`FeatureSet`, `Profile`), for a consumer embedding them in a

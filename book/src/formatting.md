@@ -107,12 +107,58 @@ its directories in. Each file's bytes are read as that file is placed and no des
 held in between, so a tree may hold any number of files and the peak memory is the largest
 single one.
 
-The times on those entries are the host's. A walk reads every directory and every symlink
-to learn what it holds, and a host that maintains access times records that read, so the
-access time an entry carries is the one the host held when the walk reached it. A tree
-read from a `noatime` mount walks to the same bytes every time; where the host moves those
-times and the bytes must not move with them, set the times on the entries a source of your
-own yields.
+The times on those entries are the host's, and two of the three move under the host's feet.
+A walk reads every directory and every symlink to learn what it holds, and a host that
+maintains access times records that read — so reading a tree is itself enough to change
+what the next walk of it records. The change time moves whenever anything sets a mode, an
+owner, or a link count, which is what staging a tree does. Only the modification time
+tracks the file's contents.
+
+`times_from_modification` is what makes those times the walk's rather than the host's:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::DirectorySource;
+
+let source = DirectorySource::from_path("staging/rootfs")?
+    .owner(0, 0)
+    .times_from_modification();
+```
+
+Each entry's modification time then stands in for its access and change times, so one tree
+walks to one image however many times it has been read or restaged, while every file keeps
+the modification time that describes it. That is the clamp for a build that wants both
+reproducible bytes and per-file times; `FormatOptions::fixed_time` is the clamp for one
+that forces every inode to a single time instead, and gives up per-file times to do it.
+
+### Composing sources
+
+A `LayeredSource` puts one source over another, so a later layer's entry replaces an
+earlier layer's at the same path. This is the shape an image build takes when a base tree
+is customized — a root filesystem from an archive, configuration over it, computed files
+over that — and the layers need not be of the same kind:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::{ArchiveSource, DirectorySource, LayeredSource};
+
+let source = LayeredSource::new()
+    .layer(ArchiveSource::from_path("rootfs.tar")?)
+    .layer(DirectorySource::from_path("overlay/etc")?)
+    .layer(computed_files);
+```
+
+A path in more than one layer takes the last layer's entry whole — its kind, metadata, and
+extended attributes, which replace the earlier set rather than merging with it name by
+name. A directory is the case worth knowing: naming it again sets its mode, ownership, and
+times, but its *contents* are separate entries at their own paths, so the layers' contents
+merge and a configuration layer is additive. Replacing a directory with something that is
+not one is different — the entries beneath it would have nowhere to live, so they are
+dropped with it.
+
+Paths are compared as the model compares them, so `/etc/hostname` and `//etc//hostname` are
+one path and the second does replace the first. There is no deletion marker: a layer states
+what is present, so the result always holds the union of the layers' paths.
 
 A file's contents are a `FileContent`: either `Owned` bytes or a `Range` of a host file.
 Both coexist in one entry list, which is what lets a caller take an archive-backed list
@@ -212,6 +258,121 @@ image bytes nobody notices. `FeatureSet::EMPTY` is the base to replay a recorded
 feature names back through `with_feature`, which is how the readable half of a pin is
 checked against the exact half.
 
+The feature set is five of the decisions that move bytes, and not the only five. The grow
+reservation, inode count, reserved share, error behaviour, journal size, and the two hash
+choices each move them too, and none of them appears above — so a build that changed one
+would produce a different image under an identical feature pin. `errors` is the least
+visible of them: it reaches neither the feature words nor the geometry, so nothing else
+records it at all.
+
+Three documents cover the whole format, split by *why each one changes*:
+
+| Document | What it holds | When it changes |
+| --- | --- | --- |
+| `FormatOptions::policy_pin` | feature set, grow, inodes, reserved, errors, journal, hash choices, whether times are clamped | only when the contract changes |
+| `FormatOptions::identity_pin` | uuid, time, hash seed, label, the clamped time | every image, by design |
+| `FormatPlan::geometry_pin` | block and inode counts, group table, reserved GDT, journal length | with the filesystem's size |
+
+Each is a self-contained document with its own version line, so a builder records the ones
+it wants and never has to slice a section out of a larger one.
+
+**The policy pin is the one to record and compare.** Nothing in it varies with the image, so
+a builder writing many images from one set of constants gets one policy pin for all of them
+— which means an empty diff between two images' recorded pins says they were built to the
+same contract, and a non-empty diff always means something changed:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::FormatOptions;
+
+let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
+assert!(options.policy_pin().starts_with("ferrosys-policy-pin 1\n"));
+```
+
+```text
+ferrosys-policy-pin 1
+compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file
+incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed
+ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+block_size 4096
+inode_size 256
+grow max
+inodes auto
+reserved 500
+errors continue
+journal auto
+hash_version half_md4
+hash_signedness unsigned
+timestamp_clamp none
+```
+
+No UUID, no timestamp, no label, no block count. Those change for reasons that are not
+drift — an image is *meant* to have its own identity, and a filesystem sized to its
+partition is *meant* to have its own geometry — so recording them beside the contract would
+make every comparison non-empty and worthless. The identity pin exists for a caller that
+wants them anyway; every field in it is also a superblock field, so a caller that can open
+the image it built need not record it at all.
+
+### Pinning what a name means, not just the name
+
+A policy pin records the options *by name*. It moves when an option is renamed or its
+default changes — and not when the formula behind one changes underneath an unchanged name.
+`grow max` reads the same before and after a change to how much `Max` reserves, while every
+block after the descriptor table moves.
+
+Planning at a **fixed reference size** and pinning the result is what closes that:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::{FormatOptions, FormatPlan, TreeBuilder};
+
+// The size is the test's constant, not the build's, so this pin is the same for every
+// image built to these options however large each one is.
+const REFERENCE_SIZE: u64 = 512 << 20;
+
+let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
+let reference = FormatPlan::new(TreeBuilder::new(), REFERENCE_SIZE, options)?;
+let pinned = reference.geometry_pin();
+assert!(pinned.starts_with("ferrosys-geometry-pin 1\n"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```text
+ferrosys-geometry-pin 1
+block_size 4096
+total_blocks 16384
+blocks_per_group 32768
+first_data_block 0
+group_count 1
+inodes_per_group 16384
+inode_table_blocks 1024
+total_inodes 16384
+gdt_blocks 1
+reserved_gdt_blocks 256
+flex_bg_size 16
+max_grow_blocks 538968064
+reserved_blocks 819
+groups 1 crc32c 0x8a137015
+journal_blocks 1024
+```
+
+`reserved_gdt_blocks` is the line to notice: it is the descriptor headroom the grow
+reservation sized, and every block after the descriptor table sits where it does because of
+it. Pinning the two documents together — the policy for the contract, one reference geometry
+for what the contract resolves to — catches both a renamed option and a re-computed one.
+
+The per-group placements are one line rather than one per group: the count, and a `crc32c`
+over every field of every group. A filesystem has as many groups as it has room for and a
+large one has millions, so the document stays a fixed size while a placement that moves
+still changes it.
+
+Each document's first line carries its version, and that version moves whenever the shape
+of the document moves. Two documents that both say `1` always mean the same thing, so a
+recorded pin that stops matching is a change in what was pinned and never a change in how it
+was rendered.
+
 ### Deciding everything before the destination is touched
 
 A format writes only the blocks the filesystem uses, so every byte of the destination it
@@ -249,6 +410,55 @@ bytes-per-inode density or an exact count — overriding the size-driven default
 density past what a group's bitmap indexes is refused rather than reduced. `reserved`
 (a `ReservedRatio`) sets the share of blocks held back for the super-user, in exact
 hundredths of a percent, defaulting to 5%.
+
+### Sizing the filesystem to what goes in it
+
+`FormatPlan::new` is told how large the filesystem is. `FormatPlan::fit` works it out
+instead, from the source:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::{FormatPlan, Slack};
+
+// The smallest filesystem that holds the source, with a fifth of it still free.
+let plan = FormatPlan::fit(source, options, Slack::Share(2000))?;
+println!("{} bytes", plan.size_bytes());
+plan.write_to(std::fs::File::create("rootfs.img")?)?;
+```
+
+There is no formula behind it. How much room a filesystem has left depends on how many
+block groups it has, how large its inode tables are, how many descriptor blocks it reserves
+to grow into, and how large a journal its size earns — and every one of those follows from
+the size, so the answer is a fixed point. `fit` finds it by planning candidate sizes and
+*placing* the source into each one, using the format's own placement pass over a sink that
+keeps nothing. Nothing is estimated beside the writer; the part of the writer that decides
+is what runs.
+
+That is what backs the guarantee: **the size `fit` returns formats, and one block less does
+not.** The search closes a bracket whose ends are both established by placing, so it ends
+holding a size that was placed successfully and the size one block below it that was not.
+Fit is not monotone in size — a filesystem one block larger can need another block group,
+and so have less room than the one below it — so that is *a* smallest size rather than
+provably *the* smallest.
+
+`Slack` says how much must be left free once the source is written, since the smallest
+filesystem holding a source is one with nothing left in it:
+
+| | |
+|---|---|
+| `Slack::None` | the floor: `plan.size_bytes()` is then the minimum size for this source |
+| `Slack::Bytes(64 << 20)` | at least 64 MiB free, rounded up to whole blocks |
+| `Slack::Share(2000)` | at least a fifth of the filesystem free, in hundredths of one percent |
+
+The measure is free blocks — the same count `s_free_blocks_count` carries. The super-user
+reservation is separate accounting over the same blocks, so a filesystem left a fifth free
+under the default 5% reservation leaves an unprivileged writer 15% of it.
+
+The source is consumed once and the model built from it is kept, so a fitted plan writes
+with no second walk of the source. That is also why there is no `minimum_size` function
+taking a source of its own: `FormatPlan::fit(source, options, Slack::None)?.size_bytes()`
+is that number, and it hands back the plan that produces it rather than throwing the work
+away.
 
 ## Streaming a large image
 
@@ -352,6 +562,45 @@ member's body streamed rather than buffered. An archive that makes the round tri
 `ArchiveSource` describes the same filesystem at both ends. A socket has no tar entry type
 at all, so a filesystem holding one is a typed error rather than an archive quietly missing
 a file.
+
+### Writing the tree back out
+
+With the `dir` feature enabled, on Linux, `DirectorySink` is the same thing as a tree on
+this host rather than as an archive — the inverse of `DirectorySource`:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::ext::{DirectorySink, Reader};
+
+let mut reader = Reader::open(std::fs::File::open("rootfs.img")?)?;
+std::fs::create_dir("unpacked")?;
+let report = DirectorySink::new("unpacked")?.write_tree(&mut reader)?;
+println!("{} names written", report.written);
+```
+
+The destination must exist and be empty; it takes the filesystem root's own mode,
+ownership, times, and extended attributes, and everything the filesystem holds appears
+beneath it. `/lost+found` is omitted, so the tree is one `DirectorySource` reads straight
+back. A file's bytes are streamed a window at a time, so a tree far larger than memory
+costs a working set.
+
+**The image is untrusted, and a name in it is not a path to resolve.** Every directory is
+created and then opened, and everything beneath it is created through that open handle by
+its single-component name — checked to be one a directory can hold, so a name carrying a
+separator, a `..`, or a NUL is `HostError::HostileName` rather than a write somewhere
+else. Symbolic links are written exactly as recorded, absolute targets included, which is
+safe because nothing here ever follows one: every handle is opened `O_NOFOLLOW` and every
+attribute is set on the link itself.
+
+Two parts of a tree take privileges — a device node needs `CAP_MKNOD`, and setting a
+recorded owner needs `CAP_CHOWN` — and by default a host that refuses either is
+`HostError::Unprivileged`, naming the entry. `skip_privileged` is the opt-in for an
+unprivileged extraction: what it left out comes back in the `ExtractReport` rather than in
+silence.
+
+Two times no extraction can carry, because no host lets a caller set them: an inode's
+**change time** and its **creation time**. Access and modification times are set exactly,
+to the nanosecond.
 
 ### Filesystems other tools made
 

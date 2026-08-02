@@ -3833,6 +3833,19 @@ impl<R: Read + Seek> Reader<R> {
     pub fn journal_superblock(
         &mut self,
     ) -> Result<Option<crate::journal::JournalSuperblock>, ReadError> {
+        let Some(first) = self.journal_superblock_block()? else {
+            return Ok(None);
+        };
+        let block = self.block(first)?;
+        Ok(Some(crate::journal::JournalSuperblock::read_from(&block)?))
+    }
+
+    /// The block holding the journal superblock, or `None` when the image carries no
+    /// journal.
+    ///
+    /// Separate from [`journal_superblock`](Self::journal_superblock) because a caller
+    /// writing the log's recorded identity back needs where it is, not only what it says.
+    pub(crate) fn journal_superblock_block(&mut self) -> Result<Option<u64>, ReadError> {
         if !self.feature.has_journal() || self.sb.journal_inum == 0 {
             return Ok(None);
         }
@@ -3848,8 +3861,7 @@ impl<R: Read + Seek> Reader<R> {
             .copied()
             .filter(|&b| b != 0)
             .ok_or(ReadError::BadJournal)?;
-        let block = self.block(first)?;
-        Ok(Some(crate::journal::JournalSuperblock::read_from(&block)?))
+        Ok(Some(first))
     }
 
     /// Read a symlink's target, whether stored inline (fast) or in a data block (slow).

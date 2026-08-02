@@ -763,6 +763,15 @@ impl FeatureSet {
     /// a silent omission from every recorded pin.
     #[must_use]
     pub fn pin(self) -> String {
+        let mut out = String::from("ferrosys-feature-pin 1\n");
+        self.push_pin_body(&mut out);
+        out
+    }
+
+    /// The pin document's lines below its header, so a document that carries a feature set
+    /// as one of its sections emits the same lines this one does rather than a second
+    /// rendering of the same fields.
+    pub(crate) fn push_pin_body(self, out: &mut String) {
         // Exhaustive on purpose: see the note above. Do not replace with field accesses.
         let Self {
             compat,
@@ -772,23 +781,22 @@ impl FeatureSet {
             inode_size,
         } = self;
 
-        let mut out = String::from("ferrosys-feature-pin 1\n");
         push_pin_word(
-            &mut out,
+            out,
             "compat",
             compat.bits(),
             &compat.names(),
             compat.unknown_bits(),
         );
         push_pin_word(
-            &mut out,
+            out,
             "incompat",
             incompat.bits(),
             &incompat.names(),
             incompat.unknown_bits(),
         );
         push_pin_word(
-            &mut out,
+            out,
             "ro_compat",
             ro_compat.bits(),
             &ro_compat.names(),
@@ -799,7 +807,6 @@ impl FeatureSet {
         out.push_str("\ninode_size ");
         out.push_str(&inode_size.to_string());
         out.push('\n');
-        out
     }
 
     /// This set with the feature named `name` turned on or off, or `None` when no word
@@ -914,8 +921,9 @@ impl FeatureSet {
         } else {
             // The ext2/ext3 family: the block-mapped writer produces the classic
             // indirect map and none of the ext4 layer. A set carrying any ext4-layer
-            // feature is ext4 by classification, so the block-mapped path refuses it —
-            // in the order the on-disk feature words fall.
+            // feature is ext4 by classification, so the block-mapped path refuses it.
+            // Each word is named in its own error, so the caller learns which one it
+            // was whatever order the checks run in.
             if self.has_flex_bg() {
                 return Err(FeatureError::RequiresExtents { feature: "flex_bg" });
             }
@@ -1385,8 +1393,7 @@ mod tests {
     fn the_non_extent_baselines_validate() {
         // The block-mapped writer produces the classic indirect map, so the ext2 and
         // ext3 baselines — which carry no `extent` and nothing from the ext4 layer — are
-        // valid write targets. This is the contract WS5 turned on: a non-extent baseline
-        // formats rather than being refused.
+        // valid write targets: a non-extent baseline formats rather than being refused.
         assert_eq!(FeatureSet::EXT2.validate(), Ok(()));
         assert_eq!(FeatureSet::EXT3.validate(), Ok(()));
     }

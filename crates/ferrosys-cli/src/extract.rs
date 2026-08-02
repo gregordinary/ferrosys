@@ -1,10 +1,28 @@
-//! `ferrosys extract`: read a filesystem's contents back out — as a tar archive, as one
-//! file's bytes, as a listing, or as one path's full metadata.
+//! `ferrosys extract`: read a filesystem's contents back out — as a tar archive, as a
+//! directory tree, as one file's bytes, as a listing, or as one path's full metadata.
 //!
-//! The archive is written by the library's `ArchiveSink`, so what it carries — the `./` root
-//! member, the omitted `/lost+found`, the PAX times, attributes, and ACLs — is the library's
-//! contract rather than this tool's. Feeding what comes out to `ferrosys format --from-tar`
-//! reproduces the filesystem it came from.
+//! The archive is written by the library's `ArchiveSink` and the tree by its `DirectorySink`,
+//! so what each carries — the `./` root member, the omitted `/lost+found`, the PAX times,
+//! attributes, and ACLs — is the library's contract rather than this tool's. Feeding what
+//! comes out to `ferrosys format --from-tar` or `--from-dir` reproduces the filesystem it
+//! came from.
+//!
+//! A walk can fail part-way — at a socket the archive format cannot carry, an inode that
+//! does not read, an ACL that does not decode — and a named destination is created and
+//! truncated before the walk starts. `--to-tar FILE --atomic` is for the case where that
+//! must not be visible: the archive is written to a sibling temporary file and renamed
+//! over the destination once the walk is complete, exactly as `format --atomic` does.
+//! `--to-dir` has no such option, because there is no rename that publishes a whole tree at
+//! once; what it offers instead is a destination that must start empty, so a failure leaves a
+//! partial tree in a directory that held nothing rather than mixed into one that did.
+//!
+//! # `--to-dir` is Linux's
+//!
+//! Writing a tree back out sets Linux inode metadata and Linux extended attributes, so the
+//! library builds its directory sink on Linux alone. Everything else here — `--to-tar`,
+//! `--cat`, `--list`, `--stat` — is the same on every platform, so this module carries the
+//! boundary rather than the whole tool: [`to_dir`] is the write on Linux and a typed refusal
+//! elsewhere.
 //!
 //! # Memory
 //!
@@ -17,11 +35,15 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Write};
+use std::path::Path;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use ferrosys::ext::DirectorySink;
 use ferrosys::ext::ondisk::{Inode, Timestamp};
 use ferrosys::ext::{Acl, ArchiveSink, Limits, OpenOptions, ReadPolicy, Reader, WalkEntry, Xattr};
 
 use crate::args::{ExtractArgs, ExtractMode, Stream};
+use crate::dest::Destination;
 use crate::json::Obj;
 use crate::{Error, emit, from_read, render};
 
@@ -71,12 +93,62 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
             })
         }
         ExtractMode::ToTar(Stream::File(path)) => {
-            let file = File::create(&path).map_err(|e| Error::io(&path, e))?;
-            let mut out = io::BufWriter::new(file);
+            let mut dest = Destination::open(&path, args.atomic)?;
+            let mut out = io::BufWriter::new(dest.file());
             ArchiveSink::new(&mut out).write_tree(&mut reader)?;
-            out.flush().map_err(|e| Error::io(&path, e))
+            out.flush().map_err(|e| Error::io(&path, e))?;
+            drop(out);
+            dest.commit()
         }
+        ExtractMode::ToDir {
+            path,
+            skip_privileged,
+        } => to_dir(&mut reader, &path, skip_privileged),
     }
+}
+
+/// Write the whole tree into a directory on this host.
+///
+/// The directory is made when it is not already there, so a caller names where the tree goes
+/// rather than preparing the place first. It must be empty: an extraction states what the
+/// filesystem holds, and a name already present would be an entry that could not be created,
+/// found part-way through with the tree half written.
+///
+/// What was written goes to the standard error, as every summary here does — the artifact of
+/// this mode is the tree, and it is already on disk.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn to_dir(reader: &mut Reader<File>, path: &Path, skip_privileged: bool) -> Result<(), Error> {
+    if !path.exists() {
+        std::fs::create_dir_all(path).map_err(|e| Error::io(path, e))?;
+    }
+    let mut sink = DirectorySink::new(path)?;
+    if skip_privileged {
+        sink = sink.skip_privileged();
+    }
+    let report = sink.write_tree(reader)?;
+
+    eprintln!("{:<24}{}", "Names written:", report.written);
+    if report.ownership_dropped {
+        eprintln!(
+            "{:<24}not applied — this process may not set another owner",
+            "Ownership:"
+        );
+    }
+    for skipped in &report.skipped {
+        eprintln!("{:<24}{}", "Skipped:", render::printable(skipped));
+    }
+    Ok(())
+}
+
+/// The same, on a platform the library builds no directory sink for: a named failure rather
+/// than a tree.
+///
+/// Writing a tree back out sets Linux inode metadata and Linux extended attributes, so the
+/// library builds its directory sink on Linux alone. `--to-tar` writes the same contents as
+/// an archive anywhere.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn to_dir(_reader: &mut Reader<File>, _path: &Path, _skip: bool) -> Result<(), Error> {
+    Err(Error::NoDirectorySink)
 }
 
 /// Write one file's bytes to the standard output, and nothing else.
@@ -170,8 +242,9 @@ fn stat_table(
     }
     for xattr in xattrs {
         // A POSIX ACL is stored in ext's compact form, which is not what a person means by
-        // an ACL: it is decoded to the text form `getfacl` prints. Every other attribute is
-        // bytes, shown the way a name is.
+        // an ACL: it is decoded to `getfacl`'s entry spelling, comma-joined so the value
+        // stays on one line of the table. Every other attribute is bytes, shown the way a
+        // name is.
         let rendered = acl_text(xattr).unwrap_or_else(|| render::printable(&xattr.value));
         line(
             &format!("Xattr {}:", render::printable(&xattr.name)),

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -16,6 +16,23 @@ license = "MIT OR Apache-2.0"
 # Both crates come from one repository, so the URL is declared once here and
 # inherited. A registry links it from every crate's page.
 repository = "https://github.com/gregordinary/ferrosys"
+
+# The profile the test suite runs under.
+#
+# Optimized, because the host-tool gates build multi-gigabyte images and one tier streams
+# a 9 TiB filesystem — minutes of wall-clock at `opt-level = 0`. But an optimized profile
+# alone compiles out exactly the checks a filesystem writer most wants in a test run: the
+# `debug_assert!`s that guard on-disk invariants, and the arithmetic overflow checks that
+# would otherwise let a wrong length wrap silently into a plausible one. Both are turned
+# back on here, so speed costs no checking.
+#
+# A profile of its own rather than settings on `release`: `release` is what a consumer's
+# `cargo install` builds, and what the suite needs from a test run is not what a shipped
+# binary should carry.
+[profile.ci]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
 
 [workspace.dependencies]
 # Versions are pinned here; a crate lists one in its own [dependencies] only when
@@ -36,7 +53,7 @@ tempfile = "3"
 proptest = "1"
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.2"` resolves `>=0.2.0, <0.3.0` — the published
+# minor is the breaking axis, so `"0.3"` resolves `>=0.3.0, <0.4.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
-ferrosys = { path = "crates/ferrosys", version = "0.2" }
+ferrosys = { path = "crates/ferrosys", version = "0.3" }

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
     ErrorBehavior, FeatureError, FeatureSet, GrowReservation, HashSignedness, HashVersion,
-    InodeCount, JournalSize, Profile, ReservedRatio, Severity,
+    InodeCount, JournalSize, Profile, ReservedRatio, Severity, Slack,
 };
 
 use crate::parse::{self, ValueError};
@@ -74,6 +74,8 @@ pub enum Command {
     Extract(ExtractArgs),
     /// Say which filesystem an image holds.
     Detect(DetectArgs),
+    /// Change what an existing filesystem is known by.
+    Identity(IdentityArgs),
     /// Print usage, for the tool as a whole or for one subcommand.
     Help(Topic),
     /// Print the version.
@@ -93,6 +95,8 @@ pub enum Topic {
     Extract,
     /// One subcommand.
     Detect,
+    /// One subcommand.
+    Identity,
 }
 
 /// Where an archive is read from, or written to: a named file, or the standard stream,
@@ -126,6 +130,16 @@ pub enum Contents {
     Dir(PathBuf),
 }
 
+/// How large the filesystem is: a size named outright, or one found from what goes in it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Size {
+    /// The byte count `--size` named.
+    Bytes(u64),
+    /// `--size auto`: the smallest filesystem that holds the contents with the room
+    /// `--slack` asks for left free.
+    Fit(Slack),
+}
+
 /// `ferrosys format`: everything the filesystem's bytes are a function of.
 ///
 /// Every input is here, and nothing else is read: the identity (`uuid`, `hash_seed`),
@@ -136,8 +150,8 @@ pub enum Contents {
 pub struct FormatArgs {
     /// The file to write. It must be a regular file.
     pub out: PathBuf,
-    /// The filesystem's size in bytes.
-    pub size: u64,
+    /// How large the filesystem is.
+    pub size: Size,
     /// The filesystem UUID.
     pub uuid: [u8; 16],
     /// The filesystem's creation and write time.
@@ -209,6 +223,22 @@ pub struct DetectArgs {
     pub json: bool,
 }
 
+/// `ferrosys identity`: what an existing filesystem becomes known by.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IdentityArgs {
+    /// The image to rewrite, opened for reading and writing.
+    pub image: PathBuf,
+    /// The new filesystem UUID, or `None` to leave it.
+    pub uuid: Option<[u8; 16]>,
+    /// The new volume label, NUL-padded, or `None` to leave it.
+    pub volume_name: Option<[u8; 16]>,
+    /// Record the seed the current UUID implies and set `metadata_csum_seed`, so a UUID
+    /// change leaves the filesystem's metadata checksums valid.
+    pub set_checksum_seed: bool,
+    /// Report what the rewrite wrote as JSON rather than as text.
+    pub json: bool,
+}
+
 /// `ferrosys extract`: what to read the filesystem's contents into.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExtractArgs {
@@ -221,6 +251,10 @@ pub struct ExtractArgs {
     /// The largest file a read will return, or `None` for no cap. A file past it is an
     /// error rather than a truncated one.
     pub max_file_bytes: Option<u64>,
+    /// Write `--to-tar`'s archive to a sibling temporary file and rename it over the
+    /// destination once the walk is complete, so the destination never holds a partial
+    /// archive.
+    pub atomic: bool,
 }
 
 /// The one thing an extract produces. Exactly one is asked for.
@@ -228,6 +262,13 @@ pub struct ExtractArgs {
 pub enum ExtractMode {
     /// Write the whole tree as a tar archive.
     ToTar(Stream),
+    /// Write the whole tree into a directory on this host.
+    ToDir {
+        /// The destination directory.
+        path: PathBuf,
+        /// Write what an unprivileged process may rather than failing on what it may not.
+        skip_privileged: bool,
+    },
     /// Write one file's bytes, and nothing else.
     Cat(Vec<u8>),
     /// Report everything one path's inode records, extended attributes included.
@@ -307,6 +348,12 @@ pub enum UsageError {
     /// `format` was given two things to populate the filesystem from.
     #[error("format: give at most one of --from-tar or --from-dir")]
     TwoSources,
+    /// `--slack` was given to a format whose size was named outright.
+    #[error(
+        "format: --slack is the room to leave in a filesystem sized to its contents, so \
+         it goes with --size auto"
+    )]
+    SlackWithoutFit,
     /// `--owner` was given to a format with no directory tree to apply it to.
     #[error(
         "format: --owner replaces the ownership a walked directory tree records, so it \
@@ -314,17 +361,26 @@ pub enum UsageError {
     )]
     OwnerWithoutDir,
     /// `extract` was told to produce nothing, or more than one thing.
-    #[error("extract: give exactly one of --to-tar, --cat, --stat, or --list")]
+    #[error("extract: give exactly one of --to-tar, --to-dir, --cat, --stat, or --list")]
     ExtractMode,
+    /// `--skip-privileged` was given to an extract that writes no tree it could apply to.
+    #[error("extract: --skip-privileged applies to --to-dir")]
+    SkipPrivilegedWithoutDir,
     /// `--json` was given to an extract that produces bytes, which have no JSON form.
     #[error("extract: --json applies to --list and --stat")]
     JsonWithoutReport,
+    /// `--atomic` was given to an extract that writes no file it could rename into place.
+    #[error("extract: --atomic applies to --to-tar FILE")]
+    AtomicWithoutFile,
     /// `inspect` was given both `--json` and `--sarif`, two different output formats.
     #[error("inspect: --sarif and --json are different output formats; give one")]
     SarifWithJson,
     /// `inspect --sarif` reports scan findings, which `--quick` skips.
     #[error("inspect: --sarif reports scan findings, which --quick skips")]
     SarifWithQuick,
+    /// `inspect --sarif` reports scan findings, and has no place to put a group table.
+    #[error("inspect: --sarif reports scan findings; --groups has no place in one")]
+    SarifWithGroups,
     /// A value this platform cannot name a file with.
     #[error("{0}: the value is not text this platform can name a file with")]
     NotAFilename(String),
@@ -485,11 +541,27 @@ pub fn parse(
         Arg::Positional(name) if name == OsStr::new("inspect") => inspect(&mut args),
         Arg::Positional(name) if name == OsStr::new("extract") => extract(&mut args),
         Arg::Positional(name) if name == OsStr::new("detect") => detect(&mut args),
+        Arg::Positional(name) if name == OsStr::new("identity") => identity(&mut args),
         Arg::Positional(name) if name == OsStr::new("help") => Ok(Command::Help(Topic::General)),
-        Arg::Long(name, None) if name == "help" => Ok(Command::Help(Topic::General)),
-        Arg::Long(name, None) if name == "version" => Ok(Command::Version),
-        Arg::Short('h', None) => Ok(Command::Help(Topic::General)),
-        Arg::Short('V', None) => Ok(Command::Version),
+        // An attached value is refused rather than dropped, here as everywhere: `--help=x`
+        // asks for something this option cannot do, and answering it with help would be
+        // answering a different question than the one asked.
+        Arg::Long(name, attached) if name == "help" => {
+            Args::no_value("--help", attached)?;
+            Ok(Command::Help(Topic::General))
+        }
+        Arg::Long(name, attached) if name == "version" => {
+            Args::no_value("--version", attached)?;
+            Ok(Command::Version)
+        }
+        Arg::Short('h', attached) => {
+            Args::no_value("-h", attached)?;
+            Ok(Command::Help(Topic::General))
+        }
+        Arg::Short('V', attached) => {
+            Args::no_value("-V", attached)?;
+            Ok(Command::Version)
+        }
         Arg::Positional(name) => Err(UsageError::UnknownCommand(
             name.to_string_lossy().into_owned(),
         )),
@@ -509,6 +581,9 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     const CMD: &str = "format";
     let mut out: Option<PathBuf> = None;
     let mut size: Option<u64> = None;
+    // Whether the size is to be found from the contents (`--size auto`) rather than named.
+    let mut fit = false;
+    let mut slack: Option<Slack> = None;
     let mut uuid: Option<[u8; 16]> = None;
     let mut time: Option<i64> = None;
     let mut from_tar: Option<Stream> = None;
@@ -542,10 +617,26 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
             Arg::Long(name, attached) => {
                 let flag = format!("--{name}");
                 match name.as_str() {
-                    "help" => return Ok(Command::Help(Topic::Format)),
+                    "help" => {
+                        Args::no_value(&flag, attached)?;
+                        return Ok(Command::Help(Topic::Format));
+                    }
+                    // `auto` is the one value that is not a byte count: it asks for the
+                    // size to be found from the contents rather than named. The two are one
+                    // setting, so the last `--size` given wins whichever form it takes.
                     "size" => {
-                        size = Some(
-                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        let value = args.value(&flag, attached)?;
+                        if value == "auto" {
+                            (size, fit) = (None, true);
+                        } else {
+                            size = Some(parse::size(&value).map_err(value_err(&flag))?);
+                            fit = false;
+                        }
+                    }
+                    "slack" => {
+                        slack = Some(
+                            parse::slack(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
                         );
                     }
                     "uuid" => {
@@ -671,7 +762,10 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                 profile =
                     Some(parse::profile(&args.value("-t", attached)?).map_err(value_err("-t"))?);
             }
-            Arg::Short('h', None) => return Ok(Command::Help(Topic::Format)),
+            Arg::Short('h', attached) => {
+                Args::no_value("-h", attached)?;
+                return Ok(Command::Help(Topic::Format));
+            }
             Arg::Short(letter, _) => {
                 return Err(UsageError::UnknownFlag {
                     command: CMD,
@@ -709,10 +803,23 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
         command: CMD,
         flag: "--uuid",
     })?;
-    let size = size.ok_or(UsageError::MissingRequired {
-        command: CMD,
-        flag: "--size",
-    })?;
+    // `--size auto` and a named size are one setting; `--slack` modifies only the first,
+    // since a size that was named has no room to find.
+    let size = match (size, fit) {
+        (_, true) => Size::Fit(slack.unwrap_or_default()),
+        (Some(bytes), false) => {
+            if slack.is_some() {
+                return Err(UsageError::SlackWithoutFit);
+            }
+            Size::Bytes(bytes)
+        }
+        (None, false) => {
+            return Err(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--size",
+            });
+        }
+    };
     let out = out.ok_or(UsageError::MissingArgument {
         command: CMD,
         what: "output file",
@@ -799,7 +906,10 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
             Arg::Long(name, attached) => {
                 let flag = format!("--{name}");
                 match name.as_str() {
-                    "help" => return Ok(Command::Help(Topic::Inspect)),
+                    "help" => {
+                        Args::no_value(&flag, attached)?;
+                        return Ok(Command::Help(Topic::Inspect));
+                    }
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
@@ -829,7 +939,10 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
                     }
                 }
             }
-            Arg::Short('h', None) => return Ok(Command::Help(Topic::Inspect)),
+            Arg::Short('h', attached) => {
+                Args::no_value("-h", attached)?;
+                return Ok(Command::Help(Topic::Inspect));
+            }
             Arg::Short(letter, _) => {
                 return Err(UsageError::UnknownFlag {
                     command: CMD,
@@ -853,13 +966,20 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
         what: "image",
     })?;
     // SARIF is a findings dialect: it projects the scan, not the description JSON and text
-    // report. So it selects a different output format from --json, and it needs the scan
-    // --quick would skip.
+    // report. So it selects a different output format from --json, it needs the scan
+    // --quick would skip, and it has nowhere to render the group table --groups asks for.
+    // The last is refused rather than ignored for the same reason as the first two: an
+    // accepted flag that changes nothing reads as one that worked, and here it would also
+    // let a descriptor read error abort a run before any SARIF was emitted — the inert
+    // flag suppressing the very document the caller asked for.
     if sarif && json {
         return Err(UsageError::SarifWithJson);
     }
     if sarif && quick {
         return Err(UsageError::SarifWithQuick);
+    }
+    if sarif && groups {
+        return Err(UsageError::SarifWithGroups);
     }
     Ok(Command::Inspect(InspectArgs {
         image,
@@ -884,7 +1004,10 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
             Arg::Long(name, attached) => {
                 let flag = format!("--{name}");
                 match name.as_str() {
-                    "help" => return Ok(Command::Help(Topic::Detect)),
+                    "help" => {
+                        Args::no_value(&flag, attached)?;
+                        return Ok(Command::Help(Topic::Detect));
+                    }
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
@@ -898,7 +1021,10 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
                     }
                 }
             }
-            Arg::Short('h', None) => return Ok(Command::Help(Topic::Detect)),
+            Arg::Short('h', attached) => {
+                Args::no_value("-h", attached)?;
+                return Ok(Command::Help(Topic::Detect));
+            }
             Arg::Short(letter, _) => {
                 return Err(UsageError::UnknownFlag {
                     command: CMD,
@@ -928,29 +1054,127 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
     }))
 }
 
-/// `ferrosys extract [options] IMAGE`.
-fn extract(args: &mut Args) -> Result<Command, UsageError> {
-    const CMD: &str = "extract";
+/// `ferrosys identity [options] IMAGE`.
+fn identity(args: &mut Args) -> Result<Command, UsageError> {
+    const CMD: &str = "identity";
     let mut image: Option<PathBuf> = None;
-    let mut offset = 0u64;
-    let mut to_tar: Option<Stream> = None;
-    let mut cat: Option<Vec<u8>> = None;
-    let mut stat: Option<Vec<u8>> = None;
-    let mut list = false;
+    let mut uuid: Option<[u8; 16]> = None;
+    let mut volume_name: Option<[u8; 16]> = None;
+    let mut set_checksum_seed = false;
     let mut json = false;
-    let mut max_file_bytes: Option<u64> = None;
 
     while let Some(arg) = args.next()? {
         match arg {
             Arg::Long(name, attached) => {
                 let flag = format!("--{name}");
                 match name.as_str() {
-                    "help" => return Ok(Command::Help(Topic::Extract)),
+                    "help" => {
+                        Args::no_value(&flag, attached)?;
+                        return Ok(Command::Help(Topic::Identity));
+                    }
+                    "uuid" => {
+                        uuid = Some(
+                            parse::hex16(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // The label is the argument's bytes, as it is for a format: a label is
+                    // a byte field on disk rather than text.
+                    "label" => {
+                        let value = args.value(&flag, attached)?;
+                        volume_name =
+                            Some(parse::label(os::bytes(&value)).map_err(value_err(&flag))?);
+                    }
+                    "set-checksum-seed" => {
+                        Args::no_value(&flag, attached)?;
+                        set_checksum_seed = true;
+                    }
+                    "json" => {
+                        Args::no_value(&flag, attached)?;
+                        json = true;
+                    }
+                    _ => {
+                        return Err(UsageError::UnknownFlag { command: CMD, flag });
+                    }
+                }
+            }
+            Arg::Short('h', attached) => {
+                Args::no_value("-h", attached)?;
+                return Ok(Command::Help(Topic::Identity));
+            }
+            Arg::Short(letter, _) => {
+                return Err(UsageError::UnknownFlag {
+                    command: CMD,
+                    flag: format!("-{letter}"),
+                });
+            }
+            Arg::Positional(value) => {
+                if image.is_some() {
+                    return Err(UsageError::UnexpectedArgument {
+                        command: CMD,
+                        value: value.to_string_lossy().into_owned(),
+                    });
+                }
+                image = Some(PathBuf::from(value));
+            }
+        }
+    }
+
+    let image = image.ok_or(UsageError::MissingArgument {
+        command: CMD,
+        what: "image",
+    })?;
+    // A run that would write nothing is a command line that meant to say something and
+    // did not, so it is a usage error rather than a silent success.
+    if uuid.is_none() && volume_name.is_none() && !set_checksum_seed {
+        return Err(UsageError::MissingRequired {
+            command: CMD,
+            flag: "--uuid, --label, or --set-checksum-seed",
+        });
+    }
+    Ok(Command::Identity(IdentityArgs {
+        image,
+        uuid,
+        volume_name,
+        set_checksum_seed,
+        json,
+    }))
+}
+
+/// `ferrosys extract [options] IMAGE`.
+fn extract(args: &mut Args) -> Result<Command, UsageError> {
+    const CMD: &str = "extract";
+    let mut image: Option<PathBuf> = None;
+    let mut offset = 0u64;
+    let mut to_tar: Option<Stream> = None;
+    let mut to_dir: Option<PathBuf> = None;
+    let mut skip_privileged = false;
+    let mut cat: Option<Vec<u8>> = None;
+    let mut stat: Option<Vec<u8>> = None;
+    let mut list = false;
+    let mut json = false;
+    let mut max_file_bytes: Option<u64> = None;
+    let mut atomic = false;
+
+    while let Some(arg) = args.next()? {
+        match arg {
+            Arg::Long(name, attached) => {
+                let flag = format!("--{name}");
+                match name.as_str() {
+                    "help" => {
+                        Args::no_value(&flag, attached)?;
+                        return Ok(Command::Help(Topic::Extract));
+                    }
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
                     }
                     "to-tar" => to_tar = Some(Stream::from_value(args.value(&flag, attached)?)),
+                    "to-dir" => to_dir = Some(PathBuf::from(args.value(&flag, attached)?)),
+                    "skip-privileged" => {
+                        Args::no_value(&flag, attached)?;
+                        skip_privileged = true;
+                    }
                     // A path inside the image is a byte string, not text: it is taken as
                     // the bytes the argument holds, and never rendered through a
                     // character encoding on the way in.
@@ -977,12 +1201,19 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
                         Args::no_value(&flag, attached)?;
                         json = true;
                     }
+                    "atomic" => {
+                        Args::no_value(&flag, attached)?;
+                        atomic = true;
+                    }
                     _ => {
                         return Err(UsageError::UnknownFlag { command: CMD, flag });
                     }
                 }
             }
-            Arg::Short('h', None) => return Ok(Command::Help(Topic::Extract)),
+            Arg::Short('h', attached) => {
+                Args::no_value("-h", attached)?;
+                return Ok(Command::Help(Topic::Extract));
+            }
             Arg::Short(letter, _) => {
                 return Err(UsageError::UnknownFlag {
                     command: CMD,
@@ -1007,17 +1238,34 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     })?;
     // Exactly one artifact per run: the standard output carries a tar stream, a file's
     // bytes, one path's metadata, or a listing, and the tool is told which.
-    let mode = match (to_tar, cat, stat, list) {
-        (Some(stream), None, None, false) => ExtractMode::ToTar(stream),
-        (None, Some(path), None, false) => ExtractMode::Cat(path),
-        (None, None, Some(path), false) => ExtractMode::Stat { path, json },
-        (None, None, None, true) => ExtractMode::List { json },
+    let mode = match (to_tar, to_dir, cat, stat, list) {
+        (Some(stream), None, None, None, false) => ExtractMode::ToTar(stream),
+        (None, Some(path), None, None, false) => ExtractMode::ToDir {
+            path,
+            skip_privileged,
+        },
+        (None, None, Some(path), None, false) => ExtractMode::Cat(path),
+        (None, None, None, Some(path), false) => ExtractMode::Stat { path, json },
+        (None, None, None, None, true) => ExtractMode::List { json },
         _ => return Err(UsageError::ExtractMode),
     };
+    // `--skip-privileged` is about the parts of a tree only a privileged process can write,
+    // so it belongs to the mode that writes one. Accepting it elsewhere would promise
+    // something no other mode does.
+    if skip_privileged && !matches!(mode, ExtractMode::ToDir { .. }) {
+        return Err(UsageError::SkipPrivilegedWithoutDir);
+    }
     // JSON is a rendering of a report, so it goes with the two modes that produce one. A
     // tar stream and a file's bytes are not reports and have no JSON form.
     if json && !matches!(mode, ExtractMode::List { .. } | ExtractMode::Stat { .. }) {
         return Err(UsageError::JsonWithoutReport);
+    }
+    // `--atomic` is about what a destination holds when a run fails part-way, so it needs
+    // a destination. Every other mode writes to the standard output, which has no rename
+    // to make it whole, and accepting the flag there would promise something the run
+    // cannot do.
+    if atomic && !matches!(mode, ExtractMode::ToTar(Stream::File(_))) {
+        return Err(UsageError::AtomicWithoutFile);
     }
 
     Ok(Command::Extract(ExtractArgs {
@@ -1025,6 +1273,7 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
         offset,
         mode,
         max_file_bytes,
+        atomic,
     }))
 }
 
@@ -1057,7 +1306,7 @@ mod tests {
             "format --size 512M --uuid {UUID} --time 1700000000 out.img"
         ));
         assert_eq!(a.out, PathBuf::from("out.img"));
-        assert_eq!(a.size, 512 << 20);
+        assert_eq!(a.size, Size::Bytes(512 << 20));
         assert_eq!(a.uuid, UUID_BYTES);
         assert_eq!(a.time, Timestamp::from_secs(1_700_000_000));
         // The hash seed defaults to the UUID: an identity the caller supplied, rather
@@ -1067,6 +1316,65 @@ mod tests {
         assert_eq!(a.contents, None);
         assert_eq!(a.owner, None);
         assert!(!a.json);
+    }
+
+    #[test]
+    fn a_size_is_named_or_found_and_slack_belongs_to_the_second() {
+        // `auto` is not a byte count and never becomes one here: the size it stands for is
+        // decided by the library, from contents this parser never sees.
+        let auto = fmt(&format!(
+            "format --size auto --uuid {UUID} --time 1 --from-dir staging out.img"
+        ));
+        assert_eq!(auto.size, Size::Fit(Slack::None));
+
+        for (value, want) in [
+            ("20%", Slack::Share(2000)),
+            ("1.5%", Slack::Share(150)),
+            ("64M", Slack::Bytes(64 << 20)),
+            ("0%", Slack::Share(0)),
+        ] {
+            let a = fmt(&format!(
+                "format --size auto --slack {value} --uuid {UUID} --time 1 out.img"
+            ));
+            assert_eq!(a.size, Size::Fit(want), "--slack {value}");
+        }
+
+        // The two forms are one setting, so the last --size wins whichever form it takes.
+        let named = fmt(&format!(
+            "format --size auto --size 64M --uuid {UUID} --time 1 out.img"
+        ));
+        assert_eq!(named.size, Size::Bytes(64 << 20));
+        let found = fmt(&format!(
+            "format --size 64M --size auto --uuid {UUID} --time 1 out.img"
+        ));
+        assert_eq!(found.size, Size::Fit(Slack::None));
+
+        // A named size has no room to find, so --slack over one is a mistake caught rather
+        // than ignored — including when a later --size takes the `auto` away.
+        for line_text in [
+            format!("format --size 64M --slack 20% --uuid {UUID} --time 1 out.img"),
+            format!("format --size auto --slack 20% --size 64M --uuid {UUID} --time 1 out.img"),
+        ] {
+            assert_eq!(
+                line(&line_text).unwrap_err(),
+                UsageError::SlackWithoutFit,
+                "{line_text}"
+            );
+        }
+
+        // A share past what the library will search for is refused by name.
+        let over = format!("format --size auto --slack 95% --uuid {UUID} --time 1 out.img");
+        assert!(
+            matches!(
+                line(&over),
+                Err(UsageError::Value { ref flag, source: ValueError::OutOfRange(_) })
+                    if flag == "--slack"
+            ),
+            "a 95% share should be out of range"
+        );
+        // And a value that is neither a percentage nor a byte count.
+        let bad = format!("format --size auto --slack lots --uuid {UUID} --time 1 out.img");
+        assert!(matches!(line(&bad), Err(UsageError::Value { .. })));
     }
 
     #[test]
@@ -1207,7 +1515,8 @@ mod tests {
             "format --size 64M --uuid {UUID} --time 1 --type ext3 out.img"
         ));
         assert_eq!(ext3.feature, FeatureSet::EXT3);
-        // No profile is ext4, exactly as it was before the selector existed.
+        // Naming no profile selects ext4, so the flag is an override rather than a
+        // requirement.
         let ext4 = fmt(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
         assert_eq!(ext4.feature, FeatureSet::DEFAULT);
         assert_eq!(Profile::of(ext4.feature), Profile::Ext4);
@@ -1488,6 +1797,12 @@ mod tests {
             line("inspect --sarif --quick image.img").unwrap_err(),
             UsageError::SarifWithQuick
         );
+        // Nor with the one that asks for a group table, which a findings log has no place
+        // to render. Accepting it would read as having worked while changing nothing.
+        assert_eq!(
+            line("inspect --sarif --groups image.img").unwrap_err(),
+            UsageError::SarifWithGroups
+        );
     }
 
     #[test]
@@ -1520,6 +1835,81 @@ mod tests {
             line("extract --cat /x --json image.img").unwrap_err(),
             UsageError::JsonWithoutReport
         );
+    }
+
+    #[test]
+    fn extract_writes_a_tree_and_the_skip_belongs_to_it() {
+        match line("extract --to-dir unpacked image.img").expect("parses") {
+            Command::Extract(a) => assert_eq!(
+                a.mode,
+                ExtractMode::ToDir {
+                    path: "unpacked".into(),
+                    skip_privileged: false,
+                }
+            ),
+            other => panic!("expected extract, got {other:?}"),
+        }
+        match line("extract --to-dir unpacked --skip-privileged image.img").expect("parses") {
+            Command::Extract(a) => assert_eq!(
+                a.mode,
+                ExtractMode::ToDir {
+                    path: "unpacked".into(),
+                    skip_privileged: true,
+                }
+            ),
+            other => panic!("expected extract, got {other:?}"),
+        }
+        // A tree and an archive are two artifacts, and a run produces one.
+        assert_eq!(
+            line("extract --to-dir d --to-tar t image.img").unwrap_err(),
+            UsageError::ExtractMode
+        );
+        // A tree is not a report, so it has no JSON form; and it is not a file, so there is
+        // nothing to rename into place.
+        assert_eq!(
+            line("extract --to-dir d --json image.img").unwrap_err(),
+            UsageError::JsonWithoutReport
+        );
+        assert_eq!(
+            line("extract --to-dir d --atomic image.img").unwrap_err(),
+            UsageError::AtomicWithoutFile
+        );
+        // And the skip is about writing a tree, so it goes nowhere else.
+        for spelling in [
+            "extract --to-tar out.tar --skip-privileged image.img",
+            "extract --list --skip-privileged image.img",
+        ] {
+            assert_eq!(
+                line(spelling).unwrap_err(),
+                UsageError::SkipPrivilegedWithoutDir,
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_atomic_needs_a_destination_to_rename_into() {
+        match line("extract --to-tar out.tar --atomic image.img").expect("parses") {
+            Command::Extract(a) => {
+                assert_eq!(a.mode, ExtractMode::ToTar(Stream::File("out.tar".into())));
+                assert!(a.atomic);
+            }
+            other => panic!("expected extract, got {other:?}"),
+        }
+        // The standard output has no rename that could make it whole, and neither has a
+        // mode that writes no file. An accepted flag that cannot do what it promises is
+        // worse than a refused one.
+        for spelling in [
+            "extract --to-tar - --atomic image.img",
+            "extract --list --atomic image.img",
+            "extract --cat /x --atomic image.img",
+        ] {
+            assert_eq!(
+                line(spelling).unwrap_err(),
+                UsageError::AtomicWithoutFile,
+                "{spelling}"
+            );
+        }
     }
 
     #[test]

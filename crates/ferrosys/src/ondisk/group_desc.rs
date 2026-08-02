@@ -47,7 +47,7 @@ pub const BG_INODE_ZEROED: u16 = 0x0004;
 /// [`read_from`](Self::read_from), [`write_to`](Self::write_to), and the
 /// [`SIZE_32`](Self::SIZE_32) / [`SIZE_64`](Self::SIZE_64) widths, and none of them
 /// changes. What the attribute buys is that this crate can widen its
-/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// coverage of the on-disk structure — the fields it does not model — without that
 /// being a breaking change for everyone reading an image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[non_exhaustive]

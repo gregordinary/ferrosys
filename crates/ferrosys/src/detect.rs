@@ -146,6 +146,51 @@ pub fn detect_with<R: Read + Seek>(
     }
 }
 
+/// What the family-agnostic root answers on its own.
+///
+/// The base build — no family compiled in — is a configuration a consumer can select, and
+/// every other test in this crate builds its fixtures with the ext formatter, so without
+/// this the root would only ever be *compiled* without its families and never run. These
+/// cases need no image, which is what lets them run in both builds.
+#[cfg(test)]
+mod agnostic_tests {
+    use super::DetectOptions;
+
+    #[test]
+    fn options_carry_the_offset_they_were_given() {
+        assert_eq!(DetectOptions::new().base, 0);
+        assert_eq!(DetectOptions::new().base(1 << 20).base, 1 << 20);
+        assert_eq!(DetectOptions::default(), DetectOptions::new());
+    }
+
+    /// With no family compiled in there is nothing to recognize an image, and the answer
+    /// is the same for every source — which is the whole of what the base build promises,
+    /// and is exactly what a build carrying a family cannot check.
+    #[cfg(not(feature = "ext"))]
+    #[test]
+    fn a_build_with_no_family_recognizes_nothing() {
+        use super::{DetectError, detect, detect_with};
+        use std::io::Cursor;
+
+        for bytes in [vec![0u8; 4096], b"not a filesystem".to_vec(), Vec::new()] {
+            assert_eq!(
+                detect(Cursor::new(bytes)).unwrap_err(),
+                DetectError::Unrecognized
+            );
+        }
+        // And the source is never read, so an offset past its end is the same answer
+        // rather than an I/O failure.
+        assert_eq!(
+            detect_with(
+                Cursor::new(vec![0u8; 1024]),
+                &DetectOptions::new().base(1 << 30)
+            )
+            .unwrap_err(),
+            DetectError::Unrecognized
+        );
+    }
+}
+
 #[cfg(all(test, feature = "ext"))]
 mod tests {
     use std::io::Cursor;

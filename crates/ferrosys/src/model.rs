@@ -697,6 +697,28 @@ fn key(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.join(&b'/')
 }
 
+/// The canonical key for a path, by the same rule [`components`] and [`key`] apply
+/// together: separators and `.` elements carry no meaning, so `/etc/hostname`,
+/// `//etc//hostname`, and `etc/./hostname` are one path and key alike. The root keys as
+/// the empty slice.
+///
+/// This exists so that a caller keying entries by path outside the model — composing two
+/// sources into one, where a later entry replaces an earlier one at the same path — agrees
+/// with the model about which paths *are* the same. Two normalizations that disagree would
+/// not fail; they would quietly leave both entries in the list, and the model would reject
+/// the duplicate or, worse, accept two names it thought were different.
+///
+/// Unlike [`components`] this rejects nothing. A `..` element, an over-long component, or
+/// one carrying a NUL keys as itself and is refused when the model reads the entry, so
+/// there is one rejection site and its error names the path the caller wrote.
+pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
+    let parts: Vec<&[u8]> = path
+        .split(|&b| b == b'/')
+        .filter(|part| !part.is_empty() && *part != b".")
+        .collect();
+    parts.join(&b'/')
+}
+
 /// One entry, normalized: its components and its parent/name split.
 struct Normalized {
     parts: Vec<Vec<u8>>,
@@ -1171,6 +1193,38 @@ mod tests {
 
     fn model(src: TreeBuilder) -> FsModel {
         build_model(src, config()).expect("model")
+    }
+
+    #[test]
+    fn the_canonical_key_is_the_key_the_model_itself_uses() {
+        // `canonical_key` exists so a caller keying entries by path outside the model —
+        // `LayeredSource` — decides "same path" the way the model does. The two are
+        // separate code paths, so this pins them together: for every path the model
+        // accepts, the shared key is the one the model derives for itself.
+        for path in [
+            &b"/etc/hostname"[..],
+            b"//etc//hostname",
+            b"etc/./hostname",
+            b"etc/hostname/",
+            b"/a",
+            b"a/b/c/d/e",
+            b"/var/log/./messages",
+        ] {
+            let theirs = key(&components(path).expect("the model accepts this path"));
+            assert_eq!(
+                canonical_key(path),
+                theirs,
+                "{}: the shared key must be the model's",
+                String::from_utf8_lossy(path)
+            );
+        }
+        // The root is the one path `components` refuses while still naming something real,
+        // and it keys as empty — which is what puts it before every other key and makes its
+        // subtree the whole tree.
+        for root in [&b"/"[..], b"", b".", b"./", b"///"] {
+            assert!(names_the_root(root));
+            assert!(canonical_key(root).is_empty());
+        }
     }
 
     #[test]

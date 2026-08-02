@@ -11,8 +11,9 @@ times — and a reader parses an image back. The contents come from a programmat
 builder, from a tar archive and its PAX metadata (the `tar` feature), or from a
 directory tree on the machine doing the building (the `dir` feature). The
 image carries real superblock and descriptor backups and reserved descriptor
-blocks sized to a grow target — a maximum the caller names, or every block the
-format can reserve when the caller names none — so the filesystem grows in place
+blocks sized to a grow target — a maximum the caller names, or as much headroom
+as a sixty-fourth of the filesystem buys when the caller names none — so the
+filesystem grows in place
 without relocating its descriptor table, and every metadata object carries a
 crc32c (`metadata_csum`) so a checker detects corruption of the filesystem's own
 structures. A format-time jbd2 journal (`has_journal`), sized from the filesystem,

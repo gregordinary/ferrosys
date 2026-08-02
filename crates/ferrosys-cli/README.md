@@ -18,11 +18,12 @@ $ ferrosys detect rootfs.img
 ext4
 ```
 
-## The four subcommands
+## The five subcommands
 
 - **`format`** writes a filesystem — from a tar archive (`--from-tar`), from a directory
   tree on this machine (`--from-dir`, with `--owner UID:GID` to override the host's
-  ownership), or empty. The size, UUID, and timestamps are inputs; the tool reads neither
+  ownership), or empty, at a size you name or one `--size auto` finds from the contents.
+  The size, UUID, and timestamps are inputs; the tool reads neither
   the clock nor a random source, so the same inputs write the same image every time. Grow
   reservation, block size, inode count, reserved percentage, volume label, journal size,
   feature set, and directory hash are all options. `--dry-run` reports the geometry
@@ -35,10 +36,14 @@ ext4
   A full scan walks every group descriptor, bitmap, inode, and extent tree, collecting
   each deviation as a typed anomaly; `--fail-on` sets the severity at which the run
   fails.
-- **`extract`** reads the contents back out: as a tar archive, as one file's bytes, as
-  one path's full metadata (`--stat`, extended attributes and decoded ACLs included), or
-  as a listing.
+- **`extract`** reads the contents back out: as a tar archive, as a directory tree on this
+  machine (`--to-dir`, the inverse of `--from-dir`), as one file's bytes, as one path's
+  full metadata (`--stat`, extended attributes and decoded ACLs included), or as a
+  listing.
 - **`detect`** says which filesystem an image holds — one word, at an offset if asked.
+- **`identity`** changes what an existing image is known by: its UUID, its volume label,
+  and the seed its metadata checksums derive from. Every superblock copy is written, and
+  nothing at all is until every check has passed.
 
 ## Streams and exit codes
 

@@ -128,13 +128,15 @@ pub use crate::csum::{Checksummer, Crc32c, CsumScheme, NullCsum};
 pub use crate::dir::{DirBlock, DirBlockKind, DirError, DirLayout, HtreeDir, LinearDir};
 pub use crate::extent::{ExtentError, ExtentNode, ExtentTree};
 pub use crate::feature::{Compat, FeatureError, FeatureSet, Incompat, Profile, RoCompat};
+pub use crate::fit::Slack;
 pub use crate::geometry::{
     BlockRange, GeometryError, GroupLayout, GrowReservation, InodeCount, Layout, PlanRequest,
     ReservedRatio, plan_layout,
 };
 pub use crate::hash::{DirHash, HashSignedness, HashVersion};
 #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
-pub use crate::host::{DirectorySource, HostError};
+pub use crate::host::{DirectorySink, DirectorySource, ExtractReport, HostError};
+pub use crate::identity::{IdentityChange, IdentityError, IdentityReport, rewrite_identity};
 pub use crate::journal::{JournalParams, JournalSize, JournalSuperblock};
 pub use crate::materialize::{
     ErrorBehavior, FormatError, FormatOptions, FormatPlan, Image, format, format_to,
@@ -146,7 +148,7 @@ pub use crate::read::{
     ScanReport, Severity, WalkEntry,
 };
 pub use crate::source::{
-    EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry, TreeBuilder,
+    EntryKind, FileContent, FileRange, LayeredSource, Metadata, Source, SourceEntry, TreeBuilder,
 };
 
 use crate::ondisk::Timestamp;

@@ -65,11 +65,13 @@ jobs:
       # `--all-features` builds the `tar` archive source and the `dir` directory source,
       # so their PAX/xattr/ACL surface is tested, linted, and doc-checked rather than
       # shipping unexercised.
-      # `--release` because the host-tool gates build multi-gigabyte images and the
-      # >2^32-block tier streams a 9 TiB filesystem: ~13 s optimized, ~3 min
-      # unoptimized. Correctness is identical either way; this is CI wall-clock.
+      # `--profile ci` is `release` with `debug-assertions` and `overflow-checks` back
+      # on (see the workspace Cargo.toml): optimized, because the host-tool gates build
+      # multi-gigabyte images and the >2^32-block tier streams a 9 TiB filesystem, but
+      # still checking the on-disk invariants the library asserts and the arithmetic it
+      # would otherwise wrap.
       - name: Test
-        run: cargo test --workspace --all-features --release
+        run: cargo test --workspace --all-features --profile ci
         env:
           FERROSYS_REQUIRE_HOST_TOOLS: "1"
 
@@ -77,8 +79,13 @@ jobs:
       # includes it has that feature enabled. Nothing else would then ever build the
       # library on its own, and the claim that its base build carries only `thiserror`
       # would stop being checked. This checks it.
-      - name: Base library builds without the archive source
-        run: cargo check -p ferrosys --no-default-features
+      #
+      # `test`, not `check`: the base build is a configuration a consumer selects, and
+      # the family-agnostic root has behavior of its own — the crc32c primitive and the
+      # negative answers `detect` gives with no family compiled in. Every other gate here
+      # needs the formatter to build a fixture, so this is the only run those cases get.
+      - name: Base library builds and passes its tests without the archive source
+        run: cargo test -p ferrosys --no-default-features --lib
 
       # The fuzz package sets its own `[workspace]`, so `cargo test --workspace` never
       # compiles it: a target that stopped matching the reader's API would rot silently

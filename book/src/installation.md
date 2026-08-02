@@ -14,7 +14,7 @@ or by editing `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrosys = "0.2"
+ferrosys = "0.3"
 ```
 
 The build is pure Rust and depends only on `thiserror`. Four features shape it:
@@ -35,7 +35,7 @@ emitting an ext filesystem.
 
 ```toml
 [dependencies]
-ferrosys = { version = "0.2", features = ["tar", "dir"] }
+ferrosys = { version = "0.3", features = ["tar", "dir"] }
 ```
 
 The [API reference](./api-reference.md) documents the public surface.

@@ -748,14 +748,24 @@ fn a_directory_entry_name_that_traverses_is_flagged_and_never_walked() {
             .collect::<Vec<_>>()
     );
 
-    // And no walked path carries the hostile name: the entry is skipped, not turned into
-    // a traversing member path an extractor would honor.
+    // And no walked path is built from the hostile name at all: the entry is skipped, not
+    // turned into a traversing member path an extractor would honor.
+    //
+    // The assertion is against the *inode*, not against a substring of the name. A reader
+    // that sanitized `a/b/../evil` down to `evil` and yielded `/probe/evil` would carry no
+    // `a/b` and would pass a substring check while having done the one thing this gate
+    // exists to forbid: turning a name the kernel calls impossible into a walked path.
+    // The name's only entry points at `z_no`, so a walked path reaching that inode is a
+    // path built from it. `/probe/z` itself was replaced, so nothing legitimate does.
     let paths = r.walk().expect("walk");
+    let from_hostile: Vec<_> = paths
+        .iter()
+        .filter(|e| e.number == z_no)
+        .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+        .collect();
     assert!(
-        paths
-            .iter()
-            .all(|e| !e.path.windows(3).any(|w| w == b"a/b")),
-        "walk() yielded a path built from the traversing name"
+        from_hostile.is_empty(),
+        "walk() yielded a path built from the traversing name: {from_hostile:?}"
     );
 }
 

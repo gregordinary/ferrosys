@@ -12,6 +12,7 @@
 //! there, never a silently dropped or truncated entry.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,7 @@ use crate::ondisk::{Timestamp, Xattr};
 /// file against the `large_file` feature — and name the offending path — before any bytes
 /// are read.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum FileContent {
     /// Bytes held in memory.
     Owned(Vec<u8>),
@@ -346,6 +348,7 @@ impl Metadata {
 /// What an entry is: a regular file, directory, symlink, hard link, device node,
 /// FIFO, or socket — the full set of POSIX file types ext4 represents.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum EntryKind {
     /// A directory.
     Directory,
@@ -578,6 +581,136 @@ impl Source for TreeBuilder {
     }
 }
 
+/// Several sources composed into one, where a later layer's entry replaces an earlier
+/// layer's at the same path.
+///
+/// This is the shape an image build takes when a base tree is customized: a root
+/// filesystem from an archive, then a directory of configuration over it, then a handful
+/// of computed files over that. Each layer is a [`Source`] of any kind — they need not be
+/// the same kind — and is consumed as it is added.
+///
+/// # What replacement means
+///
+/// A path present in more than one layer takes the last layer's entry whole: its kind, its
+/// metadata, and its extended attributes, which replace the earlier set rather than merging
+/// with it name by name. Paths are compared as the model compares them, so `/etc/hostname`
+/// and `//etc//hostname` are one path and the second does replace the first.
+///
+/// A directory is the case where replacement is not the whole story. Its own entry is
+/// replaced like any other, so the last layer decides its mode, ownership, times, and
+/// attributes — but its *contents* are separate entries at their own paths, so a directory
+/// named by two layers ends up holding the union of what each put in it. That is what makes
+/// a configuration layer additive: naming `/etc` again does not empty it.
+///
+/// Replacing a directory with something that is not one is different: the entries beneath
+/// it would have no directory to live in, so they are dropped along with it. A file at
+/// `/etc` removes `/etc/hostname` from an earlier layer.
+///
+/// # What it does not do
+///
+/// There is no deletion marker. A layer states what is present, so a path an earlier layer
+/// placed can be replaced but not removed, and the entry list is always the union of the
+/// layers' paths.
+///
+/// Nothing is validated here. A layer may name a path the model refuses — one holding a
+/// `..` element, say — and the refusal comes from the model when the composed list is read,
+/// naming the path the caller wrote.
+///
+/// # Example
+///
+/// ```
+/// use ferrosys::ext::ondisk::Timestamp;
+/// use ferrosys::ext::{EntryKind, LayeredSource, Metadata, Source, TreeBuilder};
+///
+/// let time = Timestamp::from_secs(1_700_000_000);
+/// let base = TreeBuilder::new()
+///     .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+///     .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), Metadata::new(0o644, time))
+///     .file(b"/etc/issue".to_vec(), b"welcome\n".to_vec(), Metadata::new(0o644, time));
+/// let overlay = TreeBuilder::new()
+///     .file(b"/etc/hostname".to_vec(), b"overlaid\n".to_vec(), Metadata::new(0o600, time));
+///
+/// let entries = LayeredSource::new().layer(base).layer(overlay).into_entries();
+///
+/// // Three paths: the overlay replaced one and added none.
+/// assert_eq!(entries.len(), 3);
+/// let hostname = entries.iter().find(|e| e.path == b"/etc/hostname").unwrap();
+/// assert_eq!(hostname.meta.mode, 0o600);
+/// assert!(matches!(&hostname.kind, EntryKind::File(c) if c.read().unwrap().as_ref() == b"overlaid\n"));
+/// ```
+#[derive(Clone, Default, Debug)]
+pub struct LayeredSource {
+    /// Entries by canonical path, so a later layer's entry replaces an earlier one and the
+    /// ordered keys make a subtree a contiguous range.
+    entries: BTreeMap<Vec<u8>, SourceEntry>,
+}
+
+impl LayeredSource {
+    /// A composition with no layers, which yields no entries.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a layer over the ones already added, replacing their entries where the paths
+    /// agree.
+    ///
+    /// The source is consumed here rather than held, so layers of different kinds compose
+    /// and each layer's own cost is paid once. Order is the whole contract: the last call
+    /// wins.
+    #[must_use]
+    pub fn layer(mut self, source: impl Source) -> Self {
+        for entry in source.into_entries() {
+            let key = crate::model::canonical_key(&entry.path);
+            // Something that is not a directory cannot hold the entries an earlier layer
+            // put beneath this path, so they go with it. The keys are canonical and
+            // ordered, so a subtree is the contiguous range beginning `key/` — and for the
+            // root, whose key is empty, that is every other entry.
+            if !matches!(entry.kind, EntryKind::Directory) {
+                let mut prefix = key.clone();
+                if !prefix.is_empty() {
+                    prefix.push(b'/');
+                }
+                let doomed: Vec<Vec<u8>> = self
+                    .entries
+                    .range(prefix.clone()..)
+                    .take_while(|(k, _)| k.starts_with(&prefix))
+                    // The path itself is inside its own range when it is the root, whose
+                    // prefix is empty. It is being replaced, not dropped.
+                    .filter(|(k, _)| **k != key)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in doomed {
+                    self.entries.remove(&k);
+                }
+            }
+            self.entries.insert(key, entry);
+        }
+        self
+    }
+
+    /// The number of distinct paths the layers hold between them.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the composition holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Source for LayeredSource {
+    /// The composed entries, each path once, carrying the path the layer that won wrote
+    /// rather than the canonical form used to compare them — so a model error names what
+    /// the caller typed.
+    fn into_entries(self) -> Vec<SourceEntry> {
+        self.entries.into_values().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +730,143 @@ mod tests {
         assert_eq!(entries[0].path, b"/etc");
         assert!(matches!(entries[1].kind, EntryKind::File(_)));
         assert!(matches!(entries[2].kind, EntryKind::Symlink(_)));
+    }
+
+    /// The paths a composition yields, in order, as readable strings.
+    fn paths(source: LayeredSource) -> Vec<String> {
+        source
+            .into_entries()
+            .into_iter()
+            .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+            .collect()
+    }
+
+    /// The contents of the regular file at `path`.
+    fn contents_at(entries: &[SourceEntry], path: &[u8]) -> Vec<u8> {
+        let entry = entries
+            .iter()
+            .find(|e| e.path == path)
+            .expect("path is present");
+        match &entry.kind {
+            EntryKind::File(c) => c.read().expect("read").into_owned(),
+            other => panic!("expected a file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_later_layer_replaces_an_earlier_entry_whole() {
+        let base = TreeBuilder::new()
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta())
+            .xattr(b"user.from".to_vec(), b"base".to_vec());
+        let over = TreeBuilder::new()
+            .file(
+                b"/etc/hostname".to_vec(),
+                b"over\n".to_vec(),
+                Metadata::new(0o600, meta().mtime),
+            )
+            .xattr(b"user.other".to_vec(), b"over".to_vec());
+
+        let entries = LayeredSource::new().layer(base).layer(over).into_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(contents_at(&entries, b"/etc/hostname"), b"over\n");
+        assert_eq!(entries[0].meta.mode, 0o600);
+        // The attributes are the later layer's set, not the union of the two.
+        assert_eq!(entries[0].xattrs.len(), 1);
+        assert_eq!(entries[0].xattrs[0].name, b"user.other");
+    }
+
+    #[test]
+    fn naming_a_directory_again_does_not_empty_it() {
+        // What makes a configuration layer additive: the later layer decides the
+        // directory's own metadata, and the two layers' contents merge.
+        let base = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta());
+        let over = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o700, meta().mtime))
+            .file(b"/etc/issue".to_vec(), b"over\n".to_vec(), meta());
+
+        let composed = LayeredSource::new().layer(base).layer(over);
+        assert_eq!(
+            paths(composed.clone()),
+            ["/etc", "/etc/hostname", "/etc/issue"]
+        );
+        let entries = composed.into_entries();
+        assert_eq!(entries[0].meta.mode, 0o700, "the later layer's mode");
+    }
+
+    #[test]
+    fn replacing_a_directory_with_a_file_drops_what_was_beneath_it() {
+        let base = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta())
+            .directory(b"/etc/ssl".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/ssl/cert".to_vec(), b"pem\n".to_vec(), meta())
+            // A sibling whose name shares the replaced path's bytes but not its subtree.
+            .file(b"/etcetera".to_vec(), b"kept\n".to_vec(), meta());
+        let over = TreeBuilder::new().file(b"/etc".to_vec(), b"now a file\n".to_vec(), meta());
+
+        // Everything under /etc goes with it; /etcetera is not under /etc and stays.
+        assert_eq!(
+            paths(LayeredSource::new().layer(base).layer(over)),
+            ["/etc", "/etcetera"]
+        );
+    }
+
+    #[test]
+    fn a_directory_over_a_file_keeps_the_directory() {
+        let base = TreeBuilder::new().file(b"/etc".to_vec(), b"a file\n".to_vec(), meta());
+        let over = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"over\n".to_vec(), meta());
+
+        let entries = LayeredSource::new().layer(base).layer(over).into_entries();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0].kind, EntryKind::Directory));
+    }
+
+    #[test]
+    fn paths_that_spell_one_path_are_one_path() {
+        // The model treats these three as one, so layering has to as well: otherwise the
+        // replacement silently does not happen and the model sees a duplicate.
+        let base = TreeBuilder::new().file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta());
+        let over = TreeBuilder::new().file(b"//etc//hostname".to_vec(), b"over\n".to_vec(), meta());
+        let last = TreeBuilder::new().file(b"etc/./hostname".to_vec(), b"last\n".to_vec(), meta());
+
+        let entries = LayeredSource::new()
+            .layer(base)
+            .layer(over)
+            .layer(last)
+            .into_entries();
+        assert_eq!(entries.len(), 1, "three spellings of one path");
+        // The path is the winning layer's own spelling, so a model error names what the
+        // caller wrote rather than a form it never used.
+        assert_eq!(entries[0].path, b"etc/./hostname");
+        assert_eq!(contents_at(&entries, b"etc/./hostname"), b"last\n");
+    }
+
+    #[test]
+    fn the_root_is_a_path_like_any_other() {
+        let base = TreeBuilder::new()
+            .root(Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta());
+        let over = TreeBuilder::new().root(Metadata::new(0o700, meta().mtime));
+
+        let composed = LayeredSource::new().layer(base).layer(over);
+        assert_eq!(paths(composed.clone()), ["/", "/etc/hostname"]);
+        assert_eq!(
+            composed.into_entries()[0].meta.mode,
+            0o700,
+            "the later root's mode, and the tree beneath it kept"
+        );
+    }
+
+    #[test]
+    fn a_layer_over_nothing_is_that_layer() {
+        let one = TreeBuilder::new().file(b"/a".to_vec(), b"x".to_vec(), meta());
+        assert_eq!(paths(LayeredSource::new().layer(one)), ["/a"]);
+        assert!(LayeredSource::new().is_empty());
+        assert_eq!(LayeredSource::new().len(), 0);
     }
 
     #[test]

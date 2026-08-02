@@ -7,6 +7,155 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [0.3.0] - 2026-08-02
+
+A breaking release on the command line, and additive everywhere else. Three command
+lines that used to be accepted are now usage errors, and the library gains a filesystem
+sized to its own contents, a filesystem written back out as a directory tree,
+re-identification, source composition, a walk-time timestamp clamp, and a pin over the
+whole format rather than the feature set alone.
+
+To migrate: `inspect --sarif --groups` becomes `inspect --sarif`; `format --help=x` and
+`-hX` become `format --help` and `-h`; and an exhaustive `match` on `EntryKind` or
+`FileContent` needs a `_` arm. Nothing else that compiled against `0.2` stops compiling.
+
+### Added
+
+- **`FormatPlan::fit`, `Slack`, and `format --size auto`** — size a filesystem to what goes
+  in it rather than being told how large it is. There is no formula for the floor: how much
+  room a filesystem has left depends on its group count, its inode tables, the descriptor
+  blocks it reserves to grow into, and the journal its size earns, and every one of those
+  follows from the size. So the size is searched for — candidate geometries are planned and
+  the source *placed* into each one, through the format's own placement pass over a
+  destination that keeps nothing, so nothing is estimated alongside the writer. **The size
+  returned formats, and one block less does not:** both ends of the search's bracket are
+  established by placing, so it closes holding a size that was placed and the size below it
+  that was not. `Slack` says what must remain free once the source is written — nothing, a
+  byte count, or a share of the filesystem in hundredths of one percent — since the smallest
+  filesystem holding a source is one with no room left in it. `FormatPlan::size_bytes`
+  reports what was decided, and with `Slack::None` that is the minimum size for the source.
+  On the command line, `--size auto` and `--slack 20%` or `--slack 64M`; the search runs in
+  the same window as every other planning failure, so a size that cannot be found leaves the
+  destination unopened.
+- **`DirectorySink`, `ExtractReport`, and `extract --to-dir`** — a filesystem written back
+  out as a directory tree on this host, the inverse of `DirectorySource` and
+  `format --from-dir`, behind the `dir` feature on Linux. The destination must exist and be
+  empty; it takes the filesystem root's own mode, ownership, times, and extended attributes,
+  and `/lost+found` is omitted, so what comes out is a tree `--from-dir` reads straight back.
+  A file's bytes are streamed a window at a time, and what accumulates over a walk is one
+  open handle per directory on the current path.
+
+  **The image is untrusted, and a name in it is not a path to resolve.** Every directory is
+  created and then opened, and everything beneath it is created through that open handle by
+  its single-component name — checked to be one a directory can hold, so a name carrying a
+  separator, a `..`, or a NUL is refused rather than followed. Symbolic links are written
+  exactly as recorded, absolute targets included, which is safe because nothing here ever
+  follows one.
+
+  A device node needs `CAP_MKNOD` and a recorded owner needs `CAP_CHOWN`, so an unprivileged
+  extraction stops at the first of either and names it — a rootfs quietly missing `/dev/null`
+  is a rootfs that boots differently. `skip_privileged` (`--skip-privileged`) is the opt-in
+  for a run that wants what it can have, and what it left out comes back in the report. Two
+  times no host lets a caller set are the two an extraction cannot carry: an inode's change
+  time and its creation time. There is no `--atomic` for a tree, since no rename publishes
+  one at once; the empty destination stands in its place.
+- **`rewrite_identity`, `IdentityChange`, and `ferrosys identity`** — change what an
+  existing image is known by: its UUID (`s_uuid`), its volume label (`s_volume_name`),
+  and the seed its metadata checksums derive from. Every superblock copy is written —
+  the primary and each group's backup — along with the journal's own record of the UUID,
+  so no copy is left claiming the old identity. Each copy is patched in place rather than
+  re-serialized, so it keeps every field this crate does not model. Nothing is written
+  until every copy has been read and every check has passed, so a refusal leaves the image
+  untouched. A filesystem carrying `metadata_csum` without `metadata_csum_seed` seeds every
+  checksum it holds from the UUID itself, so a UUID change there is refused;
+  `set_checksum_seed` records the seed the current UUID implies and turns
+  `metadata_csum_seed` on, after which the UUID moves and every existing checksum stays
+  valid.
+- **`LayeredSource`** — several sources composed into one, where a later layer's entry
+  replaces an earlier layer's at the same path. Layers may be of different kinds and are
+  consumed as they are added. A path present in more than one layer takes the last layer's
+  entry whole, attributes included; a directory named again keeps its contents, so a
+  configuration layer is additive; and replacing a directory with something that is not one
+  drops the entries beneath it, which would otherwise have nowhere to live. Paths are
+  compared as the model compares them, so `/etc/hostname` and `//etc//hostname` are one
+  path. There is no deletion marker: a layer states what is present.
+- **Three pin documents, split by why each one changes** — `FormatOptions::policy_pin`
+  (`ferrosys-policy-pin 1`), `FormatOptions::identity_pin` (`ferrosys-identity-pin 1`), and
+  `FormatPlan::geometry_pin` (`ferrosys-geometry-pin 1`). Each is self-contained and
+  separately versioned, so a caller records the ones it wants without slicing a section out
+  of a larger document.
+
+  The **policy** pin is the contract: the feature set plus the grow reservation, inode
+  count, reserved share, error behavior, journal size, hash algorithm and signedness, and
+  whether timestamps are clamped. Nothing in it varies with the image, so a builder writing
+  many images from one set of constants gets one policy pin for all of them — an empty diff
+  between two images' recorded pins means they were built the same way. Where
+  `FeatureSet::pin` covers five fields, this covers every option that is a property of the
+  build, `errors` included, which reaches neither the feature words nor the geometry and so
+  was recorded nowhere.
+
+  The **identity** pin holds the UUID, format time, hash seed, volume label, and the
+  clamped time — the fields that are meant to differ per image, kept apart so they do not
+  make every policy comparison non-empty. Each is also a superblock field, so a caller that
+  can open the image it built need not record this at all.
+
+  The **geometry** pin holds what the size decided: block and inode counts, the group
+  table, the reserved GDT blocks, and the journal's realized length. The per-group
+  placements are one line — the group count and a `crc32c` over every field of every group —
+  so the document stays a fixed size on a filesystem with millions of groups while a
+  placement that moves still changes it. Pinned at a fixed reference size it catches what a
+  policy pin cannot: a change to the formula behind an option whose name did not change,
+  which is what `GrowReservation::Max` did when it moved every block after the descriptor
+  table without moving a single input.
+- **`DirectorySource::times_from_modification`** — put each walked entry's modification
+  time in place of its access and change times. Reading a tree moves its access times and
+  staging one moves its change times, so without this a build's bytes depend on what the
+  host has done to the tree since. The modification time moves only when a file's contents
+  do. This is the clamp for a build that needs reproducible bytes *and* per-file
+  modification times; `FormatOptions::fixed_time` is the clamp for one that forces every
+  inode to a single time instead.
+- **`extract --to-tar FILE --atomic`** — write the archive to a sibling temporary file
+  and rename it over the destination once the walk is complete. A walk can refuse
+  part-way (a socket, an inode that does not read, an ACL that does not decode) and the
+  destination is created and truncated before it starts, so without this a failed
+  extract replaces an existing archive with a fragment. `format --atomic` already did
+  this for images; the two now share one mechanism. The flag applies to `--to-tar FILE`,
+  the only mode with a destination to rename into, and is refused elsewhere rather than
+  accepted and ignored.
+
+### Changed
+
+- **`inspect --sarif --groups` is a usage error.** SARIF is a findings log with nowhere
+  to render a group table, so the pair used to read every descriptor and discard the
+  result — and a descriptor that failed to read aborted the run before any SARIF was
+  emitted, letting an inert flag suppress the document a pipeline asked for.
+  `--sarif --json` and `--sarif --quick` were already refused.
+- **An option that takes no value refuses one everywhere.** `format --help=x` and `-hX`
+  printed help or reported "not an option"; both now report that the option takes no
+  value, as `--json=yes` already did.
+- **A value error names every form the option accepts.** `--grow huge` names `none` and
+  `max` beside the byte-count grammar, `--journal fast` names `auto` beside the block
+  count, and a `--time` outside the field's range is reported as out of range rather than
+  as text that is not a number.
+- **Terminal rendering escapes the backslash and the bidirectional controls.** A name,
+  target, or attribute value now renders to exactly one input — a name holding the four
+  characters `\x1b` no longer renders identically to one holding the escape byte — and
+  `U+202E` and its relatives are escaped rather than left to reverse the rest of the
+  line. JSON output is unchanged; it carried the exact bytes already.
+- **The `format --size` too small for a journal hint names a flag combination the tool
+  accepts.** It offered `-O ^has_journal`, which the default profile refuses because
+  `orphan_file` needs a journal; it now offers `-O ^has_journal,^orphan_file`.
+- **`ferrosys-cli` no longer depends on the `tar` crate.** It writes archives through the
+  library's `ArchiveSink`, which takes a plain writer, so the dependency was unused.
+- **Placing a file no longer copies it.** Block chunks borrow the source and only a final
+  short chunk is padded into a block of its own, so peak memory while placing a file is
+  the file rather than twice the file — which is what `format_to` documents. The bytes
+  written are identical.
+- **`EntryKind` and `FileContent` are `#[non_exhaustive]`.** Both are enums a source
+  builds from and a caller reads, and both will gain variants; marked, adding one is
+  additive. Construction is unaffected — every existing variant is built exactly as
+  before — and only an exhaustive `match` outside the crate needs a `_` arm.
+
 ## [0.2.0] - 2026-07-25
 
 A breaking release, and mostly one thing: closing the places where a later addition
@@ -124,7 +273,7 @@ constructor or a baseline constant rather than a struct literal.
   filesystem below 16 MiB out of reach at the defaults. `Max` is now `min(map ceiling,
   descriptor ceiling, total_blocks / 64)`: byte-identical at 256 MiB and above, where
   those 1024 blocks *are* a sixty-fourth, and proportional below it, so a 16 MiB image
-  reserves 64 blocks and still grows to 512 GiB. An explicit `UpTo` target is an intent
+  reserves 64 blocks and still grows to 520 GiB. An explicit `UpTo` target is an intent
   and is never reduced.
 - **A read past `Limits::max_file_bytes` is `ReadError::FileTooLarge`, not a
   truncation**, naming the size and the bound. A caller extracting a tree would
@@ -283,5 +432,6 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.3.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.2.0
 [0.1.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.1.0

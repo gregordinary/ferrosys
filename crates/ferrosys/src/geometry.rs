@@ -431,8 +431,11 @@ fn is_power_of(mut g: u32, base: u32) -> bool {
 
 /// Whether group `g` carries a superblock-and-descriptor copy under `sparse_super`:
 /// group 0 (the primary), group 1, and the powers of 3, 5, and 7.
+///
+/// The planner applies this to decide a layout's placements; a caller working from an
+/// image's own superblock rather than from a plan applies it to find the same groups.
 #[must_use]
-fn sparse_super_has_copy(g: u32) -> bool {
+pub(crate) fn sparse_super_has_copy(g: u32) -> bool {
     g == 0 || g == 1 || is_power_of(g, 3) || is_power_of(g, 5) || is_power_of(g, 7)
 }
 
@@ -493,7 +496,7 @@ pub enum GrowReservation {
     /// 8 TiB costs 1024 blocks whatever the image's size, which is a quarter of a 16 MiB
     /// image and a sixty-fourth of a 256 MiB one. So a filesystem of 256 MiB or more takes
     /// the whole map, and a smaller one takes the share it can spare — a 16 MiB image
-    /// reserves 64 blocks and still grows online to 512 GiB, which is past any device such
+    /// reserves 64 blocks and still grows online to 520 GiB, which is past any device such
     /// an image is flashed to. Growth headroom therefore never costs more than 1.6% of a
     /// filesystem, comfortably under the 5% [`ReservedRatio`] holds back by default.
     ///
@@ -540,9 +543,10 @@ pub enum InodeCount {
     /// inodes end on a byte boundary in the inode bitmap — the same `s_inodes_per_group`
     /// that `mke2fs` derives for the request. [`Layout::total_inodes`] reports the realized
     /// total. It meets or exceeds the request wherever an inode-table block holds a
-    /// multiple of eight inodes; at the 1024- and 2048-byte block sizes, where a block of
-    /// the default inode size holds only four, the multiple-of-eight step can leave the
-    /// realized total a few inodes short of the request.
+    /// multiple of eight inodes; where a block holds fewer than eight, the
+    /// multiple-of-eight step can leave the realized total a few inodes short of the
+    /// request. That is `block_size / inode_size < 8` — the 1024-byte block at the
+    /// default 256-byte inode, and the 2048-byte block once the inode is 512 bytes.
     Count(u32),
 }
 

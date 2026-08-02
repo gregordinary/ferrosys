@@ -35,7 +35,7 @@ const INCOMPAT_64BIT: u32 = 0x0080;
 /// this crate, and that is about the Rust type, not the format: the byte layout is
 /// [`read_from`](Self::read_from) and [`SIZE`](Self::SIZE), and neither of them
 /// changes. What the attribute buys is that this crate can widen its
-/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// coverage of the on-disk structure — the fields it does not model — without that
 /// being a breaking change for everyone reading an image.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]

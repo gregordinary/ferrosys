@@ -36,8 +36,8 @@ use ferrosys::ext::acl::{EXEC, READ, WRITE};
 use ferrosys::ext::ondisk::{Inode, Timestamp};
 use ferrosys::ext::{
     Acl, AclEntry, AclQualifier, AllocError, Compat, FeatureSet, FormatError, FormatOptions,
-    GeometryError, GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount, ReadError,
-    Reader, ReservedRatio, RoCompat, TreeBuilder, format_to,
+    FormatPlan, GeometryError, GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount,
+    ReadError, Reader, ReservedRatio, RoCompat, Slack, TreeBuilder, format_to,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -1271,6 +1271,54 @@ fn compact_spec() -> impl Strategy<Value = Spec> {
         }
         s
     })
+}
+
+proptest! {
+    #![proptest_config(config(24))]
+
+    /// The fit contract, generatively: whatever the tree and whatever the options, the size
+    /// `fit` settles on formats — and one block below it does not.
+    ///
+    /// The second half is what makes this more than "a large enough filesystem works". A
+    /// search that quietly rounded up, or that stopped one group early because a candidate
+    /// happened to fail for an unrelated reason, would pass the first half and fail here.
+    /// The generator's whole space is in play: every block size, every profile, every
+    /// grow reservation, and inode counts and reserved shares that move where the floor is.
+    #[test]
+    fn a_fitted_size_is_the_smallest_that_formats(spec in compact_spec()) {
+        let options = spec.geo.options();
+        let block_size = u64::from(options.feature.block_size);
+        let (source, _) = realize(&spec);
+        let size = match FormatPlan::fit(source, options, Slack::None) {
+            Ok(plan) => plan.size_bytes(),
+            // The generator draws grow targets from the spec's own size, so a tree larger
+            // than the target it was given has no size to be fitted to. That is the search
+            // reaching its ceiling, not a defect.
+            Err(e) if is_capacity_refusal(&e) || matches!(e, FormatError::DoesNotFit { .. }) => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(TestCaseError::fail(format!(
+                    "fit refused an in-envelope tree with a non-capacity error: {e}"
+                )));
+            }
+        };
+
+        let (source, _) = realize(&spec);
+        let fitted = tempfile::NamedTempFile::new().expect("temp file");
+        format_to(source, size, options, fitted.as_file()).map_err(|e| {
+            TestCaseError::fail(format!("the fitted size of {size} bytes did not format: {e}"))
+        })?;
+
+        let (source, _) = realize(&spec);
+        let smaller = tempfile::NamedTempFile::new().expect("temp file");
+        if format_to(source, size - block_size, options, smaller.as_file()).is_ok() {
+            return Err(TestCaseError::fail(format!(
+                "one block below the fitted {size} bytes formatted too\ngeometry: {:?}",
+                spec.geo
+            )));
+        }
+    }
 }
 
 /// Compare two files byte for byte in fixed-size chunks, reporting the first

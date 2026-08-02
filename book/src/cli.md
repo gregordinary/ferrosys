@@ -1,14 +1,15 @@
 # The `ferrosys` command line
 
 The `ferrosys-cli` crate ships one binary, `ferrosys`, which writes ext2, ext3, and ext4
-filesystems, reports on them, and reads their contents back out. It is the library's
-surface for anyone not writing Rust.
+filesystems, reports on them, reads their contents back out, and changes what they are
+known by. It is the library's surface for anyone not writing Rust.
 
 ```console
 $ ferrosys format  --size SIZE --uuid HEX --time SECS [options] OUT.img
 $ ferrosys inspect [options] IMAGE
-$ ferrosys extract [options] IMAGE (--to-tar F|- | --cat PATH | --stat PATH | --list)
+$ ferrosys extract [options] IMAGE (--to-tar F|- | --to-dir DIR | --cat PATH | --stat PATH | --list)
 $ ferrosys detect  [options] IMAGE
+$ ferrosys identity [options] IMAGE
 ```
 
 Install it from the workspace:
@@ -100,6 +101,43 @@ $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 \
       --from-dir staging/rootfs --owner 0:0 rootfs.img
 ```
 
+### Sizing the image to its contents
+
+`--size auto` works the size out from what goes in the filesystem, instead of being told:
+
+```console
+$ ferrosys format --size auto --from-dir staging \
+      --uuid "$(uuidgen)" --time 1700000000 rootfs.img
+```
+
+It finds the smallest filesystem that holds the contents by planning candidate sizes and
+placing the contents into each — the same placement a format performs, over a destination
+that keeps nothing — so the size it settles on is one that formats, and one block less does
+not. Nothing is written while it searches, so a size that cannot be found leaves the
+destination untouched like any other planning failure. Pair it with `--dry-run` to learn
+the number without writing anything at all.
+
+The smallest filesystem holding something is one with nothing left in it, which is right
+for an image that will only be read and useless for one that will be written to.
+`--slack` says how much must stay free:
+
+```console
+$ ferrosys format --size auto --slack 20% --from-dir staging \
+      --uuid "$(uuidgen)" --time 1700000000 rootfs.img
+$ ferrosys format --size auto --slack 64M --from-dir staging \
+      --uuid "$(uuidgen)" --time 1700000000 rootfs.img
+```
+
+The share is of the finished filesystem, so `--slack 20%` is what `df` reports as 80%
+used; the super-user reservation (`--reserved-percent`) is separate accounting over the
+same blocks, so an unprivileged writer sees 15% of it at the 5% default. `--slack` belongs
+to `--size auto` and is a usage error over a size that was named outright, which has no
+room to find.
+
+On a small image the floor is often the journal rather than the contents — a log costs
+about 4 MiB whatever goes in the filesystem — so `--size auto -t ext2` is what fits a
+boot partition to what it holds.
+
 ### Two more things about `format`
 
 **The destination must be a regular file.** A format writes only the blocks the
@@ -143,10 +181,16 @@ $ ferrosys format --size 64M --uuid "$(uuidgen)" --time 1 \
       -O ^has_journal,^orphan_file,^metadata_csum_seed,^metadata_csum small.img
 ```
 
-Clearing the ext4-layer features one by one this way lands on the same ext2 baseline that
-`-t ext2` selects directly — the flag is the shortcut. A combination that must never reach
-disk is refused by name — dropping `has_journal` while `orphan_file` remains, for
-instance, since the orphan file's entries are journalled.
+That clears the journal and the checksums and leaves the rest of the profile intact:
+`extent`, `64bit`, `flex_bg`, `huge_file`, `dir_nlink`, and `extra_isize` are all still
+set, so the image is an ext4 one without a journal, and `ferrosys inspect` labels it
+`ext4`. `-t ext2` is not a shorthand for a list of `^` words — it selects a different
+base, and reaching that base by clearing words means clearing every ext4-layer word,
+`extent` included. Name the profile you want and layer `-O` on top of it.
+
+A combination that must never reach disk is refused by name — dropping `has_journal`
+while `orphan_file` remains, for instance, since the orphan file's entries are
+journalled, which is why the line above clears both.
 
 The same rule covers what the source holds, because a feature word is a promise about the
 structures the filesystem carries. Dropping `ext_attr` from a source whose entries have
@@ -179,10 +223,11 @@ A named count is a target, not a floor. It is spread across the groups, and each
 share is rounded up to fill whole inode-table blocks and then down to a multiple of eight,
 so the group's inodes end on a byte boundary in the inode bitmap — the same
 `s_inodes_per_group` `mke2fs` derives for the request. The rounding meets or exceeds the
-request wherever an inode-table block holds a multiple of eight inodes; at the 1024- and
-2048-byte block sizes, where a block of the default inode size holds only four, the
-multiple-of-eight step can leave the realized total a few inodes short. `ferrosys inspect`
-reports the count the filesystem actually carries.
+request wherever an inode-table block holds a multiple of eight inodes; where a block
+holds fewer than eight, the multiple-of-eight step can leave the realized total a few
+inodes short. That is the 1024-byte block at the default 256-byte inode, and the
+2048-byte block once `--inode-size 512` halves how many fit. `ferrosys inspect` reports
+the count the filesystem actually carries.
 
 `--reserved-percent` sets the share of blocks held back for the super-user, from 0 to 50,
 with up to two decimal places — `--reserved-percent 1.5` reserves 1.5%. It defaults to 5.
@@ -289,7 +334,7 @@ $ ferrosys inspect --offset 1M disk.img
 
 ## `extract`
 
-Exactly one of four things comes out.
+Exactly one of five things comes out.
 
 **A tar archive.** Ownership, modes, symlinks, hard links, and device and FIFO nodes
 travel in the header; the paths, the ids, the times (to the nanosecond, and negative for
@@ -308,6 +353,65 @@ archive unchanged.
 
 A socket is the one thing tar cannot express: it has no entry type for one. An image
 holding a socket is a typed error rather than an archive quietly missing a file.
+
+That refusal — like an inode that does not read, or an ACL that does not decode — comes
+part-way through the walk, and a named destination is created and truncated before the
+walk starts. `--atomic` covers that, as it does for `format`: the archive is written to a
+sibling temporary file and renamed over the destination once the walk is complete, so a
+walk that fails leaves whatever was at that path untouched. It applies to `--to-tar FILE`,
+the only mode with a destination to rename into; asking for it anywhere else is refused
+rather than accepted and ignored.
+
+```console
+$ ferrosys extract rootfs.img --to-tar rootfs.tar --atomic
+```
+
+**A directory tree**, which is `format --from-dir` in reverse:
+
+```console
+$ ferrosys extract rootfs.img --to-dir unpacked
+Names written:          1284
+```
+
+The destination is made if it is not there and must be empty — an extraction states what
+the filesystem holds, so a name already present would be an entry that could not be
+created, found part-way through with the tree half written. It takes the filesystem
+root's own mode, ownership, times, and extended attributes, and everything the filesystem
+holds appears beneath it at the path it holds inside the image. `/lost+found` is not
+written, so the tree is one `format --from-dir` reads straight back.
+
+Everything the archive carries is carried here too, set on the files themselves: modes,
+ownership, symlinks, hard links, device and FIFO nodes, sockets, extended attributes, and
+POSIX ACLs. Two things no host lets a caller set, so the tree carries the time it was
+written for them alone: an inode's **change time** and its **creation time**. Access and
+modification times are set exactly, to the nanosecond.
+
+Two parts of a tree need privileges — a device node needs `CAP_MKNOD`, and setting a
+recorded owner needs `CAP_CHOWN` — so an unprivileged run stops at the first of either
+and names it. That is the right answer for a tree meant to be faithful: a rootfs quietly
+missing `/dev/null` is a rootfs that boots differently. `--skip-privileged` is the opt-in
+for a run that wants what it can have, and what it left out is named on the standard
+error rather than assumed:
+
+```console
+$ ferrosys extract rootfs.img --to-dir unpacked --skip-privileged
+Names written:          1282
+Ownership:              not applied — this process may not set another owner
+Skipped:                /dev/console
+Skipped:                /dev/null
+```
+
+The image is untrusted input, and a name in it is not a path to resolve. Every directory
+is created and then *opened*, and everything beneath it is created through that open
+handle by its single-component name — so a name holding a separator, a `..`, or a NUL is
+refused rather than followed, and nothing lands outside the destination. Symbolic links
+are written exactly as the image records them, absolute targets and all, which is safe
+precisely because nothing here ever follows one.
+
+There is no `--atomic` for a tree: no rename publishes a whole tree at once, and inventing
+one would promise something the run cannot do. The empty destination is what stands in its
+place — a failure part-way leaves a partial tree in a directory that held nothing, rather
+than mixed into one that did.
 
 **One file's bytes**, and nothing else on the standard output:
 
@@ -346,17 +450,23 @@ Owner:                  0:0
 Links:                  1
 Size:                   76672
 Blocks:                 152
-Accessed:               2023-11-14T22:13:20Z
-Modified:               2023-11-14T22:13:20Z
-Changed:                2023-11-14T22:13:20Z
-Created:                2023-11-14T22:13:20Z
-Xattr security.capability: 0x0100000200200000...
+Accessed:               2023-11-14T22:13:20Z (0 ns)
+Modified:               2023-11-14T22:13:20Z (0 ns)
+Changed:                2023-11-14T22:13:20Z (0 ns)
+Created:                2023-11-14T22:13:20Z (0 ns)
+Xattr security.capability: \x01\x00\x00\x02\x00 \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
 ```
 
 It reports the type, the mode both ways, ownership, link count, size, all four times, a
 device node's numbers, a symlink's target, and every extended attribute — with a stored
 POSIX ACL decoded rather than shown as bytes. A path naming a symlink describes the link
 itself, not its target. `--json` reports the same as a document.
+
+An attribute's value is bytes, and it is rendered the way a name is: printable characters
+as themselves, everything else as a `\xNN` escape, with the backslash escaping itself so
+the rendering names exactly one value. To read the bytes rather than look at them, take
+`--json`: a value that is not text carries a `value_hex` field beside it holding the bytes
+exactly, and the field's presence is itself the signal that the value is not text.
 
 In a JSON document the `mode` field is the permission bits as a **decimal** number, since
 JSON has no octal literal — `509` is `0o775` — and `mode_octal` beside it carries the usual
@@ -386,11 +496,61 @@ ext2
 
 One word on the standard output — `ext2`, `ext3`, `ext4`, or `unrecognized` — so it reads
 well in a shell test, and `--json` for a document. `--offset` points it at a partition
-inside a whole-disk image or a region a carver located.
+inside a whole-disk image or a region a carver located. A fifth answer, `unknown`, is what
+a tool prints when the library classifies a family that build has no name for: something
+recognized the image, so `unrecognized` would be the wrong word for it.
 
 This asks what an image *is*, not whether it is sound: an image with a quirk `inspect`
 would refuse still classifies here. An unrecognized image exits 8, since there is no
 filesystem to have an opinion about.
+
+## `identity`
+
+```console
+$ ferrosys identity --uuid "$(uuidgen)" --label rootfs rootfs.img
+3 superblock copies written, journal superblock updated
+```
+
+Changes what an existing filesystem is known by: its UUID, its volume label, or the seed
+its metadata checksums derive from. It is the one command that writes to an image it did
+not create, and the only one whose destination already holds something worth keeping.
+
+Every superblock copy is rewritten — the primary and each group's backup — along with the
+journal's own record of the UUID, so no copy is left claiming the old identity. Each copy
+is patched where it lies: it keeps every field this change does not name, including the
+ones this tool has no opinion about. Nothing is written until every copy has been read and
+every check has passed, so a refusal leaves the image exactly as it was. There is no
+`--atomic`: an image is rewritten in place, and a sibling temporary file would mean copying
+every byte of it to change sixteen.
+
+At least one of `--uuid`, `--label`, and `--set-checksum-seed` is required, since a run
+that would write nothing is a command line that meant to say something.
+
+### When the UUID is the checksum seed
+
+```console
+$ ferrosys identity --uuid "$(uuidgen)" legacy.img
+legacy.img: changing the UUID would invalidate every metadata checksum: this filesystem
+has metadata_csum without metadata_csum_seed, so its checksums are seeded from the UUID
+itself — set the checksum seed to keep them valid
+$ ferrosys identity --uuid "$(uuidgen)" --set-checksum-seed legacy.img
+1 superblock copies written, journal superblock updated, metadata_csum_seed set
+```
+
+Under `metadata_csum`, every metadata object in the filesystem — each group descriptor,
+inode, bitmap, directory block, and extent node — carries a checksum seeded from the
+filesystem's seed. Where `metadata_csum_seed` is set, that seed is a superblock field and
+the UUID is free to move. Where it is not, the seed *is* the UUID, so changing the UUID
+invalidates every checksum in the image at once.
+
+That is refused rather than half-performed. `--set-checksum-seed` is the way through: it
+records the seed the current UUID implies and turns `metadata_csum_seed` on, after which
+the UUID moves and every existing checksum stays valid. It is asked for rather than assumed
+because it sets an incompatible feature — a kernel that does not know `metadata_csum_seed`
+will not mount the result.
+
+Images `ferrosys format` writes carry `metadata_csum_seed` already, so this is a question
+about filesystems made elsewhere.
 
 ## A round trip, end to end
 
@@ -400,6 +560,14 @@ $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 \
       --from-tar rootfs.tar rootfs.img
 $ ferrosys inspect rootfs.img
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
+```
+
+Or with a tree at both ends, and the size taken from the tree rather than named:
+
+```console
+$ ferrosys format --size auto --slack 20% --uuid "$(uuidgen)" --time 1700000000 \
+      --from-dir rootfs --owner 0:0 rootfs.img
+$ ferrosys extract rootfs.img --to-dir unpacked --skip-privileged
 ```
 
 Every time is UTC, printed as `YYYY-MM-DDTHH:MM:SSZ`. The tool has no time zone and no

@@ -84,11 +84,15 @@ mod extent;
 #[cfg(feature = "ext")]
 mod feature;
 #[cfg(feature = "ext")]
+mod fit;
+#[cfg(feature = "ext")]
 mod geometry;
 #[cfg(feature = "ext")]
 mod hash;
 #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
 mod host;
+#[cfg(feature = "ext")]
+mod identity;
 #[cfg(feature = "ext")]
 mod journal;
 #[cfg(feature = "ext")]

@@ -66,7 +66,7 @@ pub fn rec_len_from_disk(disk: u16, block_size: usize) -> usize {
 /// Pairing this with [`rec_len_from_disk`] keeps [`DirEntry::write_to`] and
 /// [`DirEntry::read_from`] a true inverse at every block size the format allows, so the
 /// serialization stays symmetric independently of the block-size ceiling the writer
-/// currently enforces elsewhere.
+/// enforces elsewhere.
 #[must_use]
 pub fn rec_len_to_disk(len: usize, block_size: usize) -> u16 {
     if block_size < 65536 || len < 65536 {

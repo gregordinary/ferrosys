@@ -52,10 +52,11 @@ $ ferrosys inspect rootfs.img
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
 ```
 
-`format` writes a filesystem — from a tar archive, a directory tree, or empty — `inspect`
-reports on one and says whether it is sound, `extract` reads the contents back out as a
-tar archive, one file's bytes, one path's metadata, or a listing, and `detect` says which
-filesystem an image holds. The identifiers and timestamps are inputs, so the same inputs
+`format` writes a filesystem — from a tar archive, a directory tree, or empty, at a size
+you name or one `--size auto` finds from the contents — `inspect` reports on one and says
+whether it is sound, `extract` reads the contents back out as a tar archive, a directory
+tree, one file's bytes, one path's metadata, or a listing, `detect` says which filesystem
+an image holds, and `identity` changes what one is known by. The identifiers and timestamps are inputs, so the same inputs
 write the same image every time. The exit codes mirror `e2fsck`'s. See the guide's
 [command-line chapter](https://gregordinary.github.io/ferrosys/cli.html).
 

@@ -20,19 +20,22 @@
 //! down; without it the seam zeroes those fields. Which seam is active is the only
 //! thing that changes between the two, not this code.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 
 use crate::alloc::{AllocError, Allocator};
+use crate::crc32c::crc32c;
 use crate::csum::{Checksummer, Crc32c, CsumScheme, NullCsum};
 use crate::dir::{DirBlock, DirBlockKind, DirError, DirLayout, HtreeDir, LinearDir};
 use crate::extent::{
     ExtentError, build_leaves, build_tree, node_capacity, plan_tree, tail_offset, write_node,
 };
 use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE, Profile, resize_inode_size};
+use crate::fit::Slack;
 use crate::geometry::{
-    BlockRange, GeometryError, GrowReservation, InodeCount, Layout, PlanRequest, ReservedRatio,
-    plan_layout,
+    BlockRange, GeometryError, GroupLayout, GrowReservation, InodeCount, Layout, PlanRequest,
+    ReservedRatio, plan_layout,
 };
 use crate::hash::{HashSignedness, HashVersion};
 use crate::journal::{self, JournalSize};
@@ -381,6 +384,37 @@ pub enum FormatError {
         /// The image's size in bytes.
         bytes: u64,
     },
+    /// No filesystem this format describes holds the source with the room
+    /// [`FormatPlan::fit`] was asked to leave free.
+    ///
+    /// The search tries sizes up to a ceiling — the largest filesystem the feature set
+    /// addresses, or the grow target when [`GrowReservation::UpTo`] names one — and this is
+    /// what it says when the largest of them was planned and placed successfully and still
+    /// had less room left than the slack asks for. A size that *failed* is reported by its
+    /// own failure instead, so this names the case where nothing was wrong except that the
+    /// filesystem could not be made big enough.
+    #[error(
+        "no filesystem of up to {ceiling} blocks holds the source with the requested room \
+         to spare"
+    )]
+    #[non_exhaustive]
+    DoesNotFit {
+        /// The largest block count the search was allowed to try.
+        ceiling: u64,
+    },
+    /// A [`Slack::Share`] asks for a larger share of the filesystem than a fit search will
+    /// look for.
+    ///
+    /// Past the limit the filesystem is more than ten times the source it holds, and a size
+    /// that far from what the contents need is better named outright than searched for.
+    #[error("slack share of {hundredths} hundredths of a percent is past the {limit} limit")]
+    #[non_exhaustive]
+    SlackShareTooLarge {
+        /// The share asked for, in hundredths of one percent.
+        hundredths: u16,
+        /// The largest share a fit search accepts.
+        limit: u16,
+    },
     /// The format-time clock ([`FormatOptions::time`]) lies outside the range the
     /// superblock's 32-bit time fields hold: seconds in `[0, 2^32)`, from 1970 to 2106.
     /// It is refused rather than truncated to a different instant. Per-file timestamps
@@ -584,23 +618,86 @@ impl FormatPlan {
         options: FormatOptions,
     ) -> Result<Self, FormatError> {
         options.validate_format_time()?;
-        let feature = options.feature;
-        let layout = plan_layout(&options.plan_request(size_bytes))?;
-        let mut config = ModelConfig::new(feature, first_user_inode(&feature), options.time);
-        config.fixed_time = options.fixed_time;
-        let model = build_model(source, config)?;
-        if model.used_inode_count() > layout.total_inodes {
-            return Err(FormatError::TooManyInodes {
-                needed: model.used_inode_count(),
-                available: layout.total_inodes,
-            });
-        }
-        let journal_blocks = journal_size(&layout, &options)?;
+        let model = model_of(source, &options)?;
+        let (layout, journal_blocks) = plan_geometry(&model, &options, size_bytes)?;
         Ok(Self {
             layout,
             model,
             options,
             journal_blocks,
+        })
+    }
+
+    /// Plan the smallest filesystem that holds `source` with `slack` left free, deciding
+    /// the size as well as everything else.
+    ///
+    /// [`new`](Self::new) is given a size; this one finds it. The floor is not a formula —
+    /// how much room a filesystem has depends on how many groups it has, how large its
+    /// inode tables are, and how large a journal its size earns, all of which follow from
+    /// the size itself — so it is found by planning candidate sizes and placing the source
+    /// into each, which is the same placement a format performs. A candidate is judged by
+    /// what the placement leaves free, not by an estimate beside it, so a size this returns
+    /// is a size that formats.
+    ///
+    /// **The size returned formats, and one block less does not.** The search closes a
+    /// bracket whose ends are both established by placing: it ends holding a size that was
+    /// placed successfully and the size one block below it that was not. Fit is not
+    /// monotone in size — a filesystem one block larger can need another group, and so have
+    /// less room than the one below it — so that is a smallest size rather than provably
+    /// *the* smallest, and it is the guarantee worth having either way.
+    ///
+    /// The source is consumed once and the model built from it is kept, so the finished
+    /// plan is ready to [`write_to`](Self::write_to) with no second walk of the source.
+    /// [`size_bytes`](Self::size_bytes) reports what was decided.
+    ///
+    /// # What the search costs
+    ///
+    /// A handful of placements rather than one: a bracket found by doubling from what the
+    /// contents occupy, then a bisection within it. No file's bytes are read and no block is
+    /// written at any of them — a probe places, and the destination it places into keeps
+    /// nothing.
+    ///
+    /// A probe's memory is a format's at that size, because it is a format's own placement:
+    /// the allocator's bitmap, at one bit per block. So the search costs what formatting the
+    /// sizes it tries would cost, and it tries sizes near the answer.
+    ///
+    /// ```no_run
+    /// # use ferrosys::ext::{FormatOptions, FormatPlan, Slack, TreeBuilder};
+    /// # use ferrosys::ext::ondisk::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let source = TreeBuilder::new();
+    /// let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
+    /// // The smallest filesystem holding the source, with a fifth of it still free.
+    /// let plan = FormatPlan::fit(source, options, Slack::Share(2000))?;
+    /// println!("{} bytes", plan.size_bytes());
+    /// plan.write_to(std::fs::File::create("rootfs.img")?)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::SlackShareTooLarge`] if the slack asks for a share past the limit,
+    /// [`FormatError::DoesNotFit`] if no filesystem the format describes holds the source
+    /// with that room, and otherwise whatever the largest size tried failed with — which
+    /// for a source too large for its feature set is the failure that size met, not a bare
+    /// statement that nothing worked.
+    pub fn fit(
+        source: impl Source,
+        options: FormatOptions,
+        slack: Slack,
+    ) -> Result<Self, FormatError> {
+        options.validate_format_time()?;
+        // A feature set that cannot be realized fails at every size, so it is refused once
+        // here rather than found again at each candidate and reported as a sizing failure.
+        options.feature.validate().map_err(GeometryError::from)?;
+        let model = model_of(source, &options)?;
+        let fitted = crate::fit::search(&model, &options, slack)?;
+        Ok(Self {
+            layout: fitted.layout,
+            model,
+            options,
+            journal_blocks: fitted.journal_blocks,
         })
     }
 
@@ -610,11 +707,75 @@ impl FormatPlan {
         &self.layout
     }
 
+    /// The filesystem's size in bytes: its block count times its block size.
+    ///
+    /// This is what [`fit`](Self::fit) decided, and with [`Slack::None`] it is the smallest
+    /// filesystem that holds the source. For a plan from [`new`](Self::new) it is the size
+    /// that was asked for, rounded down to a whole number of blocks.
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        self.layout.total_blocks * u64::from(self.layout.block_size)
+    }
+
     /// How many inodes the source occupies, of the [`Layout::total_inodes`] the geometry
     /// provides. The reserved inodes every filesystem carries are part of the count.
     #[must_use]
     pub fn used_inodes(&self) -> u32 {
         self.model.used_inode_count()
+    }
+
+    /// The geometry this plan realized, as one canonical document.
+    ///
+    /// This is what the *size* decided: block and inode counts, the group table, the
+    /// descriptor headroom the grow reservation sized, and the journal's realized length.
+    /// It moves with the filesystem size, so two images built to the same contract at
+    /// different sizes have different geometry pins and that is correct rather than drift.
+    ///
+    /// ```text
+    /// ferrosys-geometry-pin 1
+    /// block_size 4096
+    /// total_blocks 16384
+    /// blocks_per_group 32768
+    /// first_data_block 0
+    /// group_count 1
+    /// inodes_per_group 16384
+    /// inode_table_blocks 1024
+    /// total_inodes 16384
+    /// gdt_blocks 1
+    /// reserved_gdt_blocks 256
+    /// flex_bg_size 16
+    /// max_grow_blocks 538968064
+    /// reserved_blocks 819
+    /// groups 1 crc32c 0x8a137015
+    /// journal_blocks 1024
+    /// ```
+    ///
+    /// **Pin this at a size you choose, not at the size you happen to be building.** A
+    /// [`policy_pin`](FormatOptions::policy_pin) records the options by name, so it moves
+    /// when an option is renamed or re-defaulted — and not when the formula behind one
+    /// changes underneath an unchanged name. `grow max` reads the same before and after a
+    /// change to what `Max` reserves; `reserved_gdt_blocks` does not. Planning at one
+    /// reference size and pinning the result is what turns that class of change into a
+    /// diff, and the reference size makes the pin independent of what any particular build
+    /// is sized to.
+    ///
+    /// The per-group placements are one line rather than one per group — the count, and a
+    /// `crc32c` over every field of every group in order. A filesystem has as many groups
+    /// as it has room for and a large one has millions, so the document stays a fixed size
+    /// while a placement that moves still changes it. The projection is an exhaustive
+    /// destructure, so a field added to [`Layout`] or [`GroupLayout`] is a compile error
+    /// rather than a silent omission from every recorded pin.
+    #[must_use]
+    pub fn geometry_pin(&self) -> String {
+        let mut out = String::from("ferrosys-geometry-pin 1\n");
+        push_layout_pin(&mut out, &self.layout);
+        out.push_str("journal_blocks ");
+        match self.journal_blocks {
+            Some(blocks) => out.push_str(&blocks.to_string()),
+            None => out.push_str("none"),
+        }
+        out.push('\n');
+        out
     }
 
     /// Write the filesystem into `sink`, returning the geometry it realized.
@@ -636,11 +797,377 @@ impl FormatPlan {
             journal_blocks,
         } = self;
         let feature = options.feature;
-        let mut writer = Writer::new(&layout, &feature, options, journal_blocks, &mut sink);
+        let bytes = Bytes {
+            sink: &mut sink,
+            written_end: 0,
+        };
+        let mut writer = Writer::new(&layout, &feature, options, journal_blocks, bytes);
         writer.materialize(&model)?;
         writer.extend_to_full_size()?;
         Ok(layout)
     }
+}
+
+/// Build the inode model one source implies under these options.
+///
+/// The model depends on the feature set and the timestamps and not at all on the
+/// filesystem's size, which is what lets a fit search build it once and try it against
+/// many sizes.
+fn model_of(source: impl Source, options: &FormatOptions) -> Result<FsModel, FormatError> {
+    let feature = options.feature;
+    let mut config = ModelConfig::new(feature, first_user_inode(&feature), options.time);
+    config.fixed_time = options.fixed_time;
+    Ok(build_model(source, config)?)
+}
+
+/// The geometry a size implies, checked against the model it has to hold.
+///
+/// Everything a size decides before a block is placed: the layout, whether it provides
+/// inodes enough for the model, and how large a journal it earns. One function so that
+/// planning a named size and probing a candidate one settle these the same way.
+pub(crate) fn plan_geometry(
+    model: &FsModel,
+    options: &FormatOptions,
+    size_bytes: u64,
+) -> Result<(Layout, Option<u32>), FormatError> {
+    let layout = plan_layout(&options.plan_request(size_bytes))?;
+    if model.used_inode_count() > layout.total_inodes {
+        return Err(FormatError::TooManyInodes {
+            needed: model.used_inode_count(),
+            available: layout.total_inodes,
+        });
+    }
+    let journal_blocks = journal_size(&layout, options)?;
+    Ok((layout, journal_blocks))
+}
+
+/// Place the model into this geometry and report the blocks left free, writing nothing.
+///
+/// This is the format's own placement pass over a sink that keeps nothing: the same
+/// allocator, the same calls, in the same order — so what it says about a size is what a
+/// format would find, rather than an estimate that could drift from it. The count it
+/// returns is the one the superblock's `s_free_blocks_count` would carry.
+///
+/// # Errors
+///
+/// Whatever placing the model into this geometry fails with: out of space, a journal with
+/// no room, a directory that cannot be packed.
+pub(crate) fn free_after_placing(
+    layout: &Layout,
+    options: &FormatOptions,
+    journal_blocks: Option<u32>,
+    model: &FsModel,
+) -> Result<u64, FormatError> {
+    let feature = options.feature;
+    let mut writer = Writer::new(layout, &feature, *options, journal_blocks, Discard);
+    writer.place(model)?;
+    Ok(writer.alloc.free_count())
+}
+
+/// Render bytes as lower-case hex, the form the pin document gives a UUID, a hash seed,
+/// and a volume label: exact whatever the bytes are, and one fixed width.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// A timestamp as `seconds.nanoseconds`, so the sub-second half a source can carry is part
+/// of the contract rather than rounded out of it.
+fn pin_time(t: Timestamp) -> String {
+    format!("{}.{}", t.secs, t.nanos)
+}
+
+impl FormatOptions {
+    /// The contract these options state, as one canonical document: the feature set, and
+    /// every option that is a property of *how* images are built rather than of which image
+    /// this is.
+    ///
+    /// The document is the contract. A caller records what this emits — verbatim, as a blob
+    /// — and compares it string-for-string on a later build; a difference is drift in what
+    /// the build promises, surfaced as a diff a person reads rather than as changed image
+    /// bytes nobody notices. Comparison is exactly string equality: the rendering is
+    /// deterministic, ordered, and stable across releases of this crate under the version
+    /// on its first line.
+    ///
+    /// ```text
+    /// ferrosys-policy-pin 1
+    /// compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file
+    /// incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed
+    /// ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+    /// block_size 4096
+    /// inode_size 256
+    /// grow max
+    /// inodes auto
+    /// reserved 500
+    /// errors continue
+    /// journal auto
+    /// hash_version half_md4
+    /// hash_signedness unsigned
+    /// timestamp_clamp none
+    /// ```
+    ///
+    /// **Nothing here varies with the image.** No UUID, no timestamp, no label, no block
+    /// count — those are [`identity_pin`](Self::identity_pin) and
+    /// [`FormatPlan::geometry_pin`], and each moves for reasons that are not drift. A
+    /// builder that writes many images from one set of constants gets one policy pin for
+    /// all of them, so an empty diff between two images' recorded pins means they were
+    /// built to the same contract, and a non-empty one always means something changed.
+    ///
+    /// **This is why the pin is the whole policy and not
+    /// [`FeatureSet::pin`](crate::feature::FeatureSet::pin).** The feature set decides five
+    /// of the values above. The grow reservation, inode count, reserved share, error
+    /// behavior, journal size, and the two hash choices each move bytes too, and a contract
+    /// recorded from the feature set alone shows no difference across a change to any of
+    /// them — `errors` least visibly of all, since it reaches neither the feature words nor
+    /// the geometry.
+    ///
+    /// What it does *not* catch is a change to the formula behind an option whose name is
+    /// unchanged: `grow max` reads the same before and after a change to what `Max`
+    /// reserves. [`FormatPlan::geometry_pin`] at a fixed reference size is what covers that.
+    ///
+    /// Every option is routed to one of the two documents by a single exhaustive
+    /// destructure, so a field added to [`FormatOptions`] is a compile error until it is
+    /// given a home rather than a silent omission from both.
+    #[must_use]
+    pub fn policy_pin(&self) -> String {
+        let mut policy = String::from("ferrosys-policy-pin 1\n");
+        let mut identity = String::new();
+        self.push_pins(&mut policy, &mut identity);
+        policy
+    }
+
+    /// Which image this is, as one canonical document: the identity inputs the superblock
+    /// carries verbatim.
+    ///
+    /// ```text
+    /// ferrosys-identity-pin 1
+    /// uuid 11111111111111111111111111111111
+    /// time 1700000000.0
+    /// hash_seed 00000000000000000000000000000000
+    /// volume_name 00000000000000000000000000000000
+    /// fixed_time none
+    /// ```
+    ///
+    /// This is a separate document because these fields move for a reason that is not
+    /// drift. An image is meant to have its own UUID and its own timestamps, so a builder
+    /// producing one image per board, or one per run, gets a different identity pin every
+    /// time and nothing is wrong. Recording it alongside a [`policy_pin`](Self::policy_pin)
+    /// would make every such diff non-empty and the comparison worthless.
+    ///
+    /// Every field here is recoverable from the image itself — `s_uuid`, `s_mkfs_time`,
+    /// `s_hash_seed`, and `s_volume_name` are superblock fields a reader reports — so a
+    /// caller that can open the image it built need not record this at all.
+    #[must_use]
+    pub fn identity_pin(&self) -> String {
+        let mut policy = String::new();
+        let mut identity = String::from("ferrosys-identity-pin 1\n");
+        self.push_pins(&mut policy, &mut identity);
+        identity
+    }
+
+    /// Route every option into the document it belongs in.
+    ///
+    /// Both documents are rendered together and the caller keeps the one it asked for. One
+    /// function rather than two is what makes the routing total: the destructure below is
+    /// exhaustive, so a field added to [`FormatOptions`] cannot be left out of both
+    /// documents without failing to compile — which two independent projections, each
+    /// ignoring what the other emits, would allow.
+    fn push_pins(&self, policy: &mut String, identity: &mut String) {
+        // Exhaustive on purpose: see the note above. Do not replace with field accesses.
+        let Self {
+            uuid,
+            time,
+            hash_seed,
+            hash_version,
+            hash_signedness,
+            grow,
+            inodes,
+            reserved,
+            volume_name,
+            feature,
+            errors,
+            journal,
+            fixed_time,
+        } = self;
+
+        // ── Policy: the contract, identical across every image built from these options ──
+        //
+        // The feature set is emitted in the form `FeatureSet::pin` gives it, so the two
+        // documents agree line for line about the fields they share.
+        feature.push_pin_body(policy);
+        let line = |out: &mut String, key: &str, value: String| {
+            out.push_str(key);
+            out.push(' ');
+            out.push_str(&value);
+            out.push('\n');
+        };
+        line(
+            policy,
+            "grow",
+            match grow {
+                GrowReservation::None => "none".to_string(),
+                GrowReservation::Max => "max".to_string(),
+                GrowReservation::UpTo(bytes) => format!("upto {bytes}"),
+            },
+        );
+        line(
+            policy,
+            "inodes",
+            match inodes {
+                InodeCount::Auto => "auto".to_string(),
+                InodeCount::BytesPerInode(n) => format!("bytes_per_inode {n}"),
+                InodeCount::Count(n) => format!("count {n}"),
+            },
+        );
+        // The exact stored fixed-point share, not a percentage rendered back out of it.
+        line(
+            policy,
+            "reserved",
+            reserved.hundredths_of_percent().to_string(),
+        );
+        line(
+            policy,
+            "errors",
+            match errors {
+                ErrorBehavior::Continue => "continue".to_string(),
+                ErrorBehavior::RemountReadOnly => "remount_read_only".to_string(),
+                ErrorBehavior::Panic => "panic".to_string(),
+            },
+        );
+        line(
+            policy,
+            "journal",
+            match journal {
+                JournalSize::Auto => "auto".to_string(),
+                JournalSize::Blocks(n) => format!("blocks {n}"),
+            },
+        );
+        line(
+            policy,
+            "hash_version",
+            match hash_version {
+                HashVersion::Legacy => "legacy".to_string(),
+                HashVersion::HalfMd4 => "half_md4".to_string(),
+                HashVersion::Tea => "tea".to_string(),
+            },
+        );
+        line(
+            policy,
+            "hash_signedness",
+            match hash_signedness {
+                HashSignedness::Unsigned => "unsigned".to_string(),
+                HashSignedness::Signed => "signed".to_string(),
+            },
+        );
+        // Whether the build clamps every inode to one time is a property of the build; the
+        // time it clamps to is a property of the image, so the two are recorded apart.
+        line(
+            policy,
+            "timestamp_clamp",
+            match fixed_time {
+                None => "none".to_string(),
+                Some(_) => "fixed".to_string(),
+            },
+        );
+
+        // ── Identity: which image this is ──
+        line(identity, "uuid", hex(uuid));
+        line(identity, "time", pin_time(*time));
+        line(identity, "hash_seed", hex(hash_seed));
+        line(identity, "volume_name", hex(volume_name));
+        line(
+            identity,
+            "fixed_time",
+            match fixed_time {
+                None => "none".to_string(),
+                Some(t) => pin_time(*t),
+            },
+        );
+    }
+}
+
+/// The realized geometry as the pin document's lines. See [`FormatPlan::pin`].
+fn push_layout_pin(out: &mut String, layout: &Layout) {
+    // Exhaustive on purpose, as above.
+    let Layout {
+        // The feature set this layout was planned for is the options' own, and states the
+        // contract rather than the geometry: it belongs to the policy pin, which emits it.
+        feature: _,
+        block_size,
+        total_blocks,
+        blocks_per_group,
+        first_data_block,
+        group_count,
+        inodes_per_group,
+        inode_table_blocks,
+        total_inodes,
+        gdt_blocks,
+        reserved_gdt_blocks,
+        flex_bg_size,
+        max_grow_blocks,
+        reserved_blocks,
+        groups,
+    } = layout;
+
+    for (key, value) in [
+        // The block size is geometry as much as it is contract: every count below is in
+        // these units, so a document without it states numbers with no scale.
+        ("block_size", u64::from(*block_size)),
+        ("total_blocks", *total_blocks),
+        ("blocks_per_group", u64::from(*blocks_per_group)),
+        ("first_data_block", u64::from(*first_data_block)),
+        ("group_count", u64::from(*group_count)),
+        ("inodes_per_group", u64::from(*inodes_per_group)),
+        ("inode_table_blocks", u64::from(*inode_table_blocks)),
+        ("total_inodes", u64::from(*total_inodes)),
+        ("gdt_blocks", u64::from(*gdt_blocks)),
+        ("reserved_gdt_blocks", u64::from(*reserved_gdt_blocks)),
+        ("flex_bg_size", u64::from(*flex_bg_size)),
+        ("max_grow_blocks", *max_grow_blocks),
+        ("reserved_blocks", *reserved_blocks),
+    ] {
+        out.push_str(key);
+        out.push(' ');
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+
+    // One line for a table with as many rows as the filesystem has groups: the count, and
+    // a checksum over every field of every row. A placement that moves changes the digest.
+    let digest = groups_digest(groups);
+    out.push_str(&format!("groups {group_count} crc32c 0x{digest:08x}\n"));
+}
+
+/// A `crc32c` over the per-group placements, field by field in group order.
+///
+/// Each field is fed in its widest form and in a fixed order, so the digest depends on the
+/// placements and on nothing about how they happen to be stored.
+fn groups_digest(groups: &[GroupLayout]) -> u32 {
+    let mut crc = !0u32;
+    for group in groups {
+        // Exhaustive on purpose, as above: a placement field added here must change the
+        // digest, so leaving it out has to be a compile error.
+        let GroupLayout {
+            index,
+            start_block,
+            block_count,
+            has_super,
+            block_bitmap,
+            inode_bitmap,
+            inode_table,
+        } = group;
+        crc = crc32c(crc, &u64::from(*index).to_le_bytes());
+        crc = crc32c(crc, &start_block.to_le_bytes());
+        crc = crc32c(crc, &u64::from(*block_count).to_le_bytes());
+        crc = crc32c(crc, &[u8::from(*has_super)]);
+        crc = crc32c(crc, &block_bitmap.to_le_bytes());
+        crc = crc32c(crc, &inode_bitmap.to_le_bytes());
+        crc = crc32c(crc, &inode_table.to_le_bytes());
+    }
+    !crc
 }
 
 /// The journal's size in blocks for a planned geometry, or `None` under a feature set that
@@ -691,18 +1218,85 @@ fn journal_size(layout: &Layout, options: &FormatOptions) -> Result<Option<u32>,
     Ok(Some(blocks))
 }
 
-/// The mutable state of one format: the destination, the allocator, and the inodes
-/// as they are built.
-struct Writer<'a, W> {
-    layout: &'a Layout,
-    feature: &'a FeatureSet,
-    options: FormatOptions,
-    alloc: Allocator,
-    /// Where the bytes go. Written at absolute offsets and never read back.
+/// Where a format's bytes go.
+///
+/// There are two, and the second is what a fit search runs on: [`Bytes`] writes to a
+/// seekable destination, [`Discard`] keeps nothing at all. Which one is in place changes
+/// no placement decision — the same allocator calls happen in the same order either way —
+/// so a search that only places settles exactly what a write would find out about a size,
+/// without writing a block or reading a file.
+trait Sink {
+    /// Take `bytes` at absolute byte offset `offset`.
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), FormatError>;
+
+    /// Whether the bytes are kept. A sink that discards them lets a file's contents go
+    /// unread, which is the difference between a fit search costing a placement and
+    /// costing a whole format.
+    fn keeps_bytes(&self) -> bool;
+
+    /// Make the destination as long as the filesystem, for the case where its final
+    /// blocks hold nothing and so were never written.
+    fn extend_to(&mut self, size: u64) -> Result<(), FormatError>;
+}
+
+/// The sink that writes: bytes go to a seekable destination at absolute offsets, and
+/// nothing is ever read back.
+struct Bytes<W> {
     sink: W,
     /// One past the highest byte offset written, so the destination can be extended
     /// to the filesystem's full size when the last block holds nothing.
     written_end: u64,
+}
+
+impl<W: Write + Seek> Sink for Bytes<W> {
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), FormatError> {
+        self.sink.seek(SeekFrom::Start(offset))?;
+        self.sink.write_all(bytes)?;
+        self.written_end = self.written_end.max(offset + bytes.len() as u64);
+        Ok(())
+    }
+
+    fn keeps_bytes(&self) -> bool {
+        true
+    }
+
+    fn extend_to(&mut self, size: u64) -> Result<(), FormatError> {
+        if self.written_end < size {
+            // The last byte was never written, so it is already zero; writing a zero
+            // there only grows the destination.
+            self.write_at(size - 1, &[0])?;
+        }
+        Ok(())
+    }
+}
+
+/// The sink that keeps nothing, so what a format decides can be found out without a
+/// destination to decide it into.
+struct Discard;
+
+impl Sink for Discard {
+    fn write_at(&mut self, _offset: u64, _bytes: &[u8]) -> Result<(), FormatError> {
+        Ok(())
+    }
+
+    fn keeps_bytes(&self) -> bool {
+        false
+    }
+
+    fn extend_to(&mut self, _size: u64) -> Result<(), FormatError> {
+        Ok(())
+    }
+}
+
+/// The mutable state of one format: the destination, the allocator, and the inodes
+/// as they are built.
+struct Writer<'a, S> {
+    layout: &'a Layout,
+    feature: &'a FeatureSet,
+    options: FormatOptions,
+    alloc: Allocator,
+    /// Where the bytes go.
+    sink: S,
     block_size: usize,
     /// The metadata-checksum seam: [`Crc32c`] when `metadata_csum` is on, otherwise
     /// [`NullCsum`], which zeroes every checksum. Held dynamically so the per-object
@@ -727,13 +1321,13 @@ struct Writer<'a, W> {
     journal_blocks: Option<u32>,
 }
 
-impl<'a, W: Write + Seek> Writer<'a, W> {
+impl<'a, S: Sink> Writer<'a, S> {
     fn new(
         layout: &'a Layout,
         feature: &'a FeatureSet,
         options: FormatOptions,
         journal_blocks: Option<u32>,
-        sink: W,
+        sink: S,
     ) -> Self {
         let block_size = layout.block_size as usize;
         let csum: Box<dyn Checksummer> = if feature.has_metadata_csum() {
@@ -763,7 +1357,6 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             options,
             alloc: Allocator::new(layout),
             sink,
-            written_end: 0,
             block_size,
             csum,
             dir,
@@ -774,14 +1367,24 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         }
     }
 
-    fn materialize(&mut self, model: &FsModel) -> Result<(), FormatError> {
-        // Data first: allocating file, directory, symlink, and resize-map blocks
-        // settles the allocator before free counts and bitmaps are read back.
+    /// Place every block the filesystem occupies: the source's inodes, then the ones the
+    /// filesystem provides for itself.
+    ///
+    /// This is the whole of what consumes free space, so it is what decides whether a size
+    /// works — and it is all a fit search runs. Once it returns, the allocator holds the
+    /// filesystem's settled free state and every remaining pass only reads it.
+    fn place(&mut self, model: &FsModel) -> Result<(), FormatError> {
         for minode in model.inodes.values() {
             let inode = self.materialize_inode(minode)?;
             self.inodes.insert(minode.number, inode);
         }
-        self.materialize_reserved_inodes()?;
+        self.materialize_reserved_inodes()
+    }
+
+    fn materialize(&mut self, model: &FsModel) -> Result<(), FormatError> {
+        // Data first: allocating file, directory, symlink, and resize-map blocks
+        // settles the allocator before free counts and bitmaps are read back.
+        self.place(model)?;
 
         // Then the fixed structures, in any order — they read the settled state.
         self.write_inode_tables()?;
@@ -792,22 +1395,14 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
 
     /// Write `bytes` at absolute byte offset `offset`.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), FormatError> {
-        self.sink.seek(SeekFrom::Start(offset))?;
-        self.sink.write_all(bytes)?;
-        self.written_end = self.written_end.max(offset + bytes.len() as u64);
-        Ok(())
+        self.sink.write_at(offset, bytes)
     }
 
     /// Make the destination as long as the filesystem, for the case where its final
     /// blocks hold nothing and so were never written.
     fn extend_to_full_size(&mut self) -> Result<(), FormatError> {
         let size = self.layout.total_blocks * u64::from(self.layout.block_size);
-        if self.written_end < size {
-            // The last byte was never written, so it is already zero; writing a zero
-            // there only grows the destination.
-            self.write_at(size - 1, &[0])?;
-        }
-        Ok(())
+        self.sink.extend_to(size)
     }
 
     /// A blank inode carrying the extra area this filesystem's inode size affords.
@@ -872,24 +1467,35 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
                     .any(|b| matches!(b.kind, DirBlockKind::Index { .. }));
                 self.write_dir_checksums(minode.number, &mut blocks);
                 let bytes: Vec<Vec<u8>> = blocks.into_iter().map(|b| b.bytes).collect();
-                self.place_blocks(minode.number, &mut inode, &bytes)?;
+                self.place_blocks(minode.number, &mut inode, bytes.iter())?;
                 if indexed {
                     inode.flags = inode.flags | InodeFlags::INDEX;
                 }
             }
             Content::File(content) => {
-                // The bytes are read here, at placement, rather than held from the moment
-                // the source was built: peak memory is the largest single file rather than
-                // every file at once. A source that supplied them owned pays nothing extra
-                // — the read hands back what it already holds.
-                let bytes = content.read()?;
-                let blocks = chunk_into_blocks(&bytes, self.block_size);
-                self.place_blocks(minode.number, &mut inode, &blocks)?;
+                // The block count comes from the length the content declares, which is
+                // known without reading it. That is what lets a fit search place a file
+                // without opening it — and it is the same count the bytes below chunk
+                // into, because a content that read short is a file that changed since the
+                // source named it, which `FileContent::read` refuses rather than reports.
+                let count = content.len().div_ceil(self.block_size as u64);
+                let physical = self.map_data_blocks(minode.number, &mut inode, count)?;
+                if self.sink.keeps_bytes() {
+                    // The bytes are read here, at placement, rather than held from the
+                    // moment the source was built: peak memory is the largest single file
+                    // rather than every file at once. A source that supplied them owned
+                    // pays nothing extra — the read hands back what it already holds.
+                    let bytes = content.read()?;
+                    let block_size = self.block_size;
+                    for (data, &phys) in block_chunks(&bytes, block_size).zip(&physical) {
+                        self.write_block(phys, data.as_ref())?;
+                    }
+                }
                 inode.size = content.len();
             }
             Content::SlowSymlink(target) => {
-                let blocks = chunk_into_blocks(target, self.block_size);
-                self.place_blocks(minode.number, &mut inode, &blocks)?;
+                let block_size = self.block_size;
+                self.place_blocks(minode.number, &mut inode, block_chunks(target, block_size))?;
                 inode.size = target.len() as u64;
             }
             Content::FastSymlink(target) => {
@@ -954,33 +1560,57 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         Ok(())
     }
 
-    /// Allocate blocks for `blocks`, write their contents, and map them at the inode.
+    /// Allocate `count` data blocks, map them at the inode, and return the physical block
+    /// each logical block `0..count` landed on, in order.
+    ///
     /// The extent family roots an extent tree; the block-mapped family fills the classic
-    /// direct-and-indirect map. An empty content set still gets an empty extent header
-    /// (extent family) or an empty map (block-mapped family), so the inode is valid.
-    fn place_blocks(
+    /// direct-and-indirect map. Either way the map's own blocks — extent nodes, indirect
+    /// blocks — are allocated here too and counted into `i_blocks`, so this is every block
+    /// an inode's contents cost. A count of zero still gets an empty extent header (extent
+    /// family) or an empty map (block-mapped family), so the inode is valid.
+    ///
+    /// The map is placed and the data written separately, which is what lets a file whose
+    /// blocks are mostly zero (the journal) write only the blocks it must — and what lets a
+    /// fit search take this path and stop, since nothing below it moves a block.
+    fn map_data_blocks(
         &mut self,
         ino: u32,
         inode: &mut Inode,
-        blocks: &[Vec<u8>],
-    ) -> Result<(), FormatError> {
+        count: u64,
+    ) -> Result<Vec<u64>, FormatError> {
         if self.feature.has_extents() {
             inode.flags = InodeFlags::EXTENTS;
-            let ranges = self.alloc.allocate(blocks.len() as u64)?;
+            let ranges = self.alloc.allocate(count)?;
             let physical = flatten(&ranges);
-            for (data, &phys) in blocks.iter().zip(&physical) {
-                self.write_block(phys, data)?;
-            }
             let meta = self.root_extent_tree(ino, inode, &ranges)?;
-            inode.blocks = (blocks.len() as u64 + meta) * self.sectors_per_block();
+            inode.blocks = (count + meta) * self.sectors_per_block();
+            Ok(physical)
         } else {
-            let physical = self.build_classic_map(inode, blocks.len())?;
-            for (data, &phys) in blocks.iter().zip(&physical) {
-                self.write_block(phys, data)?;
-            }
+            self.build_classic_map(inode, count)
+        }
+    }
+
+    /// Allocate blocks for `blocks`, write their contents, and map them at the inode.
+    ///
+    /// This is [`map_data_blocks`](Self::map_data_blocks) for content already in memory: a
+    /// directory's packed blocks, or a symlink target too long to live in the inode. A
+    /// regular file's contents take the mapping call directly, so its bytes are read only
+    /// when the sink keeps them.
+    fn place_blocks<B: AsRef<[u8]>>(
+        &mut self,
+        ino: u32,
+        inode: &mut Inode,
+        blocks: impl ExactSizeIterator<Item = B>,
+    ) -> Result<(), FormatError> {
+        // The blocks are consumed once, as they are written, so a caller may hand over
+        // chunks that borrow their source rather than a materialized copy of it.
+        let count = blocks.len();
+        let physical = self.map_data_blocks(ino, inode, count as u64)?;
+        for (data, &phys) in blocks.zip(&physical) {
+            self.write_block(phys, data.as_ref())?;
         }
         if inode.size == 0 {
-            inode.size = (blocks.len() * self.block_size) as u64;
+            inode.size = (count * self.block_size) as u64;
         }
         Ok(())
     }
@@ -997,22 +1627,22 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     /// first entered, which is the order `mke2fs` writes and the interleaving that fixes
     /// each block's number. Sets `inode.flags` and `inode.blocks`; leaves `inode.size` to
     /// the caller.
-    fn build_classic_map(&mut self, inode: &mut Inode, n: usize) -> Result<Vec<u64>, FormatError> {
+    fn build_classic_map(&mut self, inode: &mut Inode, n: u64) -> Result<Vec<u64>, FormatError> {
         inode.flags = InodeFlags::NONE;
-        let mut physical = Vec::with_capacity(n);
+        let mut physical = Vec::new();
         let mut meta = 0u64;
 
         // Twelve direct pointers: logical blocks 0..11 in words 0..11.
-        for slot in 0..n.min(DIRECT_BLOCKS) {
+        for slot in 0..n.min(DIRECT_BLOCKS as u64) {
             let phys = self.alloc.allocate_one()?;
             physical.push(phys);
-            put_u32(&mut inode.block, slot * 4, map_block(phys)?);
+            put_u32(&mut inode.block, slot as usize * 4, map_block(phys)?);
         }
 
         // Single-, double-, and triple-indirect trees hang off words 12, 13, 14. Each is
         // built only when the data reaches it, and allocated at the moment it is entered.
         for level in 1..=INDIRECT_LEVELS {
-            if physical.len() >= n {
+            if physical.len() as u64 >= n {
                 break;
             }
             let root = self.build_indirect(level as u32, n, &mut physical, &mut meta)?;
@@ -1023,7 +1653,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             );
         }
 
-        inode.blocks = (n as u64 + meta) * self.sectors_per_block();
+        inode.blocks = (n + meta) * self.sectors_per_block();
         Ok(physical)
     }
 
@@ -1038,7 +1668,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     fn build_indirect(
         &mut self,
         level: u32,
-        n: usize,
+        n: u64,
         physical: &mut Vec<u64>,
         meta: &mut u64,
     ) -> Result<u64, FormatError> {
@@ -1047,7 +1677,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
         let ppb = self.block_size / 4;
         let mut ptrs = vec![0u8; self.block_size];
         for slot in 0..ppb {
-            if physical.len() >= n {
+            if physical.len() as u64 >= n {
                 break;
             }
             let child = if level == 1 {
@@ -1286,7 +1916,7 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
             // interleaved with the log the same way `mke2fs` writes them. Only the first
             // block, the jbd2 superblock, is written; the rest stays zeroed.
             let physical = self
-                .build_classic_map(&mut inode, blocks as usize)
+                .build_classic_map(&mut inode, u64::from(blocks))
                 .map_err(journal_space)?;
             self.write_block(physical[0], &sb)?;
         }
@@ -1736,19 +2366,22 @@ impl<'a, W: Write + Seek> Writer<'a, W> {
     }
 }
 
-/// Split content into block-sized chunks, zero-padding the final chunk.
-fn chunk_into_blocks(bytes: &[u8], block_size: usize) -> Vec<Vec<u8>> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    bytes
-        .chunks(block_size)
-        .map(|chunk| {
+/// Split content into block-sized chunks for placement, zero-padding the final chunk.
+///
+/// The chunks borrow the source. Only a final short chunk is copied, into a padded block
+/// of its own, so placing a file costs one block beyond the file's own bytes rather than a
+/// second copy of it — which is what lets the contract be "peak memory is the largest
+/// single file" rather than twice that.
+fn block_chunks(bytes: &[u8], block_size: usize) -> impl ExactSizeIterator<Item = Cow<'_, [u8]>> {
+    bytes.chunks(block_size).map(move |chunk| {
+        if chunk.len() == block_size {
+            Cow::Borrowed(chunk)
+        } else {
             let mut block = vec![0u8; block_size];
             block[..chunk.len()].copy_from_slice(chunk);
-            block
-        })
-        .collect()
+            Cow::Owned(block)
+        }
+    })
 }
 
 /// Flatten allocated ranges into the physical block numbers they cover, in order.
@@ -1778,6 +2411,226 @@ mod tests {
         let mut o = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16]);
         o.grow = GrowReservation::UpTo(32 * 1024 * MIB);
         o
+    }
+
+    /// The plan the pin tests read: the default profile at a size small enough to state
+    /// every geometry number in the golden document.
+    fn pinned_options() -> FormatOptions {
+        let mut o = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16]);
+        o.grow = GrowReservation::Max;
+        o
+    }
+
+    fn pinned_plan() -> FormatPlan {
+        FormatPlan::new(TreeBuilder::new(), 64 * MIB, pinned_options()).expect("plan")
+    }
+
+    #[test]
+    fn the_policy_pin_is_the_document_it_documents() {
+        // The golden document, and what `policy_pin`'s rustdoc shows, so the example a
+        // reader copies is the one the code emits. Every value here is a decision that
+        // moves bytes and none of them varies with the image.
+        let expected = "\
+ferrosys-policy-pin 1
+compat 0x0000103c has_journal ext_attr resize_inode dir_index orphan_file
+incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed
+ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+block_size 4096
+inode_size 256
+grow max
+inodes auto
+reserved 500
+errors continue
+journal auto
+hash_version half_md4
+hash_signedness unsigned
+timestamp_clamp none
+";
+        assert_eq!(pinned_options().policy_pin(), expected);
+    }
+
+    #[test]
+    fn the_identity_pin_is_the_document_it_documents() {
+        let expected = "\
+ferrosys-identity-pin 1
+uuid 11111111111111111111111111111111
+time 1700000000.0
+hash_seed 00000000000000000000000000000000
+volume_name 00000000000000000000000000000000
+fixed_time none
+";
+        assert_eq!(pinned_options().identity_pin(), expected);
+    }
+
+    #[test]
+    fn the_geometry_pin_is_the_document_it_documents() {
+        let expected = "\
+ferrosys-geometry-pin 1
+block_size 4096
+total_blocks 16384
+blocks_per_group 32768
+first_data_block 0
+group_count 1
+inodes_per_group 16384
+inode_table_blocks 1024
+total_inodes 16384
+gdt_blocks 1
+reserved_gdt_blocks 256
+flex_bg_size 16
+max_grow_blocks 538968064
+reserved_blocks 819
+groups 1 crc32c 0x8a137015
+journal_blocks 1024
+";
+        assert_eq!(pinned_plan().geometry_pin(), expected);
+    }
+
+    #[test]
+    fn the_policy_pin_holds_still_while_the_image_varies() {
+        // The property the split exists for. A builder writing one image per board changes
+        // the identity and the size every time; if either reached the policy pin, an
+        // empty-diff comparison of two boards' contracts would be impossible.
+        let base = pinned_options().policy_pin();
+        for (what, mut options) in [
+            ("uuid", pinned_options()),
+            ("time", pinned_options()),
+            ("hash_seed", pinned_options()),
+            ("volume_name", pinned_options()),
+        ] {
+            match what {
+                "uuid" => options.uuid = [0x99; 16],
+                "time" => options.time = Timestamp::from_secs(1_800_000_123),
+                "hash_seed" => options.hash_seed = [0x44; 16],
+                _ => options.volume_name = *b"board-two\0\0\0\0\0\0\0",
+            }
+            assert_eq!(base, options.policy_pin(), "{what} reached the policy pin");
+            assert_ne!(
+                pinned_options().identity_pin(),
+                options.identity_pin(),
+                "{what} did not reach the identity pin"
+            );
+        }
+        // And the size, which is not an option at all: two filesystems built to one
+        // contract at different sizes pin the same policy and different geometry.
+        let small = FormatPlan::new(TreeBuilder::new(), 64 * MIB, pinned_options()).expect("plan");
+        let large = FormatPlan::new(TreeBuilder::new(), 512 * MIB, pinned_options()).expect("plan");
+        assert_eq!(base, pinned_options().policy_pin());
+        assert_ne!(
+            small.geometry_pin(),
+            large.geometry_pin(),
+            "two sizes pin the same geometry"
+        );
+    }
+
+    #[test]
+    fn every_option_that_moves_bytes_moves_one_of_the_two_pins() {
+        // Each case changes exactly one input. A knob absent from *both* documents would
+        // produce identical pins for a different image, which is the failure the pins exist
+        // to prevent -- and `errors` is the field that reaches neither the feature words
+        // nor the geometry, so nothing else would record it.
+        /// One knob's name, whether it belongs to the policy, and the change that moves it.
+        type Case = (&'static str, bool, Box<dyn Fn(&mut FormatOptions)>);
+        let cases: Vec<Case> = vec![
+            (
+                "uuid",
+                false,
+                Box::new(|o: &mut FormatOptions| o.uuid = [0x22; 16]),
+            ),
+            (
+                "time",
+                false,
+                Box::new(|o: &mut FormatOptions| o.time = Timestamp::from_secs(1_700_000_001)),
+            ),
+            (
+                "hash_seed",
+                false,
+                Box::new(|o: &mut FormatOptions| o.hash_seed = [0x33; 16]),
+            ),
+            (
+                "volume_name",
+                false,
+                Box::new(|o: &mut FormatOptions| o.volume_name = *b"rootfs\0\0\0\0\0\0\0\0\0\0"),
+            ),
+            (
+                "fixed_time",
+                // Both: whether a build clamps is policy, the time it clamps to is identity.
+                true,
+                Box::new(|o: &mut FormatOptions| {
+                    o.fixed_time = Some(Timestamp::from_secs(1_600_000_000));
+                }),
+            ),
+            (
+                "hash_version",
+                true,
+                Box::new(|o: &mut FormatOptions| o.hash_version = HashVersion::Tea),
+            ),
+            (
+                "hash_signedness",
+                true,
+                Box::new(|o: &mut FormatOptions| o.hash_signedness = HashSignedness::Signed),
+            ),
+            (
+                "grow",
+                true,
+                Box::new(|o: &mut FormatOptions| o.grow = GrowReservation::None),
+            ),
+            (
+                "inodes",
+                true,
+                Box::new(|o: &mut FormatOptions| o.inodes = InodeCount::Count(2048)),
+            ),
+            (
+                "reserved",
+                true,
+                Box::new(|o: &mut FormatOptions| {
+                    o.reserved = ReservedRatio::from_hundredths_of_percent(1000).expect("10%");
+                }),
+            ),
+            (
+                "feature",
+                true,
+                Box::new(|o: &mut FormatOptions| o.feature = FeatureSet::EXT2),
+            ),
+            (
+                "errors",
+                true,
+                Box::new(|o: &mut FormatOptions| o.errors = ErrorBehavior::Panic),
+            ),
+            (
+                "journal",
+                true,
+                Box::new(|o: &mut FormatOptions| o.journal = JournalSize::Blocks(2048)),
+            ),
+        ];
+
+        let base_policy = pinned_options().policy_pin();
+        let base_identity = pinned_options().identity_pin();
+        for (name, is_policy, change) in cases {
+            let mut o = pinned_options();
+            change(&mut o);
+            let moved = if is_policy {
+                base_policy != o.policy_pin()
+            } else {
+                base_identity != o.identity_pin()
+            };
+            let which = if is_policy { "policy" } else { "identity" };
+            assert!(moved, "changing {name} left the {which} pin unchanged");
+        }
+    }
+
+    #[test]
+    fn a_moved_group_placement_moves_the_digest() {
+        // The group table is a digest rather than a list, so this is what proves the
+        // digest is load-bearing: two layouts whose scalar geometry agrees but whose
+        // placements differ must not pin alike.
+        let mut layout = pinned_plan().layout().clone();
+        let before = groups_digest(&layout.groups);
+        layout.groups[0].inode_table += 1;
+        assert_ne!(
+            before,
+            groups_digest(&layout.groups),
+            "a moved inode table changed no digest"
+        );
     }
 
     #[test]
@@ -1890,9 +2743,9 @@ mod tests {
         .expect("model");
         assert!(model.inodes.contains_key(&ORPHAN_INO), "the entry took it");
 
-        let mut sink = std::io::Cursor::new(Vec::new());
         let journal = journal_size(&layout, &options).expect("the journal size is realizable");
-        let mut writer = Writer::new(&layout, &feature, options, journal, &mut sink);
+        // The refusal happens while placing, so no destination is needed to provoke it.
+        let mut writer = Writer::new(&layout, &feature, options, journal, Discard);
         let err = writer
             .materialize(&model)
             .expect_err("the collision is refused");

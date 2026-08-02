@@ -18,9 +18,10 @@ use util::{available, e2fsck_clean, tool};
 use ferrosys::ext::acl::{EXEC, READ, WRITE};
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    Acl, AclEntry, AclQualifier, Compat, FormatOptions, GrowReservation, Image, Incompat,
-    InodeCount, Metadata, OpenOptions, Profile, Reader, ReservedRatio, RoCompat, Source,
-    TreeBuilder, format, format_to,
+    Acl, AclEntry, AclQualifier, Compat, FormatOptions, FormatPlan, GrowReservation,
+    IdentityChange, IdentityError, Image, Incompat, InodeCount, LayeredSource, Metadata,
+    OpenOptions, Profile, Reader, ReservedRatio, RoCompat, Slack, Source, TreeBuilder, format,
+    format_to, rewrite_identity,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -198,6 +199,317 @@ fn e2fsck_gate() {
     }
 }
 
+#[test]
+fn a_filesystem_sized_to_its_source_passes_e2fsck() {
+    if !available("e2fsck") {
+        return;
+    }
+    // A fitted filesystem is the tightest one this crate writes: every structure sized to
+    // the size the search settled on, and almost nothing free. That is exactly where an
+    // accounting slip hides — a free count off by one, a final group whose metadata barely
+    // fits — so the gate is that an external checker still finds nothing wrong with it.
+    //
+    // Across the families, because each places its data differently, and across the slack
+    // settings, because the room left over moves which size is chosen and so which group is
+    // the last one.
+    for profile in [Profile::Ext2, Profile::Ext3, Profile::Ext4] {
+        for slack in [Slack::None, Slack::Bytes(4 * MIB), Slack::Share(2500)] {
+            let mut opts = options();
+            opts.feature = profile.feature_set();
+            let plan = FormatPlan::fit(populated(), opts, slack)
+                .unwrap_or_else(|e| panic!("{profile:?} with {slack:?}: {e}"));
+            let size = plan.size_bytes();
+            let file = tempfile::NamedTempFile::new().expect("temp file");
+            plan.write_to(file.as_file())
+                .expect("write the fitted image");
+            e2fsck_clean(file.path()).unwrap_or_else(|e| {
+                panic!("e2fsck faulted the {profile:?} image fitted to {size} bytes with {slack:?}:\n{e}")
+            });
+        }
+    }
+}
+
+#[test]
+fn a_layered_source_formats_into_an_image_that_holds_the_composition() {
+    // The composition's rules are unit-tested; this is the end-to-end claim, that the
+    // entry list they produce is one the model accepts and the writer realizes. The
+    // subtree drop is the part worth proving here: it removes entries whose parent is
+    // gone, and a list that kept them would be a model error rather than a wrong image.
+    let time = Timestamp::from_secs(FAKE_TIME as i64);
+    let m = |mode| Metadata::new(mode, time);
+
+    let base = populated()
+        .directory(b"/opt".to_vec(), m(0o755))
+        .directory(b"/opt/pkg".to_vec(), m(0o755))
+        .file(
+            b"/opt/pkg/data".to_vec(),
+            b"from the base\n".to_vec(),
+            m(0o644),
+        );
+    let overlay = TreeBuilder::new()
+        // Replaces a file the base placed.
+        .file(b"/etc/hostname".to_vec(), b"overlaid\n".to_vec(), m(0o600))
+        // Replaces a directory, so the base's /opt/pkg and its file go with it.
+        .file(b"/opt".to_vec(), b"now a file\n".to_vec(), m(0o644))
+        // And adds something no layer had.
+        .file(b"/etc/issue".to_vec(), b"welcome\n".to_vec(), m(0o644))
+        // Replaces the target of a hard link the base placed. The link names a path, so
+        // under later-wins it is the new content that both names reach — and they are
+        // still one file.
+        .file(
+            b"/bin/sh".to_vec(),
+            b"the overlay's shell\n".to_vec(),
+            m(0o755),
+        );
+
+    let source = LayeredSource::new().layer(base).layer(overlay);
+    let file = format_file(source, 64 * MIB, options());
+
+    let mut r = Reader::open(std::fs::File::open(file.path()).expect("open")).expect("read back");
+    assert_eq!(
+        read_path(&mut r, b"/etc/hostname"),
+        b"overlaid\n",
+        "the overlay won"
+    );
+    assert_eq!(
+        read_path(&mut r, b"/etc/issue"),
+        b"welcome\n",
+        "the overlay's addition"
+    );
+    assert_eq!(
+        read_path(&mut r, b"/opt"),
+        b"now a file\n",
+        "a file where a directory was"
+    );
+    assert!(
+        r.lookup(b"/opt/pkg/data").is_err(),
+        "the replaced directory's contents are gone"
+    );
+    // A hard link names a path, so replacing its target replaces what both names hold —
+    // and leaves them one file rather than two.
+    assert_eq!(read_path(&mut r, b"/bin/sh"), b"the overlay's shell\n");
+    assert_eq!(
+        read_path(&mut r, b"/bin/dash"),
+        b"the overlay's shell\n",
+        "the link followed the new content"
+    );
+    let (sh, inode) = r.lookup(b"/bin/sh").expect("lookup");
+    let (dash, _) = r.lookup(b"/bin/dash").expect("lookup");
+    assert_eq!(sh, dash, "the two names are still one inode");
+    assert_eq!(inode.links_count, 2);
+
+    if available("e2fsck") {
+        e2fsck_clean(file.path()).expect("a layered image checks clean");
+    }
+}
+
+/// The bytes at one path inside an image, following symbolic links as a lookup does.
+fn read_path(r: &mut Reader<std::fs::File>, path: &[u8]) -> Vec<u8> {
+    let (_, inode) = r.lookup(path).expect("lookup");
+    r.read_data(&inode).expect("read")
+}
+
+/// Open an image for the read-modify-write a re-identification performs.
+fn open_rw(path: &std::path::Path) -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("open the image for rewriting")
+}
+
+/// The UUID `dumpe2fs` reports, so what a foreign implementation reads back is the
+/// assertion rather than what this crate believes it wrote.
+fn dumped_uuid(path: &std::path::Path) -> String {
+    header_text(path, "Filesystem UUID:")
+}
+
+#[test]
+fn a_rewritten_identity_is_what_dumpe2fs_reads_and_e2fsck_accepts() {
+    if !available("e2fsck") || !available("dumpe2fs") {
+        return;
+    }
+    // 512 MiB puts backups in groups 1 and 3, so this covers the copies and not only the
+    // primary. The default profile carries metadata_csum_seed, so the UUID moves freely.
+    let file = format_file(populated(), 512 * MIB, options());
+    let before = dumped_uuid(file.path());
+
+    let new_uuid = [
+        0x5a, 0x5a, 0x11, 0x22, 0x33, 0x44, 0x45, 0x66, 0x87, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee,
+    ];
+    let mut change = IdentityChange::new();
+    change.uuid = Some(new_uuid);
+    change.volume_name = Some(*b"relabelled\0\0\0\0\0\0");
+    let report = rewrite_identity(&mut open_rw(file.path()), &change).expect("rewrite");
+
+    assert_eq!(
+        report.superblocks, 3,
+        "primary plus backups in groups 1 and 3"
+    );
+    assert!(report.journal_superblock, "the log records the UUID too");
+    assert!(!report.checksum_seed_set, "the seed was already a field");
+
+    let after = dumped_uuid(file.path());
+    assert_ne!(before, after);
+    assert_eq!(after, "5a5a1122-3344-4566-8788-99aabbccddee");
+    assert_eq!(
+        header_text(file.path(), "Filesystem volume name:"),
+        "relabelled"
+    );
+    // The whole point: a foreign checker still accepts the image, so every checksum the
+    // rewrite did not touch is still right and the copies still agree.
+    e2fsck_clean(file.path()).expect("a re-identified image checks clean");
+
+    // The log's own record of the UUID, read back through the parser rather than trusted
+    // from the offset the write used.
+    let mut r = Reader::open(std::fs::File::open(file.path()).expect("open")).expect("read back");
+    let journal = r
+        .journal_superblock()
+        .expect("parse the journal")
+        .expect("the image has a journal");
+    assert_eq!(journal.uuid, new_uuid, "the log records the new UUID");
+
+    // And the backups really carry it, rather than the primary alone reading back.
+    for group in [1u32, 3] {
+        let out = tool("dumpe2fs")
+            .args(["-o", &format!("superblock={}", u64::from(group) * 32768)])
+            .arg("-h")
+            .arg(file.path())
+            .output()
+            .expect("spawn dumpe2fs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("5a5a1122-3344-4566-8788-99aabbccddee"),
+            "the backup in group {group} kept the old UUID:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_rewrite_keeps_every_superblock_field_this_crate_does_not_model() {
+    if !available("e2fsck") || !available("mke2fs") {
+        return;
+    }
+    // The failure this guards against has bitten this crate once already, on the reading
+    // side: a foreign superblock re-serialized through the fields ferrosys models loses
+    // every field it does not — `s_last_orphan`, `s_snapshot_*`, `s_mmp_*`, `s_error_*`,
+    // `s_encoding`, `s_backup_bgs`, the reserved tail. So the image here is `mke2fs`'s
+    // rather than this crate's, because a ferrosys-written image has most of those zero
+    // and would pass a re-serializing implementation just as well.
+    //
+    // The claim is exact: after the rewrite, every byte of the primary superblock is the
+    // byte that was there, except the three windows the change names.
+    let image = mke2fs_baseline_of(Profile::Ext4, 4096, 64 * MIB);
+    let before = superblock_bytes(image.path());
+
+    let new_uuid = [
+        0x0f, 0xed, 0xcb, 0xa9, 0x87, 0x65, 0x43, 0x21, 0x0f, 0xed, 0xcb, 0xa9, 0x87, 0x65, 0x43,
+        0x21,
+    ];
+    let mut change = IdentityChange::new();
+    change.uuid = Some(new_uuid);
+    change.volume_name = Some(*b"foreign\0\0\0\0\0\0\0\0\0");
+    rewrite_identity(&mut open_rw(image.path()), &change).expect("rewrite the foreign image");
+
+    let after = superblock_bytes(image.path());
+    // `s_uuid` at 0x68, `s_volume_name` at 0x78, and `s_checksum` at 0x3fc, which is
+    // recomputed over whatever the record now holds.
+    let changed = |i: usize| (0x68..0x88).contains(&i) || (0x3fc..0x400).contains(&i);
+    assert_eq!(before.len(), after.len());
+    for i in 0..before.len() {
+        if changed(i) {
+            continue;
+        }
+        assert_eq!(
+            before[i], after[i],
+            "byte {i:#x} of the superblock moved: {:#04x} became {:#04x}",
+            before[i], after[i]
+        );
+    }
+    // And the windows that were meant to move did, so the comparison above is not passing
+    // because nothing happened at all.
+    assert_ne!(&before[0x68..0x78], &after[0x68..0x78], "the UUID moved");
+    assert_eq!(&after[0x68..0x78], &new_uuid, "to the one asked for");
+    assert_ne!(&before[0x78..0x88], &after[0x78..0x88], "the label moved");
+    e2fsck_clean(image.path()).expect("a re-identified foreign image checks clean");
+}
+
+/// The primary superblock's 1024 bytes, read straight out of the image at offset 1024.
+fn superblock_bytes(path: &Path) -> Vec<u8> {
+    let mut file = std::fs::File::open(path).expect("open the image");
+    file.seek(io::SeekFrom::Start(1024)).expect("seek");
+    let mut bytes = vec![0u8; 1024];
+    file.read_exact(&mut bytes).expect("read the superblock");
+    bytes
+}
+
+#[test]
+fn a_uuid_that_seeds_the_checksums_is_refused_until_the_seed_is_recorded() {
+    if !available("e2fsck") {
+        return;
+    }
+    // metadata_csum without metadata_csum_seed: every checksum in the filesystem derives
+    // from the UUID, so moving it would invalidate all of them at once.
+    let mut o = options();
+    o.feature.incompat =
+        Incompat::from_bits(o.feature.incompat.bits() & !Incompat::CSUM_SEED.bits());
+    let file = format_file(populated(), 64 * MIB, o);
+    e2fsck_clean(file.path()).expect("the starting image is clean");
+
+    let mut change = IdentityChange::new();
+    change.uuid = Some([0x77; 16]);
+    let refused = rewrite_identity(&mut open_rw(file.path()), &change);
+    assert!(
+        matches!(refused, Err(IdentityError::UuidWouldInvalidateChecksums)),
+        "expected a refusal, got {refused:?}"
+    );
+    // Refused before anything was written, so the image is exactly as it was.
+    e2fsck_clean(file.path()).expect("a refused rewrite left the image untouched");
+
+    // Recording the seed is the way through, and the result is still clean: every
+    // existing checksum now derives from the recorded seed rather than from the UUID.
+    change.set_checksum_seed = true;
+    let report = rewrite_identity(&mut open_rw(file.path()), &change).expect("rewrite");
+    assert!(report.checksum_seed_set);
+    e2fsck_clean(file.path()).expect("recording the seed kept every checksum valid");
+
+    // A second rewrite now needs no opt-in, because the feature it sets is set.
+    let mut again = IdentityChange::new();
+    again.uuid = Some([0x88; 16]);
+    rewrite_identity(&mut open_rw(file.path()), &again).expect("the second rewrite is free");
+    e2fsck_clean(file.path()).expect("and is still clean");
+}
+
+#[test]
+fn a_label_alone_moves_no_uuid_and_needs_no_seed() {
+    if !available("e2fsck") || !available("dumpe2fs") {
+        return;
+    }
+    // A label change touches no checksum seed, so it is free even on the feature set the
+    // test above has to refuse a UUID change on.
+    let mut o = options();
+    o.feature.incompat =
+        Incompat::from_bits(o.feature.incompat.bits() & !Incompat::CSUM_SEED.bits());
+    let file = format_file(populated(), 64 * MIB, o);
+    let uuid_before = dumped_uuid(file.path());
+
+    let mut change = IdentityChange::new();
+    change.volume_name = Some(*b"just-a-label\0\0\0\0");
+    rewrite_identity(&mut open_rw(file.path()), &change).expect("rewrite");
+
+    assert_eq!(
+        dumped_uuid(file.path()),
+        uuid_before,
+        "the UUID did not move"
+    );
+    assert_eq!(
+        header_text(file.path(), "Filesystem volume name:"),
+        "just-a-label"
+    );
+    e2fsck_clean(file.path()).expect("clean");
+}
+
 /// A tree that drives the block-mapped family's classic map into every region: a
 /// directory with small files, a slow symlink, and two files that reach the single- and
 /// double-indirect blocks (20 and 1040 blocks at a 4 KiB block size).
@@ -346,8 +658,17 @@ fn the_block_mapped_family_matches_mke2fs_geometry() {
                 });
 
                 let baseline = mke2fs_baseline_of(profile, bs, mib * MIB);
+                let dump = geometry_dump(ours.path());
+                // Guard against a vacuous pass: a `dumpe2fs` whose wording drifted would
+                // filter to nothing on both sides, and the comparison would be
+                // `assert_eq!("", "")`. The geometry always has group and placement lines.
+                assert!(
+                    dump.contains("Group 0"),
+                    "geometry_dump extracted nothing from the {profile} {bs}-byte-block \
+                     {mib} MiB image — the dumpe2fs format may have drifted"
+                );
                 assert_eq!(
-                    geometry_dump(ours.path()),
+                    dump,
                     geometry_dump(baseline.path()),
                     "{profile} geometry diverges from mke2fs at {bs}-byte blocks, {mib} MiB"
                 );
@@ -602,7 +923,11 @@ fn e2fsck_accepts_a_xattr_set_split_between_inode_and_block() {
 
 #[test]
 fn offline_resize_matrix() {
-    if !available("resize2fs") || !available("e2fsck") {
+    // `dumpe2fs` is as load-bearing here as the other two: it is what reads the grown
+    // image's feature set, and the gate's whole assertion is the absence of `meta_bg`.
+    // Gating on it keeps a host without it to the loud skip banner rather than a panic
+    // from inside a helper.
+    if !available("resize2fs") || !available("e2fsck") || !available("dumpe2fs") {
         return;
     }
     // Grow a populated single-group start image across the geometry edges and up to
@@ -2119,8 +2444,16 @@ fn every_block_size_passes_e2fsck_and_matches_mke2fs_geometry() {
             });
 
             let baseline = mke2fs_baseline(bs, mib * MIB);
+            let dump = geometry_dump(ours.path());
+            // The same vacuity guard as the sibling gates: a filter that matched nothing
+            // would compare two empty strings and pass.
+            assert!(
+                dump.contains("Group 0"),
+                "geometry_dump extracted nothing from the {bs}-byte-block {mib} MiB \
+                 image — the dumpe2fs format may have drifted"
+            );
             assert_eq!(
-                geometry_dump(ours.path()),
+                dump,
                 geometry_dump(baseline.path()),
                 "geometry diverges from mke2fs at {bs}-byte blocks, {mib} MiB"
             );
@@ -2165,7 +2498,11 @@ fn a_final_group_too_small_for_mke2fs_is_still_used() {
 
 #[test]
 fn every_block_size_survives_an_offline_grow() {
-    if !available("resize2fs") || !available("e2fsck") {
+    // `dumpe2fs` is as load-bearing here as the other two: it is what reads the grown
+    // image's feature set, and the gate's whole assertion is the absence of `meta_bg`.
+    // Gating on it keeps a host without it to the loud skip banner rather than a panic
+    // from inside a helper.
+    if !available("resize2fs") || !available("e2fsck") || !available("dumpe2fs") {
         return;
     }
     // Resize safety is the property the crate exists for, and the reserved

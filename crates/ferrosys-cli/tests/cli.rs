@@ -590,6 +590,144 @@ fn an_image_built_from_a_directory_holds_what_the_tree_held() {
     }
 }
 
+// The round trip in the tool's own terms: a tree in, an image, and the tree back out.
+// Both halves are Linux's, since walking and writing a tree both touch Linux inode
+// metadata and Linux extended attributes.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_tree_survives_a_round_trip_through_an_image() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = scratch();
+    let tree = at(&dir, "staging");
+    std::fs::create_dir_all(tree.join("etc")).expect("etc");
+    std::fs::create_dir_all(tree.join("var/empty")).expect("var/empty");
+    std::fs::write(tree.join("etc/hostname"), b"ferrosys\n").expect("hostname");
+    let init = tree.join("etc/init");
+    std::fs::write(&init, b"#!/bin/sh\nexec /sbin/init\n").expect("init");
+    std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o750)).expect("chmod");
+    std::fs::hard_link(&init, tree.join("etc/init-alias")).expect("hard link");
+    std::os::unix::fs::symlink("/proc/self/mounts", tree.join("etc/mtab")).expect("mtab");
+
+    // No --owner: the tree is this process's, so writing it back needs no privilege, and
+    // what is being checked is fidelity rather than ownership.
+    let image = at(&dir, "fs.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "--slack",
+        "10%",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The destination is made by the tool, so a caller names where the tree goes rather
+    // than preparing the place first.
+    let unpacked = at(&dir, "unpacked");
+    let out = run(&[
+        "extract",
+        image.to_str().expect("a text path"),
+        "--to-dir",
+        unpacked.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let summary = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(summary.contains("Names written:"), "{summary}");
+
+    // The tree that came back is the tree that went in: names, contents, modes, and the
+    // sharing a hard link expresses.
+    let names = |root: &Path| {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read") {
+                let path = entry.expect("entry").path();
+                if std::fs::symlink_metadata(&path).expect("stat").is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        found.sort();
+        found
+    };
+    assert_eq!(names(&tree), names(&unpacked));
+    assert_eq!(
+        std::fs::read(unpacked.join("etc/init")).expect("read"),
+        b"#!/bin/sh\nexec /sbin/init\n"
+    );
+    let mode = std::fs::symlink_metadata(unpacked.join("etc/init"))
+        .expect("stat")
+        .mode();
+    assert_eq!(mode & 0o7777, 0o750);
+    assert_eq!(
+        std::fs::read_link(unpacked.join("etc/mtab")).expect("read the link"),
+        Path::new("/proc/self/mounts")
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(unpacked.join("etc/init"))
+            .expect("stat")
+            .ino(),
+        std::fs::symlink_metadata(unpacked.join("etc/init-alias"))
+            .expect("stat")
+            .ino(),
+        "the two names did not come back as one file"
+    );
+    // Nothing the filesystem makes for itself is written into the tree.
+    assert!(!unpacked.join("lost+found").exists());
+
+    // And the tree that came back builds the same image the first one did, which is the
+    // round trip closing: --from-dir over the extraction, byte for byte.
+    let again = at(&dir, "again.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "--slack",
+        "10%",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-dir",
+        unpacked.to_str().expect("a text path"),
+        again.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // A destination that already holds something is refused, and the tree that is there
+    // is left alone.
+    let out = run(&[
+        "extract",
+        image.to_str().expect("a text path"),
+        "--to-dir",
+        unpacked.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OPERATIONAL);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not empty"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    if available("e2fsck") {
+        e2fsck_clean(&image);
+        e2fsck_clean(&again);
+    }
+}
+
 // The other half: where there is no directory source, `--from-dir` says so and the
 // destination is left alone, the same as every other planning failure.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -855,10 +993,98 @@ fn a_dry_run_reports_the_geometry_and_writes_nothing() {
 }
 
 #[test]
+fn an_auto_size_fits_the_contents_and_slack_leaves_room_in_it() {
+    let dir = scratch();
+    let archive = write_archive(&dir);
+
+    // Sized to the archive rather than to a number the caller guessed.
+    let fitted = at(&dir, "fitted.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "--from-tar",
+        archive.to_str().unwrap(),
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        fitted.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let tight = fields(&String::from_utf8_lossy(&out.stderr));
+    let blocks: u64 = tight["Block count"].parse().expect("a block count");
+    let free: u64 = tight["Free blocks"].parse().expect("a free count");
+    // The image on disk is the size the search settled on, and nothing was rounded into
+    // it afterwards.
+    let block_size: u64 = tight["Block size"].parse().expect("a block size");
+    assert_eq!(
+        std::fs::metadata(&fitted).expect("the image exists").len(),
+        blocks * block_size
+    );
+
+    // The same contents with a fifth of the filesystem left free: a larger filesystem, and
+    // one whose own free count says so.
+    let roomy = at(&dir, "roomy.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "--slack",
+        "20%",
+        "--from-tar",
+        archive.to_str().unwrap(),
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        roomy.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let loose = fields(&String::from_utf8_lossy(&out.stderr));
+    let roomy_blocks: u64 = loose["Block count"].parse().expect("a block count");
+    let roomy_free: u64 = loose["Free blocks"].parse().expect("a free count");
+    assert!(
+        roomy_blocks > blocks,
+        "{roomy_blocks} blocks with slack is not larger than {blocks} without"
+    );
+    // A fifth of the filesystem, as the share is measured: whole blocks, rounded down.
+    assert!(
+        roomy_free >= roomy_blocks / 5,
+        "{roomy_free} of {roomy_blocks} blocks free is under the fifth that was asked for"
+    );
+    assert!(free < roomy_free);
+
+    // A named size and --slack together is a usage error, not a silently ignored option.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "--slack",
+        "20%",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        at(&dir, "never.img").to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    assert!(!at(&dir, "never.img").exists());
+
+    if !available("e2fsck") {
+        return;
+    }
+    // The tightest filesystem this tool writes, judged by something that is not this tool.
+    e2fsck_clean(&fitted);
+    e2fsck_clean(&roomy);
+}
+
+#[test]
 fn a_small_filesystem_formats_at_the_defaults() {
     // The growth reservation is bounded by the filesystem it is reserved from, so `Max` —
-    // the default — cannot be the reason a small image fails to format. Each of these
-    // sizes was unformattable when the reservation was the resize inode's whole map.
+    // the default — cannot be the reason a small image fails to format. Filling the resize
+    // inode's whole map costs more blocks than any of these sizes has to spare, so each of
+    // them is a size the share bound is what makes formattable.
     let dir = scratch();
     for (size, profile, reserved) in [
         ("1M", "ext2", "4"),
@@ -917,6 +1143,26 @@ fn a_small_filesystem_formats_at_the_defaults() {
         "the failure names the option to change: {stderr}"
     );
     assert!(stderr.contains("-t ext2"), "{stderr}");
+    assert!(stderr.contains("-O ^has_journal,^orphan_file"), "{stderr}");
+
+    // Both spellings the hint offers are run, because a hint that names a flag
+    // combination the tool then refuses sends the caller from one error to another.
+    // `-O ^has_journal` alone is such a combination — the default profile carries
+    // `orphan_file`, which requires a journal — so the hint names the pair.
+    for way_out in [vec!["-t", "ext2"], vec!["-O", "^has_journal,^orphan_file"]] {
+        let image = at(&dir, "way-out.img");
+        let mut args = vec!["format", "--size", "4M", "--uuid", UUID, "--time", TIME];
+        args.extend_from_slice(&way_out);
+        args.push(image.to_str().unwrap());
+        let out = run(&args);
+        assert_eq!(
+            code(&out),
+            OK,
+            "the hint's `{}` builds a filesystem: {}",
+            way_out.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
@@ -1149,7 +1395,7 @@ fn inspect_reports_every_group_and_scans_by_default() {
 fn inspect_groups_survives_a_hostile_group_count() {
     // A crafted superblock can claim ~4 billion block groups (`blocks_count` maxed,
     // `blocks_per_group` of one). The group listing must not pre-size a vector from that
-    // count: reserving capacity for it requested hundreds of gigabytes and aborted the
+    // count: reserving capacity for it would ask for hundreds of gigabytes and abort the
     // process before a single descriptor was read. The descriptor loop grows as real
     // descriptors are found and stops when the table runs past the image — a clean
     // image-bad exit, not a crash.
@@ -1521,8 +1767,11 @@ fn gnu_tar_reads_the_archive_we_write() {
         assert!(listing.contains(name), "GNU tar lists {name}:\n{listing}");
     }
     // It sees the kinds, not just the names: a device is a device, a link is a link.
+    // The mode is required *and* one of the two spellings tar uses for the numbers — the
+    // parentheses matter, since `&&` binding tighter than `||` would let any listing
+    // containing "1, 3" pass without the mode ever being checked.
     assert!(
-        listing.contains("crw-rw-rw-") && listing.contains("1,3") || listing.contains("1, 3"),
+        listing.contains("crw-rw-rw-") && (listing.contains("1,3") || listing.contains("1, 3")),
         "GNU tar sees the device node:\n{listing}"
     );
 
@@ -1611,9 +1860,9 @@ fn extract_writes_one_artifact_and_nothing_else() {
 
 #[test]
 fn stat_reports_one_path_with_its_attributes_and_acls() {
-    // The forensic question — what is this file's mode, and what is in its attributes — was
-    // answerable only by writing a whole archive and unpacking it. `--stat` is the answer for
-    // one path, and the attributes and decoded ACLs are the part no other output carried.
+    // The forensic question — what is this file's mode, and what is in its attributes — is
+    // one `--stat` answers for a single path, without writing a whole archive and unpacking
+    // it. The attributes and the decoded ACLs are the part no other output carries.
     let dir = scratch();
     let archive = write_archive(&dir);
     let image = at(&dir, "fs.img");
@@ -1665,8 +1914,8 @@ fn stat_reports_one_path_with_its_attributes_and_acls() {
 
 #[test]
 fn the_json_documents_carry_attributes_and_both_spellings_of_a_mode() {
-    // A machine reading the listing had no way to see an attribute at all, which for the
-    // forensic use is the headline field. And a mode in JSON has to be decimal, since JSON
+    // A machine reading the listing needs the attributes, which for the forensic use are
+    // the headline field. And a mode in JSON has to be decimal, since JSON
     // has no octal literal — so the octal spelling is carried beside it rather than left for
     // the reader to convert and get wrong.
     if !available("python3") {
@@ -1742,8 +1991,8 @@ fn assert_json(program: &str, document: &[u8]) {
 
 #[test]
 fn a_read_is_bounded_by_the_cap_it_is_given() {
-    // `--cat` on a hostile image would allocate whatever `i_size` claims, and the library's
-    // bound was not reachable from the command line at all. Over the cap the read is refused,
+    // `--cat` on a hostile image would allocate whatever `i_size` claims, so the library's
+    // bound is reachable from the command line. Over the cap the read is refused,
     // because a truncated file returned as a success is the failure that matters: a caller
     // would write an incomplete file and see nothing wrong.
     let dir = scratch();
@@ -1896,6 +2145,51 @@ fn a_socket_is_a_typed_error_rather_than_a_missing_file() {
     assert!(
         complaint.contains("/run/sock") && complaint.contains("socket"),
         "the refusal names the file and why: {complaint}"
+    );
+}
+
+#[test]
+fn atomic_leaves_the_destination_alone_when_the_walk_fails() {
+    // A walk fails part-way, and a named destination is created and truncated before it
+    // starts — so without `--atomic` the archive that was already there is gone, replaced
+    // by the fragment written up to the refusal. The socket image is the reliable way to
+    // fail mid-walk; what is being pinned is the destination's contents, not the refusal.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    build_image_with_socket(&image);
+    let path = image.to_str().expect("a text path");
+
+    let out_tar = at(&dir, "existing.tar");
+    let previous = b"the archive that was already there";
+    std::fs::write(&out_tar, previous).expect("seed the destination");
+    let dest = out_tar.to_str().expect("a text path");
+
+    let out = run(&["extract", path, "--to-tar", dest, "--atomic"]);
+    assert_eq!(code(&out), OPERATIONAL);
+    assert_eq!(
+        std::fs::read(&out_tar).expect("the destination still exists"),
+        previous,
+        "an atomic extract that failed left the destination untouched"
+    );
+    // And no temporary file survives the failure.
+    let strays: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read the scratch directory")
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|n| n.contains(".ferrosys-"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "a temporary file was left behind: {strays:?}"
+    );
+
+    // The same walk without `--atomic` writes in place, which is what the option exists
+    // to opt out of: the destination is truncated before the walk reaches the socket.
+    let out = run(&["extract", path, "--to-tar", dest]);
+    assert_eq!(code(&out), OPERATIONAL);
+    assert_ne!(
+        std::fs::read(&out_tar).expect("the destination still exists"),
+        previous,
+        "written in place, a failed walk does replace what was there"
     );
 }
 
@@ -2110,4 +2404,131 @@ print("ok")
         String::from_utf8_lossy(document),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn identity_rewrites_what_an_image_is_known_by() {
+    let dir = scratch();
+    let image = at(&dir, "id.img");
+    // 512 MiB puts backups in groups 1 and 3, so the run covers the copies, not the
+    // primary alone.
+    assert_eq!(code(&format(&image, "512M", None)), OK);
+    let path = image.to_str().expect("a text path");
+
+    let out = ok(&[
+        "identity",
+        "--uuid",
+        "5a5a1122-3344-4566-8788-99aabbccddee",
+        "--label",
+        "relabelled",
+        path,
+    ]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("3 superblock copies written"), "{text}");
+    assert!(text.contains("journal superblock updated"), "{text}");
+
+    // Read back through the tool's own reader, so the assertion is about the image rather
+    // than about what the rewrite reported.
+    let report = String::from_utf8_lossy(&ok(&["inspect", "--json", path])).into_owned();
+    assert!(
+        report.contains("5a5a1122-3344-4566-8788-99aabbccddee"),
+        "the new UUID is not in the report:\n{report}"
+    );
+    assert!(report.contains("relabelled"), "the new label:\n{report}");
+
+    if available("e2fsck") {
+        e2fsck_clean(&image);
+    }
+}
+
+#[test]
+fn identity_reports_json_and_refuses_a_run_that_would_write_nothing() {
+    let dir = scratch();
+    let image = at(&dir, "id.img");
+    assert_eq!(code(&format(&image, "64M", None)), OK);
+    let path = image.to_str().expect("a text path");
+
+    let out = ok(&["identity", "--label", "tagged", "--json", path]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("\"superblocks\":1"), "{text}");
+    assert!(text.contains("\"checksum_seed_set\":false"), "{text}");
+    // A label change moves no UUID, so the log has nothing to record.
+    assert!(text.contains("\"journal_superblock\":false"), "{text}");
+
+    // Naming no change is a command line that meant to say something.
+    let out = run(&["identity", path]);
+    assert_eq!(code(&out), USAGE);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--uuid, --label, or --set-checksum-seed"),
+        "{err}"
+    );
+
+    // A label past the field is refused before the image is opened.
+    let out = run(&[
+        "identity",
+        "--label",
+        "far too long to be a volume label",
+        path,
+    ]);
+    assert_eq!(code(&out), USAGE);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the maximum is 16"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn identity_refuses_a_uuid_that_seeds_the_checksums_and_leaves_the_image_alone() {
+    let dir = scratch();
+    let image = at(&dir, "seeded.img");
+    // metadata_csum without metadata_csum_seed: the checksums are seeded from the UUID.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "-O",
+        "^metadata_csum_seed",
+        image.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let path = image.to_str().expect("a text path");
+    let before = std::fs::read(&image).expect("read the image");
+
+    let out = run(&[
+        "identity",
+        "--uuid",
+        "11111111-2222-3333-4444-555555555555",
+        path,
+    ]);
+    assert_eq!(code(&out), OPERATIONAL, "the request cannot be carried out");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalidate every metadata checksum"), "{err}");
+    assert_eq!(
+        std::fs::read(&image).expect("read the image"),
+        before,
+        "a refused rewrite wrote nothing"
+    );
+
+    // The way through, which the message names.
+    let out = ok(&[
+        "identity",
+        "--uuid",
+        "11111111-2222-3333-4444-555555555555",
+        "--set-checksum-seed",
+        path,
+    ]);
+    assert!(
+        String::from_utf8_lossy(&out).contains("metadata_csum_seed set"),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    if available("e2fsck") {
+        e2fsck_clean(&image);
+    }
 }

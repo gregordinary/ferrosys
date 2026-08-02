@@ -29,9 +29,10 @@ mutate, a run would exercise the block reader and nothing past it.
 
 `seeds/<target>/` holds the starting inputs, one filesystem per file for the reader targets
 and one tar archive per file for the archive target. Every one is small on purpose, so the
-repository carries a few tens of kilobytes and the fuzzer mutates them quickly: the images
-are 2 to 16 MiB at a 1 KiB block size and almost entirely zeros, and the archive is a few
-members with short bodies.
+fuzzer mutates them quickly: the images are 2 to 16 MiB at a 1 KiB block size, and the
+archive is a few members with short bodies. The images are almost entirely zeros, so the
+repository stores them in on the order of a hundred kilobytes however many megabytes they
+occupy once checked out.
 
 - `ext4-min` — the smallest default filesystem, `metadata_csum` and `64bit` on.
 - `ext4-nocsum` — the same without `metadata_csum`, which is a separate read path:

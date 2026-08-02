@@ -225,7 +225,7 @@ pub(crate) fn decode_device(block0: u32, block1: u32) -> (u32, u32) {
 /// this crate, and that is about the Rust type, not the format: the byte layout is
 /// [`read_from`](Self::read_from), [`write_to`](Self::write_to), and the inode size the
 /// superblock declares, and none of them changes. What the attribute buys is that this crate can widen its
-/// coverage of the on-disk structure — the fields it does not yet model — without that
+/// coverage of the on-disk structure — the fields it does not model — without that
 /// being a breaking change for everyone reading an image.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]

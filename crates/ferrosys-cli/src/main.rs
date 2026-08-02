@@ -35,9 +35,11 @@
 #![forbid(unsafe_code)]
 
 mod args;
+mod dest;
 mod detect;
 mod extract;
 mod format;
+mod identity;
 mod inspect;
 mod json;
 mod parse;
@@ -54,7 +56,7 @@ use ferrosys::DetectError;
 // everywhere; `format::from_dir` is where the difference is confined.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use ferrosys::ext::HostError;
-use ferrosys::ext::{ArchiveError, FormatError, GeometryError, ReadError, Severity};
+use ferrosys::ext::{ArchiveError, FormatError, GeometryError, IdentityError, ReadError, Severity};
 
 use crate::args::{Command, Topic, UsageError};
 
@@ -116,6 +118,15 @@ pub enum Error {
         #[source]
         source: ReadError,
     },
+    /// Re-identifying an image failed.
+    #[error("{path}: {source}")]
+    Identity {
+        /// The image that was being rewritten.
+        path: String,
+        /// What refused it.
+        #[source]
+        source: ferrosys::ext::IdentityError,
+    },
     /// Writing the filesystem failed.
     #[error(transparent)]
     Format(#[from] FormatError),
@@ -134,6 +145,14 @@ pub enum Error {
          alone. --from-tar reads an archive anywhere"
     )]
     NoDirectorySource,
+    /// `--to-dir` was given on a platform that has no directory sink to write with.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[error(
+        "--to-dir is not available on this platform: writing a tree out sets Linux inode \
+         metadata and Linux extended attributes, so the directory sink is built on Linux \
+         alone. --to-tar writes the same contents as an archive anywhere"
+    )]
+    NoDirectorySink,
     /// The image could not be read as far as it had to be.
     #[error("reading the image: {0}")]
     ImageIo(String),
@@ -182,10 +201,13 @@ impl Error {
                 "{reserved_gdt_blocks} of those blocks are growth headroom: `--grow none` \
                  reserves none, and `--grow SIZE` reserves only what growing to SIZE needs"
             )),
+            // `orphan_file` is part of the default profile and requires a journal, so
+            // `-O ^has_journal` on its own is refused at parse time. Both spellings here
+            // are ones the tool accepts.
             Error::Format(FormatError::FilesystemTooSmallForJournal { minimum, .. }) => {
                 Some(format!(
                     "a journal needs {minimum} blocks of its own: `-t ext2` builds a \
-                     filesystem without one, as does `-O ^has_journal`"
+                     filesystem without one, as does `-O ^has_journal,^orphan_file`"
                 ))
             }
             Error::Format(FormatError::JournalDoesNotFit { .. }) => Some(
@@ -215,13 +237,27 @@ impl Error {
                 _ => exit::IMAGE_BAD,
             },
             Error::Archive(ArchiveError::Acl { .. }) => exit::IMAGE_BAD,
+            // Re-identifying splits the same way. A superblock that does not check and a
+            // backup copy that is not one are verdicts about the image; a UUID that would
+            // invalidate the checksums, and a seed asked for where it does nothing, are
+            // verdicts about the *request* — the filesystem is sound and the change cannot
+            // be made — so they read as a command that could not be carried out.
+            Error::Identity { source, .. } => match source {
+                IdentityError::Read(ReadError::Io { .. }) | IdentityError::Io(_) => {
+                    exit::OPERATIONAL
+                }
+                IdentityError::Read(_)
+                | IdentityError::BackupNotASuperblock { .. }
+                | IdentityError::SuperblockChecksumMismatch { .. } => exit::IMAGE_BAD,
+                _ => exit::OPERATIONAL,
+            },
             // A tree that cannot be walked and a platform with no walk to run are both
             // failures to carry the command out, so both land here; only one of them
             // exists in any one build.
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Error::Host(_) => exit::OPERATIONAL,
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            Error::NoDirectorySource => exit::OPERATIONAL,
+            Error::NoDirectorySource | Error::NoDirectorySink => exit::OPERATIONAL,
             Error::Io { .. }
             | Error::NotARegularFile(_)
             | Error::NotDetected { .. }
@@ -287,6 +323,7 @@ fn run(argv: Vec<OsString>, source_date_epoch: Option<OsString>) -> Result<(), E
         Command::Inspect(a) => inspect::run(a),
         Command::Extract(a) => extract::run(a),
         Command::Detect(a) => detect::run(a),
+        Command::Identity(a) => identity::run(a),
         // Help and the version are what the run was asked to produce, so they are the
         // artifact and go to the standard output.
         Command::Help(topic) => emit(help(topic).as_bytes()),
@@ -321,6 +358,7 @@ fn help(topic: Topic) -> &'static str {
         Topic::Inspect => INSPECT_HELP,
         Topic::Extract => EXTRACT_HELP,
         Topic::Detect => DETECT_HELP,
+        Topic::Identity => IDENTITY_HELP,
     }
 }
 
@@ -332,6 +370,7 @@ usage:
   ferrosys inspect [options] IMAGE      report on a filesystem
   ferrosys extract [options] IMAGE      read a filesystem's contents back out
   ferrosys detect  [options] IMAGE      say which filesystem an image holds
+  ferrosys identity [options] IMAGE     change what a filesystem is known by
 
   ferrosys <command> --help             the options one command takes
   ferrosys --version                    the version
@@ -357,13 +396,20 @@ usage:
 
   ferrosys format --size 512M --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
 
+  ferrosys format --size auto --slack 20% --from-dir staging \\
+    --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
+
 Both --uuid and --time are required because an image's bytes are a function of its
 inputs alone: the tool reads neither the clock nor a random source, so the same inputs
 write the same bytes. SOURCE_DATE_EPOCH supplies --time when it is set.
 
 required:
-  --size SIZE          the filesystem's size: a byte count, optionally suffixed K, M, G,
-                       or T
+  --size SIZE|auto     the filesystem's size: a byte count, optionally suffixed K, M, G,
+                       or T — or `auto`, which sizes the filesystem to what goes in it.
+                       `auto` finds the smallest filesystem that holds the contents by
+                       planning candidate sizes and placing the contents into each, so
+                       the size it settles on is one that formats, and one block less
+                       does not. Use --slack to leave room in it
   --uuid HEX           the filesystem UUID, dashed or bare (32 hex digits). The tool
                        mints none: pipe in `uuidgen`, of whatever version you like
   --time SECS          the filesystem's creation time, in seconds since the epoch. Taken
@@ -400,6 +446,12 @@ profile:
                        started from
 
 geometry:
+  --slack PCT%|SIZE    with --size auto, how much of the filesystem must still be free
+                       once the contents are written: `20%` of it, or `64M` of it. Without
+                       this, `auto` leaves nothing — the right answer for an image that
+                       will only be read, and useless for one that will be written to.
+                       The share is of the finished filesystem, so `--slack 20%` is what
+                       `df` reports as 80% used. Up to 90%
   --block-size N       1024, 2048, or 4096 (the default)
   --inode-size N       a power of two from 128 up to the block size (default 256)
   --inodes N           the inode count, rounded up to fill each group's tables. Overrides
@@ -503,6 +555,7 @@ ferrosys extract — read an ext filesystem's contents back out
 
 usage:
   ferrosys extract [--offset N] IMAGE --to-tar FILE|-
+  ferrosys extract [--offset N] IMAGE --to-dir DIR
   ferrosys extract [--offset N] IMAGE --cat PATH
   ferrosys extract [--offset N] IMAGE --stat PATH [--json]
   ferrosys extract [--offset N] IMAGE --list [--json]
@@ -512,6 +565,16 @@ exactly one of:
                        output. Ownership, modes, times (to the nanosecond), symlinks,
                        hard links, device and FIFO nodes, extended attributes, and POSIX
                        ACLs all survive, carried in PAX records
+  --to-dir DIR         write the whole tree into a directory on this host, the inverse of
+                       `format --from-dir`. DIR is made if it is not there and must be
+                       empty. Everything the archive carries is carried here too, set on
+                       the files themselves; DIR takes the filesystem root's own mode,
+                       ownership, times, and attributes, and `/lost+found` is not written.
+                       A device node needs CAP_MKNOD and a recorded owner needs CAP_CHOWN,
+                       so an unprivileged run stops at the first of either unless
+                       --skip-privileged is given. Two things no host lets a caller set:
+                       an inode's change time and its creation time, so the tree carries
+                       the times it was written for those two alone
   --cat PATH           write one file's bytes to the standard output, and nothing else.
                        PATH is a path inside the image, taken as the bytes you typed
   --stat PATH          report everything the filesystem records about one path: its type,
@@ -529,12 +592,22 @@ options:
                        own claim, and a sparse file legitimately dwarfs the filesystem
                        holding it, so nothing structural bounds it. Over the cap the read
                        is an error rather than a short file
+  --skip-privileged    with --to-dir, write what this process may rather than failing on
+                       what it may not: a device node it cannot create is left out and the
+                       tree is owned by this process. What was skipped is named on the
+                       standard error, so an incomplete tree says so
+  --atomic             with --to-tar FILE, write the archive to a sibling temporary file
+                       and rename it over FILE once the walk is complete, so a walk that
+                       fails part-way leaves whatever was at FILE untouched. --to-dir has
+                       no equivalent — no rename publishes a whole tree at once — which is
+                       why its destination must start empty
 
 Reading holds no whole file: --cat streams to the standard output and --to-tar streams each
 member into the archive, so a multi-gigabyte file costs a working set rather than its size.
 
 The archive holds a `./` member for the root and skips `/lost+found`, so what comes out
-is what `ferrosys format --from-tar` reads back in.
+is what `ferrosys format --from-tar` reads back in; --to-dir writes the tree the same way,
+so `format --from-dir` reads that one back.
 
 A JSON mode's `mode` field is the permission bits as a decimal number, since JSON has no
 octal literal — 509 is 0o775 — and `mode_octal` beside it carries the usual spelling.
@@ -554,10 +627,45 @@ options:
 
 The answer is one word on the standard output — ext2, ext3, ext4, or `unrecognized` — so it
 reads well in a shell test. An unrecognized image exits 8, since there is no filesystem to
-have an opinion about.
+have an opinion about. A fourth word, `unknown`, is the answer when the library classifies
+a family this build has no name for: something recognized the image, so calling it
+unrecognized would be wrong.
 
 This asks what an image *is*, not whether it is sound: an image with a quirk `inspect` would
 refuse still classifies here. Use `inspect` to be told whether a filesystem is well-formed.
+";
+
+const IDENTITY_HELP: &str = "\
+ferrosys identity — change what an existing filesystem is known by
+
+usage:
+  ferrosys identity [--uuid HEX] [--label TEXT] [--set-checksum-seed] [--json] IMAGE
+
+options:
+  --uuid HEX           the new filesystem UUID: 32 hex digits, dashed or bare
+  --label TEXT         the new volume label, at most 16 bytes
+  --set-checksum-seed  record the seed the current UUID implies and set
+                       metadata_csum_seed, so the UUID can change without invalidating the
+                       filesystem's metadata checksums
+  --json               report what was written as JSON rather than as text
+
+At least one of --uuid, --label, and --set-checksum-seed is required: a run that would
+write nothing is a command line that meant to say something.
+
+Every superblock copy is rewritten — the primary and each group's backup — along with the
+journal's own record of the UUID, so no copy is left claiming the old identity. Each copy
+is patched in place: it keeps every field this change does not name.
+
+Nothing is written until every copy has been read and every check has passed, so a refusal
+leaves the image exactly as it was. There is no --atomic: an image is rewritten where it
+lies, and a temporary copy would mean writing every byte of it to change sixteen.
+
+A filesystem with metadata_csum and without metadata_csum_seed seeds every checksum it
+holds from the UUID itself, so changing the UUID would invalidate all of them at once.
+That is refused, and --set-checksum-seed is the way through: it records the seed the
+current UUID implies, after which the UUID moves and every existing checksum stays valid.
+It sets an incompatible feature, so a kernel that does not know metadata_csum_seed will
+not mount the result — which is why it is asked for rather than assumed.
 ";
 
 #[cfg(test)]

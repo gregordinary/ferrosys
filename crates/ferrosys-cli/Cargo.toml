@@ -10,7 +10,9 @@ keywords = ["ext4", "filesystem", "mkfs", "disk-image", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 # The package's front page on a registry.
 readme = "README.md"
-documentation = "https://docs.rs/ferrosys-cli"
+# The guide, not docs.rs: the only target here is a binary with `doc = false`, so a
+# rustdoc site for this package would be an empty page.
+documentation = "https://gregordinary.github.io/ferrosys/cli.html"
 
 # The binary is `ferrosys`; the package it ships in is `ferrosys-cli`.
 # `doc = false`: the binary shares the name of the `ferrosys` library, and rustdoc would
@@ -25,8 +27,6 @@ doc = false
 # The filesystem itself. The `tar` feature carries the archive source `format --from-tar`
 # reads, and `dir` the directory walk behind `format --from-dir`.
 ferrosys = { workspace = true, features = ["tar", "dir"] }
-# Writing the archive `extract --to-tar` produces. Reading one is the library's job.
-tar = { workspace = true }
 # Typed error enums. Build-time proc-macro only; no runtime footprint. Argument
 # parsing is hand-written and takes no dependency.
 thiserror = { workspace = true }
@@ -34,7 +34,9 @@ thiserror = { workspace = true }
 [dev-dependencies]
 # Scratch images and archives for the integration gates; never shipped.
 tempfile = { workspace = true }
-# Building the tar archives the round-trip gates feed back in.
+# Building the tar archives the round-trip gates feed back in, and reading back the ones
+# `extract --to-tar` writes. The binary itself needs no tar crate: it writes archives
+# through the library's archive sink, which takes a plain writer.
 tar = { workspace = true }
 # The integration gates build filesystems the archive source cannot describe (a socket)
 # and read them back, so they drive the library directly as well as the binary.

@@ -1,5 +1,10 @@
-//! The host filesystem as a source: [`DirectorySource`] walks a directory tree into the
-//! entries a format consumes.
+//! The host filesystem, in both directions: [`DirectorySource`] walks a directory tree into
+//! the entries a format consumes, and [`DirectorySink`] writes a filesystem's contents back
+//! out as a directory tree.
+//!
+//! This module is the walk in. The write out is [`sink`], and its own documentation covers
+//! what it takes to reproduce a tree faithfully — the privileges, the traversal rules, and
+//! the one time no host lets a caller set.
 //!
 //! The walk carries the fidelity an image builder needs: mode bits, ownership, access,
 //! change, and modification times to the nanosecond, symlinks, device and FIFO nodes,
@@ -23,9 +28,13 @@
 //! symlink to learn what it holds, and a host that maintains access times records that
 //! read, so the access time a walk reports is the one the host held when that entry was
 //! reached. Two walks of one tree agree on everything the walk decides; they agree on
-//! access times where the host holds them still, as a tree read from a `noatime` mount
-//! does. A caller that needs the times fixed whatever the host does builds its entries
-//! with [`Metadata::with_times`] and yields them from a source of its own.
+//! access and change times where the host holds those still, as a tree read from a
+//! `noatime` mount and left unstaged does.
+//!
+//! [`times_from_modification`](DirectorySource::times_from_modification) is what makes the
+//! times the walk's rather than the host's: it puts each entry's modification time in
+//! place of its access and change times, so one tree walks to one image however many
+//! times it has been read or restaged.
 //!
 //! # Ownership
 //!
@@ -46,6 +55,10 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+mod sink;
+
+pub use sink::{DirectorySink, ExtractReport};
 
 use crate::acl::Acl;
 use crate::ondisk::{Timestamp, Xattr};
@@ -89,6 +102,62 @@ pub enum HostError {
         /// The underlying ACL error.
         #[source]
         source: crate::acl::AclError,
+    },
+    /// The filesystem being written out could not be read.
+    #[error(transparent)]
+    #[non_exhaustive]
+    Read {
+        /// The failure the reader reported.
+        source: crate::read::ReadError,
+    },
+    /// The directory an extraction is to write into already holds something.
+    ///
+    /// An extraction states what the filesystem holds, so a name already in the destination
+    /// is an entry that cannot be created — discovered part-way through, with the tree half
+    /// written. Refusing before anything is written is the failure a caller can act on.
+    #[error("{}: is not empty", path.display())]
+    #[non_exhaustive]
+    NotEmpty {
+        /// The destination directory.
+        path: PathBuf,
+    },
+    /// The filesystem holds a name no directory on this host can hold.
+    ///
+    /// A name carrying a separator, a `..`, or a NUL would name a place the destination does
+    /// not contain, so it is refused rather than resolved. Nothing a well-formed filesystem
+    /// holds reaches this: it is what makes an image an input rather than an instruction.
+    #[error(
+        "{}: is a name that cannot be written into a directory",
+        String::from_utf8_lossy(.path)
+    )]
+    #[non_exhaustive]
+    HostileName {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+    },
+    /// Reproducing an entry needs a privilege this process does not have.
+    #[error("{}: {what}", String::from_utf8_lossy(.path))]
+    #[non_exhaustive]
+    Unprivileged {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// What could not be done, and what it would take.
+        what: &'static str,
+    },
+    /// An entry records an owner no host id can be set to: a `chown` reads all-ones as
+    /// "leave this one alone", so there is no call that sets it.
+    #[error(
+        "{}: records owner {uid}:{gid}, which cannot be set",
+        String::from_utf8_lossy(.path)
+    )]
+    #[non_exhaustive]
+    UnrepresentableOwner {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// The recorded user id.
+        uid: u32,
+        /// The recorded group id.
+        gid: u32,
     },
     /// Two paths in the tree name one directory, which a bind mount produces.
     #[error(
@@ -244,6 +313,33 @@ impl DirectorySource {
         for entry in &mut self.entries {
             entry.meta.uid = uid;
             entry.meta.gid = gid;
+        }
+        self
+    }
+
+    /// Replace every entry's access and change times with its own modification time.
+    ///
+    /// A walk records all three times the host carries, and two of them move under the
+    /// host's feet. Reading a file updates its access time, so a build that reads the tree
+    /// is itself enough to change what the next walk records; the change time moves
+    /// whenever anything sets a mode, an owner, or a link count, which is what staging a
+    /// tree does. The modification time moves only when a file's contents do, so it is the
+    /// one that describes the tree rather than the history of the machine holding it.
+    ///
+    /// This makes a walked entry's times what [`Metadata::new`] gives for that entry's
+    /// modification time, so one tree walks to one image however many times it has been
+    /// read or restaged. It is the clamp for a build that needs reproducible bytes and
+    /// keeps per-file modification times;
+    /// [`FormatOptions::fixed_time`](crate::ext::FormatOptions::fixed_time) is the clamp
+    /// for one that forces every inode to a single time instead.
+    ///
+    /// The creation time is derived from the modification time by the model, so it follows
+    /// without being named here.
+    #[must_use]
+    pub fn times_from_modification(mut self) -> Self {
+        for entry in &mut self.entries {
+            entry.meta.atime = entry.meta.mtime;
+            entry.meta.ctime = entry.meta.mtime;
         }
         self
     }

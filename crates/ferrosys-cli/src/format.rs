@@ -15,7 +15,10 @@
 //! truncating one that exists, is part of formatting rather than something done to it
 //! afterwards. So the order matters: the archive is parsed, the geometry planned, and the
 //! inode model built and checked against it *before* the destination is opened. A run that
-//! cannot succeed leaves the file that was there exactly as it was.
+//! cannot succeed leaves the file that was there exactly as it was. `--size auto` searches
+//! for the size in that same window, placing the contents into candidate geometries without
+//! writing any of them, so a size that cannot be found is a run that never opened the file
+//! either.
 //!
 //! `--atomic` goes further, for the case where a failure part-way through the writing must
 //! not be visible either: the image is written to a sibling temporary file, flushed to
@@ -29,8 +32,8 @@
 //! this module carries the boundary rather than the whole tool: [`from_dir`] is the walk on
 //! Linux and a typed refusal elsewhere.
 
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use ferrosys::ext::DirectorySource;
@@ -38,7 +41,8 @@ use ferrosys::ext::{
     ArchiveSource, FormatOptions, FormatPlan, Layout, Profile, Reader, Source, TreeBuilder,
 };
 
-use crate::args::{Contents, FormatArgs, Stream};
+use crate::args::{Contents, FormatArgs, Size, Stream};
+use crate::dest::Destination;
 use crate::json::Obj;
 use crate::{Error, emit, render};
 
@@ -55,7 +59,7 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
     // built once per kind rather than behind a trait object the library would have to
     // accept.
     let plan = match &args.contents {
-        None => FormatPlan::new(TreeBuilder::new(), args.size, options)?,
+        None => plan(TreeBuilder::new(), &args, options)?,
         Some(Contents::Tar(Stream::Std)) => {
             let stdin = std::io::stdin();
             plan(ArchiveSource::from_reader(stdin.lock())?, &args, options)?
@@ -79,7 +83,7 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
         return report(&args, plan.layout(), None);
     }
 
-    let mut dest = Destination::open(&args.out, args.atomic)?;
+    let mut dest = open_destination(&args.out, args.atomic)?;
     let layout = plan.write_to(dest.file())?;
     // The filesystem's own account of what it has left, read back from what was just
     // written rather than estimated from the plan: the free counts depend on what the
@@ -89,13 +93,51 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
     report(&args, &layout, Some(usage))
 }
 
+/// Open the destination for the image, refusing anything but a regular file.
+///
+/// A format writes only the blocks the filesystem uses and extends the file to its full
+/// size with a single byte at the end, so every byte it does not write must already read
+/// as zero. Creating the file, or truncating one that exists, is what makes that true. A
+/// block device cannot be made true that way: formatting one would leave whatever it held
+/// interleaved with the new filesystem, and the result would pass no checker.
+///
+/// The kind is checked before the file is opened, so a device is never opened for writing
+/// at all, and again after, from the handle itself, so a path that changed underneath the
+/// first check cannot slip past.
+fn open_destination(out: &Path, atomic: bool) -> Result<Destination, Error> {
+    let not_regular = || Error::NotARegularFile(out.display().to_string());
+    match std::fs::metadata(out) {
+        Ok(meta) if !meta.file_type().is_file() => return Err(not_regular()),
+        // A path that does not exist yet is about to be a regular file.
+        Ok(_) | Err(_) => {}
+    }
+    let mut dest = Destination::open(out, atomic)?;
+    let meta = dest
+        .file()
+        .metadata()
+        .map_err(|e| Error::io(dest.written(), e))?;
+    if !meta.file_type().is_file() {
+        return Err(not_regular());
+    }
+    Ok(dest)
+}
+
 /// Plan a format from one source kind.
+///
+/// A named size is planned directly. `--size auto` is a search instead: candidate sizes are
+/// planned and the source placed into each until the smallest one that holds it with the
+/// requested room to spare is found. Either way what comes back is a plan over the same
+/// model, so the search costs no second reading of the source and nothing downstream knows
+/// which way the size was arrived at.
 fn plan(
     source: impl Source,
     args: &FormatArgs,
     options: FormatOptions,
 ) -> Result<FormatPlan, Error> {
-    Ok(FormatPlan::new(source, args.size, options)?)
+    Ok(match args.size {
+        Size::Bytes(bytes) => FormatPlan::new(source, bytes, options)?,
+        Size::Fit(slack) => FormatPlan::fit(source, options, slack)?,
+    })
 }
 
 /// Plan a format from a walked directory tree.
@@ -184,119 +226,6 @@ fn options(args: &FormatArgs) -> FormatOptions {
     o.hash_version = args.hash_version;
     o.hash_signedness = args.hash_signedness;
     o
-}
-
-/// Where a format's bytes go, and what makes them the destination's.
-///
-/// Written in place, this is the destination itself. Under `--atomic` it is a sibling
-/// temporary file that becomes the destination at [`commit`](Self::commit): the rename is
-/// atomic, so a reader of the path sees either the image that was there before or the
-/// complete new one, and a run that dies part-way through leaves the old one untouched.
-struct Destination {
-    /// The path a caller asked for.
-    out: PathBuf,
-    /// The file being written: `out` itself, or the temporary sibling.
-    written: PathBuf,
-    file: File,
-    /// Whether `written` still has to be renamed over `out`.
-    atomic: bool,
-}
-
-impl Destination {
-    /// Open the destination for `out`, refusing anything but a regular file.
-    ///
-    /// A format writes only the blocks the filesystem uses and extends the file to its full
-    /// size with a single byte at the end, so every byte it does not write must already read
-    /// as zero. Creating the file, or truncating one that exists, is what makes that true. A
-    /// block device cannot be made true that way: formatting one would leave whatever it
-    /// held interleaved with the new filesystem, and the result would pass no checker.
-    ///
-    /// The kind is checked before the file is opened, so a device is never opened for
-    /// writing at all, and again after, from the handle itself, so a path that changed
-    /// underneath the first check cannot slip past.
-    fn open(out: &Path, atomic: bool) -> Result<Self, Error> {
-        let not_regular = || Error::NotARegularFile(out.display().to_string());
-        match std::fs::metadata(out) {
-            Ok(meta) if !meta.file_type().is_file() => return Err(not_regular()),
-            // A path that does not exist yet is about to be a regular file.
-            Ok(_) | Err(_) => {}
-        }
-        // The temporary file is a sibling, because a rename cannot cross filesystems: one
-        // in a scratch directory could not become this destination. The process id keeps
-        // two runs writing the same destination from writing the same temporary file; it
-        // reaches no image byte, so it costs the output's reproducibility nothing.
-        let written = if atomic {
-            let name = out.file_name().unwrap_or_default();
-            let mut temp = name.to_os_string();
-            temp.push(format!(".ferrosys-{}.tmp", std::process::id()));
-            out.with_file_name(temp)
-        } else {
-            out.to_path_buf()
-        };
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&written)
-            .map_err(|e| Error::io(&written, e))?;
-        let meta = file.metadata().map_err(|e| Error::io(&written, e))?;
-        if !meta.file_type().is_file() {
-            return Err(not_regular());
-        }
-        Ok(Self {
-            out: out.to_path_buf(),
-            written,
-            file,
-            atomic,
-        })
-    }
-
-    /// The handle the image is written through.
-    fn file(&mut self) -> &mut File {
-        &mut self.file
-    }
-
-    /// The file the bytes were written to, for reading them back.
-    fn written(&self) -> &Path {
-        &self.written
-    }
-
-    /// Make the written bytes the destination's.
-    ///
-    /// Written in place there is nothing to do. Under `--atomic` the file's bytes are
-    /// flushed to disk before the rename and the directory entry after it, since a rename
-    /// that reached the disk before the bytes it names would leave the destination holding
-    /// an image that was never finished — which is the one outcome the option exists to
-    /// prevent.
-    fn commit(self) -> Result<(), Error> {
-        if !self.atomic {
-            return Ok(());
-        }
-        self.file
-            .sync_all()
-            .map_err(|e| Error::io(&self.written, e))?;
-        std::fs::rename(&self.written, &self.out).map_err(|e| Error::io(&self.out, e))?;
-        // The directory entry the rename created. A parent that cannot be opened is not a
-        // failure of the format — the image is written and in place — so the durability of
-        // the entry is best-effort where the bytes' is not.
-        if let Some(parent) = self.out.parent().filter(|p| !p.as_os_str().is_empty())
-            && let Ok(dir) = File::open(parent)
-        {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Destination {
-    /// Remove the temporary file if it never became the destination, so a failed
-    /// `--atomic` run leaves nothing behind. A successful `commit` renamed it away, and the
-    /// remove then finds nothing to do.
-    fn drop(&mut self) {
-        if self.atomic {
-            let _ = std::fs::remove_file(&self.written);
-        }
-    }
 }
 
 /// The summary a person reads: what was written, and the geometry it took.

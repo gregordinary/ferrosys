@@ -45,27 +45,52 @@ pub fn label(name: &[u8; 16]) -> Option<String> {
     (end != 0).then(|| printable(&name[..end]))
 }
 
-/// Render image-controlled bytes for a person to read on a terminal, with every control
-/// character replaced by a visible `\xNN` escape.
+/// Render image-controlled bytes for a person to read on a terminal, with every character
+/// that acts on the terminal rather than appearing on it replaced by a visible escape.
 ///
 /// A name, symlink target, or label comes from the filesystem, which a reader does not
 /// trust: left raw, an escape sequence in one could move the cursor, recolor the line, or
-/// erase what precedes it, so a crafted image could forge or hide output. Escaping the
-/// control bytes renders the value faithfully without handing the terminal their effect.
-/// Invalid UTF-8 still renders lossily, as elsewhere; the JSON projection escapes these
-/// bytes on its own, so only the human renderers need this.
+/// erase what precedes it, and a direction override could reverse the rest of the line so
+/// that a path reads as one thing and resolves as another. So a crafted image could forge
+/// or hide output. Escaping those characters renders the value faithfully without handing
+/// the terminal their effect. The backslash escapes itself, so what comes out names
+/// exactly one input: a name holding the four characters `\x1b` and one holding the escape
+/// byte do not render alike. Invalid UTF-8 still renders lossily, as elsewhere; the JSON
+/// projection escapes these bytes on its own, so only the human renderers need this.
 #[must_use]
 pub fn printable(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for c in String::from_utf8_lossy(bytes).chars() {
-        if c.is_control() {
+        match c {
+            // Without this the escapes below would be ambiguous, and an escape a reader
+            // cannot invert is one they cannot trust.
+            '\\' => out.push_str("\\\\"),
             // A control character is at most `U+009F`, so two hex digits name it.
-            out.push_str(&format!("\\x{:02x}", c as u32));
-        } else {
-            out.push(c);
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if is_direction_control(c) => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+            c => out.push(c),
         }
     }
     out
+}
+
+/// Whether `c` is a bidirectional formatting character — one that reorders the text around
+/// it without occupying a column of its own.
+///
+/// These are not `char::is_control`: they are category `Cf`, and a terminal honors them.
+/// Left raw, `U+202E` alone makes the rest of a line render right to left, which is enough
+/// to display a name as its own reverse. The set is closed and small, so it is named here
+/// rather than reached for through a Unicode table.
+fn is_direction_control(c: char) -> bool {
+    matches!(
+        c,
+        // The marks and the embedding/override run: LRM, RLM, ALM.
+        '\u{200e}' | '\u{200f}' | '\u{061c}'
+        // LRE, RLE, PDF, LRO, RLO.
+        | '\u{202a}'..='\u{202e}'
+        // LRI, RLI, FSI, PDI.
+        | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// The mode as `ls` writes it: the type letter, then the owner, group, and other
@@ -169,8 +194,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// A POSIX ACL as `getfacl` writes it: one `tag:qualifier:perms` entry per line, in the
-/// order the ACL stores them.
+/// A POSIX ACL in `getfacl`'s `tag:qualifier:perms` spelling, entries comma-joined on one
+/// line, in the order the ACL stores them. One line rather than `getfacl`'s one entry per
+/// line, because this is a value in a label-and-value table and a multi-line value would
+/// break the column.
 ///
 /// The on-disk form is ext's compact encoding, which is neither what a person reads nor what
 /// any other tool speaks, so an ACL that is only ever shown as bytes is an ACL nobody can
@@ -255,6 +282,33 @@ mod tests {
         assert_eq!(printable(b"a\0b\x7fc"), "a\\x00b\\x7fc");
         // Invalid UTF-8 still renders lossily.
         assert_eq!(printable(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn printable_names_exactly_one_input() {
+        // The backslash escapes itself, so a name holding the four characters `\x1b`
+        // does not render as the one holding the ESC byte. Without this the rendering
+        // would be ambiguous in the direction that matters: a crafted name could be
+        // written to look like the escaped form of an innocent one.
+        assert_eq!(printable(br"a\x1bb"), "a\\\\x1bb");
+        assert_ne!(printable(br"a\x1bb"), printable(b"a\x1bb"));
+    }
+
+    #[test]
+    fn printable_escapes_the_direction_overrides() {
+        // `U+202E` reverses everything after it, so a terminal would show this name as
+        // `gpj.exe`. It is category Cf rather than a control, so `is_control` misses it.
+        assert_eq!(
+            printable("photo\u{202e}exe.jpg".as_bytes()),
+            "photo\\u{202e}exe.jpg"
+        );
+        // The isolates and the plain marks are escaped on the same grounds.
+        assert_eq!(
+            printable("a\u{2066}b\u{200f}c".as_bytes()),
+            "a\\u{2066}b\\u{200f}c"
+        );
+        // An ordinary non-ASCII character is not one of them and renders as itself.
+        assert_eq!(printable("café".as_bytes()), "café");
     }
 
     #[test]

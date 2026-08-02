@@ -15,7 +15,7 @@ use std::num::NonZeroU64;
 
 use ferrosys::ext::{
     Compat, ErrorBehavior, FeatureSet, GrowReservation, HashSignedness, HashVersion, Incompat,
-    InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity,
+    InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity, Slack,
 };
 
 /// A value an option cannot take.
@@ -62,6 +62,19 @@ pub enum ValueError {
     /// A feature list held an empty element, so it names no feature.
     #[error("{0}: a feature list has an empty element")]
     EmptyFeature(String),
+    /// The value is neither one of the option's named choices nor the measurement it
+    /// otherwise takes. Both halves are named, because an option whose value can be a
+    /// word or a number has to say so — an error reporting only the number grammar
+    /// leaves a caller no way to learn the word.
+    #[error("{value}: expected {names}, or {measurement}")]
+    NotNamedNor {
+        /// What was given.
+        value: String,
+        /// The names the option accepts, as a phrase: `none or max`.
+        names: &'static str,
+        /// The measurement it takes instead, phrased as the other errors phrase theirs.
+        measurement: &'static str,
+    },
 }
 
 /// The value's text, rendered lossily — what an error message names it by.
@@ -142,10 +155,20 @@ pub fn owner(v: &OsStr) -> Result<(u32, u32), ValueError> {
 ///
 /// # Errors
 ///
-/// [`ValueError::NotANumber`] if the text is not a decimal number, sign included.
+/// [`ValueError::NotANumber`] if the text is not a decimal number, sign included;
+/// [`ValueError::OutOfRange`] if it is one that does not fit in 64 bits.
 pub fn seconds(v: &OsStr) -> Result<i64, ValueError> {
     let s = text(v).ok_or_else(|| ValueError::NotANumber(shown(v)))?;
-    s.parse().map_err(|_| ValueError::NotANumber(shown(v)))
+    s.parse().map_err(|_| {
+        // A well-formed number the field cannot hold is a different mistake from text
+        // that is not a number, and only one of them is fixed by writing digits.
+        let digits = s.strip_prefix(['-', '+']).unwrap_or(s);
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            ValueError::OutOfRange(shown(v))
+        } else {
+            ValueError::NotANumber(shown(v))
+        }
+    })
 }
 
 /// Sixteen bytes written as hexadecimal — the filesystem UUID and the directory-hash
@@ -222,12 +245,22 @@ pub fn features(base: FeatureSet, v: &OsStr) -> Result<FeatureSet, ValueError> {
 ///
 /// # Errors
 ///
-/// [`ValueError::NotASize`] if the text is neither name nor a byte count.
+/// [`ValueError::OutOfRange`] if a suffix scales the count past 64 bits;
+/// [`ValueError::NotNamedNor`] if the text is neither name nor a byte count.
 pub fn grow(v: &OsStr) -> Result<GrowReservation, ValueError> {
     match text(v) {
         Some("none") => Ok(GrowReservation::None),
         Some("max") => Ok(GrowReservation::Max),
-        _ => size(v).map(GrowReservation::UpTo),
+        // A well-formed count the suffix pushed past 64 bits keeps its own error: the
+        // caller wrote a byte count and the trouble is its magnitude, not the grammar.
+        _ => size(v).map(GrowReservation::UpTo).map_err(|e| match e {
+            ValueError::NotASize(value) => ValueError::NotNamedNor {
+                value,
+                names: "none or max",
+                measurement: "a byte count, optionally suffixed K, M, G, or T",
+            },
+            other => other,
+        }),
     }
 }
 
@@ -236,11 +269,21 @@ pub fn grow(v: &OsStr) -> Result<GrowReservation, ValueError> {
 ///
 /// # Errors
 ///
-/// [`ValueError::NotANumber`] if the text is neither `auto` nor a block count.
+/// [`ValueError::OutOfRange`] if the count does not fit in 32 bits;
+/// [`ValueError::NotNamedNor`] if the text is neither `auto` nor a block count.
 pub fn journal(v: &OsStr) -> Result<JournalSize, ValueError> {
     match text(v) {
         Some("auto") => Ok(JournalSize::Auto),
-        _ => count_u32(v).map(JournalSize::Blocks),
+        // As for `grow`: a number too large for the field is a magnitude problem, and
+        // saying so is more useful than re-offering the grammar.
+        _ => count_u32(v).map(JournalSize::Blocks).map_err(|e| match e {
+            ValueError::NotANumber(value) => ValueError::NotNamedNor {
+                value,
+                names: "auto",
+                measurement: "a count of filesystem blocks",
+            },
+            other => other,
+        }),
     }
 }
 
@@ -381,6 +424,40 @@ pub fn bytes_per_inode(v: &OsStr) -> Result<InodeCount, ValueError> {
 /// if it parses but exceeds 50.
 pub fn reserved_percent(v: &OsStr) -> Result<ReservedRatio, ValueError> {
     let s = text(v).ok_or_else(|| ValueError::NotAPercent(shown(v)))?;
+    u16::try_from(hundredths_of_percent(s, v)?)
+        .ok()
+        .and_then(ReservedRatio::from_hundredths_of_percent)
+        .ok_or_else(|| ValueError::OutOfRange(shown(v)))
+}
+
+/// The room a fitted filesystem must leave free: a percentage of the filesystem, or a
+/// byte count.
+///
+/// `20%` and `1.5%` are shares of the finished filesystem; `64M` and `1G` are byte counts
+/// with the same suffixes [`size`] takes. Which one a value is, is decided by the trailing
+/// `%` alone.
+///
+/// # Errors
+///
+/// [`ValueError::NotAPercent`] or [`ValueError::NotASize`] if the text is neither form,
+/// and [`ValueError::OutOfRange`] for a share past what a fit search will look for.
+pub fn slack(v: &OsStr) -> Result<Slack, ValueError> {
+    let Some(percent) = text(v).and_then(|s| s.strip_suffix('%')) else {
+        return size(v).map(Slack::Bytes);
+    };
+    u16::try_from(hundredths_of_percent(percent, v)?)
+        .ok()
+        .filter(|&h| h <= Slack::MAX_SHARE)
+        .map(Slack::Share)
+        .ok_or_else(|| ValueError::OutOfRange(shown(v)))
+}
+
+/// A percentage as a whole number of hundredths of one percent: `5` is `500`, `1.5` is
+/// `150`, `12.34` is `1234`, and `.5` is `50`.
+///
+/// `s` is the text without any `%`, and `v` is the whole value the caller was given, which
+/// is what an error names.
+fn hundredths_of_percent(s: &str, v: &OsStr) -> Result<u64, ValueError> {
     let (int_part, frac_part) = s.split_once('.').unwrap_or((s, ""));
     // At most two fractional digits, so the value is a whole number of hundredths of a
     // percent. Every character on each side must be an ASCII digit, which admits no sign,
@@ -402,15 +479,11 @@ pub fn reserved_percent(v: &OsStr) -> Result<ReservedRatio, ValueError> {
             .parse::<u64>()
             .map_err(|_| ValueError::OutOfRange(shown(v)))?
     };
-    // The whole part in hundredths of a percent, plus the fraction scaled to two places:
-    // "5" -> 500, "1.5" -> 150, "12.34" -> 1234, ".5" -> 50.
-    let hundredths = whole
+    // The whole part in hundredths of a percent, plus the fraction scaled to two places.
+    whole
         .checked_mul(100)
         .and_then(|h| h.checked_add(frac_to_hundredths(frac_part)))
-        .and_then(|h| u16::try_from(h).ok())
-        .and_then(ReservedRatio::from_hundredths_of_percent)
-        .ok_or_else(|| ValueError::OutOfRange(shown(v)))?;
-    Ok(hundredths)
+        .ok_or_else(|| ValueError::OutOfRange(shown(v)))
 }
 
 /// A fractional-percent part, right-padded to two digits, as a count of hundredths of a
@@ -553,10 +626,30 @@ mod tests {
         assert_eq!(grow(os("none")).unwrap(), GrowReservation::None);
         assert_eq!(grow(os("max")).unwrap(), GrowReservation::Max);
         assert_eq!(grow(os("4G")).unwrap(), GrowReservation::UpTo(4 << 30));
-        assert!(matches!(grow(os("huge")), Err(ValueError::NotASize(_))));
+        // An option whose value can be a word or a measurement names both when it
+        // refuses one: offering only the byte-count grammar would leave `none` and
+        // `max` undiscoverable from the error that most wants to mention them.
+        assert_eq!(
+            grow(os("huge")).unwrap_err().to_string(),
+            "huge: expected none or max, or a byte count, optionally suffixed K, M, G, or T"
+        );
+        // A value that *is* a byte count, and only too large for the field, keeps the
+        // error about its magnitude.
+        assert!(matches!(
+            grow(os("99999999T")),
+            Err(ValueError::OutOfRange(_))
+        ));
 
         assert_eq!(journal(os("auto")).unwrap(), JournalSize::Auto);
         assert_eq!(journal(os("4096")).unwrap(), JournalSize::Blocks(4096));
+        assert_eq!(
+            journal(os("fast")).unwrap_err().to_string(),
+            "fast: expected auto, or a count of filesystem blocks"
+        );
+        assert!(matches!(
+            journal(os("99999999999")),
+            Err(ValueError::OutOfRange(_))
+        ));
 
         assert_eq!(fail_on(os("never")).unwrap(), None);
         assert_eq!(fail_on(os("integrity")).unwrap(), Some(Severity::Integrity));

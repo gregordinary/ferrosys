@@ -19,12 +19,20 @@ group and every backup. Growing the filesystem, up to that target, consumes the
 reserved blocks in place; the descriptor table never has to move.
 
 The target is named, not derived from the image's size by a fixed multiplier. A
-caller who knows the device the image will be flashed to names it; a caller who
-names none gets the format maximum — as much headroom as the resize inode can
-address — so an image built without a target still grows onto any device up to
-that ceiling. A target larger than the reservation can represent is rejected when
-the layout is planned, rather than written as a filesystem that would need the
-corrupting conversion to grow.
+caller who knows the device the image will be flashed to names it, and that
+target is honored to the format's ceiling. A target larger than the reservation
+can represent is rejected when the layout is planned, rather than written as a
+filesystem that would need the corrupting conversion to grow.
+
+A caller who names no target gets the largest reservation that costs at most one
+block in sixty-four of the filesystem. Filling the resize inode's map costs the
+same 1024 blocks at a 4096-byte block whatever the image's size — a
+sixty-fourth of a 256 MiB filesystem, and a quarter of a 16 MiB one — so from
+256 MiB up this is the whole map, about 8 TiB of reach, and below it the share
+the image can spare: a 16 MiB image reserves 64 blocks and grows online to
+520 GiB. Growth headroom therefore never costs more than 1.6% of a filesystem,
+and asking for no target can never turn an image that would format into one that
+does not.
 
 ## Superblock and descriptor backups
 
