@@ -592,11 +592,15 @@ else. Symbolic links are written exactly as recorded, absolute targets included,
 safe because nothing here ever follows one: every handle is opened `O_NOFOLLOW` and every
 attribute is set on the link itself.
 
-Two parts of a tree take privileges — a device node needs `CAP_MKNOD`, and setting a
-recorded owner needs `CAP_CHOWN` — and by default a host that refuses either is
+Three parts of a tree take privileges — a device node needs `CAP_MKNOD`, setting a
+recorded owner needs `CAP_CHOWN`, and an extended attribute in the `security` or `trusted`
+namespace is the host's to write — and by default a host that refuses any of them is
 `HostError::Unprivileged`, naming the entry. `skip_privileged` is the opt-in for an
 unprivileged extraction: what it left out comes back in the `ExtractReport` rather than in
-silence.
+silence, as `skipped`, `ownership_dropped`, and `xattrs_dropped`.
+
+A file's contents are written as the filesystem reports them, and a hole reads as zeros, so
+a sparse file lands in the destination fully allocated.
 
 Two times no extraction can carry, because no host lets a caller set them: an inode's
 **change time** and its **creation time**. Access and modification times are set exactly,

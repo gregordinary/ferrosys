@@ -573,6 +573,137 @@ fn a_device_node_is_refused_or_recorded_rather_than_written_wrong() {
 }
 
 #[test]
+fn a_reserved_attribute_is_refused_or_recorded_rather_than_lost_in_silence() {
+    // The `security` and `trusted` namespaces are the host's to write, and a root
+    // filesystem is full of them: `security.capability` on every binary that holds one,
+    // `security.selinux` throughout a labelled tree. So this is what an unprivileged
+    // extraction of a real image meets first.
+    //
+    // The attribute is put into the image by the builder rather than set on the host and
+    // walked in, because a test that can only use an attribute the test process is allowed
+    // to write can only ever exercise the one namespace that needs no privilege at all.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    // A file capability as the kernel stores one: revision 2, and its permitted,
+    // inheritable, and effective words.
+    let cap = vec![
+        0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let source = TreeBuilder::new()
+        .file(
+            b"/ping".to_vec(),
+            b"not really an ELF\n".to_vec(),
+            Metadata::new(0o755, time),
+        )
+        .xattr(b"security.capability".to_vec(), cap.clone())
+        .file(
+            b"/plain".to_vec(),
+            b"plain\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+    let host = tempfile::tempdir().expect("temp dir");
+
+    let strict = destination(&host, "strict");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    match DirectorySink::new(&strict)
+        .expect("open the destination")
+        .write_tree(&mut reader)
+    {
+        // Unprivileged, which is how this gate usually runs.
+        Err(HostError::Unprivileged { path, .. }) => assert_eq!(path, b"/ping"),
+        // Privileged, in which case the attribute was set and nothing was dropped.
+        Ok(report) => assert!(!report.xattrs_dropped),
+        other => panic!("expected a refusal or a written attribute, got {other:?}"),
+    }
+
+    let lenient = destination(&host, "lenient");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&lenient)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("skipping what it may not set, an extraction succeeds");
+
+    // Whichever happened, the report says so rather than leaving it to be discovered.
+    let mut buf = [0u8; 64];
+    match rustix::fs::lgetxattr(lenient.join("ping"), "security.capability", &mut buf) {
+        Ok(n) => {
+            assert_eq!(&buf[..n], &cap[..]);
+            assert!(
+                !report.xattrs_dropped,
+                "an attribute that landed is not dropped"
+            );
+        }
+        Err(_) => assert!(
+            report.xattrs_dropped,
+            "an attribute that did not land is reported"
+        ),
+    }
+
+    // Everything else it could write, it wrote — a dropped attribute is not a dropped file.
+    assert_eq!(
+        std::fs::read(lenient.join("ping")).expect("read"),
+        b"not really an ELF\n"
+    );
+    assert_eq!(
+        std::fs::read(lenient.join("plain")).expect("read"),
+        b"plain\n"
+    );
+    assert!(report.skipped.is_empty(), "no name was left out");
+}
+
+#[test]
+fn a_failure_names_the_path_it_was_writing_inside_the_destination() {
+    // An image path is absolute in the filesystem it came from, so joining one onto the
+    // destination discards the destination: a failure on `<dest>/etc` reported as `/etc`
+    // reads as though an extraction had tried to write the host's own directory, which is
+    // the one thing this never does.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+    use std::os::unix::fs::PermissionsExt;
+
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+        .file(
+            b"/etc/hostname".to_vec(),
+            b"ferrosys\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let sink = DirectorySink::new(&out).expect("open the destination");
+    // The destination stops being writable once it is open, so the first name the walk
+    // reaches fails and the failure is one this test can read. It is still readable and
+    // searchable, so the handle the sink already holds keeps working.
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let result = sink.write_tree(&mut reader);
+    // Put it back before asserting, so a failure here still leaves a tree that can be
+    // cleaned up.
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700)).expect("chmod back");
+
+    match result {
+        Err(HostError::Io { path, .. }) => {
+            assert_eq!(path, out.join("etc"));
+            assert!(
+                path.starts_with(&out),
+                "{} names a place outside the destination",
+                path.display()
+            );
+        }
+        // Privileged, where a mode bit stops nothing and the tree is simply written.
+        Ok(_) => assert!(out.join("etc/hostname").exists()),
+        other => panic!("expected an I/O failure or a written tree, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_name_that_could_leave_the_destination_writes_nothing_outside_it() {
     // The image is the input, and a name in it is not a path to resolve. This crafts the
     // one shape a hostile image would use — a directory entry whose name holds a separator,

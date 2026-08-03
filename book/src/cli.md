@@ -386,20 +386,31 @@ POSIX ACLs. Two things no host lets a caller set, so the tree carries the time i
 written for them alone: an inode's **change time** and its **creation time**. Access and
 modification times are set exactly, to the nanosecond.
 
-Two parts of a tree need privileges — a device node needs `CAP_MKNOD`, and setting a
-recorded owner needs `CAP_CHOWN` — so an unprivileged run stops at the first of either
-and names it. That is the right answer for a tree meant to be faithful: a rootfs quietly
-missing `/dev/null` is a rootfs that boots differently. `--skip-privileged` is the opt-in
-for a run that wants what it can have, and what it left out is named on the standard
-error rather than assumed:
+Three parts of a tree need privileges — a device node needs `CAP_MKNOD`, setting a
+recorded owner needs `CAP_CHOWN`, and an extended attribute in the `security` or
+`trusted` namespace is the host's to write — so an unprivileged run stops at the first of
+them and names it. That is the right answer for a tree meant to be faithful: a rootfs
+quietly missing `/dev/null` is a rootfs that boots differently, and one whose `ping` lost
+its `security.capability` is one that no longer runs unprivileged. `--skip-privileged` is
+the opt-in for a run that wants what it can have, and what it left out is named on the
+standard error rather than assumed:
 
 ```console
 $ ferrosys extract rootfs.img --to-dir unpacked --skip-privileged
 Names written:          1282
 Ownership:              not applied — this process may not set another owner
+Attributes:             not applied — this process may not set security or trusted attributes
 Skipped:                /dev/console
 Skipped:                /dev/null
 ```
+
+The reserved attributes are what an unprivileged extraction of a real root filesystem
+meets first: a Debian tree carries `security.capability` on the binaries that hold one,
+and a tree built under SELinux carries `security.selinux` on nearly every inode.
+
+A file's contents are written as the filesystem reports them, and a hole reads as zeros,
+so a sparse file lands in the destination fully allocated. A tree holding one occupies
+more space on the host than it does in the image.
 
 The image is untrusted input, and a name in it is not a path to resolve. Every directory
 is created and then *opened*, and everything beneath it is created through that open

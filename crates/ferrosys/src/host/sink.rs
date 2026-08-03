@@ -21,12 +21,19 @@
 //!
 //! # What a process may not do
 //!
-//! Two parts of a tree take privileges: a device node needs `CAP_MKNOD`, and setting a file's
-//! recorded owner needs `CAP_CHOWN`. By default a host that refuses either is an error naming
-//! the entry, so an extraction that cannot reproduce the tree says so instead of quietly
-//! producing a different one. [`skip_privileged`](DirectorySink::skip_privileged) is the
-//! opt-in for an unprivileged extraction that wants what it can have: what was left out comes
-//! back in the [`ExtractReport`], never in silence.
+//! Three parts of a tree take privileges: a device node needs `CAP_MKNOD`, setting a file's
+//! recorded owner needs `CAP_CHOWN`, and an extended attribute in the `security` or `trusted`
+//! namespace is the host's to write rather than an ordinary process's. By default a host that
+//! refuses any of them is an error naming the entry, so an extraction that cannot reproduce
+//! the tree says so instead of quietly producing a different one.
+//! [`skip_privileged`](DirectorySink::skip_privileged) is the opt-in for an unprivileged
+//! extraction that wants what it can have: what was left out comes back in the
+//! [`ExtractReport`], never in silence.
+//!
+//! The reserved attributes are not an edge case. A Debian root filesystem carries
+//! `security.capability` on the binaries that hold one, and a tree built under SELinux carries
+//! `security.selinux` on nearly every inode, so an unprivileged extraction of a real root
+//! filesystem meets this before it meets anything else.
 //!
 //! # What no extraction can carry
 //!
@@ -94,6 +101,16 @@ pub struct ExtractReport {
     /// the process that wrote it. Only ever true under
     /// [`skip_privileged`](DirectorySink::skip_privileged).
     pub ownership_dropped: bool,
+    /// Whether any extended attribute could not be set because this process may not write it,
+    /// so an entry carrying one is written without it. `security.capability` on a setuid-free
+    /// binary and `security.selinux` on a labelled tree are the ones a root filesystem
+    /// carries. Only ever true under [`skip_privileged`](DirectorySink::skip_privileged).
+    ///
+    /// A flag rather than a list of paths, as
+    /// [`ownership_dropped`](Self::ownership_dropped) is: an SELinux-labelled tree carries a
+    /// reserved attribute on nearly every inode, and naming each would make what an extraction
+    /// holds grow with the size of the tree.
+    pub xattrs_dropped: bool,
 }
 
 /// Writes a filesystem's contents out as a directory tree on this host.
@@ -159,12 +176,14 @@ impl DirectorySink {
 
     /// Write what this process may, rather than failing on what it may not.
     ///
-    /// A device node needs `CAP_MKNOD` and a recorded owner needs `CAP_CHOWN`, so an
+    /// A device node needs `CAP_MKNOD`, a recorded owner needs `CAP_CHOWN`, and an extended
+    /// attribute in the `security` or `trusted` namespace needs a privilege of its own, so an
     /// extraction running as an ordinary user cannot reproduce a root filesystem exactly.
     /// Without this it says so and stops, which is right when the tree is meant to be
-    /// faithful. With it, a node the host refuses to make is left out and the tree is owned
-    /// by the process that wrote it — and the [`ExtractReport`] names every path that was
-    /// skipped, so what the tree is missing is reported rather than assumed.
+    /// faithful. With it, a node the host refuses to make is left out, the tree is owned by
+    /// the process that wrote it, and an attribute the host reserves is not set — and the
+    /// [`ExtractReport`] names every path that was skipped and flags each of the other two,
+    /// so what the tree is missing is reported rather than assumed.
     #[must_use]
     pub fn skip_privileged(mut self) -> Self {
         self.skip_privileged = true;
@@ -334,7 +353,7 @@ impl Extraction<'_> {
             }
             _ => {
                 return Err(HostError::Unsupported {
-                    path: self.sink.root_path.join(display(&entry.path)),
+                    path: under_root(&self.sink.root_path, &entry.path),
                 });
             }
         };
@@ -403,6 +422,11 @@ impl Extraction<'_> {
 
     /// Create a regular file and stream its contents into it, returning the handle its
     /// attributes and metadata are then set through.
+    ///
+    /// The bytes written are the file's contents as the filesystem reports them, and a hole
+    /// reads as zeros — so a sparse file lands in the destination fully allocated, and a tree
+    /// holding one occupies more space on the host than it does in the image. What is written
+    /// is what a reader of either sees.
     fn write_file<R: Read + Seek>(
         &mut self,
         reader: &mut Reader<R>,
@@ -607,13 +631,13 @@ impl Extraction<'_> {
         let host_path = self.host_path(name);
         for xattr in xattrs {
             let value = xattr_value(xattr, path)?;
-            rustix::fs::lsetxattr(
+            let result = rustix::fs::lsetxattr(
                 &host_path,
                 &xattr.name[..],
                 &value,
                 rustix::fs::XattrFlags::empty(),
-            )
-            .map_err(|e| self.io(path, e.into()))?;
+            );
+            self.took_xattr(result, path)?;
         }
         Ok(())
     }
@@ -627,10 +651,36 @@ impl Extraction<'_> {
     ) -> Result<(), HostError> {
         for xattr in xattrs {
             let value = xattr_value(xattr, path)?;
-            rustix::fs::fsetxattr(fd, &xattr.name[..], &value, rustix::fs::XattrFlags::empty())
-                .map_err(|e| self.io(path, e.into()))?;
+            let result =
+                rustix::fs::fsetxattr(fd, &xattr.name[..], &value, rustix::fs::XattrFlags::empty());
+            self.took_xattr(result, path)?;
         }
         Ok(())
+    }
+
+    /// Judge one extended-attribute call, exactly as [`took_ownership`](Self::took_ownership)
+    /// judges one ownership call.
+    ///
+    /// The `security` and `trusted` namespaces are the host's to write, not an ordinary
+    /// process's: a root filesystem carries `security.capability` on the binaries that hold
+    /// one and `security.selinux` throughout when it is labelled, so an unprivileged
+    /// extraction meets a refusal here on trees that are otherwise entirely reproducible.
+    fn took_xattr(&mut self, result: rustix::io::Result<()>, path: &[u8]) -> Result<(), HostError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if forbidden(e) => {
+                if !self.sink.skip_privileged {
+                    return Err(HostError::Unprivileged {
+                        path: path.to_vec(),
+                        what: "an extended attribute in the security or trusted namespace \
+                               needs privilege to set",
+                    });
+                }
+                self.report.xattrs_dropped = true;
+                Ok(())
+            }
+            Err(e) => Err(self.io(path, e.into())),
+        }
     }
 
     /// The host path of a name in the directory currently being written.
@@ -639,20 +689,15 @@ impl Extraction<'_> {
             .open
             .last()
             .expect("the destination itself is never popped");
-        let mut path = self.sink.root_path.clone();
-        for component in dir.path.split(|&b| b == b'/') {
-            if !component.is_empty() {
-                path.push(display(component));
-            }
-        }
+        let mut path = under_root(&self.sink.root_path, &dir.path);
         path.push(display(name));
         path
     }
 
-    /// An I/O failure against the destination, named by the image path it was writing.
+    /// An I/O failure against the destination, named by the host path it was writing.
     fn io(&self, path: &[u8], source: std::io::Error) -> HostError {
         HostError::Io {
-            path: self.sink.root_path.join(display(path)),
+            path: under_root(&self.sink.root_path, path),
             source,
         }
     }
@@ -709,6 +754,23 @@ fn is_lost_found(path: &[u8]) -> bool {
 fn display(bytes: &[u8]) -> &Path {
     use std::os::unix::ffi::OsStrExt;
     Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// The host path an image path names inside the destination.
+///
+/// An image path is absolute in the filesystem it came from, and joining an absolute path onto
+/// a base discards the base — so the components are pushed one at a time and the destination
+/// stays what every path this produces is under. A message naming `/etc/hostname` would say an
+/// extraction touched the host's own file; the one that names `<destination>/etc/hostname` says
+/// where it actually wrote.
+fn under_root(root: &Path, path: &[u8]) -> PathBuf {
+    let mut out = root.to_path_buf();
+    for component in path.split(|&b| b == b'/') {
+        if !component.is_empty() {
+            out.push(display(component));
+        }
+    }
+    out
 }
 
 /// The permission and set-user/group/sticky bits of a recorded mode.
@@ -791,6 +853,23 @@ fn io_at(path: &Path) -> impl Fn(std::io::Error) -> HostError + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_path_lands_under_the_destination_rather_than_replacing_it() {
+        let root = Path::new("/tmp/unpacked");
+        // The case a plain join gets wrong: an absolute argument would discard the base and
+        // name the host's own file.
+        assert_eq!(
+            under_root(root, b"/etc/hostname"),
+            root.join("etc/hostname")
+        );
+        // The root of the image is the destination itself, spelled either way the walk
+        // reaches it.
+        assert_eq!(under_root(root, b"/"), root);
+        assert_eq!(under_root(root, b""), root);
+        // Repeated separators name no component, so they add none.
+        assert_eq!(under_root(root, b"//var//log"), root.join("var/log"));
+    }
 
     #[test]
     fn a_path_splits_into_the_directory_it_is_in_and_the_name_it_holds() {

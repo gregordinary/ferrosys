@@ -1,4 +1,5 @@
-//! Sizing a filesystem to what goes in it: the search behind [`FormatPlan::fit`].
+//! Sizing a filesystem to what goes in it: the search behind
+//! [`FormatPlan::fit`](crate::materialize::FormatPlan::fit).
 //!
 //! Every other way into a format is told how large the filesystem is. This one is not, and
 //! the size is the hardest thing to compute directly: how much room a filesystem has left

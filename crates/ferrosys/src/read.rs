@@ -822,7 +822,7 @@ pub enum ReadError {
         /// The block it names.
         block: u64,
     },
-    /// A regular file is [`LARGE_FILE_MIN_SIZE`](crate::feature::LARGE_FILE_MIN_SIZE) or
+    /// A regular file is [`LARGE_FILE_MIN_SIZE`] or
     /// larger, but the superblock does not enable the `large_file` feature that describes
     /// such a file. This is the incoherence `e2fsck` reports as "filesystem contains large
     /// files, but lacks LARGE_FILE flag in superblock". The bound is on regular files

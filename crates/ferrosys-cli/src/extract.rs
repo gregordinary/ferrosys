@@ -134,6 +134,12 @@ fn to_dir(reader: &mut Reader<File>, path: &Path, skip_privileged: bool) -> Resu
             "Ownership:"
         );
     }
+    if report.xattrs_dropped {
+        eprintln!(
+            "{:<24}not applied — this process may not set security or trusted attributes",
+            "Attributes:"
+        );
+    }
     for skipped in &report.skipped {
         eprintln!("{:<24}{}", "Skipped:", render::printable(skipped));
     }

@@ -52,10 +52,13 @@ To migrate: `inspect --sarif --groups` becomes `inspect --sarif`; `format --help
   exactly as recorded, absolute targets included, which is safe because nothing here ever
   follows one.
 
-  A device node needs `CAP_MKNOD` and a recorded owner needs `CAP_CHOWN`, so an unprivileged
-  extraction stops at the first of either and names it — a rootfs quietly missing `/dev/null`
-  is a rootfs that boots differently. `skip_privileged` (`--skip-privileged`) is the opt-in
-  for a run that wants what it can have, and what it left out comes back in the report. Two
+  A device node needs `CAP_MKNOD`, a recorded owner needs `CAP_CHOWN`, and an extended
+  attribute in the `security` or `trusted` namespace is the host's to write, so an
+  unprivileged extraction stops at the first of the three and names it — a rootfs quietly
+  missing `/dev/null` is a rootfs that boots differently, and one whose `ping` lost its
+  `security.capability` is one that no longer runs unprivileged. `skip_privileged`
+  (`--skip-privileged`) is the opt-in for a run that wants what it can have, and what it left
+  out comes back in the report as `skipped`, `ownership_dropped`, and `xattrs_dropped`. Two
   times no host lets a caller set are the two an extraction cannot carry: an inode's change
   time and its creation time. There is no `--atomic` for a tree, since no rename publishes
   one at once; the empty destination stands in its place.

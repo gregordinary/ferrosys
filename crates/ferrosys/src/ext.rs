@@ -12,7 +12,7 @@
 //! findings taxonomy a scan speaks ([`Anomaly`], [`ScanReport`]), and the
 //! metadata-checksum seam ([`Checksummer`], [`Crc32c`]) are this family's own vocabulary,
 //! re-exported here. The crate root carries the family-agnostic
-//! [`crc32c`](crate::crc32c) primitive they build on.
+//! [`crc32c`](fn@crate::crc32c) primitive they build on.
 //!
 //! # Example
 //!

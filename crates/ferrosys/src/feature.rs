@@ -42,15 +42,13 @@ pub(crate) const fn resize_inode_size(block_size: u32) -> u64 {
 ///
 /// Each generated type wraps the little-endian on-disk feature word for one
 /// superblock feature category. Flags are associated constants; set operations are
-/// `BitOr`/`BitOrAssign`/[`without`](Self::without); [`contains`](Self::contains)
-/// tests membership.
+/// `BitOr`/`BitOrAssign`/`without`, and `contains` tests membership.
 ///
 /// Each flag is declared with the on-disk name it is known by outside this crate —
 /// `EXTENTS("extent")` — so one table carries both. The Rust symbol renders
 /// [`Debug`](fmt::Debug), which keeps a diagnostic legible without a lookup table;
-/// the on-disk name drives [`names`](Self::names) and
-/// [`from_name`](Self::from_name), which is the vocabulary a user and every other
-/// ext4 tool speak.
+/// the on-disk name drives `names` and `from_name`, which is the vocabulary a user
+/// and every other ext4 tool speak.
 macro_rules! feature_word {
     (
         $(#[$ty_doc:meta])*
@@ -761,6 +759,14 @@ impl FeatureSet {
     /// Every field is emitted here, and the projection is written as an exhaustive
     /// destructure so that a field added to [`FeatureSet`] is a compile error rather than
     /// a silent omission from every recorded pin.
+    ///
+    /// **This is the document for a feature set read from an image.** A caller holding the
+    /// [`FormatOptions`](crate::ext::FormatOptions) an image was built from should record
+    /// [`policy_pin`](crate::ext::FormatOptions::policy_pin) instead, which carries these
+    /// lines verbatim and adds the seven options that move bytes without reaching the feature
+    /// words — the grow reservation, inode count, reserved share, error behavior, journal
+    /// size, and the two hash choices. A contract recorded here alone shows no difference
+    /// across a change to any of them.
     #[must_use]
     pub fn pin(self) -> String {
         let mut out = String::from("ferrosys-feature-pin 1\n");

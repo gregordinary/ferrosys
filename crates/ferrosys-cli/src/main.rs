@@ -593,9 +593,10 @@ options:
                        holding it, so nothing structural bounds it. Over the cap the read
                        is an error rather than a short file
   --skip-privileged    with --to-dir, write what this process may rather than failing on
-                       what it may not: a device node it cannot create is left out and the
-                       tree is owned by this process. What was skipped is named on the
-                       standard error, so an incomplete tree says so
+                       what it may not: a device node it cannot create is left out, the
+                       tree is owned by this process, and a security or trusted extended
+                       attribute it may not set is not set. What was left out is named on
+                       the standard error, so an incomplete tree says so
   --atomic             with --to-tar FILE, write the archive to a sibling temporary file
                        and rename it over FILE once the walk is complete, so a walk that
                        fails part-way leaves whatever was at FILE untouched. --to-dir has

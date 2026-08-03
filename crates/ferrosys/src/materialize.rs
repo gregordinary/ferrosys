@@ -1089,7 +1089,7 @@ impl FormatOptions {
     }
 }
 
-/// The realized geometry as the pin document's lines. See [`FormatPlan::pin`].
+/// The realized geometry as the pin document's lines. See [`FormatPlan::geometry_pin`].
 fn push_layout_pin(out: &mut String, layout: &Layout) {
     // Exhaustive on purpose, as above.
     let Layout {

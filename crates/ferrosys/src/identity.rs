@@ -166,6 +166,17 @@ pub enum IdentityError {
 /// them. Nothing is written until every copy has been read and every check has passed, so a
 /// refusal leaves the image untouched rather than half re-identified.
 ///
+/// A failure of the writing itself is the one case that leaves copies disagreeing, and the
+/// answer to it is to run this again: the change is stated as what each copy becomes rather
+/// than as an edit to what it holds, so a second run over a half-written image reaches the
+/// same result as a first run over an untouched one. The primary is written before any backup,
+/// so a run cut short still leaves the copy every reader consults holding the new identity.
+///
+/// The image is rewritten where it lies. There is no write-elsewhere-and-rename form of this,
+/// because the image already exists and copying it to gain one would duplicate every byte of a
+/// filesystem to change a few hundred, and would leave behind a file that is no longer sparse
+/// and no longer the one any other name refers to.
+///
 /// # Errors
 ///
 /// [`IdentityError::Read`] if the image is not a readable ext filesystem;

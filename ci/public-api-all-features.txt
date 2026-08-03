@@ -939,6 +939,7 @@ pub ferrosys::ext::ExtentTree::root: ExtentNode
 pub ferrosys::ext::ExtractReport::ownership_dropped: bool
 pub ferrosys::ext::ExtractReport::skipped: Vec<Vec<u8>>
 pub ferrosys::ext::ExtractReport::written: u64
+pub ferrosys::ext::ExtractReport::xattrs_dropped: bool
 pub ferrosys::ext::FeatureError::BlockSize::block_size: u32
 pub ferrosys::ext::FeatureError::CsumSeedWithoutMetadataCsum
 pub ferrosys::ext::FeatureError::FiletypeRequired

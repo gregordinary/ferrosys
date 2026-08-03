@@ -132,8 +132,12 @@ jobs:
           cmp /tmp/regenerated.tar crates/ferrosys/fuzz/seeds/archive_parse/rootfs-pax.tar \
             || { echo "::error::make-archive-seed.py no longer reproduces the seed"; exit 1; }
 
+      # `--document-private-items` is what makes this gate cover the whole tree. A doc
+      # comment on a private item is not rendered into the published reference, so a
+      # broken link in one is invisible to a run without this flag — and the crate is
+      # mostly private items. The site the docs workflow publishes is built without it.
       - name: Rustdoc
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --all-features --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"
 

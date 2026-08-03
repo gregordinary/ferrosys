@@ -9,11 +9,11 @@
 //! The crate root holds the family-agnostic substrate — the vocabulary a detector and a
 //! scan speak, independent of which family answers them:
 //!
-//! - [`detect`] reads an image and reports the [`Filesystem`] family it holds, and
+//! - [`detect`](fn@detect) reads an image and reports the [`Filesystem`] family it holds, and
 //!   [`detect_with`] does the same at an offset within the source, for a partition or a
 //!   region a carver located; [`DetectError`] tells an unreadable source from an
 //!   unrecognized one.
-//! - [`crc32c`] is the reflected CRC-32C primitive filesystem metadata checksums are
+//! - [`crc32c`](fn@crc32c) is the reflected CRC-32C primitive filesystem metadata checksums are
 //!   built from.
 #![cfg_attr(
     feature = "ext",

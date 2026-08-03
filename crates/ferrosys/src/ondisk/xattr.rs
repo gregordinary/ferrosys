@@ -4,7 +4,7 @@
 //! An extended attribute is a name/value pair attached to an inode. ext4 stores a
 //! small set of them inline in the inode's extra area and spills the rest to a
 //! dedicated block pointed at by `i_file_acl`. Both forms share the same
-//! [`ext4_xattr_entry`] record and the same value packing: fixed-size entry headers
+//! `ext4_xattr_entry` record and the same value packing: fixed-size entry headers
 //! grow up from a header while values grow down from the end of the region, meeting
 //! in the middle.
 //!
@@ -299,7 +299,7 @@ pub(crate) fn encode_inline(attrs: &[Xattr], region_len: usize) -> Option<Vec<u8
 /// `e_value_offs` is measured from the start of the block.
 ///
 /// The entry records grow up from the header while the values grow down from the end,
-/// so the caller must ensure the attributes fit: [`xattr_block_len`] gives the bytes a
+/// so the caller must ensure the attributes fit: [`block_len`] gives the bytes a
 /// set needs, and a set exceeding `block_size` is a contract violation the debug build
 /// catches.
 ///
