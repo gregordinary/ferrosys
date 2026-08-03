@@ -7,12 +7,19 @@
 //! # The image is untrusted
 //!
 //! A filesystem being read back was written by someone else, and every name in it is an
-//! input. Nothing this module writes is reached by joining a name onto a path: each
-//! directory is created and then *opened*, and every file, link, and node beneath it is
-//! created through that open handle by its single-component name, checked to be one a
+//! input. Nothing this module writes is reached by resolving a path through the destination
+//! tree: each directory is created and then *opened*, and every file, link, and node beneath
+//! it is created through that open handle by its single-component name, checked to be one a
 //! directory can hold. A name that is not — one holding a separator, a `..`, or a NUL — is
 //! refused rather than resolved. So an entry cannot name a place outside the destination,
 //! and no directory this writes into is one it did not itself create.
+//!
+//! One call is spelled as a path, because Linux has no `setxattr` that takes a directory
+//! handle before 6.13: an extended attribute on something that cannot be opened — a symbolic
+//! link, a device node — is set through `/proc/self/fd/<n>/<name>`, where `<n>` is the held
+//! handle to the directory the name is in. The kernel resolves that to the directory the
+//! handle already refers to, so the components between the destination and the entry are not
+//! walked again and nothing swapped into the tree mid-extraction can redirect the write.
 //!
 //! Symbolic links are a separate matter, and they are written exactly as the image records
 //! them: a link pointing at `/etc/passwd` or at `../../..` is that link, and reproducing it
@@ -306,14 +313,13 @@ impl Extraction<'_> {
         let kind = entry.inode.mode & IFMT;
         // A directory has more than one link by construction — its own name and its `.` — so
         // its link count says nothing, and it is never another name for anything.
-        if kind != IFDIR {
-            if let Some(first) = self.named.get(&entry.number) {
-                let first = first.clone();
-                self.link(&first, name, &entry.path)?;
-                self.report.written += 1;
-                return Ok(());
-            }
-            self.named.insert(entry.number, entry.path.clone());
+        if kind != IFDIR
+            && let Some(first) = self.named.get(&entry.number)
+        {
+            let first = first.clone();
+            self.link(&first, name, &entry.path)?;
+            self.report.written += 1;
+            return Ok(());
         }
 
         // A regular file is the one kind that leaves a handle behind, since writing it is
@@ -344,11 +350,15 @@ impl Extraction<'_> {
                 None
             }
             IFIFO => {
-                self.make_node(FileType::Fifo, 0, name, &entry)?;
+                if !self.make_node(FileType::Fifo, 0, name, &entry)? {
+                    return Ok(());
+                }
                 None
             }
             IFSOCK => {
-                self.make_node(FileType::Socket, 0, name, &entry)?;
+                if !self.make_node(FileType::Socket, 0, name, &entry)? {
+                    return Ok(());
+                }
                 None
             }
             _ => {
@@ -357,6 +367,16 @@ impl Extraction<'_> {
                 });
             }
         };
+
+        // Now that the name exists, it is the one a later name for this inode links from.
+        // Recorded here rather than before the entry was made, because a node the host
+        // refused was skipped: linking to it would fail for want of a name rather than
+        // report the privilege that was actually missing. Only an inode the image says has
+        // more than one name is held, so what this accumulates is the tree's hard links
+        // rather than a path per file in it.
+        if kind != IFDIR && entry.inode.links_count > 1 {
+            self.named.insert(entry.number, entry.path.clone());
+        }
 
         // A directory's own metadata waits until its children are written; everything else
         // is finished the moment it exists.
@@ -471,9 +491,13 @@ impl Extraction<'_> {
         rustix::fs::symlinkat(target, self.dir(), name).map_err(|e| self.io(&entry.path, e.into()))
     }
 
-    /// Create a device node, FIFO, or socket. Reports whether it was created: a device node
-    /// this process may not make is skipped rather than made under
+    /// Create a device node, FIFO, or socket. Reports whether it was created: a node this
+    /// process may not make is skipped rather than made under
     /// [`DirectorySink::skip_privileged`].
+    ///
+    /// A device node is the one of the three that ordinarily needs a privilege, but all
+    /// three answer a refusal the same way — a caller that asked for what it could have gets
+    /// a report of what it did not, whichever kind of node the host declined.
     fn make_node(
         &mut self,
         file_type: FileType,
@@ -487,7 +511,12 @@ impl Extraction<'_> {
                 if !self.sink.skip_privileged {
                     return Err(HostError::Unprivileged {
                         path: entry.path.clone(),
-                        what: "a device node needs CAP_MKNOD to create",
+                        what: match file_type {
+                            FileType::CharacterDevice | FileType::BlockDevice => {
+                                "a device node needs CAP_MKNOD to create"
+                            }
+                            _ => "this host refuses to create a node of this kind",
+                        },
                     });
                 }
                 self.report.skipped.push(entry.path.clone());
@@ -512,8 +541,15 @@ impl Extraction<'_> {
 
     /// Open the directory at `path` inside the destination, descending one component at a
     /// time and following nothing. `blame` is the entry a failure is reported against.
+    ///
+    /// `O_PATH`, because this asks for a handle to traverse from and nothing more. Opening a
+    /// directory for reading needs the read bit, and by the time a second name for an inode
+    /// appears the first name's directory has been finished and carries the mode the image
+    /// records — which a real tree is free to write without read permission. Traversing it
+    /// needs only search, which is exactly what `O_PATH` asks for and what `linkat` accepts
+    /// of the handle it is given.
     fn open_dir(&self, path: &[u8], blame: &[u8]) -> Result<OwnedFd, HostError> {
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut fd = rustix::fs::openat(&self.sink.root, c".", flags, Mode::empty())
             .map_err(|e| self.io(blame, e.into()))?;
         for component in path.split(|&b| b == b'/') {
@@ -615,6 +651,12 @@ impl Extraction<'_> {
     /// which cannot be opened without following it. `lsetxattr` does not follow the final
     /// component, so the attributes land on the entry itself rather than on what it may
     /// point at.
+    ///
+    /// It is the one call here that takes a path rather than a handle, because Linux has no
+    /// `setxattr` that takes a directory handle before 6.13. The path names the handle: the
+    /// kernel resolves `/proc/self/fd/<n>` to the directory that handle already refers to,
+    /// so nothing between the destination and this directory is walked a second time and the
+    /// only component resolved from a name is the entry itself.
     fn set_xattrs_by_name(
         &mut self,
         name: &[u8],
@@ -624,15 +666,11 @@ impl Extraction<'_> {
         if xattrs.is_empty() {
             return Ok(());
         }
-        // The host path this name has. Every directory component of it is one this run
-        // created, so it resolves to the entry just written; `lsetxattr` does not follow the
-        // final component, so a symbolic link takes its own attributes rather than passing
-        // them to whatever it points at.
-        let host_path = self.host_path(name);
+        let at_dir = fd_path(self.dir(), name);
         for xattr in xattrs {
             let value = xattr_value(xattr, path)?;
             let result = rustix::fs::lsetxattr(
-                &host_path,
+                &at_dir,
                 &xattr.name[..],
                 &value,
                 rustix::fs::XattrFlags::empty(),
@@ -681,17 +719,6 @@ impl Extraction<'_> {
             }
             Err(e) => Err(self.io(path, e.into())),
         }
-    }
-
-    /// The host path of a name in the directory currently being written.
-    fn host_path(&self, name: &[u8]) -> PathBuf {
-        let dir = self
-            .open
-            .last()
-            .expect("the destination itself is never popped");
-        let mut path = under_root(&self.sink.root_path, &dir.path);
-        path.push(display(name));
-        path
     }
 
     /// An I/O failure against the destination, named by the host path it was writing.
@@ -747,6 +774,20 @@ fn check_name(name: &[u8], path: &[u8]) -> Result<(), HostError> {
 /// Whether a path is `/lost+found` or something inside it.
 fn is_lost_found(path: &[u8]) -> bool {
     path == LOST_FOUND || path.starts_with(b"/lost+found/")
+}
+
+/// The path that names `name` inside the directory `dir` refers to, without resolving the
+/// directory again.
+///
+/// `/proc/self/fd/<n>` is the kernel's own name for an open handle: resolving it yields the
+/// file that handle refers to, whatever the path it was opened by has since become. Joining a
+/// single component onto it therefore reaches exactly what an `*at` call on `dir` would, which
+/// is what a call that has no `*at` form needs.
+fn fd_path(dir: &OwnedFd, name: &[u8]) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    let mut path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    path.push(display(name));
+    path
 }
 
 /// An image path or name as an [`OsStr`](std::ffi::OsStr): the bytes themselves, since a path

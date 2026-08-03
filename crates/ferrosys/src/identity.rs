@@ -27,12 +27,22 @@
 //! into `s_checksum_seed` and turns `metadata_csum_seed` on, after which the UUID changes
 //! and every existing checksum stays valid. It is opt-in because it sets an incompatible
 //! feature: a kernel that does not know `metadata_csum_seed` will not mount the result.
+//!
+//! # The journal keeps its own record
+//!
+//! The log records the filesystem's UUID as its own, so a new UUID goes there too. A log
+//! that declares `csum_v2` or `csum_v3` carries a crc32c over its whole superblock, and
+//! that word covers the UUID — so it is recomputed with it. Linux sets `csum_v3` on the
+//! journal of any filesystem carrying `metadata_csum` the first time it mounts one, which
+//! makes a checksummed log the ordinary case for any image that has ever been used rather
+//! than a corner of the format.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::crc32c::crc32c;
 use crate::feature::Incompat;
 use crate::geometry::sparse_super_has_copy;
+use crate::journal;
 use crate::ondisk::SuperBlock;
 use crate::read::{ReadError, Reader};
 
@@ -49,9 +59,6 @@ mod offset {
     /// `s_checksum`, the last word of the record.
     pub const CHECKSUM: usize = 0x3fc;
 }
-
-/// The journal superblock's `s_uuid`: the filesystem UUID, as the log records it.
-const JOURNAL_UUID_OFFSET: usize = 0x30;
 
 /// What to change about an image's identity. Every field left unset is left alone.
 ///
@@ -157,6 +164,32 @@ pub enum IdentityError {
         /// The checksum its bytes compute to.
         computed: u32,
     },
+    /// The journal superblock's own checksum does not match its contents, so the log is
+    /// damaged and writing a new UUID into it would leave a correct checksum over wrong
+    /// bytes.
+    #[error(
+        "the journal superblock's checksum is {found:#010x} but its contents compute to \
+         {computed:#010x}: the log is damaged, and re-identifying it would write a correct \
+         checksum over a wrong journal superblock"
+    )]
+    #[non_exhaustive]
+    JournalChecksumMismatch {
+        /// The checksum the journal superblock stores.
+        found: u32,
+        /// The checksum its bytes compute to.
+        computed: u32,
+    },
+    /// The journal declares a checksummed log whose checksum is not the crc32c jbd2
+    /// defines, so the word covering its UUID cannot be recomputed.
+    #[error(
+        "the journal declares checksums of type {checksum_type} rather than crc32c, so its \
+         superblock checksum cannot be brought back into agreement with a new UUID"
+    )]
+    #[non_exhaustive]
+    JournalChecksumUnsupported {
+        /// The checksum type the journal superblock names (`s_checksum_type`).
+        checksum_type: u8,
+    },
 }
 
 /// Rewrite an image's identity in place, leaving everything else exactly as it was.
@@ -177,6 +210,15 @@ pub enum IdentityError {
 /// filesystem to change a few hundred, and would leave behind a file that is no longer sparse
 /// and no longer the one any other name refers to.
 ///
+/// # Memory
+///
+/// Reading every copy before writing any is what makes a refusal leave the image untouched,
+/// and it is also what this holds: one superblock-sized buffer per copy, and one for the
+/// journal superblock. With `sparse_super` — which every filesystem this crate writes and
+/// nearly every one it reads carries — copies are placed at the powers of 3, 5, and 7, so
+/// that is a few dozen kilobytes for a filesystem of any size. Without it every group holds
+/// a copy, and the cost grows with the filesystem instead: a kilobyte per group.
+///
 /// # Errors
 ///
 /// [`IdentityError::Read`] if the image is not a readable ext filesystem;
@@ -184,8 +226,10 @@ pub enum IdentityError {
 /// [`IdentityError::UuidWouldInvalidateChecksums`] if the UUID seeds the filesystem's
 /// checksums and [`set_checksum_seed`](IdentityChange::set_checksum_seed) was not asked
 /// for; [`IdentityError::ChecksumSeedPointless`] if it was asked for where it does nothing;
-/// [`IdentityError::BackupNotASuperblock`] if a backup copy is missing; and
-/// [`IdentityError::Io`] if the image cannot be read or written.
+/// [`IdentityError::BackupNotASuperblock`] if a backup copy is missing;
+/// [`IdentityError::JournalChecksumMismatch`] if the journal superblock is damaged;
+/// [`IdentityError::JournalChecksumUnsupported`] if the log declares a checksum that is not
+/// crc32c; and [`IdentityError::Io`] if the image cannot be read or written.
 ///
 /// # Example
 ///
@@ -281,8 +325,8 @@ fn plan_rewrite<F: Read + Write + Seek>(
     let journal_written = match (journal_block, change.uuid) {
         (Some(block), Some(uuid)) => {
             let offset = block * block_size;
-            let mut bytes = read_exact_at(image, offset, JOURNAL_UUID_OFFSET + 16)?;
-            bytes[JOURNAL_UUID_OFFSET..JOURNAL_UUID_OFFSET + 16].copy_from_slice(&uuid);
+            let mut bytes = read_exact_at(image, offset, journal::SUPERBLOCK_SIZE)?;
+            patch_journal(&mut bytes, uuid)?;
             writes.push((offset, bytes));
             true
         }
@@ -357,6 +401,47 @@ fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksumm
         let c = crc32c(!0, &bytes[..offset::CHECKSUM]);
         bytes[offset::CHECKSUM..offset::CHECKSUM + 4].copy_from_slice(&c.to_le_bytes());
     }
+}
+
+/// Overwrite the UUID the log records as its own, and the checksum covering it.
+///
+/// A log declaring `csum_v2` or `csum_v3` carries a crc32c over its whole superblock, and
+/// `s_uuid` is inside what that word covers — so a UUID written without it would leave a
+/// journal jbd2 refuses to load. The stored checksum is verified before the UUID moves, for
+/// the reason [`verify_primary_checksum`] verifies the filesystem's: a damaged log must be a
+/// refusal rather than a freshly correct checksum over wrong bytes.
+///
+/// A log declaring neither carries no checksum here and takes the UUID alone. That is every
+/// log `mke2fs` creates and none that Linux has mounted on a `metadata_csum` filesystem.
+fn patch_journal(bytes: &mut [u8], uuid: [u8; 16]) -> Result<(), IdentityError> {
+    let checksummed = journal::superblock_is_checksummed(bytes);
+    if checksummed {
+        let kind = bytes[journal::offset::CHECKSUM_TYPE];
+        if kind != journal::CRC32C_CHKSUM {
+            return Err(IdentityError::JournalChecksumUnsupported {
+                checksum_type: kind,
+            });
+        }
+        let found = u32::from_be_bytes([
+            bytes[journal::offset::CHECKSUM],
+            bytes[journal::offset::CHECKSUM + 1],
+            bytes[journal::offset::CHECKSUM + 2],
+            bytes[journal::offset::CHECKSUM + 3],
+        ]);
+        let computed = journal::superblock_checksum(bytes);
+        if found != computed {
+            return Err(IdentityError::JournalChecksumMismatch { found, computed });
+        }
+    }
+    bytes[journal::offset::UUID..journal::offset::UUID + 16].copy_from_slice(&uuid);
+    if checksummed {
+        // Big-endian, as every other word of this record is: the jbd2 superblock is the one
+        // structure in the format whose byte order is not ext's.
+        let c = journal::superblock_checksum(bytes);
+        bytes[journal::offset::CHECKSUM..journal::offset::CHECKSUM + 4]
+            .copy_from_slice(&c.to_be_bytes());
+    }
+    Ok(())
 }
 
 /// Refuse a primary superblock whose stored checksum does not match its contents.

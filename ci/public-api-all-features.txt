@@ -47,6 +47,7 @@
 #[non_exhaustive] pub ferrosys::ext::FeatureError::RequiresExtents
 #[non_exhaustive] pub ferrosys::ext::FeatureError::ResizeInodeRequiresLargeFile
 #[non_exhaustive] pub ferrosys::ext::FormatError::DoesNotFit
+#[non_exhaustive] pub ferrosys::ext::FormatError::FileTooLargeForBlockMap
 #[non_exhaustive] pub ferrosys::ext::FormatError::FilesystemTooSmallForJournal
 #[non_exhaustive] pub ferrosys::ext::FormatError::FormatTimeOutOfRange
 #[non_exhaustive] pub ferrosys::ext::FormatError::ImageTooLargeInMemory
@@ -79,6 +80,8 @@
 #[non_exhaustive] pub ferrosys::ext::HostError::Unsupported
 #[non_exhaustive] pub ferrosys::ext::IdentityError::BackupNotASuperblock
 #[non_exhaustive] pub ferrosys::ext::IdentityError::ChecksumSeedPointless
+#[non_exhaustive] pub ferrosys::ext::IdentityError::JournalChecksumMismatch
+#[non_exhaustive] pub ferrosys::ext::IdentityError::JournalChecksumUnsupported
 #[non_exhaustive] pub ferrosys::ext::IdentityError::SuperblockChecksumMismatch
 #[non_exhaustive] pub ferrosys::ext::ModelError::DeviceNumberTooLarge
 #[non_exhaustive] pub ferrosys::ext::ModelError::DirectoryLinkCountOverflow
@@ -961,6 +964,9 @@ pub ferrosys::ext::FormatError::Alloc(crate::alloc::AllocError)
 pub ferrosys::ext::FormatError::Dir(crate::dir::DirError)
 pub ferrosys::ext::FormatError::DoesNotFit::ceiling: u64
 pub ferrosys::ext::FormatError::Extent(crate::extent::ExtentError)
+pub ferrosys::ext::FormatError::FileTooLargeForBlockMap::block_size: u32
+pub ferrosys::ext::FormatError::FileTooLargeForBlockMap::blocks: u64
+pub ferrosys::ext::FormatError::FileTooLargeForBlockMap::limit: u64
 pub ferrosys::ext::FormatError::FilesystemTooSmallForJournal::blocks: u64
 pub ferrosys::ext::FormatError::FilesystemTooSmallForJournal::minimum: u32
 pub ferrosys::ext::FormatError::FormatTimeOutOfRange::secs: i64
@@ -1063,6 +1069,9 @@ pub ferrosys::ext::IdentityError::BackupNotASuperblock::block: u64
 pub ferrosys::ext::IdentityError::BackupNotASuperblock::group: u32
 pub ferrosys::ext::IdentityError::ChecksumSeedPointless::found: &'static str
 pub ferrosys::ext::IdentityError::Io(std::io::Error)
+pub ferrosys::ext::IdentityError::JournalChecksumMismatch::computed: u32
+pub ferrosys::ext::IdentityError::JournalChecksumMismatch::found: u32
+pub ferrosys::ext::IdentityError::JournalChecksumUnsupported::checksum_type: u8
 pub ferrosys::ext::IdentityError::Read(crate::read::ReadError)
 pub ferrosys::ext::IdentityError::SuperblockChecksumMismatch::computed: u32
 pub ferrosys::ext::IdentityError::SuperblockChecksumMismatch::found: u32

@@ -1457,3 +1457,45 @@ fn the_generator_mostly_produces_filesystems_that_build() {
          properties are close to vacuous"
     );
 }
+
+/// The same guard for the fit tier, which needs its own.
+///
+/// [`a_fitted_size_is_the_smallest_that_formats`] returns early on a capacity refusal or a
+/// `DoesNotFit`, so a run in which every case took that branch would pass having searched
+/// nothing. The yield measured above does not cover it: that one measures `spec()`, and the
+/// fit tier draws from `compact_spec()`, which halves the group count until the image is
+/// under the cap — a rewriting that moves where the tree sits relative to the filesystem it
+/// must fit into, and so has a refusal rate of its own.
+#[test]
+fn the_compacted_generator_mostly_produces_filesystems_that_fit() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    const SAMPLES: u32 = 120;
+    let mut runner = TestRunner::deterministic();
+    let strategy = compact_spec();
+    let mut fitted = 0;
+    let mut refused = 0;
+
+    for _ in 0..SAMPLES {
+        let spec = strategy
+            .new_tree(&mut runner)
+            .expect("generate a spec")
+            .current();
+        let (source, _) = realize(&spec);
+        match FormatPlan::fit(source, spec.geo.options(), Slack::None) {
+            Ok(_) => fitted += 1,
+            Err(e) if is_capacity_refusal(&e) || matches!(e, FormatError::DoesNotFit { .. }) => {
+                refused += 1;
+            }
+            Err(e) => panic!("fit refused an in-envelope tree with a non-capacity error: {e}"),
+        }
+    }
+
+    eprintln!("fitted {fitted} of {SAMPLES}, refused {refused}");
+    assert!(
+        fitted * 2 > SAMPLES,
+        "only {fitted} of {SAMPLES} generated cases reached a fitted size: the fit \
+         property is close to vacuous"
+    );
+}

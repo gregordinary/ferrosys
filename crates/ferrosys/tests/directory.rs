@@ -573,6 +573,181 @@ fn a_device_node_is_refused_or_recorded_rather_than_written_wrong() {
 }
 
 #[test]
+fn a_hard_link_reaches_back_into_a_directory_the_image_records_without_read_permission() {
+    // The second name for an inode is written as a link from the first, whose directory the
+    // walk left behind long ago — so that directory is re-opened, and by then it carries the
+    // mode the image records rather than the one it was built with. A tree is free to record
+    // a directory the extracting user may search but not read, and traversing it is all a
+    // link needs. Two names in the *same* directory never reach this: the parent is still
+    // open and still permissive when the second arrives.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    // 0o333 is the discriminator: write and search for the owner, no read. 0o111 is the
+    // same case with nothing but search.
+    for mode in [0o333u16, 0o111, 0o500, 0o755] {
+        let source = TreeBuilder::new()
+            .directory(b"/a".to_vec(), Metadata::new(mode, time))
+            .file(
+                b"/a/f".to_vec(),
+                b"shared\n".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .directory(b"/z".to_vec(), Metadata::new(0o755, time))
+            .hardlink(
+                b"/z/g".to_vec(),
+                b"/a/f".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+        let host = tempfile::tempdir().expect("temp dir");
+        let out = destination(&host, "unpacked");
+        let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+        let report = DirectorySink::new(&out)
+            .expect("open the destination")
+            .skip_privileged()
+            .write_tree(&mut reader)
+            .unwrap_or_else(|e| panic!("mode {mode:#o}: {e}"));
+        assert_eq!(report.written, 4, "mode {mode:#o}: a name each");
+
+        // And it really is a link, not a second copy.
+        use std::os::unix::fs::MetadataExt;
+        let first = std::fs::symlink_metadata(out.join("a/f")).expect("stat the first name");
+        let second = std::fs::symlink_metadata(out.join("z/g")).expect("stat the second");
+        assert_eq!(
+            first.ino(),
+            second.ino(),
+            "mode {mode:#o}: the two names are not one file"
+        );
+        assert_eq!(first.nlink(), 2, "mode {mode:#o}: link count");
+        // The directory kept the mode the image recorded, which is what made the re-open
+        // the interesting part.
+        let dir = std::fs::symlink_metadata(out.join("a")).expect("stat the directory");
+        assert_eq!(dir.mode() & 0o7777, u32::from(mode), "mode {mode:#o}");
+    }
+}
+
+#[test]
+fn a_second_name_for_a_device_node_the_host_refused_is_skipped_with_the_first() {
+    // A device node this process may not make is left out and reported. A later name for
+    // the same inode has nothing to link from — the first name was never written — so it is
+    // left out with it. Recording a name before knowing whether it was created would make
+    // the second name's failure an unexplained ENOENT part-way through an extraction that
+    // `skip_privileged` promises will finish.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/dev".to_vec(), Metadata::new(0o755, time))
+        .char_device(b"/dev/null".to_vec(), 1, 3, Metadata::new(0o666, time))
+        .hardlink(
+            b"/dev/zzz".to_vec(),
+            b"/dev/null".to_vec(),
+            Metadata::new(0o666, time),
+        )
+        .file(
+            b"/plain".to_vec(),
+            b"written\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("skipping what it may not do, an extraction succeeds");
+
+    if out.join("dev/null").exists() {
+        // Privileged, which is how this runs as root: both names are there, as one inode.
+        use std::os::unix::fs::MetadataExt;
+        assert!(report.skipped.is_empty());
+        assert_eq!(
+            std::fs::symlink_metadata(out.join("dev/null"))
+                .expect("stat")
+                .ino(),
+            std::fs::symlink_metadata(out.join("dev/zzz"))
+                .expect("stat")
+                .ino(),
+        );
+    } else {
+        // Unprivileged: neither name was written, and both are reported.
+        assert!(!out.join("dev/zzz").exists(), "the second name was written");
+        assert_eq!(
+            report.skipped,
+            vec![b"/dev/null".to_vec(), b"/dev/zzz".to_vec()],
+        );
+    }
+    // Either way the rest of the tree is there, which is what the flag is for.
+    assert_eq!(
+        std::fs::read(out.join("plain")).expect("read"),
+        b"written\n"
+    );
+}
+
+#[test]
+fn an_attribute_on_something_that_cannot_be_opened_reaches_the_entry_itself() {
+    // A symbolic link cannot be opened without following it, so its attributes are the one
+    // thing here set through a path rather than a handle — and the path names the handle
+    // (`/proc/self/fd/<n>/<name>`) so the directories between the destination and the entry
+    // are not walked a second time. What this holds to is that the name resolves: a path
+    // that reached nowhere would fail with ENOENT, which is neither a written attribute nor
+    // a reported privilege.
+    //
+    // `trusted.*` on a symbolic link is the shape a real tree has here — the `user.*`
+    // namespace is closed to symlinks and special files outright — and it needs
+    // CAP_SYS_ADMIN, so unprivileged this is a recorded omission and privileged it is a
+    // written attribute. Either is a pass; ENOENT is not.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+        .symlink(
+            b"/etc/mtab".to_vec(),
+            b"/proc/self/mounts".to_vec(),
+            Metadata::new(0o777, time),
+        )
+        .xattr(b"trusted.origin".to_vec(), b"by-name".to_vec());
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("the attribute is written or reported, never a missing path");
+
+    let mut value = [0u8; 32];
+    let read = rustix::fs::lgetxattr(out.join("etc/mtab"), "trusted.origin", &mut value);
+    match read {
+        Ok(len) => {
+            assert_eq!(
+                &value[..len],
+                b"by-name",
+                "the attribute landed on the link"
+            );
+            assert!(!report.xattrs_dropped);
+        }
+        Err(_) => assert!(
+            report.xattrs_dropped,
+            "an attribute that is not there was not reported either"
+        ),
+    }
+    // The link itself is the link, whatever happened to its attribute.
+    assert_eq!(
+        std::fs::read_link(out.join("etc/mtab")).expect("read the link"),
+        Path::new("/proc/self/mounts")
+    );
+}
+
+#[test]
 fn a_reserved_attribute_is_refused_or_recorded_rather_than_lost_in_silence() {
     // The `security` and `trusted` namespaces are the host's to write, and a root
     // filesystem is full of them: `security.capability` on every binary that holds one,

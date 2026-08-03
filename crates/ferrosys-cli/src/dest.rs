@@ -47,12 +47,21 @@ impl Destination {
         } else {
             out.to_path_buf()
         };
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&written)
-            .map_err(|e| Error::io(&written, e))?;
+        // The temporary file must be one this run created. Its name is derivable — the
+        // destination and a process id — so opening whatever is already there would open
+        // whatever someone else put there, including a symbolic link pointing anywhere this
+        // process can write, which the truncate would then empty and the run would then fill.
+        // `create_new` is what refuses all of that: it fails if the name exists at all, and
+        // it never follows a link. The destination written in place is the opposite case and
+        // takes the opposite flags — replacing what is there is the whole request.
+        let mut options = OpenOptions::new();
+        options.write(true);
+        if atomic {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+        let file = options.open(&written).map_err(|e| Error::io(&written, e))?;
         Ok(Self {
             out: out.to_path_buf(),
             written,

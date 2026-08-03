@@ -67,9 +67,17 @@ pub fn rec_len_from_disk(disk: u16, block_size: usize) -> usize {
 /// [`DirEntry::read_from`] a true inverse at every block size the format allows, so the
 /// serialization stays symmetric independently of the block-size ceiling the writer
 /// enforces elsewhere.
+///
+/// A record never exceeds its block, so a length of 65536 or more with a smaller block size
+/// is not a record: it saturates rather than truncating to a smaller wrong value, exactly as
+/// [`min_rec_len`] does with a name too long to be one.
 #[must_use]
 pub fn rec_len_to_disk(len: usize, block_size: usize) -> u16 {
-    if block_size < 65536 || len < 65536 {
+    debug_assert!(len <= block_size, "a record never exceeds its block");
+    if block_size < 65536 {
+        return len.min(u16::MAX as usize) as u16;
+    }
+    if len < 65536 {
         return len as u16;
     }
     0xffff

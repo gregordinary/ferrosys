@@ -345,7 +345,11 @@ impl Member {
                 // way that member is named.
                 Some(first) => Some(member_name(first, false)),
                 None => {
-                    named.insert(number, path.clone());
+                    // Only an inode the image says has more than one name is held, so the
+                    // table holds the tree's hard links rather than a path per file in it.
+                    if inode.links_count > 1 {
+                        named.insert(number, path.clone());
+                    }
                     None
                 }
             }

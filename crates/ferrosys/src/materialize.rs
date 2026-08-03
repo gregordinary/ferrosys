@@ -346,6 +346,29 @@ pub enum FormatError {
         /// The size it declares.
         size: u64,
     },
+    /// A file needs more blocks than a classic (ext2/ext3) block map reaches: twelve direct
+    /// pointers and three levels of indirect blocks, `12 + p + p² + p³` blocks for
+    /// `p = block_size / 4`. That is 16.06 GiB at a 1024-byte block and 4.004 TiB at the
+    /// 4096-byte default.
+    ///
+    /// This is the block-mapped twin of [`ExtentError::FileTooLarge`]. A file past the reach
+    /// would otherwise be mapped as far as the words go and written no further, while its
+    /// size claimed the whole length — so it is refused instead. Only a feature set without
+    /// `extent` reaches it: an extent-mapped file has the extent tree's own bound.
+    #[error(
+        "a file of {blocks} blocks exceeds the {limit} a classic block map reaches at a \
+         {block_size}-byte block: build it on a feature set with extents, or at a larger \
+         block size"
+    )]
+    #[non_exhaustive]
+    FileTooLargeForBlockMap {
+        /// Logical blocks the file needs.
+        blocks: u64,
+        /// Logical blocks the map reaches.
+        limit: u64,
+        /// The block size whose pointer count fixes that reach.
+        block_size: u32,
+    },
     /// A block the resize inode must map lies past what its block map addresses. The
     /// map is a classic 32-bit block map, and the geometry reserves descriptor blocks
     /// only on a filesystem a 32-bit block number spans, so a block past that reaching
@@ -443,6 +466,18 @@ const DIRECT_BLOCKS: usize = 12;
 
 /// Levels of indirection above the direct pointers: single, double, and triple.
 const INDIRECT_LEVELS: usize = 3;
+
+/// The most logical blocks a classic block map reaches at `block_size`: the twelve direct
+/// pointers, plus one, two, and three levels of indirect blocks each holding
+/// `block_size / 4` pointers.
+///
+/// A 1024-byte block reaches 16,843,020 blocks — 16.06 GiB — and a 4096-byte block reaches
+/// 1,074,791,436, which is 4.004 TiB. Past that the map runs out of words, and a file that
+/// needs more of them is refused rather than mapped short.
+fn classic_map_reach(block_size: usize) -> u64 {
+    let ppb = (block_size / 4) as u64;
+    DIRECT_BLOCKS as u64 + ppb + ppb * ppb + ppb * ppb * ppb
+}
 
 /// A finished filesystem image: the bytes, and the geometry that produced them.
 pub struct Image {
@@ -1628,6 +1663,19 @@ impl<'a, S: Sink> Writer<'a, S> {
     /// each block's number. Sets `inode.flags` and `inode.blocks`; leaves `inode.size` to
     /// the caller.
     fn build_classic_map(&mut self, inode: &mut Inode, n: u64) -> Result<Vec<u64>, FormatError> {
+        // The map's words run out at three levels of indirection, and the loop below simply
+        // stops when they do — so a file past the reach would be mapped short while its size
+        // claimed the whole length, which is a file whose tail is neither mapped nor written.
+        // Refused here instead, as the extent path refuses a file past what a 32-bit logical
+        // block number addresses.
+        let reach = classic_map_reach(self.block_size);
+        if n > reach {
+            return Err(FormatError::FileTooLargeForBlockMap {
+                blocks: n,
+                limit: reach,
+                block_size: self.block_size as u32,
+            });
+        }
         inode.flags = InodeFlags::NONE;
         let mut physical = Vec::new();
         let mut meta = 0u64;
@@ -1907,6 +1955,12 @@ impl<'a, S: Sink> Writer<'a, S> {
                     .allocate(u64::from(blocks))
                     .map_err(journal_space)?,
             };
+            // The log's first block, which is the jbd2 superblock. Indexing the first range
+            // cannot be out of bounds: `blocks` is at least `MIN_JOURNAL_BLOCKS` — the size
+            // is checked against that floor before this is called, whether it came from the
+            // heuristic or from an explicit `JournalSize::Blocks` — so the allocation is of
+            // a nonzero count, and an allocation of a nonzero count either yields at least
+            // one range or fails.
             self.write_block(ranges[0].start, &sb)?;
             inode.flags = InodeFlags::EXTENTS;
             let meta = self.root_extent_tree(JOURNAL_INO, &mut inode, &ranges)?;
@@ -1918,6 +1972,8 @@ impl<'a, S: Sink> Writer<'a, S> {
             let physical = self
                 .build_classic_map(&mut inode, u64::from(blocks))
                 .map_err(journal_space)?;
+            // As above: `blocks` is at least `MIN_JOURNAL_BLOCKS`, and the map holds one
+            // entry per logical block, so there is a first one.
             self.write_block(physical[0], &sb)?;
         }
         inode.size = size;
@@ -2986,6 +3042,58 @@ journal_blocks 1024
         let jsb = r.journal_superblock().unwrap().expect("journal");
         assert_eq!(jsb.max_len, 2048);
         assert_eq!(r.inode(8).unwrap().size, 2048 * 4096);
+    }
+
+    #[test]
+    fn the_classic_block_map_reaches_what_its_pointer_words_hold() {
+        // Twelve direct pointers plus one, two, and three levels of `block_size / 4`
+        // pointers each. These are the whole reach of an ext2/ext3 file at each block size
+        // the format allows, and the bound a file past them is refused against.
+        assert_eq!(classic_map_reach(1024), 16_843_020); // 16.06 GiB
+        assert_eq!(classic_map_reach(2048), 134_480_396); // 256.5 GiB
+        assert_eq!(classic_map_reach(4096), 1_074_791_436); // 4.004 TiB
+    }
+
+    #[test]
+    fn a_file_past_the_classic_block_maps_reach_is_refused_rather_than_mapped_short() {
+        // The block-mapped twin of the extent tree's own bound. A map that ran out of words
+        // would leave the tail of a file neither mapped nor written while its size claimed
+        // the whole length, so the count is checked before a block is allocated — which is
+        // what lets this fire without a filesystem large enough to hold the file existing.
+        //
+        // The journal is the structure an explicit size can push past the bound: a source
+        // entry that large would have to be read, and the resize inode is bounded far below
+        // it. A 1024-byte block puts the reach at 16,843,020 blocks.
+        let mut o = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16])
+            .profile(Profile::Ext3);
+        o.feature.block_size = 1024;
+        o.grow = GrowReservation::None;
+        o.journal = JournalSize::Blocks(16_843_021);
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("expected FileTooLargeForBlockMap");
+        };
+        assert!(
+            matches!(
+                err,
+                FormatError::FileTooLargeForBlockMap {
+                    blocks: 16_843_021,
+                    limit: 16_843_020,
+                    block_size: 1024,
+                }
+            ),
+            "expected FileTooLargeForBlockMap, got {err:?}"
+        );
+
+        // One block below the reach is a map the words hold, so what refuses the log above
+        // is the bound and not the size alone: it gets as far as running out of filesystem.
+        o.journal = JournalSize::Blocks(16_843_020);
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("expected the log not to fit in 64 MiB");
+        };
+        assert!(
+            matches!(err, FormatError::JournalDoesNotFit { .. }),
+            "expected JournalDoesNotFit, got {err:?}"
+        );
     }
 
     #[test]

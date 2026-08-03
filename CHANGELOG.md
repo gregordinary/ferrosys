@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [0.3.0] - 2026-08-02
+## [0.3.0] - 2026-08-03
 
 A breaking release on the command line, and additive everywhere else. Three command
 lines that used to be accepted are now usage errors, and the library gains a filesystem
@@ -66,7 +66,11 @@ To migrate: `inspect --sarif --groups` becomes `inspect --sarif`; `format --help
   existing image is known by: its UUID (`s_uuid`), its volume label (`s_volume_name`),
   and the seed its metadata checksums derive from. Every superblock copy is written —
   the primary and each group's backup — along with the journal's own record of the UUID,
-  so no copy is left claiming the old identity. Each copy is patched in place rather than
+  so no copy is left claiming the old identity. A log declaring `csum_v2` or `csum_v3`
+  carries a crc32c over its whole superblock, and `s_uuid` is inside what that word covers,
+  so it is recomputed with it: Linux sets `csum_v3` on the journal of any `metadata_csum`
+  filesystem the first time it mounts one, which makes a checksummed log the ordinary case
+  for any image that has ever been used. Each copy is patched in place rather than
   re-serialized, so it keeps every field this crate does not model. Nothing is written
   until every copy has been read and every check has passed, so a refusal leaves the image
   untouched. A filesystem carrying `metadata_csum` without `metadata_csum_seed` seeds every
@@ -158,6 +162,33 @@ To migrate: `inspect --sarif --groups` becomes `inspect --sarif`; `format --help
   builds from and a caller reads, and both will gain variants; marked, adding one is
   additive. Construction is unaffected — every existing variant is built exactly as
   before — and only an exhaustive `match` outside the crate needs a `_` arm.
+
+### Fixed
+
+- **A file past what a classic block map reaches is refused rather than written short.**
+  An ext2 or ext3 file spans twelve direct pointers and three levels of indirect blocks —
+  `12 + p + p² + p³` blocks for `p = block_size / 4`, which is 16.06 GiB at a 1024-byte
+  block and 4.004 TiB at the 4096-byte default. Past that the map ran out of words and the
+  file's tail was neither mapped nor written, while its size claimed the whole length and
+  the format reported success. It is now `FormatError::FileTooLargeForBlockMap`, the
+  block-mapped twin of the bound the extent path already had. Only a feature set without
+  `extent` reaches it, and only a file or an explicit `--journal` size past the reach.
+- **An inode count spread thinly over many groups no longer plans a filesystem with no
+  inodes.** A group's inode count is rounded to a multiple of eight, and a per-group share
+  below that step rounded to none at all — so `format -b 1024 -N 16` on a 32 MiB filesystem
+  planned `s_inodes_per_group = 0` and then failed reporting that the source needed more
+  inodes than the filesystem had. A group now holds at least eight, which is where `mke2fs`
+  holds it too, so the geometry stays byte-identical and the filesystem is one every tool
+  can divide by. `InodeCount::Count` documents that a count spread this thinly realizes
+  eight times the group count.
+- **`--atomic` creates its temporary file rather than opening whatever is there.** The name
+  is a sibling of the destination and a process id, so it is derivable; the open now fails
+  if the name exists at all and never follows a symbolic link, where before it would have
+  truncated and written through one.
+- **`rec_len_to_disk` saturates on a length past the field.** A record never exceeds its
+  block, so a length of 65536 or more with a smaller block size is not a record; it now
+  saturates rather than truncating to a smaller wrong value, matching `min_rec_len`. No
+  caller in the crate reaches it.
 
 ## [0.2.0] - 2026-07-25
 

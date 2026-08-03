@@ -415,9 +415,10 @@ more space on the host than it does in the image.
 The image is untrusted input, and a name in it is not a path to resolve. Every directory
 is created and then *opened*, and everything beneath it is created through that open
 handle by its single-component name — so a name holding a separator, a `..`, or a NUL is
-refused rather than followed, and nothing lands outside the destination. Symbolic links
-are written exactly as the image records them, absolute targets and all, which is safe
-precisely because nothing here ever follows one.
+refused rather than followed, and nothing lands outside the destination. No path through
+the destination tree is walked a second time, so nothing swapped into it while a run is in
+flight can redirect a write. Symbolic links are written exactly as the image records them,
+absolute targets and all, which is safe precisely because nothing here ever follows one.
 
 There is no `--atomic` for a tree: no rename publishes a whole tree at once, and inventing
 one would promise something the run cannot do. The empty destination is what stands in its
@@ -533,6 +534,15 @@ ones this tool has no opinion about. Nothing is written until every copy has bee
 every check has passed, so a refusal leaves the image exactly as it was. There is no
 `--atomic`: an image is rewritten in place, and a sibling temporary file would mean copying
 every byte of it to change sixteen.
+
+The journal keeps its own copy of the UUID, and on most images a checksum over it. Linux
+sets `csum_v3` on the log of any `metadata_csum` filesystem the first time it mounts one,
+so an image that has ever been used — a rescue image being cloned, a rootfs that was booted
+once and is now being re-stamped per device — carries a crc32c covering the whole journal
+superblock. That word is recomputed with the UUID, so the log stays one the kernel will
+load. A journal whose stored checksum does not match its contents is refused, as a damaged
+filesystem superblock is: writing a correct checksum over wrong bytes would replace a fault
+a checker finds with one it does not.
 
 At least one of `--uuid`, `--label`, and `--set-checksum-seed` is required, since a run
 that would write nothing is a command line that meant to say something.

@@ -20,6 +20,71 @@ pub const JBD2_SUPERBLOCK_V2: u32 = 4;
 /// The smallest journal jbd2 accepts, in filesystem blocks.
 pub const MIN_JOURNAL_BLOCKS: u32 = 1024;
 
+/// The size of `journal_superblock_t`, the record at the front of the journal's first
+/// block.
+///
+/// A log's block is at least this large, and the record's own checksum covers exactly
+/// these bytes rather than the whole block.
+pub(crate) const SUPERBLOCK_SIZE: usize = 1024;
+
+/// Byte offsets within the journal superblock of the fields a re-identification reads and
+/// writes.
+pub(crate) mod offset {
+    /// `s_feature_incompat`.
+    pub const FEATURE_INCOMPAT: usize = 0x28;
+    /// `s_uuid`: the filesystem this log serves, as the log records it.
+    pub const UUID: usize = 0x30;
+    /// `s_checksum_type`.
+    pub const CHECKSUM_TYPE: usize = 0x50;
+    /// `s_checksum`, which covers the whole record.
+    pub const CHECKSUM: usize = 0xfc;
+}
+
+/// `JBD2_FEATURE_INCOMPAT_CSUM_V2`: the log's blocks and its superblock carry crc32c.
+pub(crate) const INCOMPAT_CSUM_V2: u32 = 0x0000_0008;
+
+/// `JBD2_FEATURE_INCOMPAT_CSUM_V3`: the same, with a wider block tag.
+pub(crate) const INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
+
+/// `JBD2_CRC32C_CHKSUM`: the checksum type a `csum_v2` or `csum_v3` log names, and the only
+/// one jbd2 accepts for either.
+pub(crate) const CRC32C_CHKSUM: u8 = 4;
+
+/// Whether a log whose superblock is `record` carries a checksum in that superblock.
+///
+/// `csum_v2` and `csum_v3` each put one there. `JBD2_FEATURE_COMPAT_CHECKSUM` — the older
+/// scheme, a compat feature — checksums a commit block and leaves the superblock without
+/// one, so a log carrying only that has nothing here to keep in agreement.
+///
+/// Linux sets `csum_v3` on the log of any filesystem carrying `metadata_csum` the first
+/// time it mounts it, so a log without either is one that has never been mounted.
+///
+/// # Panics
+///
+/// If `record` is shorter than [`SUPERBLOCK_SIZE`].
+pub(crate) fn superblock_is_checksummed(record: &[u8]) -> bool {
+    assert!(record.len() >= SUPERBLOCK_SIZE, "a whole record is needed");
+    get_be_u32(record, offset::FEATURE_INCOMPAT) & (INCOMPAT_CSUM_V2 | INCOMPAT_CSUM_V3) != 0
+}
+
+/// The checksum a journal superblock's bytes compute to: crc32c over the whole
+/// [`SUPERBLOCK_SIZE`]-byte record, seeded from `!0`, with the checksum field itself read
+/// as zero.
+///
+/// jbd2 stores the result big-endian at [`offset::CHECKSUM`], as it stores every other word
+/// of this record — the one structure in the format whose byte order is not ext's.
+///
+/// # Panics
+///
+/// If `record` is shorter than [`SUPERBLOCK_SIZE`].
+pub(crate) fn superblock_checksum(record: &[u8]) -> u32 {
+    use crate::crc32c::crc32c;
+    assert!(record.len() >= SUPERBLOCK_SIZE, "a whole record is needed");
+    let c = crc32c(!0, &record[..offset::CHECKSUM]);
+    let c = crc32c(c, &[0u8; 4]);
+    crc32c(c, &record[offset::CHECKSUM + 4..SUPERBLOCK_SIZE])
+}
+
 /// How large the journal should be.
 ///
 /// [`Auto`](JournalSize::Auto) sizes it from the filesystem's block count with the
@@ -270,6 +335,54 @@ mod tests {
                 uuid,
             }
         );
+    }
+
+    #[test]
+    fn a_log_declares_its_superblock_checksum_through_the_incompat_word() {
+        let mut sb = build_superblock(&JournalParams::new(4096, 1024, [0; 16]));
+        // A freshly written log declares no features, so it carries no checksum here.
+        assert!(!superblock_is_checksummed(&sb));
+        // Every incompat feature that is not a checksum leaves it that way; `revoke`,
+        // `64bit`, and `async_commit` are the ones an ordinary log picks up.
+        for bit in [0x1u32, 0x2, 0x4, 0x20] {
+            put_be_u32(&mut sb, offset::FEATURE_INCOMPAT, bit);
+            assert!(
+                !superblock_is_checksummed(&sb),
+                "{bit:#x} is not a checksum"
+            );
+        }
+        for bit in [INCOMPAT_CSUM_V2, INCOMPAT_CSUM_V3] {
+            put_be_u32(&mut sb, offset::FEATURE_INCOMPAT, bit);
+            assert!(superblock_is_checksummed(&sb), "{bit:#x} is a checksum");
+        }
+    }
+
+    #[test]
+    fn the_superblock_checksum_covers_the_record_and_not_its_own_field() {
+        let mut sb = build_superblock(&JournalParams::new(4096, 1024, [0x33; 16]));
+        let sealed = superblock_checksum(&sb);
+        // Whatever the field holds, the value computed is the same — which is what lets a
+        // stored checksum be verified by recomputing rather than by clearing first.
+        sb[offset::CHECKSUM..offset::CHECKSUM + 4].copy_from_slice(&sealed.to_be_bytes());
+        assert_eq!(superblock_checksum(&sb), sealed);
+        sb[offset::CHECKSUM..offset::CHECKSUM + 4].copy_from_slice(&[0xff; 4]);
+        assert_eq!(superblock_checksum(&sb), sealed);
+        // Every other byte of the record is covered, including the last one before the
+        // checksum field and the last one of the record itself.
+        for moved in [0x00usize, offset::UUID, offset::CHECKSUM - 1, 0x100, 0x3ff] {
+            let mut other = sb.clone();
+            other[moved] ^= 0xff;
+            assert_ne!(
+                superblock_checksum(&other),
+                sealed,
+                "byte {moved:#x} is not covered"
+            );
+        }
+        // And nothing past the record is: the checksum covers `journal_superblock_t`, not
+        // the block it sits at the front of.
+        let mut past = sb.clone();
+        past[SUPERBLOCK_SIZE] ^= 0xff;
+        assert_eq!(superblock_checksum(&past), sealed);
     }
 
     #[test]

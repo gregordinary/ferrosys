@@ -435,6 +435,212 @@ fn a_rewrite_keeps_every_superblock_field_this_crate_does_not_model() {
     e2fsck_clean(image.path()).expect("a re-identified foreign image checks clean");
 }
 
+#[test]
+fn a_rewrite_keeps_a_checksummed_journal_loadable() {
+    if !available("e2fsck") || !available("mke2fs") {
+        return;
+    }
+    // A journal `mke2fs` has just written declares no jbd2 features at all, so its
+    // superblock carries no checksum and a UUID written into it invalidates nothing. Every
+    // image that has ever been mounted is the other case: Linux sets `csum_v3` on the log
+    // of any `metadata_csum` filesystem the first time it mounts one, and the crc32c that
+    // comes with it covers `s_uuid`. So the fixture puts the image into the state a mount
+    // leaves behind, which is the state a rescue image being cloned or a built rootfs being
+    // re-stamped per device is actually in.
+    let image = mke2fs_baseline_of(Profile::Ext4, 4096, 64 * MIB);
+    let journal = journal_superblock_offset(image.path());
+    mount_the_journal(image.path(), journal);
+    e2fsck_clean(image.path()).expect("the mounted-once fixture is itself clean");
+
+    let new_uuid = [
+        0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x41, 0x11, 0x8f, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99,
+        0x88,
+    ];
+    let mut change = IdentityChange::new();
+    change.uuid = Some(new_uuid);
+    let report =
+        rewrite_identity(&mut open_rw(image.path()), &change).expect("rewrite the mounted image");
+    assert!(report.journal_superblock, "the log's record was written");
+
+    // The claim in three parts: the log records the new UUID, its own checksum agrees with
+    // the bytes it now holds, and `e2fsck` will still load it.
+    let after = read_at(image.path(), journal, JOURNAL_SB_LEN);
+    assert_eq!(&after[0x30..0x40], &new_uuid, "the log took the new UUID");
+    let stored = u32::from_be_bytes([after[0xfc], after[0xfd], after[0xfe], after[0xff]]);
+    let mut recomputed = after.clone();
+    seal_journal_checksum(&mut recomputed);
+    assert_eq!(
+        stored,
+        u32::from_be_bytes([
+            recomputed[0xfc],
+            recomputed[0xfd],
+            recomputed[0xfe],
+            recomputed[0xff]
+        ]),
+        "the journal superblock's checksum matches its contents"
+    );
+    e2fsck_clean(image.path()).expect("a re-identified checksummed journal checks clean");
+}
+
+#[test]
+fn the_log_takes_the_new_uuid_where_tune2fs_leaves_it_behind() {
+    if !available("e2fsck") || !available("mke2fs") || !available("tune2fs") {
+        return;
+    }
+    // A divergence from the tool this replaces, pinned so it stays a decision rather than
+    // becoming a discovery. `tune2fs -U` does not touch an internal journal at all: the log
+    // keeps the UUID it had, and `e2fsck` is content, because nothing in ext4 matches an
+    // internal log's `s_uuid` against the filesystem's. This crate writes it, so a cloned
+    // image's log does not go on naming the filesystem it was cloned from — and the crc32c
+    // over the log's superblock is recomputed with it, which is what keeps the result one
+    // jbd2 will load.
+    //
+    // Nothing is lost by moving it. The log's `s_uuid` is also jbd2's seed for the
+    // checksums on the log's own blocks, so moving it under a log with transactions to
+    // replay would make them unrecoverable — but such a filesystem declares
+    // `needs_recovery`, an incompatible feature the reader does not follow, so it is refused
+    // before a byte is planned. The log this reaches is always an empty one.
+    let uuid_text = "77665544-3322-4111-8fee-ddccbbaa9988";
+    let uuid = [
+        0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x41, 0x11, 0x8f, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99,
+        0x88,
+    ];
+
+    let ours = mke2fs_baseline_of(Profile::Ext4, 4096, 64 * MIB);
+    let journal = journal_superblock_offset(ours.path());
+    mount_the_journal(ours.path(), journal);
+    let theirs = tempfile::NamedTempFile::new().expect("temp");
+    std::fs::copy(ours.path(), theirs.path()).expect("copy the fixture");
+    let before = read_at(ours.path(), journal, JOURNAL_SB_LEN);
+
+    let mut change = IdentityChange::new();
+    change.uuid = Some(uuid);
+    rewrite_identity(&mut open_rw(ours.path()), &change).expect("rewrite");
+
+    let status = tool("tune2fs")
+        .args(["-U", uuid_text])
+        .arg(theirs.path())
+        .status()
+        .expect("spawn tune2fs");
+    assert!(status.success(), "tune2fs -U failed");
+
+    // What tune2fs left: the log exactly as it was, old UUID and old checksum.
+    assert_eq!(
+        read_at(theirs.path(), journal, JOURNAL_SB_LEN),
+        before,
+        "tune2fs is expected to leave the internal journal untouched",
+    );
+    // What this crate leaves: the new UUID, and nothing else moved but the checksum over it.
+    let after = read_at(ours.path(), journal, JOURNAL_SB_LEN);
+    assert_eq!(&after[0x30..0x40], &uuid);
+    let moved: Vec<usize> = (0..JOURNAL_SB_LEN)
+        .filter(|&i| after[i] != before[i])
+        .collect();
+    let expected: Vec<usize> = (0x30..0x40).chain(0xfc..0x100).collect();
+    assert_eq!(moved, expected, "only the UUID and its checksum moved");
+
+    // And both images are ones `e2fsck` accepts, which is the property the divergence
+    // must not cost.
+    e2fsck_clean(ours.path()).expect("the re-identified log checks clean");
+    e2fsck_clean(theirs.path()).expect("tune2fs's image checks clean");
+}
+
+/// Put an image's journal into the state Linux leaves it in after a mount: `csum_v3` in
+/// `s_feature_incompat`, crc32c as `s_checksum_type`, and the checksum that follows.
+///
+/// A journal `mke2fs` has just written declares no jbd2 features at all, so nothing in it
+/// is checksummed and a UUID written into it invalidates nothing. Linux sets `csum_v3` on
+/// the log of any `metadata_csum` filesystem the first time it mounts one, which makes this
+/// the state of every image that has ever been used.
+fn mount_the_journal(path: &Path, journal: u64) {
+    let mut record = read_at(path, journal, JOURNAL_SB_LEN);
+    // `s_feature_incompat` at 0x28, big-endian like every word of this record, gains
+    // `JBD2_FEATURE_INCOMPAT_CSUM_V3`; `s_checksum_type` at 0x50 becomes crc32c.
+    let incompat = u32::from_be_bytes([record[0x28], record[0x29], record[0x2a], record[0x2b]]);
+    record[0x28..0x2c].copy_from_slice(&(incompat | 0x10).to_be_bytes());
+    record[0x50] = 4;
+    seal_journal_checksum(&mut record);
+    write_at(path, journal, &record);
+}
+
+#[test]
+fn a_rewrite_refuses_an_image_whose_journal_superblock_is_damaged() {
+    if !available("mke2fs") {
+        return;
+    }
+    // The refusal the filesystem's own superblock already gets, for the same reason: a log
+    // whose checksum does not match its bytes is damaged, and recomputing one over it would
+    // replace a detectable fault with an undetectable one.
+    let image = mke2fs_baseline_of(Profile::Ext4, 4096, 64 * MIB);
+    let journal = journal_superblock_offset(image.path());
+    mount_the_journal(image.path(), journal);
+    // One byte the checksum covers, moved after the log was sealed.
+    let mut record = read_at(image.path(), journal, JOURNAL_SB_LEN);
+    record[0x18] ^= 0xff;
+    write_at(image.path(), journal, &record);
+
+    let mut change = IdentityChange::new();
+    change.uuid = Some([0x5a; 16]);
+    let err = rewrite_identity(&mut open_rw(image.path()), &change)
+        .expect_err("a damaged log is refused");
+    assert!(
+        matches!(err, IdentityError::JournalChecksumMismatch { .. }),
+        "expected a journal checksum refusal, got {err:?}"
+    );
+    // And the refusal left the image alone: the log still holds the UUID it did.
+    let after = read_at(image.path(), journal, JOURNAL_SB_LEN);
+    assert_eq!(&after[0x30..0x40], &record[0x30..0x40]);
+}
+
+/// The size of `journal_superblock_t`, which is what its checksum covers.
+const JOURNAL_SB_LEN: usize = 1024;
+
+/// The byte offset of the journal superblock in `path`, found by its jbd2 magic.
+///
+/// The tests reach it this way rather than through the crate, so what they exercise is not
+/// also what located what they exercise.
+fn journal_superblock_offset(path: &Path) -> u64 {
+    let bytes = std::fs::read(path).expect("read the image");
+    let magic = 0xc03b_3998u32.to_be_bytes();
+    // Block-aligned at 4096, which is the block size every caller here builds with, and the
+    // journal superblock is a whole block of its own.
+    for offset in (0..bytes.len().saturating_sub(4)).step_by(4096) {
+        if bytes[offset..offset + 4] == magic {
+            return offset as u64;
+        }
+    }
+    panic!("no jbd2 superblock in the image");
+}
+
+/// Write the checksum a journal superblock's bytes compute to into the record itself:
+/// crc32c seeded `!0` over all 1024 bytes with `s_checksum` at 0xfc read as zero, stored
+/// big-endian.
+///
+/// Spelled out from the jbd2 definition rather than called through the crate, so it is an
+/// independent statement of the same rule.
+fn seal_journal_checksum(record: &mut [u8]) {
+    record[0xfc..0x100].copy_from_slice(&[0u8; 4]);
+    let c = ferrosys::crc32c(!0, &record[..JOURNAL_SB_LEN]);
+    record[0xfc..0x100].copy_from_slice(&c.to_be_bytes());
+}
+
+/// `len` bytes of `path` from `offset`.
+fn read_at(path: &Path, offset: u64, len: usize) -> Vec<u8> {
+    let mut file = std::fs::File::open(path).expect("open the image");
+    file.seek(io::SeekFrom::Start(offset)).expect("seek");
+    let mut bytes = vec![0u8; len];
+    file.read_exact(&mut bytes).expect("read");
+    bytes
+}
+
+/// Put `bytes` at `offset` in `path`.
+fn write_at(path: &Path, offset: u64, bytes: &[u8]) {
+    let mut file = open_rw(path);
+    file.seek(io::SeekFrom::Start(offset)).expect("seek");
+    file.write_all(bytes).expect("write");
+    file.flush().expect("flush");
+}
+
 /// The primary superblock's 1024 bytes, read straight out of the image at offset 1024.
 fn superblock_bytes(path: &Path) -> Vec<u8> {
     let mut file = std::fs::File::open(path).expect("open the image");

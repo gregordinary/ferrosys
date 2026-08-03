@@ -303,6 +303,15 @@ pub const MAX_EXTENT_BLOCKS: u64 = 1 << 48;
 /// target is not held to it.
 const GROW_MAX_SHARE: u64 = 64;
 
+/// The fewest inodes a block group holds.
+///
+/// A group's inode count is rounded to a multiple of eight so its inodes end on a byte
+/// boundary in the inode bitmap, and a per-group share below that step would round to none
+/// at all — a group every tool divides by and no checker accepts. Eight is where `mke2fs`
+/// holds it too, so an explicit [`InodeCount::Count`] spread thinly over many groups yields
+/// the same geometry from either.
+const MIN_INODES_PER_GROUP: u64 = 8;
+
 /// Blocks of superblock-plus-descriptor overhead at the start of a group that
 /// carries a copy: one superblock block, the descriptor table, and the reserved
 /// descriptor blocks.
@@ -540,13 +549,17 @@ pub enum InodeCount {
     BytesPerInode(NonZeroU64),
     /// A target inode count, spread across the groups. Each group's share is rounded up to
     /// fill whole inode-table blocks, then down to a multiple of eight so the group's
-    /// inodes end on a byte boundary in the inode bitmap — the same `s_inodes_per_group`
-    /// that `mke2fs` derives for the request. [`Layout::total_inodes`] reports the realized
-    /// total. It meets or exceeds the request wherever an inode-table block holds a
-    /// multiple of eight inodes; where a block holds fewer than eight, the
-    /// multiple-of-eight step can leave the realized total a few inodes short of the
-    /// request. That is `block_size / inode_size < 8` — the 1024-byte block at the
-    /// default 256-byte inode, and the 2048-byte block once the inode is 512 bytes.
+    /// inodes end on a byte boundary in the inode bitmap, and held at eight — the same
+    /// `s_inodes_per_group` that `mke2fs` derives for the request.
+    /// [`Layout::total_inodes`] reports the realized total.
+    ///
+    /// It meets or exceeds the request wherever an inode-table block holds a multiple of
+    /// eight inodes. Where a block holds fewer than eight — `block_size / inode_size < 8`,
+    /// which is the 1024-byte block at the default 256-byte inode and the 2048-byte block
+    /// once the inode is 512 bytes — the multiple-of-eight step can leave the realized total
+    /// a few inodes short of the request, and the floor of eight per group can put it above:
+    /// a count spread thinly enough that a group's share falls under the step yields eight
+    /// times the group count, whatever was asked for.
     Count(u32),
 }
 
@@ -872,16 +885,20 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
             });
         }
         // Round up to fill whole inode-table blocks, then mask down to a multiple of eight
-        // so a group's inodes end on a byte boundary in the inode bitmap. This reproduces
-        // how `mke2fs` sizes `s_inodes_per_group` byte for byte, mask included. The mask
-        // changes the value only when an inode-table block holds fewer than eight inodes
-        // (`ipb < 8`: a 1024- or 2048-byte block at a large inode size); there it can trim
-        // the group by one inode-table block, which is why an explicit `Count` can realize
-        // a few inodes short of the request. Two invariants survive the mask: `inode_cap`
-        // is a multiple of both `ipb` and eight, so the rounded, masked value never exceeds
-        // the bitmap; and `ipb` is a power of two no greater than eight, so a multiple of
-        // eight is a multiple of `ipb` and `itb = ipg / ipb` stays a whole number of blocks.
-        ipg = (ipg.div_ceil(ipb) * ipb) & !7;
+        // so a group's inodes end on a byte boundary in the inode bitmap, and hold the
+        // result at eight. This reproduces how `mke2fs` sizes `s_inodes_per_group` byte for
+        // byte, mask and floor included. The mask changes the value only when an inode-table
+        // block holds fewer than eight inodes (`ipb < 8`: a 1024- or 2048-byte block at a
+        // large inode size); there it can trim the group by one inode-table block, which is
+        // why an explicit `Count` can realize a few inodes short of the request. The floor
+        // catches the end of that: a per-group share below the step masks to zero, and a
+        // group with no inodes is a group every tool divides by — so eight is the smallest a
+        // group holds, and a filesystem carries at least eight inodes per group whatever
+        // count was asked for. Two invariants survive the mask: `inode_cap` is a multiple of
+        // both `ipb` and eight, so the rounded, masked value never exceeds the bitmap; and
+        // `ipb` is a power of two no greater than eight, so a multiple of eight is a
+        // multiple of `ipb` and `itb = ipg / ipb` stays a whole number of blocks.
+        ipg = ((ipg.div_ceil(ipb) * ipb) & !7).max(MIN_INODES_PER_GROUP);
         let itb = ipg / ipb;
 
         // A partial final group is kept whenever it can physically hold the metadata
@@ -1562,6 +1579,37 @@ mod tests {
             assert_eq!(
                 l.inodes_per_group, want_ipg,
                 "Count({request}) at 2048-byte blocks: inodes_per_group",
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_spread_below_the_rounding_step_still_leaves_every_group_inodes() {
+        // The end of the range the mask trims: a count spread over enough groups that a
+        // group's share falls below the multiple-of-eight step. Masking alone would take it
+        // to zero, and a group with no inodes is a filesystem with an inode table of no
+        // blocks, an inodes-per-group of nothing for every tool to divide by, and no room
+        // for the eleven inodes a filesystem's own structures occupy.
+        //
+        // Each row is pinned against `mke2fs 1.47.0 -b 1024 -I 256 -N <count>` at the same
+        // size, which floors `s_inodes_per_group` at eight for exactly this reason — so the
+        // floor keeps the geometry byte-identical rather than departing from it.
+        for (mib, request, want_ipg, want_total) in [
+            (8u64, 16u32, 16u32, 16u32), // one group: the share is the count
+            (16, 16, 8, 16),             // two groups, eight each
+            (32, 16, 8, 32),             // four groups: masking alone would give none
+            (64, 32, 8, 64),             // eight groups
+            (128, 64, 8, 128),           // sixteen groups
+        ] {
+            let l = plan_bs_inodes(1024, mib, InodeCount::Count(request));
+            assert_eq!(
+                (l.inodes_per_group, l.total_inodes),
+                (want_ipg, want_total),
+                "Count({request}) on {mib} MiB at 1024-byte blocks",
+            );
+            assert!(
+                l.inode_table_blocks > 0,
+                "Count({request}) on {mib} MiB: a group's inode table has no blocks",
             );
         }
     }
