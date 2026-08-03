@@ -144,6 +144,51 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  deny:
+    name: dependency advisories + licenses
+    runs-on: ubuntu-latest
+    env:
+      # Pinned; bump deliberately, and update the digest with it. This step puts a binary
+      # on PATH whose verdict decides whether the dependency graph is acceptable, so what
+      # it runs is asserted rather than taken on trust from a redirect.
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show
+
+      - name: Install cargo-deny
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
+          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum -c - \
+            || { echo "::error::cargo-deny tarball digest mismatch"; exit 1; }
+          tar -xzf "$tarball" --strip-components=1 -C "$HOME/.local/bin" \
+            --wildcards '*/cargo-deny'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The advisory database is fetched at check time rather than cached: a cached copy
+      # makes this gate pass for the wrong reason, and the whole value of it is that it
+      # knows something today that it did not know at the last push.
+      #
+      # Two invocations, because the fuzz package declares its own `[workspace]` and a
+      # check rooted here never reaches its graph — the same reason the fuzz targets get
+      # a type-check step of their own above. Both read the one `deny.toml`.
+      #
+      # `--allow license-exception-not-encountered`: that one config serves two graphs
+      # that do not carry the same crates, so the fuzz package's license exception is
+      # unmatched here and this workspace's allowances are unmatched there. An entry that
+      # the other graph needs is not a stale entry.
+      - name: Dependencies carry no known advisory, and no license this crate cannot grant
+        run: |
+          cargo deny check --allow license-exception-not-encountered
+          cargo deny --manifest-path crates/ferrosys/fuzz/Cargo.toml --config deny.toml \
+            check --allow license-exception-not-encountered
+
   cross:
     name: cross-target check
     runs-on: ubuntu-latest

@@ -110,6 +110,7 @@ NOT_APPLICABLE = {
     "Install the pinned nightly for rustdoc JSON": "the public API gate installs it",
     "Install MSRV toolchain": "the MSRV gate installs it",
     "Install mdbook": "the book gate requires mdbook on PATH",
+    "Install cargo-deny": "the dependency gate requires cargo-deny on PATH",
     "Install attr for the getfattr xattr gate": "getfattr is required on PATH",
     "Build e2fsprogs, put it on PATH, pin its config, assert the version":
         "the version already on PATH is asserted rather than built",
@@ -123,6 +124,7 @@ MIRRORED = {
     "Fuzz archive seed still parses, and reproduces from its generator",
     "Rustdoc", "Check", "Public API matches its snapshot", "cargo check on MSRV",
     "Build book", "Test guide examples against the crate",
+    "Dependencies carry no known advisory, and no license this crate cannot grant",
 }
 
 steps, name = [], None
@@ -153,6 +155,20 @@ for s in known - seen:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+}
+
+# The dependency graph, judged against deny.toml: known advisories, the licenses the
+# crate's own dual grant depends on, and where the crates came from.
+#
+# Two invocations, because the fuzz package declares its own `[workspace]` and a check
+# rooted here never reaches its graph. Both read the one config. The flag suppresses the
+# report that one config's entries do not all match one graph — the fuzz package's
+# license exception is unmatched here, and this workspace's allowances are unmatched
+# there, and neither is stale.
+deny_check() {
+    cargo deny check --allow license-exception-not-encountered \
+        && cargo deny --manifest-path crates/ferrosys/fuzz/Cargo.toml --config deny.toml \
+            check --allow license-exception-not-encountered
 }
 
 # The gap mirroring commands cannot close. A host that records access times moves a
@@ -186,6 +202,8 @@ gates preflight runs, mirroring .github/workflows/ci.yml:
 
   check       fmt, clippy, the workspace suite, the base library without the archive
               source, three fuzz gates, and rustdoc over private items
+  deps        cargo deny over this workspace and the fuzz package: advisories,
+              licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
   public-api  ci/public-api.sh under $NIGHTLY
   msrv        cargo +$MSRV check --all-targets --all-features
@@ -263,6 +281,17 @@ gate "rustdoc (--document-private-items)" \
 unset RUSTFLAGS
 
 echo
+echo "dependencies"
+# Unlike every other gate here, this one can fail on a tree that has not changed: the
+# advisory database moves on its own, and a graph that was clean at the last push is not
+# thereby clean now. It needs the network for that reason.
+if ! have cargo-deny; then
+    skip "advisories, licenses, sources" "cargo-deny not on PATH"
+else
+    gate "advisories, licenses, sources" deny_check
+fi
+
+echo
 echo "cross"
 for entry in "${CROSS_TARGETS[@]}"; do
     target="${entry%%|*}" ; flags="${entry#*|}"
@@ -303,6 +332,17 @@ else
     # guide's `extern crate ferrosys` as ambiguous, so the book links against a directory
     # of its own rather than whatever else this run has left behind.
     book_target="$root/target/preflight-book"
+
+    # A directory of its own is not enough on its own, because this one persists between
+    # runs and the crate's artifact name carries a hash over its dependency versions.
+    # Change a version and the next run writes a second rlib beside the first rather than
+    # replacing it, and the gate fails on the ambiguity with a diagnostic that reads like
+    # a broken example. CI never sees it — a fresh checkout has nothing to collide with —
+    # which is exactly why it has to be handled here. Only the library's own artifacts go;
+    # its dependencies stay compiled, so this costs one crate's rebuild.
+    rm -f "$book_target"/debug/deps/libferrosys-*.rlib \
+          "$book_target"/debug/deps/libferrosys-*.rmeta
+
     gate "book: build the crate it links against" \
         env CARGO_TARGET_DIR="$book_target" cargo build
     gate "book: mdbook build" mdbook build book

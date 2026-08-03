@@ -1,0 +1,99 @@
+# What the dependency graph is allowed to contain.
+#
+# The crate is a filesystem writer with a deliberately small dependency surface: the
+# default build carries one crate, and the widest build carries four. A surface that
+# small is worth asserting rather than assuming, because the cost of it growing is paid
+# by every consumer and the growth happens transitively, where nothing in this tree
+# names it.
+#
+# Four questions are settled here. The first three fail the run; the fourth fails on a
+# version requirement that cannot be audited and reports on duplication it does not own:
+#
+#   advisories  nothing in the graph carries a known vulnerability, and nothing it
+#               depends on has been withdrawn from the registry
+#   licenses    every crate reachable from this workspace is permissively licensed, so
+#               the dual MIT/Apache-2.0 grant this crate makes is one it can actually make
+#   sources     every crate comes from crates.io, and nothing enters the build from a
+#               git revision or a registry named somewhere else
+#   bans        no dependency floats on a `*` requirement, and duplicate majors are
+#               reported
+#
+# Run it with `cargo deny check`. The push gate runs it twice — over this workspace, and
+# over the fuzz package, which sets its own `[workspace]` and is therefore invisible to a
+# check rooted here — and passes `--allow license-exception-not-encountered` to both,
+# because one config judging two graphs leaves some entry unmatched in each of them.
+
+[graph]
+# Every feature, because the features are where the dependencies are: the default build
+# reaches only `thiserror`, and `tar`, `dir`, and `serde` each add a crate that a check
+# of the default graph would never see.
+all-features = true
+# No target filter. The crate compiles for Linux, macOS, Windows, and 32-bit targets, and
+# each pulls a different platform shim — `windows-sys` on one, `linux-raw-sys` on
+# another. Judging only the host's graph would leave the others unexamined until a
+# consumer built them.
+targets = []
+
+[advisories]
+# The RustSec database, fetched at check time. A stale local copy is a check that passes
+# for the wrong reason, so this is not vendored.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Crates whose maintenance status is flagged, anywhere in the graph rather than in the
+# workspace alone: an unmaintained crate three levels down is still a crate this build
+# compiles and ships.
+unmaintained = "all"
+# Advisories accepted deliberately. Every entry is an advisory id and the reason it does
+# not apply here; an empty list is the only state that needs no argument.
+ignore = []
+
+[licenses]
+# The permissive set, and nothing else. A copyleft crate arriving transitively would make
+# the crate's own dual grant unsound, and it would arrive without any file in this tree
+# changing — which is exactly the failure this list exists to catch.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # The Rust standard library's own exception, carried by the direct-syscall crates the
+    # directory source is built on.
+    "Apache-2.0 WITH LLVM-exception",
+    # `unicode-ident`, reached through every proc-macro in the graph.
+    "Unicode-3.0",
+]
+
+# Packages marked `publish = false` carry no license field, because an unpublished package
+# grants nothing to anyone. The fuzz package is one, and asking it for a license it has no
+# reason to declare would fail the check over the absence of a term nobody needs.
+private = { ignore = true }
+
+# One config judges two graphs — this workspace and the fuzz package beside it — and
+# they do not carry the same crates. An allowance the fuzz graph never reaches is a
+# difference between the two, not a stale entry.
+unused-allowed-license = "allow"
+
+# A license allowed for one crate rather than for the graph. `libfuzzer-sys` is
+# `(MIT OR Apache-2.0) AND NCSA`: the `AND` makes NCSA mandatory rather than a choice, so
+# taking the crate at all means taking that term. NCSA is permissive and the crate is
+# reached only by the fuzz targets, which are built by hand on a nightly toolchain and are
+# not part of anything this workspace publishes. Scoped to the one crate, so the same term
+# arriving anywhere else still fails.
+exceptions = [{ name = "libfuzzer-sys", allow = ["NCSA"] }]
+
+[bans]
+# Reported, not gated. The duplicates in the graph are all in the test-only half and all
+# upstream's to resolve — a proc-macro crate a test dependency pulls in at one major
+# while the shipped graph is at another. Failing on those would fail this workspace for
+# churn it does not control and cannot fix. What the report is for is the other case: a
+# duplicate appearing in the shipped graph, which is this workspace's to fix and which
+# nothing else here would surface.
+multiple-versions = "warn"
+# A `*` version requirement takes whatever the registry last published, which makes a
+# build unreproducible and an audit meaningless.
+wildcards = "deny"
+# Except for path dependencies, which resolve inside this tree rather than from a
+# registry: the fuzz package depends on the crate beside it that way.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
