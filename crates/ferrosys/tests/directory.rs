@@ -474,9 +474,17 @@ fn a_tree_survives_the_round_trip_through_a_filesystem() {
         );
         assert_eq!(was.contents, now.contents, "{name}: contents moved");
         assert_eq!(was.mtime, now.mtime, "{name}: modification time moved");
-        assert_eq!(was.atime, now.atime, "{name}: access time moved");
         assert_eq!(was.xattrs, now.xattrs, "{name}: attributes moved");
     }
+    // Access times are compared against the image below rather than here. A walk reads
+    // every directory and every symlink to learn what they hold, and a host that maintains
+    // access times records that read — so the source tree's are moved by the very walk that
+    // recorded them, and comparing the two ends of the trip would be asking the extraction
+    // to reproduce something that changed after it was read. A freshly built tree has its
+    // access time equal to its modification time, which is exactly when `relatime` updates,
+    // so this is the ordinary case on a host that keeps them and invisible on one mounted
+    // `noatime`. `without_atimes` drops them from the walk comparison for the same reason.
+    assert_recorded_times_reached_the_tree(&mut reader, &out);
     // The hard link is a hard link on the way out too.
     assert_eq!(
         after["etc/init"].inode, after["etc/init-alias"].inode,
@@ -485,6 +493,58 @@ fn a_tree_survives_the_round_trip_through_a_filesystem() {
     // Nothing the filesystem makes for itself is written into the tree.
     assert!(!out.join("lost+found").exists());
     assert_eq!(report.written as usize, before.len() - 1, "one per name");
+}
+
+/// Assert that every access and modification time the image records reached the tree
+/// written from it, to the nanosecond.
+///
+/// This is what a `DirectorySink` promises about times, and it is stated against the image
+/// because the image is what the sink was given. Comparing the destination to the tree the
+/// image was built from would instead be a statement about the host's access-time policy,
+/// which moves the source's times under both ends of the trip.
+fn assert_recorded_times_reached_the_tree<R: io::Read + io::Seek>(
+    reader: &mut Reader<R>,
+    out: &Path,
+) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut checked = 0;
+    // The root has no name in the walk, so it is stated separately: the destination
+    // directory is what carries the filesystem root's own times across.
+    let root = reader.inode(2).expect("the root inode");
+    let mut entries = vec![(out.to_path_buf(), root)];
+    for entry in reader.walk().expect("walk the image") {
+        // Every filesystem makes `/lost+found` for itself, and no extraction writes it.
+        if entry.path == b"/lost+found" || entry.path.starts_with(b"/lost+found/") {
+            continue;
+        }
+        let mut path = out.to_path_buf();
+        for part in entry.path.split(|&b| b == b'/').filter(|p| !p.is_empty()) {
+            path.push(std::ffi::OsStr::from_bytes(part));
+        }
+        entries.push((path, entry.inode));
+    }
+
+    for (path, inode) in entries {
+        let meta =
+            std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            (meta.atime(), meta.atime_nsec()),
+            (inode.atime.secs, i64::from(inode.atime.nanos)),
+            "{}: the recorded access time did not reach the tree",
+            path.display()
+        );
+        assert_eq!(
+            (meta.mtime(), meta.mtime_nsec()),
+            (inode.mtime.secs, i64::from(inode.mtime.nanos)),
+            "{}: the recorded modification time did not reach the tree",
+            path.display()
+        );
+        checked += 1;
+    }
+    // So an equality over an empty walk cannot pass for agreement.
+    assert_eq!(checked, 9, "root, 3 dirs, 2 files, link, alias, fifo");
 }
 
 #[test]
