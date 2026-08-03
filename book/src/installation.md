@@ -23,7 +23,7 @@ The build is pure Rust and depends only on `thiserror`. Four features shape it:
 |---|---|---|---|
 | `ext` | on | The whole filesystem surface, under the `ext` module: the formatter, the reader, the feature model, and the on-disk structures | — |
 | `tar` | off | `ArchiveSource` and `ArchiveSink`: a filesystem built from a tar stream, and one written back out as one, with PAX times, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` records | `tar` |
-| `dir` | off | `DirectorySource`: a filesystem built from a directory tree on this machine, with its modes, ownership, times, hard links, special files, and extended attributes. Built on Linux, whose metadata and extended attributes the walk reads | `rustix` |
+| `dir` | off | `DirectorySource` and `DirectorySink`: a filesystem built from a directory tree on this machine, and one written back out as a tree, with modes, ownership, times, hard links, special files, and extended attributes. Built on Linux, whose metadata and extended attributes both ends read and write | `rustix` |
 | `serde` | off | `Serialize` on the scan taxonomy, the planned geometry, and the feature model, for embedding them in a document of your own | `serde` |
 
 `default-features = false` is a real build, not a smaller version of the same one: it

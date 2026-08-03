@@ -7,6 +7,32 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [0.3.1] - 2026-08-03
+
+A documentation and packaging release. No library or command-line behaviour changes,
+and nothing that compiled against `0.3.0` is affected.
+
+### Fixed
+
+- **The `dir` feature was documented as half of what it is.** `0.3.0` added
+  `DirectorySink` and `extract --to-dir` beside the existing `DirectorySource`, and the
+  feature's own description — in the crate documentation, in the guide's feature table,
+  and in the manifest it is declared in — still named a source alone. A feature carries
+  its documentation to the registry, so the published description named one direction of
+  something that reads and writes in both. The dependency it pulls is described the same
+  way: `rustix` supplies the directory, node, ownership, timestamp, and
+  extended-attribute calls both ends need, rather than the extended-attribute calls a
+  walk alone needs.
+- **`ferrosys-cli` declared `ferrosys` twice** — once as a dependency carrying `tar`
+  and `dir`, and again as a development dependency carrying `tar`. An integration test
+  links a crate's normal dependencies, so the second entry never selected anything the
+  first did not already provide. One entry now serves both.
+
+### Changed
+
+- Both crates carry a `homepage`, so a registry links the guide from each crate's page
+  rather than leaving the repository as the only route to it.
+
 ## [0.3.0] - 2026-08-03
 
 A breaking release on the command line, and additive everywhere else. Three command
@@ -466,6 +492,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.3.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.1
 [0.3.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.2.0
 [0.1.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.1.0

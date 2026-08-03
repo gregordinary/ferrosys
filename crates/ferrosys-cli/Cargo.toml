@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 keywords = ["ext4", "filesystem", "mkfs", "disk-image", "cli"]
 categories = ["command-line-utilities", "filesystem"]
@@ -25,7 +26,10 @@ doc = false
 
 [dependencies]
 # The filesystem itself. The `tar` feature carries the archive source `format --from-tar`
-# reads, and `dir` the directory walk behind `format --from-dir`.
+# reads, and `dir` the directory walk behind `format --from-dir`. The integration gates
+# build filesystems the archive source cannot describe (a socket) and read them back, so
+# they drive the library directly as well as the binary; an integration test links a
+# normal dependency, so this one entry serves both.
 ferrosys = { workspace = true, features = ["tar", "dir"] }
 # Typed error enums. Build-time proc-macro only; no runtime footprint. Argument
 # parsing is hand-written and takes no dependency.
@@ -38,6 +42,3 @@ tempfile = { workspace = true }
 # `extract --to-tar` writes. The binary itself needs no tar crate: it writes archives
 # through the library's archive sink, which takes a plain writer.
 tar = { workspace = true }
-# The integration gates build filesystems the archive source cannot describe (a socket)
-# and read them back, so they drive the library directly as well as the binary.
-ferrosys = { workspace = true, features = ["tar"] }

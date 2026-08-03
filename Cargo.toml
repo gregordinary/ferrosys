@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -13,6 +13,9 @@ rust-version = "1.88"
 # Permissive dual-license, the Rust-ecosystem norm for a library meant to be
 # depended on widely.
 license = "MIT OR Apache-2.0"
+# Both crates share one guide, so the URL is declared once here and inherited. A
+# registry links it from every crate's page.
+homepage = "https://gregordinary.github.io/ferrosys/"
 # Both crates come from one repository, so the URL is declared once here and
 # inherited. A registry links it from every crate's page.
 repository = "https://github.com/gregordinary/ferrosys"
@@ -40,8 +43,9 @@ overflow-checks = true
 thiserror = "2"
 # default-features off: archive parsing (incl. PAX xattrs), no host-side xattr writes.
 tar = { version = "0.4", default-features = false }
-# default-features off, `std` + `fs` on: the two extended-attribute calls the directory
-# source needs, over the direct-syscall backend, with no C library in the tree.
+# default-features off, `std` + `fs` on: the directory, node, ownership and
+# extended-attribute calls the host-directory source and sink need, over the
+# direct-syscall backend, with no C library in the tree.
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 # default-features off, `std` + `derive` on: the `Serialize` implementations the `serde`
 # feature adds, and nothing else — no deserialization, no runtime format.

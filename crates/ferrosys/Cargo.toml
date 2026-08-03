@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 keywords = ["ext2", "ext3", "ext4", "filesystem", "mkfs"]
 categories = ["filesystem", "os"]
@@ -26,11 +27,13 @@ ext = []
 # host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
 # and SCHILY ACL records. The archive source feeds the ext writer, so it enables `ext`.
 tar = ["dep:tar", "ext"]
-# The host-directory `Source`, which walks a tree on this machine into the entries a
-# format writes. Off by default so the base build carries only `thiserror`; enabling it
-# pulls in `rustix` for the two extended-attribute calls the standard library has no
-# equivalent of. The walk reads Linux inode metadata and Linux extended attributes, so it
-# is present on Linux. The directory source feeds the ext writer, so it enables `ext`.
+# The host-directory `Source` and `Sink`: the walk that turns a tree on this machine into
+# the entries a format writes, and the extraction that writes a filesystem's contents back
+# out as a tree. Off by default so the base build carries only `thiserror`; enabling it
+# pulls in `rustix` for the directory, node, ownership and extended-attribute calls the
+# standard library has no equivalent of. Both ends read and write Linux inode metadata and
+# Linux extended attributes, so they are present on Linux. Both sit against the ext writer
+# and reader, so this enables `ext`.
 dir = ["dep:rustix", "ext"]
 # `Serialize` on the values a consumer embeds in a report of its own: the scan taxonomy
 # (`Anomaly`, `ScanReport`, `Severity`, `Category`, `Location`), the planned geometry
@@ -51,12 +54,14 @@ tar = { workspace = true, optional = true }
 # The `Serialize` derives, behind the `serde` feature.
 serde = { workspace = true, optional = true }
 
-# The host-directory `Source`'s dependency, on the platform whose trees it walks.
+# The host-directory source and sink's dependency, on the platform whose trees they walk
+# and create.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-# `lgetxattr` and `llistxattr`, behind the `dir` feature. Default features off with only
-# `std` and `fs` on, which on Linux is the direct-syscall backend: the tree it brings is
-# `bitflags` and `linux-raw-sys` type definitions, with no C library and no build script
-# probing one.
+# The `*at` directory calls, `mknodat`, the ownership and mode calls, the timestamp
+# calls and the extended-attribute calls, behind the `dir` feature. Default features off
+# with only `std` and `fs` on, which on Linux is the direct-syscall backend: the tree it
+# brings is `bitflags` and `linux-raw-sys` type definitions, with no C library and no
+# build script probing one.
 rustix = { workspace = true, optional = true }
 
 [dev-dependencies]

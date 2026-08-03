@@ -31,10 +31,11 @@ and timestamps are inputs, never read from the clock or a random source."
 //!
 //! - **`tar`** adds the tar/PAX archive source and sink: a filesystem built from an
 //!   archive, and one written back out as one. It depends on `tar`.
-//! - **`dir`** adds the host-directory source: a filesystem built by walking a tree on
-//!   this machine, with its modes, ownership, times, hard links, special files, and
-//!   extended attributes. It depends on `rustix` for the two extended-attribute calls the
-//!   standard library has no equivalent of, and is present on Linux.
+//! - **`dir`** adds the host-directory source and sink: a filesystem built by walking a
+//!   tree on this machine, and one written back out as a tree, with modes, ownership,
+//!   times, hard links, special files, and extended attributes. It depends on `rustix`
+//!   for the directory, node, ownership and extended-attribute calls the standard library
+//!   has no equivalent of, and is present on Linux.
 //! - **`serde`** adds `Serialize` to the scan taxonomy, the planned geometry, and the
 //!   feature model, for embedding them in a document of your own. It depends on `serde`.
 // The crate is safe by construction: on-disk types serialize through explicit
