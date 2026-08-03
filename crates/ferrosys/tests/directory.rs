@@ -456,6 +456,21 @@ fn a_tree_survives_the_round_trip_through_a_filesystem() {
     assert!(!report.ownership_dropped);
     assert!(report.skipped.is_empty());
 
+    // Every time the image records reached the tree, to the nanosecond. Stated here,
+    // before anything lists the destination: a host that keeps access times moves a
+    // directory's the moment it is read, and `held` below reads every one of them, so this
+    // asks through `lstat` — the one way to learn what a name holds without touching it.
+    //
+    // Access times are stated against the image rather than against the source tree
+    // because a walk reads every directory and every symlink to learn what they hold, so
+    // the source's own are moved by the very walk that recorded them. Comparing the two
+    // ends of the trip would be asking the extraction to reproduce something that changed
+    // after it was read. A freshly built tree has its access time equal to its
+    // modification time, which is exactly when `relatime` updates, so that is the ordinary
+    // case on a host that keeps them and invisible on one mounted `noatime`.
+    // `without_atimes` drops them from the walk comparison for the same reason.
+    assert_recorded_times_reached_the_tree(&mut reader, &out);
+
     let before = held(&source_tree);
     let after = held(&out);
     assert_eq!(
@@ -476,15 +491,6 @@ fn a_tree_survives_the_round_trip_through_a_filesystem() {
         assert_eq!(was.mtime, now.mtime, "{name}: modification time moved");
         assert_eq!(was.xattrs, now.xattrs, "{name}: attributes moved");
     }
-    // Access times are compared against the image below rather than here. A walk reads
-    // every directory and every symlink to learn what they hold, and a host that maintains
-    // access times records that read — so the source tree's are moved by the very walk that
-    // recorded them, and comparing the two ends of the trip would be asking the extraction
-    // to reproduce something that changed after it was read. A freshly built tree has its
-    // access time equal to its modification time, which is exactly when `relatime` updates,
-    // so this is the ordinary case on a host that keeps them and invisible on one mounted
-    // `noatime`. `without_atimes` drops them from the walk comparison for the same reason.
-    assert_recorded_times_reached_the_tree(&mut reader, &out);
     // The hard link is a hard link on the way out too.
     assert_eq!(
         after["etc/init"].inode, after["etc/init-alias"].inode,
