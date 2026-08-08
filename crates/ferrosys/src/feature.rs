@@ -668,6 +668,15 @@ impl FeatureSet {
         self.ro_compat.contains(RoCompat::LARGE_FILE)
     }
 
+    /// True when an inode's block count may use the high half of its field
+    /// (`huge_file`). Without it only `i_blocks_lo` exists, so a filesystem's files are
+    /// bounded at `2^32` 512-byte sectors — two tebibytes — and the two bytes the high half
+    /// would occupy are ext2's `l_i_frag` and `l_i_fsize` instead.
+    #[must_use]
+    pub const fn has_huge_file(self) -> bool {
+        self.ro_compat.contains(RoCompat::HUGE_FILE)
+    }
+
     /// True when inode 7 maps the reserved group-descriptor-table blocks
     /// (`resize_inode`). Without it a filesystem carries no descriptor headroom and
     /// grows only offline, by relocating its descriptor table.

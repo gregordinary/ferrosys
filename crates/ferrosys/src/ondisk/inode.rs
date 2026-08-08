@@ -26,6 +26,7 @@
 
 use super::xattr::XATTR_MAGIC;
 use super::{ParseError, get_u16, get_u32, join64, put_u16, put_u32};
+use crate::time::Timestamp;
 
 /// `S_IFDIR | 0755`, the mode of the root directory.
 pub const ROOT_INODE_MODE: u16 = 0o40755;
@@ -93,97 +94,63 @@ impl core::ops::BitOr for InodeFlags {
     }
 }
 
-/// An ext4 timestamp: seconds since the Unix epoch plus a nanosecond fraction.
+/// The earliest instant an inode's time fields represent: the signed 32-bit seconds field
+/// at its most negative with a zero epoch, i.e. `-2^31` seconds (1901-12-13).
+pub const TIME_SECS_MIN: i64 = i32::MIN as i64;
+
+/// The latest instant an inode's time fields represent: the signed 32-bit seconds field at
+/// its most positive with the epoch at 3, i.e. `(2^31 - 1) + 3 * 2^32` seconds
+/// (2446-05-10).
+pub const TIME_SECS_MAX: i64 = i32::MAX as i64 + (3 << 32);
+
+/// Whether an instant reaches an inode without loss: its seconds lie within
+/// [`TIME_SECS_MIN`]`..=`[`TIME_SECS_MAX`] and its fraction divides a second.
 ///
-/// ext4 splits this across a 32-bit seconds field and a 32-bit "extra" field. The
-/// seconds field is a *signed* 32-bit value; the extra field's low two bits are an
-/// unsigned epoch that adds a multiple of `2^32` seconds on top of it, and its upper
-/// 30 bits hold nanoseconds. So the on-disk seconds are
-/// `(i32)field + (epoch << 32)`, spanning [`EPOCH_MIN`](Self::EPOCH_MIN) to
-/// [`EPOCH_MAX`](Self::EPOCH_MAX) — from 1901 to 2446.
-/// [`encode`](Timestamp::encode) and [`decode`](Timestamp::decode) perform that
-/// split; it matches the kernel's `ext4_decode_extra_time` exactly, so a pre-1970 or
-/// post-2038 time round-trips through the same bytes the kernel would write.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Timestamp {
-    /// Seconds since the Unix epoch. Values outside
-    /// [`EPOCH_MIN`](Self::EPOCH_MIN)`..=`[`EPOCH_MAX`](Self::EPOCH_MAX) cannot be
-    /// represented on disk; [`is_representable`](Self::is_representable) reports which.
-    pub secs: i64,
-    /// Nanoseconds within the second, `0..1_000_000_000`.
-    ///
-    /// A timestamp built for writing holds a valid fraction, and
-    /// [`is_representable`](Self::is_representable) is what confirms it before one
-    /// reaches an inode. A timestamp [`decode`](Self::decode)d from an image need not:
-    /// the on-disk field is thirty bits wide, so an inode this crate did not write can
-    /// name a fraction larger than a second and this field carries what the inode says.
-    pub nanos: u32,
+/// An instant that does not would have its epoch bits or its nanoseconds masked to their
+/// field widths by [`encode_time`], so callers check here and reject with a typed error
+/// instead.
+#[must_use]
+pub const fn time_is_representable(t: Timestamp) -> bool {
+    t.secs >= TIME_SECS_MIN && t.secs <= TIME_SECS_MAX && t.nanos < Timestamp::NANOS_PER_SEC
 }
 
-impl Timestamp {
-    /// The earliest representable time: `(i32)field` at its most negative with a zero
-    /// epoch, i.e. `-2^31` seconds (1901-12-13).
-    pub const EPOCH_MIN: i64 = i32::MIN as i64;
+/// Encode an instant to the `(field, extra)` pair an inode stores.
+///
+/// ext4 splits a time across a 32-bit seconds field and a 32-bit "extra" field. The seconds
+/// field is *signed*; the extra field's low two bits are an unsigned epoch adding a multiple
+/// of `2^32` seconds on top of it, and its upper 30 bits hold nanoseconds. So the stored
+/// seconds are `(i32)field + (epoch << 32)`.
+///
+/// The epoch is the number of `2^32`-second steps between the signed field and the true
+/// seconds; for a [representable](time_is_representable) instant it is 0 to 3 and encodes
+/// exactly. Outside that range the epoch and the nanoseconds are masked to their on-disk
+/// widths, so callers validate first.
+#[must_use]
+pub const fn encode_time(t: Timestamp) -> (u32, u32) {
+    let field = t.secs as u32;
+    // The signed 32-bit field sign-extended back to i64; the epoch carries the
+    // remaining high seconds as a count of 2^32-second steps.
+    let low = field as i32 as i64;
+    let epoch = ((t.secs - low) >> 32) as u32;
+    let extra = (epoch & 0x3) | (t.nanos << 2);
+    (field, extra)
+}
 
-    /// The latest representable time: `(i32)field` at its most positive with the epoch
-    /// at 3, i.e. `(2^31 - 1) + 3 * 2^32` seconds (2446-05-10).
-    pub const EPOCH_MAX: i64 = i32::MAX as i64 + (3 << 32);
-
-    /// One past the largest valid nanosecond fraction.
-    pub const NANOS_PER_SEC: u32 = 1_000_000_000;
-
-    /// A timestamp at `secs` seconds past the epoch with no sub-second part.
-    #[must_use]
-    pub const fn from_secs(secs: i64) -> Self {
-        Self { secs, nanos: 0 }
-    }
-
-    /// Whether this timestamp encodes to disk without loss: its seconds lie within
-    /// the on-disk range and its nanoseconds are a valid fraction. A timestamp that is
-    /// not representable would have its epoch bits or nanoseconds silently truncated by
-    /// [`encode`](Self::encode), so callers reject it with a typed error instead.
-    #[must_use]
-    pub const fn is_representable(self) -> bool {
-        self.secs >= Self::EPOCH_MIN
-            && self.secs <= Self::EPOCH_MAX
-            && self.nanos < Self::NANOS_PER_SEC
-    }
-
-    /// Encode to the `(field, extra)` pair ext4 stores: the low 32 bits of the seconds
-    /// as a signed field, and the extra word combining the epoch offset with the
-    /// nanoseconds.
-    ///
-    /// The epoch is the number of `2^32`-second steps between the signed 32-bit field
-    /// and the true seconds; for a [representable](Self::is_representable) timestamp it
-    /// is 0 to 3 and encodes exactly. Outside that range the epoch and the nanoseconds
-    /// are masked to their on-disk widths, so callers validate first.
-    #[must_use]
-    pub const fn encode(self) -> (u32, u32) {
-        let field = self.secs as u32;
-        // The signed 32-bit field sign-extended back to i64; the epoch carries the
-        // remaining high seconds as a count of 2^32-second steps.
-        let low = field as i32 as i64;
-        let epoch = ((self.secs - low) >> 32) as u32;
-        let extra = (epoch & 0x3) | (self.nanos << 2);
-        (field, extra)
-    }
-
-    /// Decode from the stored `(field, extra)` pair: the signed seconds field plus the
-    /// epoch offset, and the nanoseconds from the extra word's upper bits.
-    ///
-    /// This is the kernel's `ext4_decode_extra_time`, and like it, it reports what the
-    /// inode holds rather than what a valid fraction would be: the extra word's upper
-    /// thirty bits reach 1 073 741 823, past the 1 000 000 000 that makes a second, so a
-    /// decoded [`nanos`](Self::nanos) is bounded by the field and not by the second it
-    /// divides. A caller that goes on to render or re-encode a decoded timestamp checks
-    /// it with [`is_representable`](Self::is_representable) first.
-    #[must_use]
-    pub const fn decode(field: u32, extra: u32) -> Self {
-        let secs = (field as i32 as i64) + (((extra & 0x3) as i64) << 32);
-        Self {
-            secs,
-            nanos: extra >> 2,
-        }
+/// Decode an instant from the stored `(field, extra)` pair: the signed seconds field plus
+/// the epoch offset, and the nanoseconds from the extra word's upper bits.
+///
+/// This is the kernel's `ext4_decode_extra_time`, and like it, it reports what the inode
+/// holds rather than what a valid fraction would be: the extra word's upper thirty bits
+/// reach 1 073 741 823, past the 1 000 000 000 that makes a second, so a decoded
+/// [`nanos`](Timestamp::nanos) is bounded by the field and not by the second it divides. A
+/// caller that goes on to render or re-encode a decoded instant checks it with
+/// [`time_is_representable`] first.
+#[must_use]
+pub const fn decode_time(field: u32, extra: u32) -> Timestamp {
+    let secs = (field as i32 as i64) + (((extra & 0x3) as i64) << 32);
+    Timestamp {
+        secs,
+        nanos: extra >> 2,
     }
 }
 
@@ -244,6 +211,10 @@ pub struct Inode {
     pub links_count: u16,
     /// Blocks charged to the file (`i_blocks_lo` + `l_i_blocks_high`), in 512-byte
     /// sectors unless [`InodeFlags::HUGE_FILE`] is set.
+    ///
+    /// Parsing joins both halves unconditionally; whether the upper one exists is a
+    /// question about the `huge_file` feature, which the parse does not see. Without it the
+    /// value is `i_blocks_lo` alone, and the reader that holds the feature words masks it.
     pub blocks: u64,
     /// Inode flags (`i_flags`).
     pub flags: InodeFlags,
@@ -262,6 +233,9 @@ pub struct Inode {
     pub generation: u32,
     /// Block holding this inode's out-of-line extended attributes (`i_file_acl` +
     /// `l_i_file_acl_high`); zero when there are none.
+    ///
+    /// Joined unconditionally, like [`blocks`](Self::blocks): the upper half exists only
+    /// under `64bit`, and the reader masks it where that is clear.
     pub file_acl: u64,
     /// Size of the used extra-inode area (`i_extra_isize`); 32 in the 256-byte
     /// inode.
@@ -390,10 +364,10 @@ impl Inode {
         let b = &mut buf[..size];
         b.fill(0);
 
-        let (atime, atime_x) = self.atime.encode();
-        let (ctime, ctime_x) = self.ctime.encode();
-        let (mtime, mtime_x) = self.mtime.encode();
-        let (crtime, crtime_x) = self.crtime.encode();
+        let (atime, atime_x) = encode_time(self.atime);
+        let (ctime, ctime_x) = encode_time(self.ctime);
+        let (mtime, mtime_x) = encode_time(self.mtime);
+        let (crtime, crtime_x) = encode_time(self.crtime);
         let fits = |off, width| Self::fits(inode_size, self.extra_isize, off, width);
 
         // The classic inode: present at every inode size.
@@ -549,14 +523,20 @@ impl Inode {
             gid: u32::from(get_u16(buf, 0x18)) | (u32::from(get_u16(buf, 0x7a)) << 16),
             size: join64(get_u32(buf, 0x04), size_hi),
             links_count: get_u16(buf, 0x1a),
+            // Joined whether or not `huge_file` says the upper bytes are a high half:
+            // that is a question about the feature words, which this layer does not have.
+            // Without the feature they are ext2's `l_i_frag` and `l_i_fsize`, and the
+            // reader masks them off once it knows.
             blocks: join64(get_u32(buf, 0x1c), u32::from(get_u16(buf, 0x74))),
             flags: InodeFlags(get_u32(buf, 0x20)),
-            atime: Timestamp::decode(get_u32(buf, 0x08), extra(0x8c)),
-            ctime: Timestamp::decode(get_u32(buf, 0x0c), extra(0x84)),
-            mtime: Timestamp::decode(get_u32(buf, 0x10), extra(0x88)),
-            crtime: Timestamp::decode(extra(0x90), extra(0x94)),
+            atime: decode_time(get_u32(buf, 0x08), extra(0x8c)),
+            ctime: decode_time(get_u32(buf, 0x0c), extra(0x84)),
+            mtime: decode_time(get_u32(buf, 0x10), extra(0x88)),
+            crtime: decode_time(extra(0x90), extra(0x94)),
             dtime: get_u32(buf, 0x14),
             generation: get_u32(buf, 0x64),
+            // The same, gated on `64bit` rather than on `huge_file`: without it 0x76 is
+            // `i_pad1`.
             file_acl: join64(get_u32(buf, 0x68), u32::from(get_u16(buf, 0x76))),
             extra_isize,
             block,
@@ -828,11 +808,11 @@ mod tests {
             secs: 1_700_000_000,
             nanos: 123_456_789,
         };
-        let (field, extra) = t.encode();
+        let (field, extra) = encode_time(t);
         assert_eq!(field, 1_700_000_000);
         assert_eq!(extra & 0x3, 0, "epoch high bits");
         assert_eq!(extra >> 2, 123_456_789, "nanoseconds");
-        assert_eq!(Timestamp::decode(field, extra), t);
+        assert_eq!(decode_time(field, extra), t);
     }
 
     #[test]
@@ -848,11 +828,11 @@ mod tests {
             (4_294_967_296, 0x0000_0000, 1),    // 2106, exactly 2^32
             (1_700_000_000, 0x6553_f100, 0),    // an in-range recent time
         ] {
-            let (f, e) = Timestamp::from_secs(secs).encode();
+            let (f, e) = encode_time(Timestamp::from_secs(secs));
             assert_eq!(f, field, "field for secs={secs}");
             assert_eq!(e & 0x3, epoch, "epoch for secs={secs}");
             assert_eq!(
-                Timestamp::decode(f, e),
+                decode_time(f, e),
                 Timestamp::from_secs(secs),
                 "round-trip for secs={secs}"
             );
@@ -861,21 +841,22 @@ mod tests {
 
     #[test]
     fn timestamp_representable_range_tracks_the_on_disk_limits() {
-        assert_eq!(Timestamp::EPOCH_MIN, -(1 << 31));
-        assert_eq!(Timestamp::EPOCH_MAX, (1 << 31) - 1 + (3 << 32));
-        assert!(Timestamp::from_secs(0).is_representable());
-        assert!(Timestamp::from_secs(Timestamp::EPOCH_MIN).is_representable());
-        assert!(Timestamp::from_secs(Timestamp::EPOCH_MAX).is_representable());
-        assert!(!Timestamp::from_secs(Timestamp::EPOCH_MIN - 1).is_representable());
-        assert!(!Timestamp::from_secs(Timestamp::EPOCH_MAX + 1).is_representable());
+        assert_eq!(TIME_SECS_MIN, -(1 << 31));
+        assert_eq!(TIME_SECS_MAX, (1 << 31) - 1 + (3 << 32));
+        assert!(time_is_representable(Timestamp::from_secs(0)));
+        assert!(time_is_representable(Timestamp::from_secs(TIME_SECS_MIN)));
+        assert!(time_is_representable(Timestamp::from_secs(TIME_SECS_MAX)));
+        assert!(!time_is_representable(Timestamp::from_secs(
+            TIME_SECS_MIN - 1
+        )));
+        assert!(!time_is_representable(Timestamp::from_secs(
+            TIME_SECS_MAX + 1
+        )));
         // A nanosecond fraction at or past one second cannot be represented.
-        assert!(
-            !Timestamp {
-                secs: 0,
-                nanos: Timestamp::NANOS_PER_SEC
-            }
-            .is_representable()
-        );
+        assert!(!time_is_representable(Timestamp {
+            secs: 0,
+            nanos: Timestamp::NANOS_PER_SEC
+        }));
     }
 
     #[test]

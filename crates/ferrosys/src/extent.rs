@@ -405,10 +405,17 @@ pub fn write_node(node: &ExtentNode, eh_max: usize, buf: &mut [u8]) -> Result<()
 /// so trailing bytes — an inode's unused inline area, or a node's checksum tail —
 /// are ignored.
 ///
+/// The header's counts must agree with each other and with the node they describe.
+/// `eh_max` is the capacity the node was built with, so it holds at least one entry
+/// and no more than [`node_capacity`] of `buf`; `eh_entries` is what that capacity
+/// actually holds. Either relation broken is the corrupt header the kernel and
+/// `e2fsck` both refuse to walk, and it is refused here for the same reason: the
+/// entries beyond it are not a mapping any ext4 driver would follow.
+///
 /// # Errors
 ///
 /// [`crate::ondisk::ParseError`] if the node is shorter than a header, its magic is
-/// wrong, or its entry count overruns `buf`.
+/// wrong, or its counts disagree with each other or with `buf`.
 pub fn parse_node(buf: &[u8]) -> Result<ExtentNode, crate::ondisk::ParseError> {
     use crate::ondisk::ParseError;
     if buf.len() < EXTENT_ENTRY_SIZE {
@@ -422,13 +429,25 @@ pub fn parse_node(buf: &[u8]) -> Result<ExtentNode, crate::ondisk::ParseError> {
         .try_into()
         .expect("header slice is exactly EXTENT_ENTRY_SIZE bytes");
     let header = ExtentHeader::from_bytes(header_bytes)?;
+    let capacity = node_capacity(buf.len());
+    let max = header.max as usize;
     let entries = header.entries as usize;
-    let need = EXTENT_ENTRY_SIZE * (entries + 1);
-    if buf.len() < need {
-        return Err(ParseError::TooShort {
-            structure: "ExtentNode",
-            need,
-            got: buf.len(),
+    // A node declaring room for nothing has no entries to hold, and one declaring room
+    // past its own capacity places entries in bytes it does not reach.
+    if max == 0 || max > capacity {
+        return Err(ParseError::InvalidField {
+            structure: "ExtentHeader",
+            field: "eh_max",
+            value: u64::from(header.max),
+        });
+    }
+    // Bounding the entries by the declared capacity bounds them by the node too, since
+    // that capacity is the node's own.
+    if entries > max {
+        return Err(ParseError::InvalidField {
+            structure: "ExtentHeader",
+            field: "eh_entries",
+            value: u64::from(header.entries),
         });
     }
     let entry = |i: usize| -> [u8; EXTENT_ENTRY_SIZE] {
@@ -801,6 +820,55 @@ mod tests {
         match parse_node(&block).unwrap() {
             ExtentNode::Leaves(back) => assert_eq!(back.len(), 1),
             other => panic!("expected one leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_header_whose_counts_disagree_is_refused() {
+        // Each way the three counts can contradict the node they describe, patched into a
+        // node that is otherwise exactly what the writer emits. `eh_entries` is at header
+        // offset 2 and `eh_max` at 4.
+        let node = |eh_entries: u16, eh_max: u16| {
+            let leaves = build_leaves(&[BlockRange { start: 6, len: 1 }]).unwrap();
+            let mut block = [0u8; Inode::BLOCK_BYTES];
+            write_node(&ExtentNode::Leaves(leaves), INLINE, &mut block).unwrap();
+            block[2..4].copy_from_slice(&eh_entries.to_le_bytes());
+            block[4..6].copy_from_slice(&eh_max.to_le_bytes());
+            block
+        };
+
+        // The unpatched node — one entry in a four-entry inline root — is what the
+        // rejections below are measured against.
+        assert!(parse_node(&node(1, INLINE as u16)).is_ok());
+
+        for (eh_entries, eh_max, field, value, why) in [
+            (0, 0, "eh_max", 0, "a node with room for nothing"),
+            (
+                1,
+                INLINE as u16 + 1,
+                "eh_max",
+                INLINE as u64 + 1,
+                "capacity past the sixty-byte inline area",
+            ),
+            (
+                INLINE as u16,
+                1,
+                "eh_entries",
+                INLINE as u64,
+                "more entries than the declared capacity",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    parse_node(&node(eh_entries, eh_max)),
+                    Err(ParseError::InvalidField {
+                        structure: "ExtentHeader",
+                        field: f,
+                        value: v,
+                    }) if f == field && v == value
+                ),
+                "eh_entries {eh_entries}, eh_max {eh_max} must be refused: {why}"
+            );
         }
     }
 }

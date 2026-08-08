@@ -3,7 +3,7 @@
 //! and (where `e2fsck` is present) checks clean.
 //!
 //! Runs only with the `tar` feature enabled.
-#![cfg(feature = "tar")]
+#![cfg(all(feature = "tar", feature = "ext"))]
 
 mod util;
 
@@ -11,11 +11,11 @@ use std::io::{self, Seek, Write};
 
 use tar::{Builder, EntryType, Header};
 
-use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
-    Acl, AclQualifier, ArchiveError, ArchiveSource, EntryKind, FileContent, FormatOptions,
-    GrowReservation, Reader, Source, format,
+    EntryKind, FileContent, FormatOptions, GrowReservation, Reader, Source, format,
 };
+use ferrosys::{Acl, AclQualifier, ArchiveError, ArchiveSource};
 use util::{available, e2fsck_clean};
 
 const MIB: u64 = 1024 * 1024;
@@ -353,8 +353,46 @@ fn a_pax_global_header_is_skipped_not_rejected() {
     let tar_bytes = b.into_inner().unwrap();
 
     let source = ArchiveSource::from_reader(&tar_bytes[..]).expect("global header skipped");
-    // The two real members parsed; the global header contributed nothing.
+    // The two real members parsed; the global header held only `comment`, which this parser
+    // reads off no member either, so passing it over changes nothing.
     assert_eq!(source.len(), 2);
+}
+
+#[test]
+fn a_pax_global_header_that_would_change_a_member_is_refused_rather_than_dropped() {
+    // A `g` header carries defaults for every member after it. This parser resolves
+    // per-member records only, so an archive expressing ownership, times, or attributes
+    // *only* as a global default would convert to a filesystem that does not carry them —
+    // silently, and with the fidelity report saying nothing was lost.
+    //
+    // So a default that would have changed a member is a refusal. A key this parser ignores
+    // per-member is ignored globally to exactly the same effect, and passes: every
+    // `git archive` tarball opens with a `g` header, and refusing those would refuse most
+    // archives in the world over a `comment` nobody reads.
+    for record in [
+        &b"11 uid=1000\n"[..],
+        b"15 mtime=1700000\n",
+        b"36 SCHILY.xattr.user.origin=global\n",
+    ] {
+        let mut b = Builder::new(Vec::new());
+        let mut gh = Header::new_gnu();
+        gh.set_entry_type(EntryType::XGlobalHeader);
+        gh.set_mode(0o644);
+        gh.set_size(record.len() as u64);
+        gh.set_path("pax_global_header").unwrap();
+        gh.set_cksum();
+        b.append(&gh, record).unwrap();
+        b.append(&dir_header("etc/", 0o755), io::empty()).unwrap();
+        let tar_bytes = b.into_inner().unwrap();
+
+        // `ArchiveSource` holds a whole entry list and is deliberately not `Debug`, which
+        // `expect_err` would want.
+        match ArchiveSource::from_reader(&tar_bytes[..]) {
+            Err(ArchiveError::Malformed { .. }) => {}
+            Err(other) => panic!("{record:?}: expected Malformed, got {other:?}"),
+            Ok(_) => panic!("{record:?}: a consequential global default was passed over"),
+        }
+    }
 }
 
 #[test]
@@ -602,11 +640,12 @@ fn a_binary_posix_acl_xattr_is_translated_to_ext4s_form() {
         .find(|x| x.name == Acl::ACCESS_NAME)
         .expect("access ACL present")
         .value;
-    assert_ne!(
+    // The value read back is the one the archive stated, whatever ext packed it into.
+    assert_eq!(
         value, v2,
-        "the version-2 bytes reached the disk untranslated"
+        "the ACL survives the round trip as the ACL it was"
     );
-    let acl = Acl::decode(&value).expect("ext4's compact form");
+    let acl = Acl::decode(&value).expect("the boundary form");
     assert!(
         acl.entries()
             .iter()
@@ -773,7 +812,7 @@ fn a_pax_value_containing_a_newline_is_read_intact() {
         .iter()
         .find(|x| x.name == Acl::ACCESS_NAME)
         .expect("access ACL present");
-    let acl = Acl::decode(&acl.value).expect("ext4's compact form");
+    let acl = Acl::decode(&acl.value).expect("the boundary form");
     assert!(
         acl.entries()
             .iter()

@@ -1,13 +1,13 @@
 [package]
 name = "ferrosys-cli"
-description = "Command-line ext2/3/4 formatter, inspector, and extractor built on ferrosys"
+description = "Command-line ext2/3/4 and FAT12/16/32 formatter, inspector, and extractor built on ferrosys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-keywords = ["ext4", "filesystem", "mkfs", "disk-image", "cli"]
+keywords = ["ext4", "fat32", "filesystem", "mkfs", "disk-image"]
 categories = ["command-line-utilities", "filesystem"]
 # The package's front page on a registry.
 readme = "README.md"
@@ -30,7 +30,13 @@ doc = false
 # build filesystems the archive source cannot describe (a socket) and read them back, so
 # they drive the library directly as well as the binary; an integration test links a
 # normal dependency, so this one entry serves both.
-ferrosys = { workspace = true, features = ["tar", "dir"] }
+#
+# Every family is named, and that is the deliberate asymmetry between the two crates: the
+# library is modular so a consumer wanting one filesystem compiles one, and the binary is
+# comprehensive because someone running `detect` or `inspect` on an unknown image wants it
+# identified whatever it turns out to be. A family missing here is not a smaller build; it
+# is a wrong answer from a shipping command.
+ferrosys = { workspace = true, features = ["ext", "fat", "tar", "dir"] }
 # Typed error enums. Build-time proc-macro only; no runtime footprint. Argument
 # parsing is hand-written and takes no dependency.
 thiserror = { workspace = true }

@@ -8,8 +8,9 @@
 //! and slow symlinks, hard links, device / FIFO nodes, extended attributes from
 //! `SCHILY.xattr.*` records, and POSIX ACLs — from the text form of a
 //! `SCHILY.acl.access` / `SCHILY.acl.default` record, or from the binary version-2
-//! form of a `system.posix_acl_*` attribute — which it translates into ext4's on-disk
-//! ACL bytes (see [`crate::acl`]).
+//! form of a `system.posix_acl_*` attribute — which arrive as one [`Acl`] whichever
+//! form carried them and leave as the version-2 `posix_acl_xattr` bytes every boundary
+//! speaks. Narrowing that to whatever a filesystem stores is the family's own work.
 //!
 //! An archive's own root member (`./`) describes the filesystem root: its mode,
 //! ownership, times, and extended attributes become the root directory's.
@@ -38,9 +39,10 @@ use std::sync::Arc;
 
 use tar::EntryType;
 
-use crate::acl::{Acl, AclEntry, AclQualifier, EXEC, READ, WRITE};
-use crate::ondisk::{Timestamp, Xattr};
+use crate::acl::{Acl, AclEntry, AclQualifier};
 use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry};
+use crate::time::Timestamp;
+use crate::xattr::Xattr;
 
 mod blocks;
 mod sink;
@@ -56,7 +58,7 @@ pub enum ArchiveError {
     #[error("reading archive: {0}")]
     Io(#[from] std::io::Error),
     /// An entry could not be interpreted.
-    #[error("archive entry {}: {reason}", String::from_utf8_lossy(path))]
+    #[error("archive entry {}: {reason}", crate::escape::printable(path))]
     #[non_exhaustive]
     Bad {
         /// The offending entry's path.
@@ -67,7 +69,7 @@ pub enum ArchiveError {
     /// An entry has a type the model cannot represent.
     #[error(
         "archive entry {} has an unsupported type",
-        String::from_utf8_lossy(path)
+        crate::escape::printable(path)
     )]
     #[non_exhaustive]
     Unsupported {
@@ -104,7 +106,7 @@ pub enum ArchiveError {
     /// stored ACL could not be translated into one.
     #[error(
         "archive entry {} has an invalid ACL: {source}",
-        String::from_utf8_lossy(path)
+        crate::escape::printable(path)
     )]
     #[non_exhaustive]
     Acl {
@@ -115,14 +117,14 @@ pub enum ArchiveError {
     },
     /// The filesystem being written out could not be read.
     #[error(transparent)]
-    Read(#[from] crate::read::ReadError),
+    Read(#[from] crate::tree::TreeError),
     /// The filesystem holds an entry a tar archive has no way to express: a socket, which
     /// has no entry type at all. It is a typed error rather than an archive quietly missing
     /// a file.
     #[error(
         "{} is a socket, which a tar archive has no entry type for: writing it out would \
          drop it silently",
-        String::from_utf8_lossy(path)
+        crate::escape::printable(path)
     )]
     #[non_exhaustive]
     Unrepresentable {
@@ -135,8 +137,8 @@ pub enum ArchiveError {
     #[error(
         "{}: extended-attribute name {} cannot be written to a PAX record: it holds an '=' \
          or a newline, or is not valid UTF-8",
-        String::from_utf8_lossy(path),
-        String::from_utf8_lossy(name)
+        crate::escape::printable(path),
+        crate::escape::printable(name)
     )]
     #[non_exhaustive]
     XattrNameUnrepresentable {
@@ -157,7 +159,7 @@ impl ArchiveError {
     fn from_body_io(e: std::io::Error, path: &[u8]) -> Self {
         ArchiveError::Io(std::io::Error::new(
             e.kind(),
-            format!("{}: {e}", String::from_utf8_lossy(path)),
+            format!("{}: {e}", crate::escape::printable(path)),
         ))
     }
 }
@@ -366,7 +368,8 @@ fn parse_entry(
         _ => return Err(ArchiveError::Unsupported { path }),
     };
 
-    // Whichever form an ACL arrived in, it reaches the disk as ext4's compact bytes.
+    // Whichever form an ACL arrived in — a binary version-2 attribute or SCHILY text — it
+    // leaves here as the one form every boundary speaks, and the family narrows it.
     let mut xattrs = pax.xattrs;
     if let Some(acl) = &pax.acl_access {
         xattrs.push(Xattr {
@@ -553,16 +556,31 @@ fn parse_pax_time(value: &[u8], path: &[u8]) -> Result<Option<Timestamp>, Archiv
         path: path.to_vec(),
         reason: "invalid PAX time seconds",
     })?;
-    // Take up to nine fractional digits, right-padded to nanoseconds.
+    // Up to nine fractional digits, right-padded to nanoseconds.
+    //
+    // The fraction is held to being digits before anything is derived from its length, and
+    // that order is the whole of the check. Taking nine *characters* and then measuring
+    // their length in *bytes* is not the same count: one multi-byte character makes the
+    // scale below underflow, and it does so before the parse that would have refused the
+    // input. Rejecting first also refuses `0.+5`, which Rust's integer parser accepts as a
+    // signed five and which is not a fraction any archiver writes.
     let mut nanos: u32 = 0;
     if !frac_str.is_empty() {
-        let digits: String = frac_str.chars().take(9).collect();
-        let scale = 9 - digits.len() as u32;
+        if !frac_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(ArchiveError::Bad {
+                path: path.to_vec(),
+                reason: "invalid PAX time fraction",
+            });
+        }
+        // Every byte is an ASCII digit, so nine bytes are nine characters and the slice
+        // lands on a character boundary. At most nine digits parse to under a billion, and
+        // scaling by the digits that are missing keeps it there.
+        let digits = &frac_str[..frac_str.len().min(9)];
         let parsed: u32 = digits.parse().map_err(|_| ArchiveError::Bad {
             path: path.to_vec(),
             reason: "invalid PAX time fraction",
         })?;
-        nanos = parsed * 10u32.pow(scale);
+        nanos = parsed * 10u32.pow(9 - digits.len() as u32);
     }
     // A negative time with a fraction is `secs.frac` below zero, i.e. the whole seconds
     // floored and the fraction its distance up to the next second. The seconds token
@@ -583,7 +601,7 @@ fn parse_pax_time(value: &[u8], path: &[u8]) -> Result<Option<Timestamp>, Archiv
 /// Parse a binary `system.posix_acl_*` attribute — the version-2 form an archiver
 /// copies straight from `getxattr` — into an ACL.
 fn decode_acl_xattr(value: &[u8], path: &[u8]) -> Result<Acl, ArchiveError> {
-    Acl::decode_xattr_v2(value).map_err(|source| ArchiveError::Acl {
+    Acl::decode(value).map_err(|source| ArchiveError::Acl {
         path: path.to_vec(),
         source,
     })
@@ -676,9 +694,9 @@ fn parse_acl_perm(text: &str) -> Option<u16> {
     let mut perm = 0u16;
     for c in text.chars() {
         match c {
-            'r' => perm |= READ,
-            'w' => perm |= WRITE,
-            'x' => perm |= EXEC,
+            'r' => perm |= Acl::READ,
+            'w' => perm |= Acl::WRITE,
+            'x' => perm |= Acl::EXEC,
             '-' => {}
             _ => return None,
         }
@@ -737,7 +755,7 @@ mod tests {
         let acl = parse_acl_text(b"u::rwx,u:1000:rw-,g::r-x,m::rwx,o::r--", b"/x").unwrap();
         let entries = acl.entries();
         assert_eq!(entries[0].who, AclQualifier::UserObj);
-        assert_eq!(entries[0].perm, READ | WRITE | EXEC);
+        assert_eq!(entries[0].perm, Acl::READ | Acl::WRITE | Acl::EXEC);
         assert!(entries.iter().any(|e| e.who == AclQualifier::User(1000)));
         // The full spelling parses the same.
         let full = parse_acl_text(b"user::rwx,group::r-x,other::r--", b"/x").unwrap();
@@ -746,8 +764,11 @@ mod tests {
 
     #[test]
     fn acl_perm_rejects_junk() {
-        assert_eq!(parse_acl_perm("rwx"), Some(READ | WRITE | EXEC));
-        assert_eq!(parse_acl_perm("r--"), Some(READ));
+        assert_eq!(
+            parse_acl_perm("rwx"),
+            Some(Acl::READ | Acl::WRITE | Acl::EXEC)
+        );
+        assert_eq!(parse_acl_perm("r--"), Some(Acl::READ));
         assert_eq!(parse_acl_perm("rwq"), None);
     }
 
@@ -762,6 +783,40 @@ mod tests {
         // A whole negative second is unchanged.
         let t = parse_pax_time(b"-1", b"/x").unwrap().unwrap();
         assert_eq!((t.secs, t.nanos), (-1, 0));
+    }
+
+    #[test]
+    fn pax_time_refuses_a_fraction_that_is_not_digits() {
+        // Nine characters are not nine bytes. A fraction whose first nine characters run
+        // past nine bytes made the padding scale underflow — panicking in a debug build and
+        // wrapping in a release one, where the wrapped exponent produced an arbitrary
+        // nanosecond value that reached the on-disk timestamp. The check on the digits comes
+        // first, so nothing is computed from a length that is not the count it was taken as.
+        for value in [
+            &b"1.12345678\xc3\xa9"[..],
+            b"1.\xc3\xa9",
+            b"1.\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80",
+            b"1.123456789\xc3\xa9",
+            // Rust's integer parser takes a leading sign; a fraction does not have one.
+            b"0.+5",
+            b"0.-5",
+            b"1. 5",
+        ] {
+            let err = match parse_pax_time(value, b"/x") {
+                Err(e) => e,
+                Ok(t) => panic!("{value:?} is not a time, got {t:?}"),
+            };
+            assert!(
+                matches!(err, ArchiveError::Bad { reason, .. } if reason.contains("fraction")),
+                "{value:?}: {err:?}"
+            );
+        }
+        // And a long fraction of real digits is still truncated to nanoseconds rather than
+        // refused, which is what the bound is for.
+        let t = parse_pax_time(b"1.123456789987654321", b"/x")
+            .unwrap()
+            .unwrap();
+        assert_eq!((t.secs, t.nanos), (1, 123_456_789));
     }
 
     #[test]

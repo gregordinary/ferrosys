@@ -133,6 +133,34 @@ pub enum GeometryError {
         /// The most block groups a 32-bit group number addresses.
         limit: u64,
     },
+    /// The descriptor table has grown until the run that opens every group carrying a
+    /// superblock copy — the superblock block, the descriptor table, and the reserved
+    /// descriptor blocks — is longer than a block group.
+    ///
+    /// That run is contiguous and repeats at the start of each group with a copy, so it
+    /// must fit inside one group: the next group opens with its own copy, and a longer
+    /// run would write the primary's descriptors over it. Only `meta_bg`, which splits
+    /// the descriptor table across the filesystem instead of repeating it whole, makes
+    /// the geometry expressible, and this crate does not write it. The size is refused
+    /// rather than planned into a filesystem whose metadata overwrites itself.
+    ///
+    /// A larger block size raises both ends — a group holds `8 * block_size` blocks while
+    /// the table grows with the group count — and is the way out.
+    #[error(
+        "filesystem of {blocks} blocks needs {groups} block groups, whose {overhead}-block \
+         superblock and descriptor run does not fit a block group of {blocks_per_group} blocks"
+    )]
+    #[non_exhaustive]
+    DescriptorsExceedGroup {
+        /// Blocks the filesystem would have.
+        blocks: u64,
+        /// Block groups the geometry needs.
+        groups: u64,
+        /// Blocks the superblock-and-descriptor run occupies.
+        overhead: u64,
+        /// Blocks in a block group.
+        blocks_per_group: u64,
+    },
     /// The geometry needs more inodes than the superblock's 32-bit `s_inodes_count`
     /// holds. The inode count follows from the size and the bytes-per-inode ratio, so
     /// this is reached by sizing alone, and it is rejected rather than wrapped.
@@ -715,6 +743,8 @@ impl PlanRequest {
 ///   if the block count outruns the block numbers that describe it.
 /// - [`GeometryError::TooManyGroups`] or [`GeometryError::TooManyInodes`] if the size
 ///   needs more block groups or inodes than the 32-bit counts on disk hold.
+/// - [`GeometryError::DescriptorsExceedGroup`] if the size needs a descriptor table whose
+///   run no longer fits a block group.
 /// - [`GeometryError::InodesTooDense`] if an [`InodeCount`] override needs more inodes in
 ///   a group than its one-block bitmap indexes.
 /// - [`GeometryError::FinalGroupTooSmall`] if the last group cannot hold its
@@ -868,6 +898,26 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
                 .min(ceiling_gdt.saturating_sub(gdt))
                 .min(total_blocks / GROW_MAX_SHARE),
         };
+
+        // The superblock, descriptor table, and reserved descriptor blocks form one
+        // contiguous run at the start of every group that carries a copy, and the next
+        // group opens with its own. A run longer than a block group therefore reaches
+        // into — and, once materialized, over — the copy that follows it, so a geometry
+        // that needs one is refused here rather than planned. This is reachable by size
+        // alone: the table grows with the group count while a group's size is fixed at
+        // `8 * block_size`, so every block size has a total past which the two cross.
+        // The oracle answers the same geometry by enabling `meta_bg`, which splits the
+        // table instead of repeating it whole; this crate does not write `meta_bg`, so
+        // refusing is the only honest answer. A single-group filesystem has no following
+        // copy to overwrite and is bounded by the group-0 overhead check instead.
+        if group_count >= 2 && 1 + gdt + reserved > bpg {
+            return Err(GeometryError::DescriptorsExceedGroup {
+                blocks: total_blocks,
+                groups: group_count,
+                overhead: 1 + gdt + reserved,
+                blocks_per_group: bpg,
+            });
+        }
 
         // Spread the inode count for the current block count across the groups. A group's
         // inodes are indexed by a one-block bitmap, so it holds at most `inode_cap` of
@@ -1392,6 +1442,83 @@ mod tests {
     }
 
     #[test]
+    fn the_superblock_and_descriptor_run_always_fits_a_block_group() {
+        // The run that opens every group carrying a copy must fit inside one group, or
+        // the next group's copy lands inside the previous group's descriptor table. The
+        // sweep above covers 16-512 MiB; this one climbs by powers of two to where the
+        // descriptor table and the block group actually cross, and asserts the invariant
+        // directly rather than through the placements it governs — so it holds at sizes
+        // whose group vectors are too large to walk pairwise.
+        for bs in [1024u32, 2048, 4096] {
+            for shift in 4..=23u32 {
+                let mib = 1u64 << shift;
+                let planned = plan_geo(
+                    mib * MIB,
+                    GrowReservation::Max,
+                    FeatureSet {
+                        block_size: bs,
+                        ..FeatureSet::default()
+                    },
+                );
+                let Ok(l) = planned else { continue };
+                let run = super_overhead(l.gdt_blocks, l.reserved_gdt_blocks);
+                assert!(
+                    l.group_count < 2 || run <= u64::from(l.blocks_per_group),
+                    "{bs}-byte blocks, {mib} MiB: a {run}-block run in a \
+                     {}-block group",
+                    l.blocks_per_group
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_descriptor_table_too_large_for_a_block_group_is_refused() {
+        // Past this size the descriptor table's run outgrows a block group and the only
+        // geometry that expresses it needs meta_bg, which this crate does not write. The
+        // planner must refuse rather than return a layout whose backup superblocks sit
+        // inside the primary's descriptor table.
+        for (bs, mib) in [
+            (1024u32, 1024u64 * 1024),
+            (1024, 2 * 1024 * 1024),
+            (2048, 16 * 1024 * 1024),
+        ] {
+            let err = plan_geo(
+                mib * MIB,
+                GrowReservation::None,
+                FeatureSet {
+                    block_size: bs,
+                    ..FeatureSet::default()
+                },
+            )
+            .expect_err("a run longer than a block group is not plannable");
+            assert!(
+                matches!(err, GeometryError::DescriptorsExceedGroup { .. }),
+                "{bs}-byte blocks, {mib} MiB: expected DescriptorsExceedGroup, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_size_below_the_descriptor_threshold_still_plans() {
+        // The refusal must fall on the geometry that cannot be expressed, not on the
+        // largest one that can: a 1 KiB-block filesystem one block group below the
+        // threshold plans, and its run fits.
+        let l = plan_geo(
+            990 * 1024 * MIB,
+            GrowReservation::None,
+            FeatureSet {
+                block_size: 1024,
+                ..FeatureSet::default()
+            },
+        )
+        .expect("990 GiB at a 1 KiB block is expressible without meta_bg");
+        assert!(
+            super_overhead(l.gdt_blocks, l.reserved_gdt_blocks) <= u64::from(l.blocks_per_group)
+        );
+    }
+
+    #[test]
     fn a_groups_inode_count_ends_on_a_byte_boundary() {
         // A group's inodes must be a whole number of bytes in the inode bitmap, or
         // the bitmap's padding cannot be written. Only a 1024-byte block, which fits
@@ -1612,6 +1739,71 @@ mod tests {
                 "Count({request}) on {mib} MiB: a group's inode table has no blocks",
             );
         }
+    }
+
+    #[test]
+    fn the_size_driven_ratio_matches_mke2fs_at_every_bucket_boundary() {
+        // Each pair pinned against mke2fs 1.47.0 output: the block count one below a
+        // boundary and the boundary itself, at both ends of the block-size range. The
+        // buckets are stated in mebibytes, so every boundary moves with the block size —
+        // 3 MiB is 768 blocks at 4096 bytes and 3072 at 1024 — and a bucket that stopped
+        // scaling would put a whole size range on the wrong ratio while every test that
+        // formats at one fixed block size still passed.
+        //
+        // The 16 TiB boundary is past what a 32-bit block number reaches at every block
+        // size, and the 4 TiB one is at a 1024-byte block, so those pairs describe sizes
+        // only a `64bit` filesystem plans. The ratio is a function of the block count
+        // whatever addresses it, so it is pinned here rather than through a plan.
+        for (bs, meg) in [(1024u32, 1024u64), (2048, 512), (4096, 256)] {
+            // floppy -> small, at 3 MiB.
+            assert_eq!(
+                inode_ratio(3 * meg - 1, bs),
+                8192,
+                "floppy, {bs}-byte blocks"
+            );
+            assert_eq!(inode_ratio(3 * meg, bs), 4096, "small, {bs}-byte blocks");
+            // small -> default, at 512 MiB.
+            assert_eq!(
+                inode_ratio(512 * meg - 1, bs),
+                4096,
+                "small, {bs}-byte blocks"
+            );
+            assert_eq!(
+                inode_ratio(512 * meg, bs),
+                16384,
+                "default, {bs}-byte blocks"
+            );
+            // default -> big, at 4 TiB.
+            assert_eq!(
+                inode_ratio(4 * 1024 * 1024 * meg - 1, bs),
+                16384,
+                "default, {bs}-byte blocks"
+            );
+            assert_eq!(
+                inode_ratio(4 * 1024 * 1024 * meg, bs),
+                32768,
+                "big, {bs}-byte blocks"
+            );
+            // big -> huge, at 16 TiB.
+            assert_eq!(
+                inode_ratio(16 * 1024 * 1024 * meg - 1, bs),
+                32768,
+                "big, {bs}-byte blocks"
+            );
+            assert_eq!(
+                inode_ratio(16 * 1024 * 1024 * meg, bs),
+                65536,
+                "huge, {bs}-byte blocks"
+            );
+        }
+
+        // The ratio a plan actually applies, so the buckets above are pinned to the geometry
+        // rather than only to themselves. On 64 MiB at a 4096-byte block the size falls in
+        // the `small` bucket, which is 16384 inodes for 16384 blocks; 512 MiB is the first
+        // size in `default`, and 131072 blocks at 16384 bytes each is 32768 inodes. Both
+        // counts are what mke2fs reports for the same size.
+        assert_eq!(plan_inodes(64, InodeCount::Auto).total_inodes, 16384);
+        assert_eq!(plan_inodes(512, InodeCount::Auto).total_inodes, 32768);
     }
 
     #[test]

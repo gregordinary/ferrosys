@@ -5,7 +5,9 @@
 //! of one input are byte-for-byte identical. These are pure-crate checks; they need
 //! no host tools.
 
-use ferrosys::ext::ondisk::Timestamp;
+#![cfg(feature = "ext")]
+
+use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
     FeatureSet, FormatOptions, GrowReservation, Metadata, TreeBuilder, format, format_to,
 };

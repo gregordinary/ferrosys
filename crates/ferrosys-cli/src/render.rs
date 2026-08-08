@@ -11,8 +11,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ferrosys::ext::acl::{EXEC, READ, WRITE};
-use ferrosys::ext::{Acl, AclQualifier};
+use ferrosys::{Acl, AclQualifier};
 
 use crate::args::os;
 
@@ -31,6 +30,17 @@ pub fn uuid(bytes: &[u8; 16]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// A FAT volume serial number in the form every tool that shows one writes it: two
+/// upper-case hex groups of four digits, separated by a dash.
+///
+/// The spelling is the convention rather than a choice — it is what a driver, `fatlabel`,
+/// and a DOS `VOL` all print — so a serial copied out of this tool's report matches one
+/// copied out of any other.
+#[must_use]
+pub fn volume_serial(id: u32) -> String {
+    format!("{:04X}-{:04X}", id >> 16, id & 0xffff)
 }
 
 /// A volume label as a person reads it: the bytes up to the first NUL, rendered lossily,
@@ -52,46 +62,14 @@ pub fn label(name: &[u8; 16]) -> Option<String> {
 /// trust: left raw, an escape sequence in one could move the cursor, recolor the line, or
 /// erase what precedes it, and a direction override could reverse the rest of the line so
 /// that a path reads as one thing and resolves as another. So a crafted image could forge
-/// or hide output. Escaping those characters renders the value faithfully without handing
-/// the terminal their effect. The backslash escapes itself, so what comes out names
-/// exactly one input: a name holding the four characters `\x1b` and one holding the escape
-/// byte do not render alike. Invalid UTF-8 still renders lossily, as elsewhere; the JSON
-/// projection escapes these bytes on its own, so only the human renderers need this.
-#[must_use]
-pub fn printable(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for c in String::from_utf8_lossy(bytes).chars() {
-        match c {
-            // Without this the escapes below would be ambiguous, and an escape a reader
-            // cannot invert is one they cannot trust.
-            '\\' => out.push_str("\\\\"),
-            // A control character is at most `U+009F`, so two hex digits name it.
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c if is_direction_control(c) => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Whether `c` is a bidirectional formatting character — one that reorders the text around
-/// it without occupying a column of its own.
+/// or hide output.
 ///
-/// These are not `char::is_control`: they are category `Cf`, and a terminal honors them.
-/// Left raw, `U+202E` alone makes the rest of a line render right to left, which is enough
-/// to display a name as its own reverse. The set is closed and small, so it is named here
-/// rather than reached for through a Unicode table.
-fn is_direction_control(c: char) -> bool {
-    matches!(
-        c,
-        // The marks and the embedding/override run: LRM, RLM, ALM.
-        '\u{200e}' | '\u{200f}' | '\u{061c}'
-        // LRE, RLE, PDF, LRO, RLO.
-        | '\u{202a}'..='\u{202e}'
-        // LRI, RLI, FSI, PDI.
-        | '\u{2066}'..='\u{2069}'
-    )
-}
+/// This is the library's own [`ferrosys::printable`], not a copy of it. The rule is the same
+/// rule — the escaping every message and finding the library renders has already been
+/// through — and a second implementation of it here would be a second place for it to drift.
+/// The JSON projection escapes the same two classes on its own, through
+/// [`crate::json::push_string`], so only the human renderers reach for this.
+pub use ferrosys::printable;
 
 /// The mode as `ls` writes it: the type letter, then the owner, group, and other
 /// permission triples, with the `setuid`, `setgid`, and sticky bits folded into the
@@ -218,7 +196,7 @@ pub fn acl(acl: &Acl) -> String {
             AclQualifier::Mask => ("mask", String::new()),
             AclQualifier::Other => ("other", String::new()),
         };
-        let bits = [(READ, 'r'), (WRITE, 'w'), (EXEC, 'x')]
+        let bits = [(Acl::READ, 'r'), (Acl::WRITE, 'w'), (Acl::EXEC, 'x')]
             .iter()
             .map(|&(bit, ch)| if entry.perm & bit != 0 { ch } else { '-' })
             .collect::<String>();
@@ -230,6 +208,19 @@ pub fn acl(acl: &Acl) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_volume_serial_is_written_the_way_every_tool_prints_one() {
+        // Two upper-case hex groups of four digits: what a driver, `fatlabel`, and a DOS
+        // `VOL` all show, so a serial copied out of this tool matches one copied out of any
+        // other — and one this prints can be typed back into `format --volume-id`.
+        assert_eq!(volume_serial(0x1a2b_3c4d), "1A2B-3C4D");
+        assert_eq!(volume_serial(0), "0000-0000");
+        assert_eq!(volume_serial(u32::MAX), "FFFF-FFFF");
+        // Leading zeros are kept in both halves: the field is eight digits wide, and a
+        // shorter rendering would be a different serial.
+        assert_eq!(volume_serial(0x0001_0002), "0001-0002");
+    }
 
     #[test]
     fn a_uuid_is_written_in_the_canonical_dashed_form() {
@@ -265,50 +256,6 @@ mod tests {
             label(b"a\x1bb\0\0\0\0\0\0\0\0\0\0\0\0\0").as_deref(),
             Some("a\\x1bb")
         );
-    }
-
-    #[test]
-    fn printable_escapes_control_bytes_and_keeps_the_rest() {
-        // Ordinary text, including the path separator, passes through untouched.
-        assert_eq!(printable(b"/etc/passwd"), "/etc/passwd");
-        // A terminal escape sequence a crafted image might carry is neutralized: the ESC
-        // and the carriage return become visible escapes rather than acting on the
-        // terminal.
-        assert_eq!(
-            printable(b"safe\x1b[31mred\rgone"),
-            "safe\\x1b[31mred\\x0dgone"
-        );
-        // NUL and DEL are controls too.
-        assert_eq!(printable(b"a\0b\x7fc"), "a\\x00b\\x7fc");
-        // Invalid UTF-8 still renders lossily.
-        assert_eq!(printable(b"a\xffb"), "a\u{fffd}b");
-    }
-
-    #[test]
-    fn printable_names_exactly_one_input() {
-        // The backslash escapes itself, so a name holding the four characters `\x1b`
-        // does not render as the one holding the ESC byte. Without this the rendering
-        // would be ambiguous in the direction that matters: a crafted name could be
-        // written to look like the escaped form of an innocent one.
-        assert_eq!(printable(br"a\x1bb"), "a\\\\x1bb");
-        assert_ne!(printable(br"a\x1bb"), printable(b"a\x1bb"));
-    }
-
-    #[test]
-    fn printable_escapes_the_direction_overrides() {
-        // `U+202E` reverses everything after it, so a terminal would show this name as
-        // `gpj.exe`. It is category Cf rather than a control, so `is_control` misses it.
-        assert_eq!(
-            printable("photo\u{202e}exe.jpg".as_bytes()),
-            "photo\\u{202e}exe.jpg"
-        );
-        // The isolates and the plain marks are escaped on the same grounds.
-        assert_eq!(
-            printable("a\u{2066}b\u{200f}c".as_bytes()),
-            "a\\u{2066}b\\u{200f}c"
-        );
-        // An ordinary non-ASCII character is not one of them and renders as itself.
-        assert_eq!(printable("café".as_bytes()), "café");
     }
 
     #[test]

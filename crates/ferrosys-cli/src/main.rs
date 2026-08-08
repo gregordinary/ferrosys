@@ -1,8 +1,17 @@
-//! `ferrosys` — write, inspect, and read back ext2/3/4 filesystems.
+//! `ferrosys` — write, inspect, and read back ext2/3/4 filesystems and FAT12/16/32
+//! volumes.
 //!
 //! The binary is a shell around the `ferrosys` library: it parses a command line,
-//! opens files, and renders results. Every decision about what an ext filesystem *is*
-//! belongs to the library.
+//! opens files, and renders results. Every decision about what a filesystem *is* belongs
+//! to the library.
+//!
+//! # Every family, always
+//!
+//! The library is modular — a consumer that wants one filesystem compiles one — and this
+//! binary is the deliberate exception: it compiles in every family the library has, so
+//! someone running `detect` or `inspect` on an unknown image gets it identified whatever it
+//! turns out to be. A family missing here would not be a smaller build; it would be a wrong
+//! answer from a shipping command.
 //!
 //! # Exit codes
 //!
@@ -11,9 +20,9 @@
 //!
 //! - `0` — the command did what it was asked, and any filesystem it read is sound.
 //! - `4` — a filesystem was read and it is bad.
-//! - `8` — the command could not be carried out: the host got in the way, or the bytes
-//!   given are not an ext filesystem, so there is no filesystem to have an opinion
-//!   about.
+//! - `8` — the command could not be carried out: the host got in the way, the bytes given
+//!   are not a filesystem any compiled-in family reads, or an option named a concept the
+//!   image's family does not have.
 //! - `16` — the command line could not be understood.
 //!
 //! # Streams
@@ -26,10 +35,10 @@
 //!
 //! # Determinism
 //!
-//! Everything an image's bytes depend on is an input the tool is given. A format's UUID is
-//! required, its time is required (or comes from `SOURCE_DATE_EPOCH`), and its hash seed
-//! defaults to the UUID's bytes — so two runs given the same inputs write the same bytes,
-//! always.
+//! Everything an image's bytes depend on is an input the tool is given. A format's identity
+//! is required — the UUID for ext, the volume serial number for a FAT — its time is required
+//! (or comes from `SOURCE_DATE_EPOCH`), and ext's hash seed defaults to the UUID's bytes. So
+//! two runs given the same inputs write the same bytes, always.
 
 // The tool inherits the library's bar: there is no `unsafe` here, ever.
 #![forbid(unsafe_code)]
@@ -50,13 +59,14 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use ferrosys::DetectError;
+use ferrosys::{DetectError, OpenError, TreeError};
 // The directory source `--from-dir` walks with, and the failures it reports, exist on the
 // platform the library builds it for. Every other command and option is the same
 // everywhere; `format::from_dir` is where the difference is confined.
+use ferrosys::ArchiveError;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use ferrosys::ext::HostError;
-use ferrosys::ext::{ArchiveError, FormatError, GeometryError, IdentityError, ReadError, Severity};
+use ferrosys::HostError;
+use ferrosys::ext::{FormatError, GeometryError, IdentityError, ReadError, Severity};
 
 use crate::args::{Command, Topic, UsageError};
 
@@ -118,6 +128,42 @@ pub enum Error {
         #[source]
         source: ReadError,
     },
+    /// The bytes are not a filesystem any compiled-in family reads, or a family recognized
+    /// them and its reader then refused them.
+    ///
+    /// Distinct from [`NotExt`](Self::NotExt) in what it says: that one is one family's
+    /// verdict, and this is every family's.
+    #[error("{path}: {source}")]
+    NotAFilesystem {
+        /// The file that was opened.
+        path: String,
+        /// What opening it produced.
+        #[source]
+        source: OpenError,
+    },
+    /// An option naming a concept the image's family does not have.
+    ///
+    /// Reported rather than passed over. A run that asked for something and was handed a
+    /// report silently missing it has been told the image holds none of that thing, which is
+    /// a different claim from the question not applying to this family at all.
+    #[error("{option} does not apply to a {family} filesystem: {reason}")]
+    NotForFamily {
+        /// The option as it was typed.
+        option: &'static str,
+        /// The family the image turned out to hold.
+        family: &'static str,
+        /// Why the two do not meet.
+        reason: &'static str,
+    },
+    /// The library classified a family this build of the tool cannot work with.
+    ///
+    /// The binary compiles in every family the library has, so nothing in this workspace
+    /// produces it; a newer library linked against an older tool would.
+    #[error(
+        "the image holds a filesystem this build of the tool does not handle — the library \
+         recognized it and this command has nothing to do with it"
+    )]
+    UnsupportedFamily,
     /// Re-identifying an image failed.
     #[error("{path}: {source}")]
     Identity {
@@ -127,9 +173,17 @@ pub enum Error {
         #[source]
         source: ferrosys::ext::IdentityError,
     },
-    /// Writing the filesystem failed.
+    /// Writing an ext filesystem failed.
     #[error(transparent)]
-    Format(#[from] FormatError),
+    ExtFormat(#[from] FormatError),
+    /// Writing a FAT volume failed.
+    ///
+    /// A variant of its own rather than one shared with the line above: what a format can
+    /// refuse is the family's own list, and the two lists have almost nothing in common —
+    /// one is journals and feature words and the other is cluster counts and properties a
+    /// directory entry cannot hold.
+    #[error(transparent)]
+    FatFormat(#[from] ferrosys::fat::FormatError),
     /// The source archive could not be read.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -162,15 +216,22 @@ pub enum Error {
     /// A filesystem was read, and it is bad.
     #[error("the filesystem is malformed: {0}")]
     Image(#[source] ReadError),
+    /// A filesystem was read through the extraction surface, and it is bad.
+    ///
+    /// The classification is the shared one: whether the bytes are wrong, whether the image
+    /// uses something this build does not follow, or whether a caller's limit stopped the
+    /// read. The family's own message rides along inside it.
+    #[error("the filesystem is malformed: {0}")]
+    Tree(#[source] TreeError),
     /// The scan found what the caller asked to be told about.
     #[error(
         "the filesystem holds {}{count} {}, the worst of them {}",
         if *truncated { "at least " } else { "" },
-        if *count == 1 { "anomaly" } else { "anomalies" },
+        if *count == 1 { "finding" } else { "findings" },
         worst.as_str()
     )]
     Verdict {
-        /// How many anomalies the scan found.
+        /// How many findings the scan produced.
         count: usize,
         /// The severity of the most serious one.
         worst: Severity,
@@ -194,7 +255,7 @@ impl Error {
         match self {
             // The growth reservation is part of group 0's overhead, and on a small
             // filesystem it can be most of it. `--grow` is what decides it.
-            Error::Format(FormatError::Geometry(GeometryError::TooSmall {
+            Error::ExtFormat(FormatError::Geometry(GeometryError::TooSmall {
                 reserved_gdt_blocks,
                 ..
             })) if *reserved_gdt_blocks > 0 => Some(format!(
@@ -204,13 +265,13 @@ impl Error {
             // `orphan_file` is part of the default profile and requires a journal, so
             // `-O ^has_journal` on its own is refused at parse time. Both spellings here
             // are ones the tool accepts.
-            Error::Format(FormatError::FilesystemTooSmallForJournal { minimum, .. }) => {
+            Error::ExtFormat(FormatError::FilesystemTooSmallForJournal { minimum, .. }) => {
                 Some(format!(
                     "a journal needs {minimum} blocks of its own: `-t ext2` builds a \
                      filesystem without one, as does `-O ^has_journal,^orphan_file`"
                 ))
             }
-            Error::Format(FormatError::JournalDoesNotFit { .. }) => Some(
+            Error::ExtFormat(FormatError::JournalDoesNotFit { .. }) => Some(
                 "`--journal N` sets the log's size in filesystem blocks, and `-t ext2` \
                  builds without one"
                     .to_string(),
@@ -226,6 +287,10 @@ impl Error {
             // A malformed filesystem is an opinion formed about one; everything else here
             // is a failure to form one at all.
             Error::Image(_) | Error::Verdict { .. } => exit::IMAGE_BAD,
+            // The same line one level up: what the extraction surface says about the bytes
+            // is a verdict about the filesystem, and what it says about reading them is not.
+            Error::Tree(TreeError::Io { .. }) => exit::OPERATIONAL,
+            Error::Tree(_) => exit::IMAGE_BAD,
             // Writing an archive out of an image reads that image, so some of what an
             // archive failure carries is a verdict about the filesystem: a structure that
             // cannot be read, and a stored ACL that does not decode, are the image's faults.
@@ -233,7 +298,7 @@ impl Error {
             // written are not — the filesystem is sound and the request cannot be carried
             // out.
             Error::Archive(ArchiveError::Read(e)) => match e {
-                ReadError::Io { .. } => exit::OPERATIONAL,
+                TreeError::Io { .. } => exit::OPERATIONAL,
                 _ => exit::IMAGE_BAD,
             },
             Error::Archive(ArchiveError::Acl { .. }) => exit::IMAGE_BAD,
@@ -251,6 +316,20 @@ impl Error {
                 | IdentityError::SuperblockChecksumMismatch { .. } => exit::IMAGE_BAD,
                 _ => exit::OPERATIONAL,
             },
+            // Extraction to a host tree splits along the same line as extraction to an
+            // archive, and it must split the same way: one image extracted two ways cannot
+            // be a bad filesystem through `--to-tar` and an operational failure through
+            // `--to-dir`. A structure that cannot be read is the image's fault, and so is a
+            // name no well-formed filesystem holds — the library says as much where it
+            // raises it. Everything else is the host refusing: no privilege, no room, a
+            // destination that is not empty, an owner this platform cannot name.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Error::Host(HostError::Read { source, .. }) => match source {
+                TreeError::Io { .. } => exit::OPERATIONAL,
+                _ => exit::IMAGE_BAD,
+            },
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Error::Host(HostError::HostileName { .. }) => exit::IMAGE_BAD,
             // A tree that cannot be walked and a platform with no walk to run are both
             // failures to carry the command out, so both land here; only one of them
             // exists in any one build.
@@ -262,7 +341,11 @@ impl Error {
             | Error::NotARegularFile(_)
             | Error::NotDetected { .. }
             | Error::NotExt { .. }
-            | Error::Format(_)
+            | Error::NotAFilesystem { .. }
+            | Error::NotForFamily { .. }
+            | Error::UnsupportedFamily
+            | Error::ExtFormat(_)
+            | Error::FatFormat(_)
             | Error::Archive(_)
             | Error::ImageIo(_)
             | Error::NoSuchPath(_)
@@ -292,6 +375,38 @@ fn from_read(e: ReadError) -> Error {
             Error::NoSuchPath(path)
         }
         other => Error::Image(other),
+    }
+}
+
+/// The same, for a read of a FAT volume.
+///
+/// The line falls in the same place — the host, the caller, or the image — and the third case
+/// goes through the shared classification rather than through a variant of its own, because
+/// what this tool does with a malformed filesystem does not depend on which family it is.
+fn from_fat_read(e: ferrosys::fat::ReadError) -> Error {
+    use ferrosys::fat::ReadError as FatError;
+    match e {
+        FatError::Io { message, .. } => Error::ImageIo(message),
+        FatError::NotFound { path, .. } | FatError::NotADirectory { path, .. } => {
+            Error::NoSuchPath(path)
+        }
+        other => Error::from(TreeError::from(other)),
+    }
+}
+
+/// A failure the extraction surface reported, as this tool classifies it.
+///
+/// Written as a conversion rather than a function because it is what lets a walk carry this
+/// tool's own error type: `FsTree::walk_tree` takes any error a `TreeError` converts into, so
+/// a visitor's failure and the filesystem's each reach the caller as themselves.
+impl From<TreeError> for Error {
+    fn from(e: TreeError) -> Self {
+        match e {
+            // The host could not read the source, which says nothing about whether the
+            // filesystem is sound.
+            TreeError::Io { message, .. } => Error::ImageIo(message),
+            other => Error::Tree(other),
+        }
     }
 }
 
@@ -363,7 +478,7 @@ fn help(topic: Topic) -> &'static str {
 }
 
 const GENERAL_HELP: &str = "\
-ferrosys — write, inspect, and read back ext2/3/4 filesystems
+ferrosys — write, inspect, and read back ext2/3/4 filesystems and FAT12/16/32 volumes
 
 usage:
   ferrosys format  [options] OUT.img    write a filesystem
@@ -374,6 +489,11 @@ usage:
 
   ferrosys <command> --help             the options one command takes
   ferrosys --version                    the version
+
+filesystems:
+  ext2, ext3, ext4      formatted, inspected, and read back
+  fat12, fat16, fat32   the same. `format -t` selects which; every command identifies
+                        whichever family an image turns out to hold
 
 exit codes (as e2fsck's):
   0   the command did what it was asked
@@ -389,31 +509,46 @@ of its inputs alone: the same inputs write the same bytes.
 ";
 
 const FORMAT_HELP: &str = "\
-ferrosys format — write an ext2, ext3, or ext4 filesystem
+ferrosys format — write an ext2, ext3, or ext4 filesystem, or a FAT12/16/32 volume
 
 usage:
   ferrosys format --size SIZE --uuid HEX --time SECS [options] OUT.img
+  ferrosys format -t fat32 --size SIZE --volume-id HEX --time SECS [options] OUT.img
 
   ferrosys format --size 512M --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
 
   ferrosys format --size auto --slack 20% --from-dir staging \\
     --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
 
-Both --uuid and --time are required because an image's bytes are a function of its
-inputs alone: the tool reads neither the clock nor a random source, so the same inputs
-write the same bytes. SOURCE_DATE_EPOCH supplies --time when it is set.
+  ferrosys format -t fat32 --size 512M --volume-id 1A2B-3C4D --label ESP \\
+    --time \"$(date +%s)\" --owner 0:0 --accept-loss change-time,time-precision \\
+    --from-dir esp-staging esp.img
+
+-t names the filesystem, and each family takes its own identity and its own options; an
+option of the other family is refused by name rather than passed over. Naming no type
+writes ext4.
+
+An identity and --time are required because an image's bytes are a function of its inputs
+alone: the tool reads neither the clock nor a random source, so the same inputs write the
+same bytes. SOURCE_DATE_EPOCH supplies --time when it is set.
 
 required:
   --size SIZE|auto     the filesystem's size: a byte count, optionally suffixed K, M, G,
                        or T — or `auto`, which sizes the filesystem to what goes in it.
                        `auto` finds the smallest filesystem that holds the contents by
                        planning candidate sizes and placing the contents into each, so
-                       the size it settles on is one that formats, and one block less
-                       does not. Use --slack to leave room in it
-  --uuid HEX           the filesystem UUID, dashed or bare (32 hex digits). The tool
+                       the size it settles on is one that formats, and one allocation
+                       unit less does not. Use --slack to leave room in it
+  --uuid HEX           (ext) the filesystem UUID, dashed or bare (32 hex digits). The tool
                        mints none: pipe in `uuidgen`, of whatever version you like
+  --volume-id HEX      (fat) the volume serial number, 8 hex digits, dashed or bare —
+                       1A2B-3C4D or 1A2B3C4D. This family's identity field, as the UUID is
+                       ext's; it is 32 bits, so it is named rather than cut from a UUID
   --time SECS          the filesystem's creation time, in seconds since the epoch. Taken
-                       from SOURCE_DATE_EPOCH when the option is absent
+                       from SOURCE_DATE_EPOCH when the option is absent. A FAT directory
+                       entry represents 1980-01-01 through 2107-12-31 at a two-second
+                       granularity, so a time outside that is refused for one rather than
+                       truncated into a plausible-looking one
 
 contents (at most one):
   --from-tar FILE|-    populate the filesystem from a tar archive. A named FILE is left on
@@ -423,10 +558,12 @@ contents (at most one):
                        be uncompressed — decompress it into `-` with `gunzip -c f.tar.gz |
                        ferrosys format ... --from-tar -`
   --from-dir DIR       populate the filesystem from a directory tree on this machine. DIR
-                       itself becomes the filesystem root. Modes, ownership, all three
-                       times, symlinks, hard links, device and FIFO nodes, sockets, and
-                       extended attributes with their POSIX ACLs are all carried; symlinks
-                       are recorded, never followed. Each file is read as it is placed, so
+                       itself becomes the filesystem root. An ext filesystem carries all of
+                       it: modes, ownership, all three times, symlinks, hard links, device
+                       and FIFO nodes, sockets, and extended attributes with their POSIX
+                       ACLs; symlinks are recorded, never followed. A FAT volume has a field
+                       for almost none of it, and --accept-loss is what says which of them
+                       may go. Each file is read as it is placed, so
                        peak memory is the largest single file. Walking a tree records Linux
                        inode metadata and Linux extended attributes, so this option is
                        carried out on Linux alone; --from-tar reads an archive anywhere
@@ -436,22 +573,53 @@ contents (at most one):
                        user that built it
 
 labelling:
-  --label NAME         the volume label, up to 16 bytes. A longer one is refused rather
-                       than truncated
+  --label NAME         the volume label: up to 16 bytes on ext, and 11 upper-cased bytes
+                       of the OEM character set on a FAT. A label the field cannot hold is
+                       refused rather than truncated
 
-profile:
-  -t, --type ext2|ext3|ext4   the base feature set to write (default ext4). -O and the
-                       geometry options layer on top, so `-t ext2 -O has_journal` is ext3.
-                       The image is judged by the features it carries, not the profile it
-                       started from
+filesystem:
+  -t, --type ext2|ext3|ext4|fat12|fat16|fat32
+                       which filesystem to write (default ext4). For ext it is also the
+                       base feature set: -O and the geometry options layer on top, so
+                       `-t ext2 -O has_journal` is ext3, and the image is judged by the
+                       features it carries rather than the profile it started from. For a
+                       FAT it is what the cluster count must derive to — nothing in a FAT
+                       volume records its type, so a size that cannot reach the named one
+                       is refused rather than written as something else
 
-geometry:
+fidelity (fat):
+  --accept-loss LIST   which properties of the source this build may lose: `all`, or a
+                       comma-separated list of ownership, permissions, special-bits, kind,
+                       extended-attributes, access-time, change-time, modification-time,
+                       time-precision, name. Without it a build that would lose anything
+                       fails and names the entry and the property.
+
+                       A FAT directory entry has no field for an owner, a group,
+                       permission bits, a symbolic link, a second name for a file, a device
+                       number, or an extended attribute — but a property counts as lost
+                       only when the value does not survive, so a root-owned tree of 0644
+                       files and 0755 directories loses nothing by those. A tree walked off
+                       this host always loses two: change-time, which the format has no
+                       field for at all, and time-precision, since it stores a write time
+                       to two seconds and an access time to the day.
+
+                       Properties are named one by one on purpose: accepting the loss of
+                       permission bits must not silently accept every symbolic link in the
+                       tree disappearing. `all` is the deliberate exception
+  --assume-owner U:G   the owner a read of this image will report, which is the point a
+                       loss is measured against. Defaults to 0:0
+  --assume-modes F:D   the modes a read will report, for a file and for a directory, in
+                       octal. Defaults to 644:755. Set these to whatever the extraction
+                       will use, so the two ends agree about what survived
+
   --slack PCT%|SIZE    with --size auto, how much of the filesystem must still be free
                        once the contents are written: `20%` of it, or `64M` of it. Without
                        this, `auto` leaves nothing — the right answer for an image that
                        will only be read, and useless for one that will be written to.
                        The share is of the finished filesystem, so `--slack 20%` is what
                        `df` reports as 80% used. Up to 90%
+
+geometry (ext):
   --block-size N       1024, 2048, or 4096 (the default)
   --inode-size N       a power of two from 128 up to the block size (default 256)
   --inodes N           the inode count, rounded up to fill each group's tables. Overrides
@@ -489,7 +657,7 @@ geometry:
                        error (`s_errors`): note it and carry on, remount read-only, or
                        panic. Defaults to `continue`, the kernel's own default
 
-determinism:
+determinism (ext):
   --fixed-time SECS    force every inode's times to this value, whatever the source says
   --hash half_md4|tea|legacy       the directory-hash algorithm (default half_md4)
   --hash-signedness signed|unsigned  how a name's bytes are read when hashed. Unsigned by
@@ -500,7 +668,8 @@ output:
   --json               print the geometry the format realized, as JSON, on the standard
                        output. Without it, a summary goes to the standard error
   --dry-run            report the geometry this command would realize and write nothing.
-                       The destination is not opened, created, or truncated
+                       The destination is not opened, created, or truncated — so there is
+                       nothing for --atomic to decide, and the two cannot pair
 
 destination:
   --atomic             write the image to a sibling temporary file and rename it over the
@@ -519,10 +688,15 @@ a run that fails for any other reason leaves the file that was there untouched.
 ";
 
 const INSPECT_HELP: &str = "\
-ferrosys inspect — report on an ext filesystem
+ferrosys inspect — report on a filesystem
 
 usage:
   ferrosys inspect [options] IMAGE
+
+The image is classified first and then described by whichever family claimed it, so a
+report is a family-tagged envelope: a head that means the same thing whatever the image
+holds — the family, the variant, the size, the allocation unit, the identifier, and what a
+scan found — then a body that is entirely that family's own.
 
 options:
   --offset N           where the filesystem begins within the file, for a partition
@@ -533,25 +707,33 @@ options:
                        analysis or forensic pipeline; reports findings alone, not the
                        superblock description, so it needs the scan and cannot pair with
                        --quick
-  --groups             report every block group's descriptor as well
-  --quick              report the superblock alone, without scanning the image
+  --groups             (ext) report every block group's descriptor as well. A block group
+                       is how an ext filesystem divides itself; a FAT volume has one flat
+                       cluster heap, so the option is refused for one rather than passed
+                       over
+  --quick              report the superblock alone, without scanning the image. There is
+                       then no scan for a verdict to read, so it cannot pair with --fail-on
   --fail-on SEVERITY|never
                        the severity at which the scan's findings make the filesystem bad:
                        cosmetic, conformance, integrity (the default), structural, or
                        never. `integrity` faults a filesystem whose own bytes contradict
-                       each other; `conformance` also faults one that is valid ext but not
-                       the form this tool writes, which is a check on this tool's own output
-                       rather than on ext
+                       each other; `conformance` also faults one that is valid for its
+                       format but not the form this tool writes, which is a check on this
+                       tool's own output rather than on the format
 
 The whole image is scanned unless --quick says otherwise, so an image that is bad is
 reported as bad (exit 4) rather than merely described. What counts as bad is --fail-on,
 which defaults to `integrity`: a filesystem whose own bytes contradict each other fails,
-and a valid ext filesystem that another tool wrote does not. That is the default a CI
-gate inherits, and `--fail-on conformance` is the stricter line to draw deliberately.
+and a valid filesystem that another tool wrote does not. That is the default a CI gate
+inherits, and `--fail-on conformance` is the stricter line to draw deliberately.
+
+The four severities mean the same thing for every family; the categories a finding falls
+into are each family's own, since a superblock and a boot sector are not the same subsystem
+under two names.
 ";
 
 const EXTRACT_HELP: &str = "\
-ferrosys extract — read an ext filesystem's contents back out
+ferrosys extract — read a filesystem's contents back out
 
 usage:
   ferrosys extract [--offset N] IMAGE --to-tar FILE|-
@@ -578,20 +760,25 @@ exactly one of:
   --cat PATH           write one file's bytes to the standard output, and nothing else.
                        PATH is a path inside the image, taken as the bytes you typed
   --stat PATH          report everything the filesystem records about one path: its type,
-                       mode (octal and symbolic), ownership, link count, size, all four
-                       times, a device node's numbers, a symlink's target, and its extended
-                       attributes with any POSIX ACL decoded. A path naming a symlink
-                       describes the link, not its target; --json reports it as JSON
+                       mode (octal and symbolic), ownership, size, times, and — where the
+                       family records them — its inode number, link count, a device node's
+                       numbers, a symlink's target, and its extended attributes with any
+                       POSIX ACL decoded. A path naming a symlink describes the link, not
+                       its target; --json reports it as JSON
   --list               list the tree; --json lists it as JSON, with each entry's extended
                        attributes and decoded ACLs
 
 options:
   --offset N           where the filesystem begins within the file
-  --max-file-bytes N   refuse to read a file larger than N bytes, for an image whose
-                       declared sizes have not earned trust: a file's size is the image's
-                       own claim, and a sparse file legitimately dwarfs the filesystem
-                       holding it, so nothing structural bounds it. Over the cap the read
-                       is an error rather than a short file
+  --max-file-bytes N   refuse to read a file larger than N bytes. A file's size is the
+                       image's own claim, and a sparse file legitimately dwarfs the
+                       filesystem holding it, so nothing structural bounds it: an inode
+                       claiming sixteen tebibytes and mapping nothing costs an extraction
+                       sixteen tebibytes of zeros from an image of a hundred kilobytes.
+                       Defaults to sixteen times the length of the filesystem being read,
+                       which no ordinary file approaches; name a size to read one that is
+                       legitimately sparser than that. Over the cap the read is an error
+                       rather than a short file
   --skip-privileged    with --to-dir, write what this process may rather than failing on
                        what it may not: a device node it cannot create is left out, the
                        tree is owned by this process, and a security or trusted extended
@@ -602,6 +789,23 @@ options:
                        fails part-way leaves whatever was at FILE untouched. --to-dir has
                        no equivalent — no rename publishes a whole tree at once — which is
                        why its destination must start empty
+  --strict             refuse an image the reader cannot hold to its format, rather than
+                       interpreting it best-effort. Extraction writes what it read
+                       somewhere, so a filesystem carrying a deviation this reader does not
+                       follow produces output that looks complete and is not. Without this
+                       the read falls back to a lenient one — which is what makes a damaged
+                       or unfamiliar image recoverable at all — and names on the standard
+                       error the deviation it decided to interpret through
+  --assume-owner U:G   the owner to record where the filesystem records none. Defaults to
+                       0:0. An ext filesystem records ownership on every entry, so this
+                       changes nothing about one; it is the answer for a FAT volume, which
+                       has no field for an owner, where something must be assumed before a
+                       host file can be created
+  --assume-modes F:D   the permission modes to assume, in octal, for a file and for a
+                       directory, where the filesystem records none. Defaults to 644:755.
+                       Conservative on purpose: a tree extracted from a format with no
+                       permission bits must not land world-writable because nothing was
+                       named. What was assumed is reported on the standard error
 
 Reading holds no whole file: --cat streams to the standard output and --to-tar streams each
 member into the archive, so a multi-gigabyte file costs a working set rather than its size.
@@ -612,6 +816,12 @@ so `format --from-dir` reads that one back.
 
 A JSON mode's `mode` field is the permission bits as a decimal number, since JSON has no
 octal literal — 509 is 0o775 — and `mode_octal` beside it carries the usual spelling.
+
+Every entry carries a `synthesized` list naming the properties the report filled in rather
+than read, in the same words `format --accept-loss` takes — so a property a listing shows
+can be typed straight back into a build. A field the family has no notion of at all is
+absent instead: a FAT entry carries no `inode` and no `links`, because a zero or a one
+there would be this tool answering a question the format never asked.
 ";
 
 const DETECT_HELP: &str = "\
@@ -626,18 +836,18 @@ options:
                        optionally suffixed K, M, G, or T
   --json               report as JSON rather than as one word
 
-The answer is one word on the standard output — ext2, ext3, ext4, or `unrecognized` — so it
-reads well in a shell test. An unrecognized image exits 8, since there is no filesystem to
-have an opinion about. A fourth word, `unknown`, is the answer when the library classifies
-a family this build has no name for: something recognized the image, so calling it
-unrecognized would be wrong.
+The answer is one word on the standard output — ext2, ext3, ext4, fat12, fat16, fat32, or
+`unrecognized` — so it reads well in a shell test. It is the same word `format -t` takes.
+An unrecognized image exits 8, since there is no filesystem to have an opinion about. One
+further word, `unknown`, is the answer when the library classifies a family this build has
+no name for: something recognized the image, so calling it unrecognized would be wrong.
 
 This asks what an image *is*, not whether it is sound: an image with a quirk `inspect` would
 refuse still classifies here. Use `inspect` to be told whether a filesystem is well-formed.
 ";
 
 const IDENTITY_HELP: &str = "\
-ferrosys identity — change what an existing filesystem is known by
+ferrosys identity — change what an existing ext filesystem is known by
 
 usage:
   ferrosys identity [--uuid HEX] [--label TEXT] [--set-checksum-seed] [--json] IMAGE
@@ -672,8 +882,7 @@ not mount the result — which is why it is asked for rather than assumed.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrosys::ext::ondisk::Timestamp;
-    use ferrosys::ext::{FormatOptions, Reader, TreeBuilder};
+    use ferrosys::ext::{FormatOptions, Reader, Timestamp, TreeBuilder};
 
     #[test]
     fn every_failure_names_the_exit_code_it_reports() {
@@ -702,9 +911,9 @@ mod tests {
                 truncated: true,
             }
             .to_string(),
-            "the filesystem holds at least 10000 anomalies, the worst of them structural"
+            "the filesystem holds at least 10000 findings, the worst of them structural"
         );
-        // One finding is one anomaly: the verdict is a line a person reads.
+        // One finding is singular: the verdict is a line a person reads.
         assert_eq!(
             Error::Verdict {
                 count: 1,
@@ -712,7 +921,7 @@ mod tests {
                 truncated: false,
             }
             .to_string(),
-            "the filesystem holds 1 anomaly, the worst of them integrity"
+            "the filesystem holds 1 finding, the worst of them integrity"
         );
         assert_eq!(
             Error::NotExt {

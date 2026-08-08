@@ -17,8 +17,9 @@
 //! # Example
 //!
 //! ```
-//! use ferrosys::ext::ondisk::Timestamp;
-//! use ferrosys::ext::{format, FormatOptions, GrowReservation, Metadata, Reader, TreeBuilder};
+//! use ferrosys::ext::{
+//!     format, FormatOptions, GrowReservation, Metadata, Reader, Timestamp, TreeBuilder,
+//! };
 //!
 //! let time = Timestamp::from_secs(1_700_000_000);
 //! let source = TreeBuilder::new()
@@ -51,10 +52,13 @@
 // withdrawn with a major version. Naming them makes each item's publicness a decision,
 // and `ci/public-api.sh` holds the whole surface to a committed snapshot so adding one
 // shows up as a reviewed line rather than as nothing at all.
-/// The permission bits a POSIX ACL entry carries.
-pub mod acl {
-    pub use crate::acl::{EXEC, READ, WRITE};
-}
+//
+// The one-path rule has exactly one exception, and it is deliberate: the family-agnostic
+// vocabulary that lives at the crate root — a source and its entries, an instant, an
+// attribute, a finding — is re-exported flat here as well. Describing a tree to write and
+// reporting what was found in one are not ext concepts, but they are most of what a caller
+// formatting an ext image names, and making them reach for two namespaces to write one
+// image would buy nothing. Nothing under a layer module below is dual-pathed.
 /// Extent trees: the ext4 file block map, and the machinery that shapes and serializes
 /// one.
 pub mod extent {
@@ -91,6 +95,17 @@ pub mod model {
     };
 }
 /// The byte-exact on-disk structures: superblock, inodes, directory entries, and more.
+///
+/// The instant an inode records is a [`Timestamp`], which is the crate's own; what belongs
+/// here is the split across the seconds and "extra" fields ext4 stores it in, and the range
+/// of instants those fields reach — [`encode_time`](ondisk::encode_time),
+/// [`decode_time`](ondisk::decode_time), and
+/// [`time_is_representable`](ondisk::time_is_representable) between
+/// [`TIME_SECS_MIN`](ondisk::TIME_SECS_MIN) and [`TIME_SECS_MAX`](ondisk::TIME_SECS_MAX).
+///
+/// An [`Acl`] divides the same way: the value is the crate's own, and the
+/// tighter form ext4 packs it into is [`encode_acl`](ondisk::encode_acl) and
+/// [`decode_acl`](ondisk::decode_acl).
 pub mod ondisk {
     pub use crate::ondisk::{
         BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, DIR_TAIL_LEN, DX_CHECKSUM_OFFSET,
@@ -98,60 +113,62 @@ pub mod ondisk {
         DX_ROOT_COUNT_OFFSET, DX_TAIL_LEN, DirEntry, DxEntry, EXTENT_ENTRY_SIZE, EXTENT_MAGIC,
         EXTENT_TAIL_LEN, ExtentHeader, ExtentIdx, ExtentLeaf, FileType, GOOD_OLD_FIRST_INODE,
         GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode, InodeFlags, ORPHAN_BLOCK_MAGIC,
-        ORPHAN_TAIL_LEN, ROOT_INODE_MODE, SUPERBLOCK_MAGIC, SuperBlock, Timestamp, dx_limit,
-        dx_tail_offset, extra_isize_for, min_rec_len, orphan_entries_len, orphan_tail_bytes,
-        read_dx_countlimit, read_dx_entries, read_dx_root_info, read_orphan_tail,
-        rec_len_from_disk, rec_len_to_disk, write_dir_tail, write_dx_entries, write_dx_node_header,
+        ORPHAN_TAIL_LEN, ROOT_INODE_MODE, SUPERBLOCK_MAGIC, SuperBlock, TIME_SECS_MAX,
+        TIME_SECS_MIN, decode_acl, decode_time, dx_limit, dx_tail_offset, encode_acl, encode_time,
+        extra_isize_for, min_rec_len, orphan_entries_len, orphan_tail_bytes, read_dx_countlimit,
+        read_dx_entries, read_dx_root_info, read_orphan_tail, rec_len_from_disk, rec_len_to_disk,
+        time_is_representable, write_dir_tail, write_dx_entries, write_dx_node_header,
         write_dx_root_header, write_dx_tail,
     };
 }
-/// The bounds a read is held to, and the version of the scan document it emits.
+/// The bounds a read is held to.
 pub mod read {
-    pub use crate::read::{MAX_SYMLINK_HOPS, MIN_DIRENT_LEN, SCAN_SCHEMA_VERSION};
+    pub use crate::read::{MAX_SYMLINK_HOPS, MIN_DIRENT_LEN};
 }
 
 // The flat entry points and types, the crate's filesystem surface under one namespace.
 //
 // Constants are not lifted here. Every value naming a bound, a threshold, a magic word, or
 // a schema version is reached through the layer module that defines it —
-// `ext::read::SCAN_SCHEMA_VERSION`, `ext::read::MIN_DIRENT_LEN`,
+// `ext::read::MAX_SYMLINK_HOPS`, `ext::read::MIN_DIRENT_LEN`,
 // `ext::feature::LARGE_FILE_MIN_SIZE`, `ext::journal::JBD2_MAGIC` — because a constant is a
 // detail of the layer whose contract it states, and the layers hold nearly forty of them:
 // lifting one is a decision about all of them. Free functions are lifted only where they
 // are the pipeline's entry points (`plan_layout`, `build_model`, `format`, `format_to`); a
 // layer's own helpers stay in their module.
-pub use crate::acl::{Acl, AclEntry, AclError, AclQualifier};
 pub use crate::alloc::{AllocError, Allocator};
-#[cfg(feature = "tar")]
-pub use crate::archive::{ArchiveError, ArchiveSink, ArchiveSource};
 pub use crate::csum::{Checksummer, Crc32c, CsumScheme, NullCsum};
 pub use crate::dir::{DirBlock, DirBlockKind, DirError, DirLayout, HtreeDir, LinearDir};
 pub use crate::extent::{ExtentError, ExtentNode, ExtentTree};
 pub use crate::feature::{Compat, FeatureError, FeatureSet, Incompat, Profile, RoCompat};
-pub use crate::fit::Slack;
 pub use crate::geometry::{
     BlockRange, GeometryError, GroupLayout, GrowReservation, InodeCount, Layout, PlanRequest,
     ReservedRatio, plan_layout,
 };
 pub use crate::hash::{DirHash, HashSignedness, HashVersion};
-#[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
-pub use crate::host::{DirectorySink, DirectorySource, ExtractReport, HostError};
 pub use crate::identity::{IdentityChange, IdentityError, IdentityReport, rewrite_identity};
 pub use crate::journal::{JournalParams, JournalSize, JournalSuperblock};
 pub use crate::materialize::{
     ErrorBehavior, FormatError, FormatOptions, FormatPlan, Image, format, format_to,
 };
 pub use crate::model::{FsModel, ModelConfig, ModelError, build_model};
-pub use crate::ondisk::{ParseError, Xattr};
+pub use crate::ondisk::ParseError;
 pub use crate::read::{
-    Anomaly, Category, Entry, Limits, Location, OpenOptions, ReadError, ReadPolicy, Reader,
-    ScanReport, Severity, WalkEntry,
+    Anomaly, Category, Entry, Location, OpenOptions, ReadError, Reader, ScanReport, WalkEntry,
 };
+
+// The crate root's family-agnostic vocabulary, reached from here as well — see the note on
+// the one-path rule above. An ACL is here because it is the value one attribute carries, and
+// an attribute is: what a family packs it into is a different question, and lives in the
+// layer module that does the packing.
+pub use crate::acl::{Acl, AclEntry, AclError, AclQualifier};
+pub use crate::finding::{Coordinate, Family, Finding, FindingReport, Severity};
+pub use crate::policy::{Limits, ReadPolicy};
 pub use crate::source::{
     EntryKind, FileContent, FileRange, LayeredSource, Metadata, Source, SourceEntry, TreeBuilder,
 };
-
-use crate::ondisk::Timestamp;
+pub use crate::time::Timestamp;
+pub use crate::xattr::Xattr;
 
 /// Format options seeded for an ext4 image: the extent-mapped, checksummed, journalled
 /// default. Sugar for [`FormatOptions::new`] followed by

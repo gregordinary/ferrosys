@@ -21,95 +21,17 @@
 //! not to be — which is the guarantee worth stating whether or not the function is
 //! monotone.
 
-use crate::geometry::{GrowReservation, Layout, MAX_32BIT_BLOCKS, MAX_EXTENT_BLOCKS};
+use crate::geometry::{
+    GeometryError, GrowReservation, Layout, MAX_32BIT_BLOCKS, MAX_EXTENT_BLOCKS,
+};
 use crate::materialize::{FormatError, FormatOptions, free_after_placing, plan_geometry};
 use crate::model::{Content, FsModel};
-
-/// Room to leave beyond what the source needs, when a filesystem is sized to fit one.
-///
-/// A fit search with no slack finds the smallest filesystem the source fits in, which is a
-/// filesystem with nothing left in it — correct for an image that will only ever be read,
-/// and useless for one that will be written to. This states how much must remain.
-///
-/// The measure is free blocks once the source is written: the same count the filesystem's
-/// own `s_free_blocks_count` carries, and the same one `df` reports as *used* against
-/// *size*. The super-user reservation
-/// ([`ReservedRatio`](crate::geometry::ReservedRatio)) is separate accounting laid over
-/// those same blocks rather than a second claim on them, so a filesystem left a fifth free
-/// under the default 5% reservation leaves an unprivileged writer 15% of it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-#[non_exhaustive]
-pub enum Slack {
-    /// Nothing beyond the source: the smallest filesystem that holds it.
-    #[default]
-    None,
-    /// At least this many bytes free, rounded up to whole blocks.
-    Bytes(u64),
-    /// At least this share of the filesystem free, in hundredths of one percent — `2000`
-    /// for a fifth, `150` for 1.5%.
-    ///
-    /// The share is of the whole filesystem rather than of the source, so it says what the
-    /// finished image looks like rather than how far it was grown: at `2500` a quarter of
-    /// the blocks are free whatever the source turned out to occupy. A share past
-    /// [`MAX_SHARE`](Self::MAX_SHARE) is refused with
-    /// [`FormatError::SlackShareTooLarge`].
-    Share(u16),
-}
-
-impl Slack {
-    /// The largest share a fit search will look for: 90%, in hundredths of one percent.
-    ///
-    /// At this share the filesystem is ten times the source it holds, and each further step
-    /// toward a wholly empty filesystem multiplies the size again while the search works
-    /// harder to find it. A size that far from what the contents need is a size to name
-    /// rather than to search for.
-    pub const MAX_SHARE: u16 = 9000;
-
-    /// Hundredths of one percent of a whole, exactly: the product is carried in 128 bits so
-    /// it exists for every block count, and narrowing back is lossless because the share is
-    /// bounded well below one.
-    fn share_of(total: u64, hundredths: u16) -> u64 {
-        (u128::from(total) * u128::from(hundredths) / 10_000) as u64
-    }
-
-    /// The blocks a filesystem of `total_blocks` must have free to satisfy this.
-    fn required_free(self, total_blocks: u64, block_size: u64) -> u64 {
-        match self {
-            Self::None => 0,
-            Self::Bytes(bytes) => bytes.div_ceil(block_size),
-            Self::Share(hundredths) => Self::share_of(total_blocks, hundredths),
-        }
-    }
-
-    /// Refuse a share past the limit before any searching happens.
-    fn validate(self) -> Result<(), FormatError> {
-        match self {
-            Self::Share(hundredths) if hundredths > Self::MAX_SHARE => {
-                Err(FormatError::SlackShareTooLarge {
-                    hundredths,
-                    limit: Self::MAX_SHARE,
-                })
-            }
-            _ => Ok(()),
-        }
-    }
-}
+use crate::sizing::{Probe, Slack};
 
 /// A candidate size that held the source: the geometry it planned, ready to become a plan.
 pub(crate) struct Fitted {
     pub(crate) layout: Layout,
     pub(crate) journal_blocks: Option<u32>,
-}
-
-/// Why a candidate size was rejected.
-enum Miss {
-    /// It could not be planned or placed. The failure is carried so the search can report
-    /// it if no size works at all — "out of space by 40 blocks" says far more than "no size
-    /// fits".
-    Failed(FormatError),
-    /// It was planned and placed, and had less room left than the slack asks for. Nothing
-    /// failed; the filesystem is simply too tight.
-    TooTight,
 }
 
 /// The largest block count the search will consider.
@@ -154,22 +76,63 @@ fn content_floor(model: &FsModel, block_size: u64) -> u64 {
         .sum()
 }
 
+/// Which way a planning refusal points.
+///
+/// Most of what a probe meets is a filesystem too small, and a search that reads every
+/// refusal that way climbs until one of them stops being true. Two kinds do not point that
+/// way, and both are provable from the planner rather than guessed.
+///
+/// Upward-closed: a size whose block count, group count, inode count, or descriptor-table
+/// run has outgrown the field or the block group that holds it. Each of those grows with the
+/// size, so no larger filesystem escapes the same refusal — and reading one as "too small"
+/// makes the climb step straight over the sizes that do work. A [`GrowReservation::UpTo`]
+/// target below the candidate is the same shape: only a smaller filesystem satisfies it.
+///
+/// Size-independent: an invalid feature set. [`plan_layout`](crate::geometry::plan_layout)
+/// validates it before it looks at the size, so every candidate meets it identically and the
+/// first one may as well answer for all of them.
+fn classify(e: GeometryError) -> Probe<Fitted, FormatError> {
+    match e {
+        GeometryError::TooManyGroups { .. }
+        | GeometryError::TooManyInodes { .. }
+        | GeometryError::DescriptorsExceedGroup { .. }
+        | GeometryError::BlockCountNeeds64Bit { .. }
+        | GeometryError::BlockCountTooLarge { .. }
+        | GeometryError::ReservationNeeds32BitBlocks { .. }
+        | GeometryError::GrowTargetTooSmall { .. } => Probe::Exhausted(FormatError::Geometry(e)),
+        GeometryError::Feature(_) => Probe::Impossible(FormatError::Geometry(e)),
+        _ => Probe::TooSmall(FormatError::Geometry(e)),
+    }
+}
+
 /// Plan a filesystem of `blocks` blocks and place the model into it.
 fn probe(
     model: &FsModel,
     options: &FormatOptions,
     slack: Slack,
     blocks: u64,
-) -> Result<Fitted, Miss> {
+) -> Probe<Fitted, FormatError> {
     let block_size = u64::from(options.feature.block_size);
     let size_bytes = blocks.saturating_mul(block_size);
-    let (layout, journal_blocks) =
-        plan_geometry(model, options, size_bytes).map_err(Miss::Failed)?;
-    let free = free_after_placing(&layout, options, journal_blocks, model).map_err(Miss::Failed)?;
+    // Every failure is carried, so a search that finds no size at all can report what the
+    // last one it tried actually met — "out of space by 40 blocks" says far more than "no
+    // size fits".
+    let (layout, journal_blocks) = match plan_geometry(model, options, size_bytes) {
+        Ok(planned) => planned,
+        // Planning is the one step whose refusals say which way they point.
+        Err(FormatError::Geometry(e)) => return classify(e),
+        Err(e) => return Probe::TooSmall(e),
+    };
+    // Placing refuses for want of room — the allocator running dry, or a journal with
+    // nowhere to go — and a larger filesystem is what answers that.
+    let free = match free_after_placing(&layout, options, journal_blocks, model) {
+        Ok(free) => free,
+        Err(e) => return Probe::TooSmall(e),
+    };
     if free < slack.required_free(layout.total_blocks, block_size) {
-        return Err(Miss::TooTight);
+        return Probe::Tight;
     }
-    Ok(Fitted {
+    Probe::Fits(Fitted {
         layout,
         journal_blocks,
     })
@@ -189,7 +152,13 @@ pub(crate) fn search(
     options: &FormatOptions,
     slack: Slack,
 ) -> Result<Fitted, FormatError> {
-    slack.validate()?;
+    // The shared input states the limit; refusing it is this family's error to name.
+    if let Some(hundredths) = slack.share_over_limit() {
+        return Err(FormatError::SlackShareTooLarge {
+            hundredths,
+            limit: Slack::MAX_SHARE,
+        });
+    }
     let block_size = u64::from(options.feature.block_size);
     let ceiling = ceiling_blocks(options);
 
@@ -202,46 +171,22 @@ pub(crate) fn search(
         return Err(FormatError::DoesNotFit { ceiling });
     }
 
-    // Bracket. A filesystem of no blocks holds nothing, so the lower end starts proven
-    // without probing; the upper end is found by doubling until a size holds the source.
-    let mut lo = 0u64;
-    let mut candidate = content_floor(model, block_size).clamp(1, ceiling);
-    let (mut hi, mut fitted) = loop {
-        let miss = match probe(model, options, slack, candidate) {
-            Ok(fitted) => break (candidate, fitted),
-            Err(miss) => miss,
-        };
-        lo = candidate;
-        if candidate == ceiling {
-            // Why the largest size the search may try was rejected is the whole of what
-            // there is to report: a size that failed says what it failed at, and one that
-            // planned and placed perfectly well and was merely too tight failed at nothing
-            // — so it gets an answer of its own rather than the failure some far smaller
-            // size met.
-            return Err(match miss {
-                Miss::Failed(e) => e,
-                Miss::TooTight => FormatError::DoesNotFit { ceiling },
-            });
-        }
-        candidate = candidate.saturating_mul(2).min(ceiling);
-    };
+    // The bracket is the crate's; what this family supplies is where to start, where to
+    // stop, and what a candidate turns out to be.
+    let floor = content_floor(model, block_size).clamp(1, ceiling);
+    let probed = crate::sizing::bracket(floor, ceiling, |blocks| {
+        probe(model, options, slack, blocks)
+    });
 
-    // Bisect. `lo` is a size that did not hold the source and `hi` is one that did, and
-    // every step keeps that true, so the loop closes with `hi` one block above `lo`: a size
-    // that formats, with the size below it proven not to. Why a rejected candidate was
-    // rejected no longer matters here — the bracket already holds an answer, so the search
-    // can only succeed from this point on.
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match probe(model, options, slack, mid) {
-            Ok(next) => {
-                hi = mid;
-                fitted = next;
-            }
-            Err(_) => lo = mid,
-        }
+    // Why the largest size the search may try was rejected is the whole of what there is to
+    // report: a size that failed says what it failed at, and one that planned and placed
+    // perfectly well and was merely too tight failed at nothing — so it gets an answer of
+    // its own rather than the failure some far smaller size met.
+    match probed {
+        Ok((_, fitted)) => Ok(fitted),
+        Err(Some(e)) => Err(e),
+        Err(None) => Err(FormatError::DoesNotFit { ceiling }),
     }
-    Ok(fitted)
 }
 
 #[cfg(test)]
@@ -250,9 +195,10 @@ mod tests {
     use crate::feature::{FeatureSet, Profile};
     use crate::materialize::{FormatPlan, format};
     use crate::model::{ModelConfig, build_model};
-    use crate::ondisk::{SuperBlock, Timestamp};
+    use crate::ondisk::SuperBlock;
     use crate::read::Reader;
     use crate::source::{Metadata, Source, TreeBuilder};
+    use crate::time::Timestamp;
 
     const MIB: u64 = 1024 * 1024;
 
@@ -534,6 +480,55 @@ mod tests {
         // A 3000-byte block is not a block size at any filesystem size.
         let err = fit_err(TreeBuilder::new(), options, Slack::None);
         assert!(matches!(err, FormatError::Geometry(_)), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_that_points_upward_ends_the_climb_rather_than_stepping_over_the_answer() {
+        // A geometry error naming a count the size outgrew — the group count, the inode
+        // count, the descriptor run — is a verdict of *too large*. Read as too small it
+        // would double past every size that works and report the ceiling's failure, so the
+        // direction is what the classification has to get right.
+        for e in [
+            GeometryError::TooManyGroups {
+                blocks: 0,
+                groups: 0,
+                limit: 0,
+            },
+            GeometryError::TooManyInodes {
+                blocks: 0,
+                inodes: 0,
+                limit: 0,
+            },
+            GeometryError::DescriptorsExceedGroup {
+                blocks: 0,
+                groups: 0,
+                overhead: 0,
+                blocks_per_group: 0,
+            },
+        ] {
+            assert!(
+                matches!(classify(e), Probe::Exhausted(_)),
+                "{e:?} points upward"
+            );
+        }
+        assert!(matches!(
+            classify(GeometryError::TooSmall {
+                blocks: 0,
+                overhead: 0,
+                reserved_gdt_blocks: 0,
+            }),
+            Probe::TooSmall(_)
+        ));
+    }
+
+    #[test]
+    fn a_feature_set_that_cannot_be_realized_is_answered_by_the_first_probe() {
+        // It is wrong at every size, so the search must not climb through twenty copies of
+        // the same complaint to find that out.
+        let err = classify(GeometryError::Feature(
+            crate::feature::FeatureError::FiletypeRequired,
+        ));
+        assert!(matches!(err, Probe::Impossible(_)));
     }
 
     #[test]

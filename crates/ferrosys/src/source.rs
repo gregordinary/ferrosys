@@ -18,7 +18,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::ondisk::{Timestamp, Xattr};
+use crate::time::Timestamp;
+use crate::xattr::Xattr;
 
 /// A regular file's contents: either bytes in memory, or a range of a file on the host
 /// read at the moment it is placed.
@@ -218,9 +219,8 @@ impl FileRange {
     /// Read the range's bytes.
     ///
     /// Every failure names the path, the offset, and the length, since that is what a
-    /// caller has to act on: the error surfaces through a transparent
-    /// [`FormatError::Io`](crate::materialize::FormatError::Io), so what this message
-    /// says is the whole of what a person sees. A short read in particular — the file
+    /// caller has to act on: the error surfaces through a family's own format error
+    /// transparently, so what this message says is the whole of what a person sees. A short read in particular — the file
     /// changed after the source was built — is otherwise indistinguishable from any
     /// other truncation, and names neither the file that changed nor the range that was
     /// lost.
@@ -236,7 +236,7 @@ impl FileRange {
                 e.kind(),
                 format!(
                     "{}: reading {} bytes at offset {}: {e}",
-                    self.path.display(),
+                    crate::escape::printable_path(&self.path),
                     self.len,
                     self.offset
                 ),
@@ -245,7 +245,7 @@ impl FileRange {
         let len = usize::try_from(self.len).map_err(|_| {
             std::io::Error::other(format!(
                 "{}: {} bytes at offset {} is more than this platform addresses",
-                self.path.display(),
+                crate::escape::printable_path(&self.path),
                 self.len,
                 self.offset
             ))
@@ -255,12 +255,112 @@ impl FileRange {
         // alone opens it here, which is the whole of what it defers.
         let mut handle = match &self.file {
             Some(file) => file.try_clone().map_err(context)?,
-            None => File::open(self.path.as_path()).map_err(context)?,
+            // Opened without following a final symbolic link. A walk records a symlink as a
+            // symlink and never reads through one, and this is where that promise would
+            // otherwise end: a local writer replacing a staged name with a link between the
+            // walk and the placement would put the target's bytes into the image, with no
+            // error and nothing in the fidelity report. The "must not change" caveat on a
+            // range covers content changing; it does not cover the name becoming a different
+            // kind of thing.
+            None => open_no_follow(self.path.as_path()).map_err(context)?,
         };
         handle.seek(SeekFrom::Start(self.offset)).map_err(context)?;
         let mut buf = vec![0u8; len];
         handle.read_exact(&mut buf).map_err(context)?;
         Ok(buf)
+    }
+}
+
+/// Open a regular file by path without following a symbolic link at the end of it.
+///
+/// `O_NOFOLLOW` is not in the standard library's options, so the raw flag is set through the
+/// Unix extension; on a platform with no such flag the plain open is what there is, and the
+/// walk that produced the path is the same platform's.
+fn open_no_follow(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(o_nofollow())
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
+}
+
+/// `O_NOFOLLOW` for this target.
+///
+/// Spelled here rather than pulled from a C-binding crate, which this crate does not depend
+/// on for one integer, and which is not compiled at all in the feature sets that carry no
+/// host directory. The value is part of each kernel's stable syscall interface, and it is
+/// one value per architecture rather than one value: Linux's generic definition is
+/// `0o400000`, and arm, aarch64, m68k, powerpc and powerpc64 each define `0o100000` in its
+/// place, where `0o400000` means `O_LARGEFILE` — a bit the kernel accepts and ignores, so
+/// the generic value on one of those is an open that quietly follows the link. The BSDs
+/// including macOS use `0x0100`, and the Solaris lineage the Linux generic value.
+///
+/// A unix target outside those families is a build failure rather than a guess: what a guess
+/// costs is a read through a link, silently. The value is proved rather than asserted —
+/// `a_link_is_refused_by_the_flag_this_target_defines` opens one on whatever target the suite
+/// is running on.
+#[cfg(unix)]
+const fn o_nofollow() -> i32 {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        if cfg!(any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "m68k",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        )) {
+            0o100_000
+        } else {
+            0o400_000
+        }
+    }
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        0o400_000
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        compile_error!(
+            "no O_NOFOLLOW value is known for this target, and an open that follows a \
+             symbolic link would read through a name recorded as a link"
+        );
+        0
     }
 }
 
@@ -397,8 +497,30 @@ pub struct SourceEntry {
     /// Ownership, mode, and times.
     pub meta: Metadata,
     /// Extended attributes attached to this entry, each a fully-qualified name and
-    /// its value. Empty for an entry with none.
+    /// its value in the boundary form [`Xattr`] describes. Empty for an entry with none.
     pub xattrs: Vec<Xattr>,
+}
+
+/// The canonical key for a path: separators and `.` elements carry no meaning, so
+/// `/etc/hostname`, `//etc//hostname`, and `etc/./hostname` are one path and key alike, and
+/// the root keys as the empty slice.
+///
+/// This is the rule a family's own path handling agrees with, so that a caller keying
+/// entries by path outside a model — composing two sources into one, where a later entry
+/// replaces an earlier one at the same path — decides which paths *are* the same the way
+/// the model that consumes them will. Two normalizations that disagree would not fail; they
+/// would quietly leave both entries in the list, and the model would reject the duplicate
+/// or, worse, accept two names it thought were different.
+///
+/// It rejects nothing. A `..` element, an over-long component, or one carrying a NUL keys
+/// as itself and is refused when a model reads the entry, so there is one rejection site
+/// and its error names the path the caller wrote.
+pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
+    let parts: Vec<&[u8]> = path
+        .split(|&b| b == b'/')
+        .filter(|part| !part.is_empty() && *part != b".")
+        .collect();
+    parts.join(&b'/')
 }
 
 /// Something that produces the entries to write into a filesystem.
@@ -619,8 +741,7 @@ impl Source for TreeBuilder {
 /// # Example
 ///
 /// ```
-/// use ferrosys::ext::ondisk::Timestamp;
-/// use ferrosys::ext::{EntryKind, LayeredSource, Metadata, Source, TreeBuilder};
+/// use ferrosys::ext::{EntryKind, LayeredSource, Metadata, Source, TreeBuilder, Timestamp};
 ///
 /// let time = Timestamp::from_secs(1_700_000_000);
 /// let base = TreeBuilder::new()
@@ -661,7 +782,7 @@ impl LayeredSource {
     #[must_use]
     pub fn layer(mut self, source: impl Source) -> Self {
         for entry in source.into_entries() {
-            let key = crate::model::canonical_key(&entry.path);
+            let key = canonical_key(&entry.path);
             // Something that is not a directory cannot hold the entries an earlier layer
             // put beneath this path, so they go with it. The keys are canonical and
             // ordered, so a subtree is the contiguous range beginning `key/` — and for the
@@ -997,6 +1118,41 @@ mod tests {
         let read = content.read().expect("read the range");
         assert!(matches!(read, std::borrow::Cow::Owned(_)));
         assert_eq!(read.as_ref(), b"eight");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_refused_by_the_flag_this_target_defines() {
+        // `O_NOFOLLOW` is one number per architecture, and the number that is wrong for the
+        // one being built is not a failure the kernel reports: on arm and aarch64 the value
+        // Linux's generic headers give is `O_LARGEFILE`, which every open already implies,
+        // so the flag is accepted, ignored, and the link followed. Nothing above this reads
+        // as broken — the bytes of whatever the link points at simply arrive as the file's.
+        //
+        // So the flag is exercised rather than trusted: a range named by a path that is a
+        // link must fail to read, on whatever target the suite is running on.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"pointed at\n").expect("write the target");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let err = FileRange::at_path(&link, 0, 11)
+            .read()
+            .expect_err("a range naming a link reads nothing");
+        // That it failed is the whole claim: a flag the kernel ignored is a read that
+        // *succeeds*, holding the target's bytes. Which errno says so is the kernel's to
+        // choose — Linux reports `ELOOP` and the BSDs `EMLINK` — so the refusal is checked
+        // by the path it names rather than by a number that varies with the platform.
+        let text = err.to_string();
+        assert!(text.contains("link"), "{text}");
+
+        // The same range on the name the link points at reads it, so what the refusal
+        // refuses is the link and not the read.
+        assert_eq!(
+            FileRange::at_path(&target, 0, 11).read().expect("read"),
+            b"pointed at\n"
+        );
     }
 
     #[test]

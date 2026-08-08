@@ -11,13 +11,14 @@
 //! types are outputs, and what a consumer serializes is what a scan or a plan handed it.
 //!
 //! Runs only with the `serde` feature enabled.
-#![cfg(feature = "serde")]
+#![cfg(all(feature = "serde", feature = "ext"))]
 
-use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
     BlockRange, FeatureSet, FormatOptions, GrowReservation, Layout, PlanRequest, Profile, Reader,
     ScanReport, TreeBuilder, format, plan_layout,
 };
+use ferrosys::{Family, Severity};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -156,11 +157,33 @@ fn a_layout_serializes_whole_including_every_group() {
 }
 
 #[test]
+fn a_finding_is_spelled_the_same_in_both_serializations() {
+    // Two serializations, and each has a job: `to_json` emits the versioned document a
+    // consumer parses, and the derives serialize the Rust value as it stands for a caller
+    // embedding a report in a structure of its own.
+    //
+    // Where the two describe the same thing they must agree, or a consumer reading either
+    // document has to learn one closed vocabulary twice. A severity and a family are the
+    // cases: one lower-case spelling each, whichever asked.
+    for (severity, spelled) in [
+        (Severity::Cosmetic, "cosmetic"),
+        (Severity::Conformance, "conformance"),
+        (Severity::Integrity, "integrity"),
+        (Severity::Structural, "structural"),
+    ] {
+        assert_eq!(json(&severity), serde_json::json!(spelled));
+        assert_eq!(severity.as_str(), spelled);
+    }
+    assert_eq!(json(&Family::Ext), serde_json::json!("ext"));
+    assert_eq!(Family::Ext.as_str(), "ext");
+}
+
+#[test]
 fn the_crates_own_emitters_are_unaffected_by_the_derives() {
     // The hand-rolled JSON stays the schema-versioned canonical form: a consumer that
     // reads it sees the same document whether or not this feature is on.
     let report = ScanReport::default();
-    let text = report.to_json();
-    assert!(text.contains("\"schema\":1"), "{text}");
-    assert!(text.contains("\"anomalies\":[]"), "{text}");
+    let text = report.to_report().to_json();
+    assert!(text.contains("\"schema\":2"), "{text}");
+    assert!(text.contains("\"findings\":[]"), "{text}");
 }

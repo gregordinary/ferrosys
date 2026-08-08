@@ -10,7 +10,6 @@ use std::fs::File;
 
 use ferrosys::{DetectOptions, Filesystem};
 
-use crate::json::Obj;
 use crate::{Error, emit};
 
 /// Classify the image the arguments name.
@@ -21,8 +20,13 @@ pub fn run(args: crate::args::DetectArgs) -> Result<(), Error> {
     // The classification is the artifact of the run, so it goes to the standard output —
     // including the negative answer, which is as much an answer as the positive one. An
     // unrecognized image is not a failure of the command; the exit code says which it was.
-    let (family, profile) = match &found {
+    //
+    // The two words are the same pair `inspect`'s head carries, and deliberately: which
+    // family and which of that family's variants is one question, and one tool answering it
+    // under two vocabularies is a consumer's problem for no gain.
+    let (family, variant) = match &found {
         Ok(Filesystem::Ext(profile)) => ("ext", Some(profile.name())),
+        Ok(Filesystem::Fat(fat_type)) => ("fat", Some(fat_type.as_str())),
         // A family the library classified and this binary has no name for, which a newer
         // library linked against an older tool would produce. Saying `unknown` is honest;
         // saying `unrecognized` would not be, since something did recognize it.
@@ -31,23 +35,20 @@ pub fn run(args: crate::args::DetectArgs) -> Result<(), Error> {
     };
 
     let text = if args.json {
-        let mut out = String::new();
-        let mut o = Obj::new(&mut out);
-        o.u64("schema", crate::json::SCHEMA_VERSION);
-        o.str("family", family);
-        match profile {
-            Some(name) => o.str("profile", name),
-            None => o.raw("profile", "null"),
-        }
-        o.u64("offset", args.offset);
-        o.end();
-        out.push('\n');
-        out
+        crate::json::document(|o| {
+            o.str("family", family);
+            match variant {
+                Some(name) => o.str("variant", name),
+                None => o.raw("variant", "null"),
+            }
+            o.u64("offset", args.offset);
+        })
     } else {
         // One word for the answer, so `$(ferrosys detect img)` is usable in a shell test.
-        // The profile is the finer answer where there is one, and it is what a caller acts
-        // on: ext2, ext3, and ext4 are read by the same reader but mounted by name.
-        match profile {
+        // The variant is the finer answer where there is one, and it is what a caller acts
+        // on: ext2, ext3, and ext4 are read by the same reader but mounted by name, and so
+        // are fat12, fat16, and fat32.
+        match variant {
             Some(name) => format!("{name}\n"),
             None => format!("{family}\n"),
         }

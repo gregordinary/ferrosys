@@ -14,7 +14,6 @@
 use ferrosys::ext::{IdentityChange, rewrite_identity};
 
 use crate::args::IdentityArgs;
-use crate::json::Obj;
 use crate::{Error, emit};
 
 /// Rewrite the identity of the image the arguments name.
@@ -36,29 +35,11 @@ pub fn run(args: IdentityArgs) -> Result<(), Error> {
     })?;
 
     let text = if args.json {
-        let mut out = String::new();
-        let mut o = Obj::new(&mut out);
-        o.u64("schema", crate::json::SCHEMA_VERSION);
-        o.u64("superblocks", u64::from(report.superblocks));
-        o.raw(
-            "journal_superblock",
-            if report.journal_superblock {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        o.raw(
-            "checksum_seed_set",
-            if report.checksum_seed_set {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        o.end();
-        out.push('\n');
-        out
+        crate::json::document(|o| {
+            o.u64("superblocks", u64::from(report.superblocks));
+            o.bool("journal_superblock", report.journal_superblock);
+            o.bool("checksum_seed_set", report.checksum_seed_set);
+        })
     } else {
         // What was written, in the terms the operation is understood in: how many copies
         // now agree, and whether the log and the seed moved with them.

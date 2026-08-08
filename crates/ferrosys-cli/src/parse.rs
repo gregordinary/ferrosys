@@ -13,10 +13,57 @@
 use std::ffi::OsStr;
 use std::num::NonZeroU64;
 
+use ferrosys::Slack;
 use ferrosys::ext::{
     Compat, ErrorBehavior, FeatureSet, GrowReservation, HashSignedness, HashVersion, Incompat,
-    InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity, Slack,
+    InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity,
 };
+use ferrosys::fat::{FatType, FatTypeRequest};
+use ferrosys::{AcceptedLoss, Property};
+
+/// Which filesystem a `-t` value names: the family, and which variant of it.
+///
+/// The two travel together because a variant only means anything inside its family, and
+/// because the family is what decides which of a format's other options apply at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FsType {
+    /// An ext2, ext3, or ext4 filesystem.
+    Ext(Profile),
+    /// A FAT12, FAT16, or FAT32 volume.
+    Fat(FatTypeRequest),
+}
+
+/// ext4 is what naming no type at all means, which is what keeps every command line that
+/// named none writing exactly what it wrote before the value domain widened.
+impl Default for FsType {
+    fn default() -> Self {
+        FsType::Ext(Profile::default())
+    }
+}
+
+impl FsType {
+    /// The family, as a message names it and as an option's own family is recorded.
+    #[must_use]
+    pub fn family(self) -> &'static str {
+        match self {
+            FsType::Ext(_) => "ext",
+            FsType::Fat(_) => "fat",
+        }
+    }
+
+    /// The variant, as it was named on the command line.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            FsType::Ext(profile) => profile.name(),
+            FsType::Fat(FatTypeRequest::Exactly(fat)) => fat.as_str(),
+            // The value domain names one of the three outright, so nothing on a command
+            // line reaches these. They are the family's own word, which is the honest
+            // answer for a request that did not name a type.
+            FsType::Fat(_) => "fat",
+        }
+    }
+}
 
 /// A value an option cannot take.
 ///
@@ -53,9 +100,24 @@ pub enum ValueError {
         /// The label's length in bytes.
         len: usize,
     },
+    /// A volume label a FAT volume cannot record: too long for the eleven-byte field, or
+    /// holding a byte a directory entry's name field may not.
+    ///
+    /// The library's own refusal rides along, because it names both which byte and where.
+    #[error(transparent)]
+    NotAFatLabel(#[from] ferrosys::fat::LabelError),
+    /// The value is not eight hexadecimal digits.
+    #[error("{0}: expected 4 bytes of hex (8 digits; dashes are ignored)")]
+    NotHex32(String),
+    /// A property list held an empty element, so it names no property.
+    #[error("{0}: a property list has an empty element")]
+    EmptyProperty(String),
     /// The value is not an ownership pair.
     #[error("{0}: expected UID:GID, two whole numbers separated by a colon")]
     NotAnOwner(String),
+    /// The value is not two octal permission modes separated by a colon.
+    #[error("{0}: expected FILE:DIR, two octal permission modes (e.g. 644:755)")]
+    NotAModePair(String),
     /// The value named a feature no ext feature word defines.
     #[error("{0}: not an ext feature name")]
     UnknownFeature(String),
@@ -148,6 +210,40 @@ pub fn owner(v: &OsStr) -> Result<(u32, u32), ValueError> {
     let uid: u32 = uid.parse().map_err(|_| bad())?;
     let gid: u32 = gid.parse().map_err(|_| bad())?;
     Ok((uid, gid))
+}
+
+/// The two permission modes to assume where a filesystem records none, written
+/// `FILE:DIR` in octal — `644:755`, `600:700`.
+///
+/// Octal without a prefix, because a permission mode is written that way everywhere else a
+/// person meets one: `chmod 644`, `0644` in a source file, `rw-r--r--` in a listing. A
+/// leading `0` is accepted and means nothing extra.
+///
+/// Only the permission and set-user/group/sticky bits are a mode here: the file-type bits
+/// come from what the entry is, so a value past `07777` names bits this cannot set.
+///
+/// # Errors
+///
+/// [`ValueError::NotAModePair`] if the text is not two octal numbers separated by a colon,
+/// and [`ValueError::OutOfRange`] if either names more than the permission bits.
+pub fn modes(v: &OsStr) -> Result<(u16, u16), ValueError> {
+    let bad = || ValueError::NotAModePair(shown(v));
+    let s = text(v).ok_or_else(bad)?;
+    let (file, dir) = s.split_once(':').ok_or_else(bad)?;
+    let one = |part: &str| -> Result<u16, ValueError> {
+        // A digit outside 0-7 is not an octal number at all, so it is the shape that is
+        // wrong rather than the value: `8:755` has no reading, while `10000:755` has one
+        // that names bits a permission mode does not hold.
+        if part.is_empty() || !part.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return Err(bad());
+        }
+        u32::from_str_radix(part, 8)
+            .ok()
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|mode| *mode <= 0o7777)
+            .ok_or_else(|| ValueError::OutOfRange(shown(v)))
+    };
+    Ok((one(file)?, one(dir)?))
 }
 
 /// A count of seconds since the Unix epoch, which may be negative: ext4 timestamps
@@ -358,27 +454,129 @@ pub fn error_behavior(v: &OsStr) -> Result<ErrorBehavior, ValueError> {
     }
 }
 
-/// The base filesystem profile a format seeds from: `ext2`, `ext3`, or `ext4`. The names
-/// are the ones `mke2fs -t` takes.
+/// Which filesystem `-t` names: the family, and which variant of it.
 ///
-/// The profile sets the baseline feature words and the baseline block and inode sizes; the
-/// `-O` list and the size options layer on top of it. The image is judged by the features
-/// it ends up carrying, not the profile it started from.
+/// Both halves come from one value because they are one question. The variant seeds whatever
+/// that family composes from — feature words for ext, the type a cluster count must derive to
+/// for a FAT — and the family decides which of the remaining options apply at all.
 ///
 /// # Errors
 ///
-/// [`ValueError::NotOneOf`] if the text names no profile.
-pub fn profile(v: &OsStr) -> Result<Profile, ValueError> {
+/// [`ValueError::NotOneOf`] if the text names no filesystem this tool writes.
+pub fn fs_type(v: &OsStr) -> Result<FsType, ValueError> {
     match text(v) {
-        Some("ext2") => Ok(Profile::Ext2),
-        Some("ext3") => Ok(Profile::Ext3),
-        Some("ext4") => Ok(Profile::Ext4),
+        Some("ext2") => Ok(FsType::Ext(Profile::Ext2)),
+        Some("ext3") => Ok(FsType::Ext(Profile::Ext3)),
+        Some("ext4") => Ok(FsType::Ext(Profile::Ext4)),
+        Some("fat12") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat12))),
+        Some("fat16") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat16))),
+        Some("fat32") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat32))),
         _ => Err(ValueError::NotOneOf {
             value: shown(v),
-            expected: "ext2, ext3, ext4",
+            expected: "ext2, ext3, ext4, fat12, fat16, fat32",
         }),
     }
 }
+
+/// A 32-bit identifier written as hexadecimal: a FAT volume's serial number.
+///
+/// The dashed form every tool shows a serial in — `1A2B-3C4D` — is accepted alongside the
+/// bare eight digits, so a serial read off one report can be typed straight back in.
+///
+/// # Errors
+///
+/// [`ValueError::NotHex32`] if the text is not eight hexadecimal digits once dashes are
+/// removed.
+pub fn hex32(v: &OsStr) -> Result<u32, ValueError> {
+    let Some(s) = text(v) else {
+        return Err(ValueError::NotHex32(shown(v)));
+    };
+    let digits: String = s.chars().filter(|&c| c != '-').collect();
+    if digits.len() != 8 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ValueError::NotHex32(shown(v)));
+    }
+    u32::from_str_radix(&digits, 16).map_err(|_| ValueError::NotHex32(shown(v)))
+}
+
+/// Which properties of a source a build may lose: a comma-separated list of property names,
+/// or `all`.
+///
+/// The names are the properties themselves rather than one switch, because a caller who
+/// accepted losing permission bits has not thereby accepted every symbolic link in the tree
+/// disappearing. `all` is the deliberate exception, and it covers a property a later version
+/// of the library names as well.
+///
+/// # Errors
+///
+/// [`ValueError::NotOneOf`] if an element names no property, and
+/// [`ValueError::EmptyProperty`] if the list holds an empty element.
+pub fn accepted_loss(v: &OsStr) -> Result<AcceptedLoss, ValueError> {
+    let Some(s) = text(v) else {
+        return Err(ValueError::NotOneOf {
+            value: shown(v),
+            expected: ACCEPTED_LOSS_NAMES,
+        });
+    };
+    if s == "all" {
+        return Ok(AcceptedLoss::ALL);
+    }
+    let mut set = AcceptedLoss::NONE;
+    for element in s.split(',') {
+        if element.is_empty() {
+            return Err(ValueError::EmptyProperty(shown(v)));
+        }
+        let Some(property) = PROPERTY_NAMES
+            .iter()
+            .find(|(name, _)| *name == element)
+            .map(|(_, property)| *property)
+        else {
+            return Err(ValueError::NotOneOf {
+                value: element.to_string(),
+                expected: ACCEPTED_LOSS_NAMES,
+            });
+        };
+        set = set.and(property);
+    }
+    Ok(set)
+}
+
+/// The name of a property, as this tool writes it.
+///
+/// The same table [`accepted_loss`] reads, in the other direction — so a property a report
+/// names is a property that can be typed straight back into `--accept-loss`. A tool that
+/// printed one spelling and accepted another would be telling a caller a word it then
+/// refuses.
+#[must_use]
+pub fn property_name(property: Property) -> &'static str {
+    PROPERTY_NAMES
+        .iter()
+        .find(|(_, p)| *p == property)
+        .map_or("unknown", |(name, _)| name)
+}
+
+/// This tool's one spelling for each property. Read by `--accept-loss` and written by every
+/// report that names one.
+///
+/// The `unknown` fallback in [`property_name`] covers a property a newer library names and
+/// this build does not; `--accept-loss all` is how such a property is accepted, since it
+/// cannot be spelled.
+const PROPERTY_NAMES: &[(&str, Property)] = &[
+    ("ownership", Property::Ownership),
+    ("permissions", Property::Permissions),
+    ("special-bits", Property::SpecialBits),
+    ("kind", Property::Kind),
+    ("extended-attributes", Property::ExtendedAttributes),
+    ("access-time", Property::AccessTime),
+    ("change-time", Property::ChangeTime),
+    ("modification-time", Property::ModificationTime),
+    ("time-precision", Property::TimePrecision),
+    ("name", Property::Name),
+];
+
+/// The names [`accepted_loss`] takes, for the message a refused one produces.
+const ACCEPTED_LOSS_NAMES: &str = "all, or a comma-separated list of ownership, permissions, \
+                                   special-bits, kind, extended-attributes, access-time, \
+                                   change-time, modification-time, time-precision, name";
 
 /// A volume label, packed NUL-padded into the sixteen-byte `s_volume_name` field.
 ///
@@ -499,6 +697,43 @@ fn frac_to_hundredths(frac: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The two modes a value names, or the error it is.
+    #[test]
+    fn modes_are_two_octal_permission_words() {
+        use std::ffi::OsString;
+        let m = |v: &str| super::modes(&OsString::from(v));
+
+        assert_eq!(m("644:755").expect("parses"), (0o644, 0o755));
+        // Octal without a prefix, as `chmod` takes it; a leading zero means nothing extra.
+        assert_eq!(m("0600:0700").expect("parses"), (0o600, 0o700));
+        // The set-user, set-group, and sticky bits are permission bits too.
+        assert_eq!(m("4755:1777").expect("parses"), (0o4755, 0o1777));
+
+        // Anything that is not two octal words separated by a colon.
+        for bad in [
+            "644",
+            "644:",
+            ":755",
+            "644:755:1",
+            "abc:755",
+            "",
+            "8:755",
+            "-1:755",
+        ] {
+            assert!(
+                matches!(m(bad), Err(super::ValueError::NotAModePair(_))),
+                "{bad} should not parse as a mode pair"
+            );
+        }
+        // Two octal words that name more than the permission bits.
+        for out_of_range in ["10000:755", "644:10000", "7777777:755"] {
+            assert!(
+                matches!(m(out_of_range), Err(super::ValueError::OutOfRange(_))),
+                "{out_of_range} names bits a mode cannot hold"
+            );
+        }
+    }
+
     use super::*;
 
     fn os(s: &str) -> &OsStr {
@@ -666,19 +901,101 @@ mod tests {
     }
 
     #[test]
-    fn profile_names_the_three_baselines() {
-        assert_eq!(profile(os("ext2")).unwrap(), Profile::Ext2);
-        assert_eq!(profile(os("ext3")).unwrap(), Profile::Ext3);
-        assert_eq!(profile(os("ext4")).unwrap(), Profile::Ext4);
-        // A name outside the family is a usage error naming what would have been accepted.
+    fn a_type_names_a_family_and_a_variant_of_it() {
+        // The three ext baselines, which are the names `mke2fs -t` takes.
+        assert_eq!(fs_type(os("ext2")).unwrap(), FsType::Ext(Profile::Ext2));
+        assert_eq!(fs_type(os("ext3")).unwrap(), FsType::Ext(Profile::Ext3));
+        assert_eq!(fs_type(os("ext4")).unwrap(), FsType::Ext(Profile::Ext4));
+        // ...and the three FATs, which are what the cluster count must derive to rather
+        // than what to write into the image: nothing in a FAT volume records its type.
+        assert_eq!(
+            fs_type(os("fat12")).unwrap(),
+            FsType::Fat(FatTypeRequest::Exactly(FatType::Fat12))
+        );
+        assert_eq!(
+            fs_type(os("fat32")).unwrap(),
+            FsType::Fat(FatTypeRequest::Exactly(FatType::Fat32))
+        );
+
+        // Each answers which family it is and which variant, and the variant is the word
+        // that was typed — the same word `ferrosys detect` prints back.
+        assert_eq!(fs_type(os("ext3")).unwrap().family(), "ext");
+        assert_eq!(fs_type(os("ext3")).unwrap().name(), "ext3");
+        assert_eq!(fs_type(os("fat16")).unwrap().family(), "fat");
+        assert_eq!(fs_type(os("fat16")).unwrap().name(), "fat16");
+        // Naming no type is ext4, so a command line that named none writes what it always
+        // wrote.
+        assert_eq!(FsType::default(), FsType::Ext(Profile::Ext4));
+
+        // A name outside every family is a usage error naming what would have been
+        // accepted.
         assert!(matches!(
-            profile(os("ext5")),
+            fs_type(os("ext5")),
             Err(ValueError::NotOneOf { .. })
         ));
         assert_eq!(
-            profile(os("xfs")).unwrap_err().to_string(),
-            "xfs: expected one of ext2, ext3, ext4"
+            fs_type(os("xfs")).unwrap_err().to_string(),
+            "xfs: expected one of ext2, ext3, ext4, fat12, fat16, fat32"
         );
+    }
+
+    #[test]
+    fn a_serial_number_reads_in_the_form_a_report_prints_it() {
+        // Eight hex digits, and the dashed form every tool shows a serial in — so one read
+        // off a report can be typed straight back in.
+        assert_eq!(hex32(os("1A2B3C4D")).unwrap(), 0x1a2b_3c4d);
+        assert_eq!(hex32(os("1A2B-3C4D")).unwrap(), 0x1a2b_3c4d);
+        assert_eq!(hex32(os("deadbeef")).unwrap(), 0xdead_beef);
+        assert_eq!(hex32(os("00000000")).unwrap(), 0);
+        // Anything that is not eight digits, or is not hex, is refused rather than padded
+        // or truncated into something plausible.
+        for bad in ["1A2B3C4", "1A2B3C4D5", "", "1A2B-3C4G", "0x1A2B3C4D"] {
+            assert!(
+                matches!(hex32(os(bad)), Err(ValueError::NotHex32(_))),
+                "{bad} is not a serial number"
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_losses_are_named_one_by_one_or_all_at_once() {
+        // Named individually, because a caller who accepted losing permission bits has not
+        // thereby accepted every symbolic link in the tree disappearing.
+        let one = accepted_loss(os("permissions")).unwrap();
+        assert!(one.contains(Property::Permissions));
+        assert!(!one.contains(Property::Kind));
+
+        let several = accepted_loss(os("ownership,permissions,extended-attributes")).unwrap();
+        for property in [
+            Property::Ownership,
+            Property::Permissions,
+            Property::ExtendedAttributes,
+        ] {
+            assert!(several.contains(property), "{property:?} was named");
+        }
+        assert!(!several.contains(Property::Kind));
+
+        // Every name round-trips: what a report prints is what this reads back.
+        for (name, property) in PROPERTY_NAMES {
+            assert_eq!(property_name(*property), *name);
+            assert!(accepted_loss(os(name)).unwrap().contains(*property));
+        }
+
+        // `all` is the deliberate exception, and it covers a property a later version of
+        // the library names as well.
+        assert_eq!(accepted_loss(os("all")).unwrap(), AcceptedLoss::ALL);
+        // Nothing named at all is the default, which refuses every loss.
+        assert!(AcceptedLoss::NONE.is_empty());
+
+        // A name no property defines, and an empty element, are each refused by name.
+        assert!(matches!(
+            accepted_loss(os("permissons")),
+            Err(ValueError::NotOneOf { .. })
+        ));
+        assert!(matches!(
+            accepted_loss(os("ownership,,kind")),
+            Err(ValueError::EmptyProperty(_))
+        ));
     }
 
     #[test]

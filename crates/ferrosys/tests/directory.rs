@@ -4,18 +4,22 @@
 //!
 //! Runs where the directory source is built: with the `dir` feature enabled, on the
 //! platform whose inode metadata and extended attributes the walk reads.
-#![cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+#![cfg(all(
+    feature = "dir",
+    feature = "ext",
+    any(target_os = "linux", target_os = "android")
+))]
 
 mod util;
 
 use std::io;
 use std::path::Path;
 
-use ferrosys::ext::ondisk::{Inode, Timestamp};
-use ferrosys::ext::{
-    DirectorySink, DirectorySource, FormatOptions, GrowReservation, HostError, Reader, Source,
-    SourceEntry, format,
-};
+use ferrosys::ext::OpenOptions;
+use ferrosys::ext::Timestamp;
+use ferrosys::ext::ondisk::Inode;
+use ferrosys::ext::{FormatOptions, GrowReservation, Reader, Source, SourceEntry, format};
+use ferrosys::{DirectorySink, DirectorySource, HostError, Limits};
 use util::{available, e2fsck_clean};
 
 const MIB: u64 = 1024 * 1024;
@@ -571,8 +575,25 @@ fn the_destination_must_be_an_empty_directory() {
         Err(HostError::NotEmpty { path, .. }) => assert_eq!(path, occupied),
         other => panic!("expected a refusal, got {}", describe(other)),
     }
-    // And an empty one is accepted.
+    // And an empty one is accepted. Both questions are asked of the handle rather than of
+    // the name, so what the sink accepted and what it writes into are one object.
     assert!(DirectorySink::new(destination(&host, "empty")).is_ok());
+
+    // A symbolic link to an empty directory is a destination like any other: naming one is
+    // the caller's own doing, as it is for `tar -C`, and the handle taken through it refers
+    // to the directory itself.
+    let target = destination(&host, "pointed-at");
+    let link = host.path().join("via-link");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    assert!(DirectorySink::new(&link).is_ok());
+
+    // A dangling one is not a directory, which is the answer the open itself gives.
+    let dangling = host.path().join("dangling");
+    std::os::unix::fs::symlink(host.path().join("nowhere"), &dangling).expect("symlink");
+    match DirectorySink::new(&dangling) {
+        Err(HostError::Io { .. }) => {}
+        other => panic!("expected an i/o failure, got {}", describe(other)),
+    }
 }
 
 /// What a `Result<DirectorySink, _>` was, for a test that expected the other thing.
@@ -646,12 +667,20 @@ fn a_hard_link_reaches_back_into_a_directory_the_image_records_without_read_perm
     // a directory the extracting user may search but not read, and traversing it is all a
     // link needs. Two names in the *same* directory never reach this: the parent is still
     // open and still permissive when the second arrives.
+    //
+    // The second half of the list is the case where searching it is *not* something the mode
+    // allows either. There the directory's own metadata waits until the whole walk is over
+    // rather than until the walk leaves it, so the link still has somewhere to traverse. An
+    // ordinary user extracting an ordinary image is what this is about: the tree is
+    // well-formed and a privileged run writes it, so an unprivileged one must too.
     use ferrosys::ext::{Metadata, TreeBuilder};
+    use std::os::unix::fs::PermissionsExt;
 
     let time = Timestamp::from_secs(FAKE);
     // 0o333 is the discriminator: write and search for the owner, no read. 0o111 is the
-    // same case with nothing but search.
-    for mode in [0o333u16, 0o111, 0o500, 0o755] {
+    // same case with nothing but search. 0o000, 0o444 and 0o600 are the ones with no search
+    // at all, which is what a re-traversal cannot get through.
+    for mode in [0o333u16, 0o111, 0o500, 0o755, 0o000, 0o444, 0o600] {
         let source = TreeBuilder::new()
             .directory(b"/a".to_vec(), Metadata::new(mode, time))
             .file(
@@ -677,8 +706,18 @@ fn a_hard_link_reaches_back_into_a_directory_the_image_records_without_read_perm
             .unwrap_or_else(|e| panic!("mode {mode:#o}: {e}"));
         assert_eq!(report.written, 4, "mode {mode:#o}: a name each");
 
-        // And it really is a link, not a second copy.
         use std::os::unix::fs::MetadataExt;
+        // The directory kept the mode the image recorded, which is what made the re-open
+        // the interesting part. Read before anything is relaxed, since relaxing it is what
+        // the rest of the test needs.
+        let dir = std::fs::symlink_metadata(out.join("a")).expect("stat the directory");
+        assert_eq!(dir.mode() & 0o7777, u32::from(mode), "mode {mode:#o}");
+        // Now look inside, which for the unsearchable modes means giving the test itself the
+        // search permission the image did not record.
+        std::fs::set_permissions(out.join("a"), std::fs::Permissions::from_mode(0o700))
+            .expect("relax the directory the test is about to look into");
+
+        // And it really is a link, not a second copy.
         let first = std::fs::symlink_metadata(out.join("a/f")).expect("stat the first name");
         let second = std::fs::symlink_metadata(out.join("z/g")).expect("stat the second");
         assert_eq!(
@@ -687,10 +726,6 @@ fn a_hard_link_reaches_back_into_a_directory_the_image_records_without_read_perm
             "mode {mode:#o}: the two names are not one file"
         );
         assert_eq!(first.nlink(), 2, "mode {mode:#o}: link count");
-        // The directory kept the mode the image recorded, which is what made the re-open
-        // the interesting part.
-        let dir = std::fs::symlink_metadata(out.join("a")).expect("stat the directory");
-        assert_eq!(dir.mode() & 0o7777, u32::from(mode), "mode {mode:#o}");
     }
 }
 
@@ -811,6 +846,291 @@ fn an_attribute_on_something_that_cannot_be_opened_reaches_the_entry_itself() {
         std::fs::read_link(out.join("etc/mtab")).expect("read the link"),
         Path::new("/proc/self/mounts")
     );
+}
+
+#[test]
+fn a_capability_attribute_outlives_the_ownership_change_that_would_strip_it() {
+    // Setting an owner strips `security.capability`: the kernel raises `ATTR_KILL_PRIV` on
+    // every `chown` of a non-directory, whether or not the ids change, and that is what
+    // removes the attribute. So an extraction that writes attributes before ownership writes
+    // this one and then destroys it — and, because `fsetxattr` succeeded, reports the
+    // extraction faithful. A caller gating a release on faithfulness would ship a root
+    // filesystem whose binaries have lost every capability, with nothing saying so.
+    //
+    // Presence is what is asserted, not the bytes: written from inside a user namespace the
+    // kernel rewrites a version 2 record into a version 3 one carrying the namespace's root
+    // id, so the value that comes back is longer than the value that went in. That rewrite is
+    // the host's business. Whether the attribute is *there* is this crate's.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    let cap = vec![
+        0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let source = TreeBuilder::new()
+        .file(
+            b"/ping".to_vec(),
+            b"not really an ELF\n".to_vec(),
+            // Owned by root, which is what a real root filesystem records — and what makes
+            // the `chown` a call the sink actually issues.
+            Metadata::new(0o755, time).owned_by(0, 0),
+        )
+        .xattr(b"security.capability".to_vec(), cap);
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("extraction succeeds whether or not the attribute may be set");
+
+    // Unprivileged the attribute cannot be set at all and the report says so, which is the
+    // other half of the contract and is gated above. What must never happen is the third
+    // case: the report says nothing was dropped and the attribute is not there.
+    if !report.xattrs_dropped {
+        let mut buf = [0u8; 64];
+        rustix::fs::lgetxattr(out.join("ping"), "security.capability", &mut buf)
+            .expect("an extraction that reports no dropped attribute has the capability on disk");
+    }
+}
+
+#[test]
+fn the_read_cap_bounds_what_an_extraction_writes_and_not_only_what_a_read_returns() {
+    // A sink streams a file through a fixed buffer, so its own memory is bounded whatever
+    // the file claims. What it *writes* is not: the byte count follows the length the image
+    // declares, and a hole reads back as zeros — so an inode claiming terabytes and mapping
+    // nothing fills the destination until it runs out of room, from an image of a few
+    // kilobytes. `Limits::max_file_bytes` is documented as the cap on a read that trusts a
+    // declared size, and it reached only whole-file reads; an extraction is the one place
+    // that trust is spent on disk.
+    //
+    // The cap is checked before the name is created, so a refused file leaves nothing.
+    let time = Timestamp::from_secs(FAKE);
+    let source = ferrosys::ext::TreeBuilder::new()
+        .file(
+            b"/small".to_vec(),
+            b"tiny\n".to_vec(),
+            ferrosys::ext::Metadata::new(0o644, time),
+        )
+        .file(
+            b"/big".to_vec(),
+            vec![b'x'; 40_000],
+            ferrosys::ext::Metadata::new(0o644, time),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open_with(
+        io::Cursor::new(image.as_bytes()),
+        &OpenOptions::new().limits(Limits::new().max_file_bytes(1000)),
+    )
+    .expect("open");
+    let err = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect_err("a file past the cap is refused rather than written");
+    assert!(
+        matches!(err, HostError::Read { .. }),
+        "the refusal is the read's, named as such: {err:?}"
+    );
+    assert!(
+        !out.join("big").exists(),
+        "a refused file left no name behind"
+    );
+
+    // And under no cap the same tree extracts whole, so what the cap refuses is the cap's
+    // doing rather than the file's.
+    let plain = destination(&host, "plain");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    DirectorySink::new(&plain)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("write the tree");
+    assert_eq!(
+        std::fs::read(plain.join("big")).expect("read").len(),
+        40_000
+    );
+}
+
+#[test]
+fn a_tree_of_unsearchable_directories_is_refused_rather_than_running_out_of_handles() {
+    // A directory whose recorded mode denies its owner search permission keeps its handle
+    // until the walk is over, because applying that mode would close it to the walk still
+    // going on. Which directories those are is the *image's* choice, so an image whose
+    // directories are all `0o600` asks for one open handle per directory in the tree —
+    // about eleven hundred of them passes the default soft `RLIMIT_NOFILE`.
+    //
+    // What follows the stop is worse than the stop: the deferred directories never get
+    // their mode or their owner, so the tree is left at `BUILDING` and owned by this
+    // process — the half-written tree the deferral was introduced to remove, reintroduced
+    // under a hostile image. So the wait has a ceiling, and reaching it is a refusal that
+    // says what it is.
+    let time = Timestamp::from_secs(FAKE);
+    let mut src = ferrosys::ext::TreeBuilder::new();
+    for i in 0..300 {
+        src = src.directory(
+            format!("/d{i:04}").into_bytes(),
+            ferrosys::ext::Metadata::new(0o600, time),
+        );
+    }
+    let image = format(src, 32 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let err = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect_err("a tree of unsearchable directories is refused");
+    assert!(
+        matches!(err, HostError::TooManyDeferredDirectories { .. }),
+        "the refusal names what it is: {err:?}"
+    );
+}
+
+#[test]
+fn a_file_read_at_placement_time_does_not_follow_a_link_swapped_in_behind_the_walk() {
+    // A walk records a symlink as a symlink and never reads through one. A file's *bytes*,
+    // though, are read when the file is placed, by the name the walk recorded — so a local
+    // writer replacing a staged name with a link between the walk and the format would put
+    // the target's bytes into the image, with no error and nothing in the fidelity report.
+    // The "must not change" caveat on a recorded range covers content changing; it does not
+    // cover the name becoming a different kind of thing.
+    let host = tempfile::tempdir().expect("temp dir");
+    let staged = host.path().join("payload");
+    std::fs::write(&staged, b"the real contents\n").expect("write");
+    let secret = host.path().join("secret");
+    std::fs::write(&secret, b"not for the image\n").expect("write");
+
+    let source = DirectorySource::from_path(host.path())
+        .expect("walk the tree")
+        .owner(0, 0);
+
+    // The swap, after the walk and before the format reads a byte.
+    std::fs::remove_file(&staged).expect("remove");
+    std::os::unix::fs::symlink(&secret, &staged).expect("symlink");
+
+    // A format that refused the link is the answer; one that succeeded must at least not
+    // have read through it.
+    if let Ok(image) = format(source, 16 * MIB, opts()) {
+        let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+        let tree = walk_tree(&mut reader);
+        if let Some(inode) = tree.get(&b"/payload"[..]) {
+            let bytes = reader.read_data(inode).unwrap_or_default();
+            assert_ne!(
+                bytes, b"not for the image\n",
+                "the format read through a link swapped in behind the walk"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_attribute_this_host_will_not_hold_on_this_kind_is_named_as_that() {
+    // Two refusals arrive as the same errno and are not the same thing. The kernel restricts
+    // a `user.*` attribute to a regular file or a directory by the *type* of what it is set
+    // on, not by who is setting it — so on a symbolic link it fails identically for root.
+    // Reported as a missing privilege it named a namespace the attribute is not in and
+    // prescribed a privilege that would not help.
+    //
+    // The ext model puts no such restriction on a namespace, so a tree carrying this formats
+    // perfectly well and the image is not malformed. This host simply has nowhere to put it.
+    let time = Timestamp::from_secs(FAKE);
+    // Owned by this process, so the ownership call before the attribute succeeds and what
+    // the run meets is the attribute rule rather than a missing CAP_CHOWN.
+    // Read off a file this process just made, since the ids are not otherwise reachable
+    // without a dependency this test crate does not carry.
+    let probe = tempfile::NamedTempFile::new().expect("temp file");
+    let (uid, gid) = {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = probe.as_file().metadata().expect("stat");
+        (m.uid(), m.gid())
+    };
+    let source = ferrosys::ext::TreeBuilder::new()
+        .symlink(
+            b"/link".to_vec(),
+            b"/etc/passwd".to_vec(),
+            ferrosys::ext::Metadata::new(0o777, time).owned_by(uid, gid),
+        )
+        .xattr(b"user.note".to_vec(), b"x".to_vec());
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    match DirectorySink::new(&out)
+        .expect("open the destination")
+        .write_tree(&mut reader)
+    {
+        Err(HostError::UnsupportedAttribute { name, .. }) => assert_eq!(name, b"user.note"),
+        // A host that does hold it is not what this is about; what must never happen is the
+        // refusal claiming a privilege would help.
+        Ok(_) => {}
+        Err(other) => panic!("expected a kind refusal, got {other:?}"),
+    }
+
+    // And skipping records it as the loss it is rather than failing.
+    let lenient = destination(&host, "lenient");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&lenient)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("skipping what it cannot hold, an extraction succeeds");
+    assert_eq!(
+        std::fs::read_link(lenient.join("link")).expect("read the link"),
+        Path::new("/etc/passwd"),
+        "the link itself is the link, whatever happened to its attribute"
+    );
+    let _ = report;
+}
+
+#[test]
+fn a_directory_carries_its_extended_attributes_across() {
+    // A directory's attributes are applied with the rest of its metadata, once its children
+    // are written — the same wait its mode takes, for the same reason. Nothing about being a
+    // directory makes an attribute optional, and one silently left behind would be a property
+    // of the image that the extraction dropped while reporting itself faithful.
+    //
+    // `user.*` because it is the one namespace an unprivileged process may write, so this
+    // gate asserts rather than tolerates.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+        .xattr(b"user.origin".to_vec(), b"on-the-directory".to_vec())
+        .file(
+            b"/etc/hostname".to_vec(),
+            b"host\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    // Ownership is skipped rather than demanded: this gate is about the attribute, and a
+    // root-owned tree cannot be reproduced by an ordinary process.
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("write the tree");
+
+    let mut value = [0u8; 32];
+    let len = rustix::fs::lgetxattr(out.join("etc"), "user.origin", &mut value)
+        .expect("the directory's attribute is on the directory");
+    assert_eq!(&value[..len], b"on-the-directory");
+    assert!(!report.xattrs_dropped);
 }
 
 #[test]

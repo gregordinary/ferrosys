@@ -16,12 +16,14 @@
 
 use std::collections::BTreeMap;
 
+use crate::acl::Acl;
 use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE};
 use crate::ondisk::{
-    FileType, Inode, Timestamp, Xattr, has_empty_name, longest_stored_name, split_for_storage,
-    xattr_block_len,
+    FileType, Inode, has_empty_name, longest_stored_name, split_for_storage, xattr_block_len,
 };
 use crate::source::{EntryKind, FileContent, Metadata, Source, SourceEntry};
+use crate::time::Timestamp;
+use crate::xattr::Xattr;
 
 /// The widest device major number the on-disk encoding represents (12 bits).
 const MAX_DEVICE_MAJOR: u32 = (1 << 12) - 1;
@@ -55,10 +57,11 @@ const MODE_TYPE_MASK: u16 = 0o170000;
 
 /// An input the model cannot represent.
 ///
-/// A path in a message renders through [`String::from_utf8_lossy`]: an ext4 path is a
-/// byte string, which need not be UTF-8, and a message naming the offending path is
-/// worth more than one that refuses to guess at a byte. An unrepresentable byte becomes
-/// U+FFFD, so the rendering is lossy and the path is still recognizable.
+/// A path in a message is rendered rather than repeated: an ext4 path is a byte string,
+/// which need not be UTF-8 and may hold anything a terminal acts on. A message naming the
+/// offending path is worth far more than one that refuses to guess at a byte, so an
+/// unrepresentable byte becomes U+FFFD and the path stays recognizable — and anything a
+/// terminal would act on becomes a visible escape rather than an instruction.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelError {
@@ -66,10 +69,27 @@ pub enum ModelError {
     /// target the root directory.
     #[error("path is empty or names the root, where a name is required")]
     EmptyPath,
+    /// An entry carries a `system.posix_acl_*` attribute whose value is not a POSIX ACL.
+    ///
+    /// The value is refused rather than stored: written through as opaque bytes it would be
+    /// an attribute the kernel reads as an ACL and cannot parse, which is a filesystem that
+    /// grants access nobody described.
+    #[error(
+        "entry {} has an invalid ACL: {source}",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    Acl {
+        /// The offending path.
+        path: Vec<u8>,
+        /// The underlying ACL error.
+        #[source]
+        source: crate::acl::AclError,
+    },
     /// An entry naming the root is not a directory. The root is a directory, so an
     /// entry that would place anything else there is rejected rather than applying its
     /// metadata to a directory it does not describe.
-    #[error("entry {} names the root but is not a directory", String::from_utf8_lossy(.path))]
+    #[error("entry {} names the root but is not a directory", crate::escape::printable(.path))]
     #[non_exhaustive]
     RootNotDirectory {
         /// The offending path.
@@ -88,8 +108,8 @@ pub enum ModelError {
     /// A path component was empty, `.`, `..`, or longer than 255 bytes.
     #[error(
         "path {} has an invalid component {}",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.component)
+        crate::escape::printable(.path),
+        crate::escape::printable(.component)
     )]
     #[non_exhaustive]
     InvalidComponent {
@@ -101,28 +121,28 @@ pub enum ModelError {
     /// Two entries resolve to the same path. This is a hard error: an input naming one
     /// path twice is rejected rather than resolved by keeping the last entry, so the
     /// filesystem an ambiguous source would produce is never guessed at.
-    #[error("path {} is used by more than one entry", String::from_utf8_lossy(.path))]
+    #[error("path {} is used by more than one entry", crate::escape::printable(.path))]
     #[non_exhaustive]
     Duplicate {
         /// The duplicated path.
         path: Vec<u8>,
     },
     /// An entry's parent directory was not declared.
-    #[error("path {} has no parent directory", String::from_utf8_lossy(.path))]
+    #[error("path {} has no parent directory", crate::escape::printable(.path))]
     #[non_exhaustive]
     ParentMissing {
         /// The path whose parent is absent.
         path: Vec<u8>,
     },
     /// An entry's parent path exists but is not a directory.
-    #[error("path {} has a parent that is not a directory", String::from_utf8_lossy(.path))]
+    #[error("path {} has a parent that is not a directory", crate::escape::printable(.path))]
     #[non_exhaustive]
     ParentNotDir {
         /// The path whose parent is not a directory.
         path: Vec<u8>,
     },
     /// An entry uses a path the filesystem reserves (such as `/lost+found`).
-    #[error("path {} is reserved", String::from_utf8_lossy(.path))]
+    #[error("path {} is reserved", crate::escape::printable(.path))]
     #[non_exhaustive]
     ReservedPath {
         /// The reserved path.
@@ -131,8 +151,8 @@ pub enum ModelError {
     /// A hard link's target does not exist.
     #[error(
         "hard link {} targets {}, which does not exist",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.target)
+        crate::escape::printable(.path),
+        crate::escape::printable(.target)
     )]
     #[non_exhaustive]
     HardlinkTargetMissing {
@@ -145,8 +165,8 @@ pub enum ModelError {
     /// one name; a directory may not, since a second name would make the tree a cycle.
     #[error(
         "hard link {} targets {}, which is a directory",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.target)
+        crate::escape::printable(.path),
+        crate::escape::printable(.target)
     )]
     #[non_exhaustive]
     HardlinkTargetIsDirectory {
@@ -158,8 +178,8 @@ pub enum ModelError {
     /// A chain of hard links closes on itself, so it names no inode.
     #[error(
         "hard link {} targets {} through a cycle of links",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.target)
+        crate::escape::printable(.path),
+        crate::escape::printable(.target)
     )]
     #[non_exhaustive]
     HardlinkCycle {
@@ -171,8 +191,8 @@ pub enum ModelError {
     /// A hard link would push its target's link count past what ext4 records.
     #[error(
         "hard link {} targets {}, which already holds the maximum links",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.target)
+        crate::escape::printable(.path),
+        crate::escape::printable(.target)
     )]
     #[non_exhaustive]
     TooManyLinks {
@@ -184,7 +204,7 @@ pub enum ModelError {
     /// A symlink target is longer than a single block.
     #[error(
         "symlink {} has a target of {len} bytes, more than a block holds",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     SymlinkTargetTooLong {
@@ -194,7 +214,7 @@ pub enum ModelError {
         len: usize,
     },
     /// A symlink has an empty target, which points nowhere.
-    #[error("symlink {} has an empty target", String::from_utf8_lossy(.path))]
+    #[error("symlink {} has an empty target", crate::escape::printable(.path))]
     #[non_exhaustive]
     EmptySymlinkTarget {
         /// The symlink's path.
@@ -203,7 +223,7 @@ pub enum ModelError {
     /// A symlink target contains an embedded NUL, which the kernel reads as its end.
     #[error(
         "symlink {} has a target containing an embedded NUL",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     SymlinkTargetHasNul {
@@ -215,7 +235,7 @@ pub enum ModelError {
     #[error(
         "directory {} has {subdirs} subdirectories, past the {limit} a link count holds \
          without the dir_nlink feature",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     DirectoryLinkCountOverflow {
@@ -229,7 +249,7 @@ pub enum ModelError {
     /// A device node's major or minor number exceeds what the on-disk form holds.
     #[error(
         "device {} has out-of-range numbers {major}:{minor}",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     DeviceNumberTooLarge {
@@ -243,7 +263,7 @@ pub enum ModelError {
     /// An extended attribute's stored name is longer than 255 bytes.
     #[error(
         "entry {} has an extended attribute name longer than 255 bytes",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     XattrNameTooLong {
@@ -258,8 +278,8 @@ pub enum ModelError {
     /// into a set the kernel, `e2fsck`, and this crate's own reader would each misread.
     #[error(
         "entry {} has an invalid extended attribute name ({reason}): {}",
-        String::from_utf8_lossy(.path),
-        String::from_utf8_lossy(.name)
+        crate::escape::printable(.path),
+        crate::escape::printable(.name)
     )]
     #[non_exhaustive]
     InvalidXattrName {
@@ -275,7 +295,7 @@ pub enum ModelError {
     /// xattr block an inode can charge.
     #[error(
         "entry {} has extended attributes spilling {needed} bytes past the inode, more than a block holds",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     XattrsTooLarge {
@@ -292,7 +312,7 @@ pub enum ModelError {
     #[error(
         "entry {} carries extended attributes, which the feature set cannot hold without \
          ext_attr",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     XattrsWithoutFeature {
@@ -307,7 +327,7 @@ pub enum ModelError {
     #[error(
         "file {} is {size} bytes, past the {limit} a regular file may reach without the \
          large_file feature",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     FileTooLargeWithoutFeature {
@@ -324,7 +344,7 @@ pub enum ModelError {
     /// instant.
     #[error(
         "entry {} has a timestamp of {secs}s + {nanos}ns outside the representable range",
-        String::from_utf8_lossy(.path)
+        crate::escape::printable(.path)
     )]
     #[non_exhaustive]
     TimestampOutOfRange {
@@ -513,7 +533,7 @@ impl Times {
     /// in the error. Checked once per entry, before the times reach an inode.
     fn validate(&self, path: &[u8]) -> Result<(), ModelError> {
         for t in [self.atime, self.ctime, self.mtime, self.crtime] {
-            if !t.is_representable() {
+            if !crate::ondisk::time_is_representable(t) {
                 return Err(ModelError::TimestampOutOfRange {
                     path: path.to_vec(),
                     secs: t.secs,
@@ -593,6 +613,31 @@ impl ModelConfig {
 /// for the same reason — a name the on-disk format cannot represent as a distinct,
 /// addressable entry is rejected rather than written into a set that would silently lose
 /// attributes.
+/// The attribute set as ext stores it, narrowing each POSIX ACL from the form every
+/// boundary speaks into the compact one this format packs it into.
+///
+/// This runs before [`validate_xattrs`] rather than after, because the compact form is
+/// shorter than the one it came from: sizing the set that arrived would refuse attribute
+/// sets that fit, and would size the spill block against bytes no inode ever holds.
+fn stored_xattrs(path: &[u8], xattrs: &[Xattr]) -> Result<Vec<Xattr>, ModelError> {
+    xattrs
+        .iter()
+        .map(|x| {
+            if x.name != Acl::ACCESS_NAME && x.name != Acl::DEFAULT_NAME {
+                return Ok(x.clone());
+            }
+            let acl = Acl::decode(&x.value).map_err(|source| ModelError::Acl {
+                path: path.to_vec(),
+                source,
+            })?;
+            Ok(Xattr {
+                name: x.name.clone(),
+                value: crate::ondisk::encode_acl(&acl),
+            })
+        })
+        .collect()
+}
+
 fn validate_xattrs(path: &[u8], xattrs: &[Xattr], config: &ModelConfig) -> Result<(), ModelError> {
     if xattrs.is_empty() {
         return Ok(());
@@ -697,28 +742,6 @@ fn key(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.join(&b'/')
 }
 
-/// The canonical key for a path, by the same rule [`components`] and [`key`] apply
-/// together: separators and `.` elements carry no meaning, so `/etc/hostname`,
-/// `//etc//hostname`, and `etc/./hostname` are one path and key alike. The root keys as
-/// the empty slice.
-///
-/// This exists so that a caller keying entries by path outside the model — composing two
-/// sources into one, where a later entry replaces an earlier one at the same path — agrees
-/// with the model about which paths *are* the same. Two normalizations that disagree would
-/// not fail; they would quietly leave both entries in the list, and the model would reject
-/// the duplicate or, worse, accept two names it thought were different.
-///
-/// Unlike [`components`] this rejects nothing. A `..` element, an over-long component, or
-/// one carrying a NUL keys as itself and is refused when the model reads the entry, so
-/// there is one rejection site and its error names the path the caller wrote.
-pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
-    let parts: Vec<&[u8]> = path
-        .split(|&b| b == b'/')
-        .filter(|part| !part.is_empty() && *part != b".")
-        .collect();
-    parts.join(&b'/')
-}
-
 /// One entry, normalized: its components and its parent/name split.
 struct Normalized {
     parts: Vec<Vec<u8>>,
@@ -788,13 +811,9 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         Some(entry) => {
             let times = config.times(&entry.meta);
             times.validate(&entry.path)?;
-            validate_xattrs(&entry.path, &entry.xattrs, &config)?;
-            let mut root = dir_inode(
-                ROOT_INO,
-                0o040000 | entry.meta.mode,
-                times,
-                entry.xattrs.clone(),
-            );
+            let xattrs = stored_xattrs(&entry.path, &entry.xattrs)?;
+            validate_xattrs(&entry.path, &xattrs, &config)?;
+            let mut root = dir_inode(ROOT_INO, 0o040000 | entry.meta.mode, times, xattrs);
             root.uid = entry.meta.uid;
             root.gid = entry.meta.gid;
             root
@@ -859,8 +878,8 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         let meta = &n.entry.meta;
         let times = config.times(meta);
         times.validate(&n.entry.path)?;
-        validate_xattrs(&n.entry.path, &n.entry.xattrs, &config)?;
-        let xattrs = n.entry.xattrs.clone();
+        let xattrs = stored_xattrs(&n.entry.path, &n.entry.xattrs)?;
+        validate_xattrs(&n.entry.path, &xattrs, &config)?;
         // Every kind but a directory shares this leaf construction; a directory's
         // content and link count are filled in during finalization.
         let leaf = |mode: u16, content: Content| ModelInode {
@@ -1191,6 +1210,27 @@ mod tests {
         Metadata::new(mode, Timestamp::from_secs(1_700_000_000))
     }
 
+    /// The smallest well-formed ACL, in the boundary form a source states one in.
+    fn minimal_acl() -> Vec<u8> {
+        use crate::acl::{AclEntry, AclQualifier};
+        Acl::new(vec![
+            AclEntry {
+                who: AclQualifier::UserObj,
+                perm: Acl::READ | Acl::WRITE,
+            },
+            AclEntry {
+                who: AclQualifier::GroupObj,
+                perm: Acl::READ,
+            },
+            AclEntry {
+                who: AclQualifier::Other,
+                perm: Acl::READ,
+            },
+        ])
+        .expect("a well-formed ACL")
+        .encode()
+    }
+
     fn model(src: TreeBuilder) -> FsModel {
         build_model(src, config()).expect("model")
     }
@@ -1212,7 +1252,7 @@ mod tests {
         ] {
             let theirs = key(&components(path).expect("the model accepts this path"));
             assert_eq!(
-                canonical_key(path),
+                crate::source::canonical_key(path),
                 theirs,
                 "{}: the shared key must be the model's",
                 String::from_utf8_lossy(path)
@@ -1223,7 +1263,7 @@ mod tests {
         // subtree the whole tree.
         for root in [&b"/"[..], b"", b".", b"./", b"///"] {
             assert!(names_the_root(root));
-            assert!(canonical_key(root).is_empty());
+            assert!(crate::source::canonical_key(root).is_empty());
         }
     }
 
@@ -1247,11 +1287,11 @@ mod tests {
         // A file mtime the on-disk format cannot hold is a typed error, not a silent
         // wrap to a different instant.
         let mut m = Metadata::new(0o644, Timestamp::from_secs(1_700_000_000));
-        m.mtime = Timestamp::from_secs(Timestamp::EPOCH_MAX + 1);
+        m.mtime = Timestamp::from_secs(crate::ondisk::TIME_SECS_MAX + 1);
         let src = TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), m);
         let err = build_model(src, config()).unwrap_err();
         assert!(
-            matches!(err, ModelError::TimestampOutOfRange { secs, .. } if secs == Timestamp::EPOCH_MAX + 1),
+            matches!(err, ModelError::TimestampOutOfRange { secs, .. } if secs == crate::ondisk::TIME_SECS_MAX + 1),
             "expected TimestampOutOfRange, got {err:?}"
         );
     }
@@ -1261,7 +1301,7 @@ mod tests {
         // The format-wide default time reaches the always-present directories, so an
         // unrepresentable one fails the build up front.
         let cfg = ModelConfig {
-            default_time: Timestamp::from_secs(Timestamp::EPOCH_MIN - 1),
+            default_time: Timestamp::from_secs(crate::ondisk::TIME_SECS_MIN - 1),
             ..config()
         };
         let err = build_model(TreeBuilder::new(), cfg).unwrap_err();
@@ -1733,10 +1773,68 @@ mod tests {
         build_model(
             TreeBuilder::new()
                 .file(b"/f".to_vec(), b"data".to_vec(), meta(0o644))
-                .xattr(b"system.posix_acl_access".to_vec(), vec![0u8; 4]),
+                .xattr(b"system.posix_acl_access".to_vec(), minimal_acl()),
             config(),
         )
         .expect("a whole-name ACL attribute is a valid, non-empty name");
+    }
+
+    #[test]
+    fn an_acl_attribute_is_narrowed_to_the_form_ext_stores() {
+        // The value a source states is the boundary form; what the inode carries is this
+        // format's packing of it. Storing the stated bytes would be an attribute the kernel
+        // reads as an ACL and cannot parse.
+        let m = model(
+            TreeBuilder::new()
+                .file(b"/f".to_vec(), b"data".to_vec(), meta(0o644))
+                .xattr(Acl::ACCESS_NAME.to_vec(), minimal_acl()),
+        );
+        let stored = &m
+            .inodes
+            .values()
+            .find(|i| i.xattrs.iter().any(|x| x.name == Acl::ACCESS_NAME))
+            .expect("the file carries the ACL")
+            .xattrs[0];
+        assert_eq!(
+            stored.value,
+            crate::ondisk::encode_acl(&Acl::decode(&minimal_acl()).expect("the stated ACL"))
+        );
+        assert!(
+            stored.value.len() < minimal_acl().len(),
+            "the stored form is the narrower one"
+        );
+    }
+
+    #[test]
+    fn an_acl_attribute_already_in_the_stored_form_is_refused_rather_than_narrowed_twice() {
+        // The two forms are told apart by their version header, so the narrowing is not
+        // idempotent and must not pretend to be: a value that is already what the inode
+        // carries is a caller stating the wrong form, and narrowing it again would pack a
+        // header and entries that were never a boundary ACL. It is the one confusion
+        // available between the two, so it is refused by name rather than misread.
+        let compact = crate::ondisk::encode_acl(&Acl::decode(&minimal_acl()).expect("an ACL"));
+        let err = build_model(
+            TreeBuilder::new()
+                .file(b"/f".to_vec(), b"data".to_vec(), meta(0o644))
+                .xattr(Acl::ACCESS_NAME.to_vec(), compact),
+            config(),
+        )
+        .expect_err("the stored form is not a value a source may state");
+        assert!(matches!(err, ModelError::Acl { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_acl_attribute_that_is_not_an_acl_is_refused() {
+        // Written through as opaque bytes this would be an attribute the kernel reads as an
+        // ACL and cannot parse, which is access nobody described.
+        let err = build_model(
+            TreeBuilder::new()
+                .file(b"/f".to_vec(), b"data".to_vec(), meta(0o644))
+                .xattr(Acl::ACCESS_NAME.to_vec(), b"not an ACL".to_vec()),
+            config(),
+        )
+        .expect_err("a value that is not an ACL is refused");
+        assert!(matches!(err, ModelError::Acl { .. }), "{err:?}");
     }
 
     #[test]

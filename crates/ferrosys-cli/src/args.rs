@@ -14,13 +14,16 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::Slack;
+use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
     ErrorBehavior, FeatureError, FeatureSet, GrowReservation, HashSignedness, HashVersion,
-    InodeCount, JournalSize, Profile, ReservedRatio, Severity, Slack,
+    InodeCount, JournalSize, ReservedRatio, Severity,
 };
+use ferrosys::fat::{FatTypeRequest, VolumeLabel};
+use ferrosys::{AcceptedLoss, Synthesis};
 
-use crate::parse::{self, ValueError};
+use crate::parse::{self, FsType, ValueError};
 
 /// The bytes of an OS string, and the OS string a slice of those bytes names.
 ///
@@ -142,18 +145,21 @@ pub enum Size {
 
 /// `ferrosys format`: everything the filesystem's bytes are a function of.
 ///
-/// Every input is here, and nothing else is read: the identity (`uuid`, `hash_seed`),
-/// the clock (`time`, `fixed_time`), the geometry (`size`, `feature`, `grow`,
-/// `journal`), and the contents (`contents`, `owner`). Two runs given the same values
-/// write the same bytes.
+/// Every input is here, and nothing else is read: the clock (`time`), the size, the
+/// contents (`contents`, `owner`), and — in [`target`](Self::target) — the family to write
+/// and everything only that family takes. Two runs given the same values write the same
+/// bytes.
+///
+/// The split is where it is because the fields above it are the questions every family
+/// answers and the ones below it are not: an ext filesystem has a UUID, a feature set, and a
+/// journal, and a FAT volume has none of the three. Flattening them together would put a
+/// dozen fields in front of a caller that mean nothing for the family it named.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FormatArgs {
     /// The file to write. It must be a regular file.
     pub out: PathBuf,
     /// How large the filesystem is.
     pub size: Size,
-    /// The filesystem UUID.
-    pub uuid: [u8; 16],
     /// The filesystem's creation and write time.
     pub time: Timestamp,
     /// What to populate the filesystem from, or `None` for an empty one.
@@ -161,6 +167,31 @@ pub struct FormatArgs {
     /// The user and group every entry is owned by, overriding what a walked directory
     /// tree records, or `None` to keep the host's.
     pub owner: Option<(u32, u32)>,
+    /// Print the geometry the format realized as JSON.
+    pub json: bool,
+    /// Write the image to a sibling temporary file and rename it over the destination once
+    /// it is complete, so the destination never holds a partial image.
+    pub atomic: bool,
+    /// Report the geometry the format would realize and write nothing.
+    pub dry_run: bool,
+    /// Which family to write, and the inputs only that family takes.
+    pub target: Target,
+}
+
+/// Which family a format writes, and everything only that family takes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Target {
+    /// An ext2, ext3, or ext4 filesystem.
+    Ext(Box<ExtTarget>),
+    /// A FAT12, FAT16, or FAT32 volume.
+    Fat(FatTarget),
+}
+
+/// What only an ext format takes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExtTarget {
+    /// The filesystem UUID.
+    pub uuid: [u8; 16],
     /// The feature profile, with the block and inode sizes already folded in.
     pub feature: FeatureSet,
     /// What the kernel does on a detected filesystem error (`s_errors`).
@@ -183,13 +214,26 @@ pub struct FormatArgs {
     pub hash_signedness: HashSignedness,
     /// The 16-byte directory-hash seed. Defaults to the UUID's bytes.
     pub hash_seed: [u8; 16],
-    /// Print the geometry the format realized as JSON.
-    pub json: bool,
-    /// Write the image to a sibling temporary file and rename it over the destination once
-    /// it is complete, so the destination never holds a partial image.
-    pub atomic: bool,
-    /// Report the geometry the format would realize and write nothing.
-    pub dry_run: bool,
+}
+
+/// What only a FAT format takes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FatTarget {
+    /// Which of the three types the geometry must derive to. Nothing in a FAT image records
+    /// the type, so this states what the derivation must arrive at rather than what to write
+    /// down.
+    pub request: FatTypeRequest,
+    /// The volume serial number the boot sector records — this family's identity field, as
+    /// the UUID is ext's.
+    pub volume_id: u32,
+    /// The volume label, or `None` for an unnamed volume.
+    pub label: Option<VolumeLabel>,
+    /// Which properties of the source the build may lose. Empty by default, so a build that
+    /// would drop something fails and names it.
+    pub accepted_loss: AcceptedLoss,
+    /// What a read of the image would fill an owner and a mode with, which is the point a
+    /// loss is measured against: a value that survives the round trip was not lost.
+    pub synthesis: Synthesis,
 }
 
 /// `ferrosys inspect`: what to report on, and what counts as a failing verdict.
@@ -248,13 +292,33 @@ pub struct ExtractArgs {
     pub offset: u64,
     /// What to produce.
     pub mode: ExtractMode,
-    /// The largest file a read will return, or `None` for no cap. A file past it is an
-    /// error rather than a truncated one.
+    /// The largest file a read will return, or `None` to derive it from the image's own
+    /// length. A file past it is an error rather than a truncated one.
+    ///
+    /// There is no spelling for "no cap", and none is needed: the cap is a size, so a caller
+    /// who means to read a sparse file of a given size names that size.
     pub max_file_bytes: Option<u64>,
     /// Write `--to-tar`'s archive to a sibling temporary file and rename it over the
     /// destination once the walk is complete, so the destination never holds a partial
     /// archive.
     pub atomic: bool,
+    /// What to record for a property the filesystem being read has no field for.
+    ///
+    /// Every ext filesystem records ownership, permission bits, and times, so this changes
+    /// nothing about an ext image. It is the answer for a format that records none of them,
+    /// where something has to be assumed before a host file can be created — and the
+    /// defaults are the conservative ones, so a tree extracted with nothing named never
+    /// lands more permissive than it was asked to be.
+    pub synthesis: Synthesis,
+    /// Refuse an image the reader cannot hold to its format, rather than interpreting it
+    /// best-effort.
+    ///
+    /// Extraction writes what it read somewhere, so an image carrying a deviation this
+    /// reader does not follow produces output that looks complete and is not. Without this
+    /// the read falls back to a lenient one, which is what makes a damaged image
+    /// recoverable, and says on the standard error which deviation it decided to interpret
+    /// through.
+    pub strict: bool,
 }
 
 /// The one thing an extract produces. Exactly one is asked for.
@@ -360,6 +424,21 @@ pub enum UsageError {
          goes with --from-dir"
     )]
     OwnerWithoutDir,
+    /// An option belonging to one family was given to a format writing another.
+    ///
+    /// Refused rather than passed over: an ext filesystem has no volume serial number and a
+    /// FAT volume has no journal, so a line naming both has said two things that cannot both
+    /// be honoured, and carrying on would write an image built differently from the one that
+    /// was asked for.
+    #[error("format: {flag} is an option of the {family} family, and this format writes {named}")]
+    FlagNotForFamily {
+        /// The offending option, as it is spelled.
+        flag: &'static str,
+        /// The family the option belongs to.
+        family: &'static str,
+        /// The filesystem the command line named.
+        named: &'static str,
+    },
     /// `extract` was told to produce nothing, or more than one thing.
     #[error("extract: give exactly one of --to-tar, --to-dir, --cat, --stat, or --list")]
     ExtractMode,
@@ -372,6 +451,10 @@ pub enum UsageError {
     /// `--atomic` was given to an extract that writes no file it could rename into place.
     #[error("extract: --atomic applies to --to-tar FILE")]
     AtomicWithoutFile,
+    /// `format --atomic` decides how the destination is replaced, and `--dry-run` never
+    /// opens one.
+    #[error("format: --atomic decides how the destination is replaced, and --dry-run writes none")]
+    AtomicWithDryRun,
     /// `inspect` was given both `--json` and `--sarif`, two different output formats.
     #[error("inspect: --sarif and --json are different output formats; give one")]
     SarifWithJson,
@@ -381,6 +464,10 @@ pub enum UsageError {
     /// `inspect --sarif` reports scan findings, and has no place to put a group table.
     #[error("inspect: --sarif reports scan findings; --groups has no place in one")]
     SarifWithGroups,
+    /// `inspect --fail-on` is a verdict on the scan, which `--quick` skips — so together
+    /// they are a gate that cannot fire.
+    #[error("inspect: --fail-on is a verdict on the scan, which --quick skips")]
+    FailOnWithQuick,
     /// A value this platform cannot name a file with.
     #[error("{0}: the value is not text this platform can name a file with")]
     NotAFilename(String),
@@ -585,32 +672,43 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut fit = false;
     let mut slack: Option<Slack> = None;
     let mut uuid: Option<[u8; 16]> = None;
+    let mut volume_id: Option<u32> = None;
     let mut time: Option<i64> = None;
     let mut from_tar: Option<Stream> = None;
     let mut from_dir: Option<PathBuf> = None;
     let mut owner: Option<(u32, u32)> = None;
-    // The feature set is composed once the whole line is read (below), not mutated in place
-    // as options arrive. So the base profile (`-t`), the size overrides, and the `-O` deltas
-    // take effect in a fixed order — profile seeds, sizes override, `-O` lists layer on last
-    // — rather than in the order they happen to appear. This is the order `mke2fs -t … -O …`
-    // composes in, and it makes `-t` position-independent.
-    let mut profile: Option<Profile> = None;
+    // The family and everything only one family takes are composed once the whole line is
+    // read (below), not applied in place as options arrive. So the base type (`-t`), the size
+    // overrides, and the `-O` deltas take effect in a fixed order — type seeds, sizes
+    // override, `-O` lists layer on last — rather than in the order they happen to appear.
+    // This is the order `mke2fs -t … -O …` composes in, and it is what makes `-t`
+    // position-independent for the family it names as much as for the features it seeds.
+    let mut fs_type: Option<FsType> = None;
     let mut block_size: Option<u32> = None;
     let mut inode_size: Option<u16> = None;
     let mut feature_ops: Vec<OsString> = Vec::new();
     let mut errors = ErrorBehavior::default();
     let mut inodes = InodeCount::default();
     let mut reserved = ReservedRatio::default();
-    let mut volume_name = [0u8; 16];
+    // The label as typed. It is validated once the family is known: an ext label is sixteen
+    // bytes of anything and a FAT label is eleven in the OEM character set, so the same
+    // argument is two different values and neither can be built before `-t` is read.
+    let mut label: Option<Vec<u8>> = None;
     let mut grow = GrowReservation::default();
     let mut journal = JournalSize::Auto;
     let mut fixed_time: Option<i64> = None;
     let mut hash_version = HashVersion::default();
     let mut hash_signedness = HashSignedness::default();
     let mut hash_seed: Option<[u8; 16]> = None;
+    let mut accepted_loss = AcceptedLoss::NONE;
+    let mut synthesis = Synthesis::new();
     let mut json = false;
     let mut atomic = false;
     let mut dry_run = false;
+    // Every option seen that belongs to one family alone, so naming one with the other
+    // family's type is refused by name rather than passed over. Recorded rather than checked
+    // on the spot, because `-t` may come after the option it disqualifies.
+    let mut family_only: Vec<(&'static str, &'static str)> = Vec::new();
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -640,8 +738,19 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         );
                     }
                     "uuid" => {
+                        family_only.push(("--uuid", "ext"));
                         uuid = Some(
                             parse::hex16(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // A FAT volume's identity: a 32-bit serial number, not a 128-bit UUID.
+                    // Each family names its own rather than one flag being truncated into
+                    // whatever the format has room for.
+                    "volume-id" => {
+                        family_only.push(("--volume-id", "fat"));
+                        volume_id = Some(
+                            parse::hex32(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
@@ -659,22 +768,25 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                                 .map_err(value_err(&flag))?,
                         );
                     }
-                    // The base profile seeds the feature set; `--type` and `-t` name the same
-                    // thing, and the last one given wins. `-O` and the size options layer on
-                    // top of it when the set is composed below.
+                    // The base type names the family and seeds whatever that family
+                    // composes from. `--type` and `-t` name the same thing, and the last one
+                    // given wins. `-O` and the size options layer on top of it when the
+                    // feature set is composed below.
                     "type" => {
-                        profile = Some(
-                            parse::profile(&args.value(&flag, attached)?)
+                        fs_type = Some(
+                            parse::fs_type(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
                     "block-size" => {
+                        family_only.push(("--block-size", "ext"));
                         block_size = Some(
                             parse::count_u32(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
                     "inode-size" => {
+                        family_only.push(("--inode-size", "ext"));
                         let v = parse::count_u32(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         inode_size = Some(u16::try_from(v).map_err(|_| UsageError::Value {
@@ -686,52 +798,88 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // the count outright, `--bytes-per-inode` names the density it derives
                     // from. Either overrides the size-driven default.
                     "inodes" => {
+                        family_only.push(("--inodes", "ext"));
                         let count = parse::count_u32(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         inodes = InodeCount::Count(count);
                     }
                     "bytes-per-inode" => {
+                        family_only.push(("--bytes-per-inode", "ext"));
                         inodes = parse::bytes_per_inode(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "reserved-percent" => {
+                        family_only.push(("--reserved-percent", "ext"));
                         reserved = parse::reserved_percent(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
-                    // A label is bytes, not text — the on-disk field holds sixteen of them
-                    // and the reader reports whatever is there — so it is taken as the
-                    // argument's bytes, as a path inside the image is.
+                    // A label is bytes, not text — an ext field holds sixteen of them and
+                    // the reader reports whatever is there — so it is taken as the argument's
+                    // bytes, as a path inside the image is. What fits is the family's
+                    // question, asked once `-t` is known.
                     "label" => {
                         let value = args.value(&flag, attached)?;
-                        volume_name = parse::label(os::bytes(&value)).map_err(value_err(&flag))?;
+                        label = Some(os::bytes(&value).to_vec());
+                    }
+                    // Which properties of the source the build may lose. A FAT directory
+                    // entry has no field for an owner, a mode, a symbolic link, a second
+                    // name, a device number, or an extended attribute, so a tree carrying any
+                    // of them is refused until the caller has said which may go.
+                    "accept-loss" => {
+                        family_only.push(("--accept-loss", "fat"));
+                        accepted_loss = parse::accepted_loss(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    // The point a loss is measured against: what a read of the image would
+                    // fill an owner and a mode with. A value that survives the round trip was
+                    // not lost, so these are what make a root-owned, conventionally moded
+                    // tree go into a FAT image faithfully.
+                    "assume-owner" => {
+                        family_only.push(("--assume-owner", "fat"));
+                        let (uid, gid) = parse::owner(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                        synthesis = synthesis.owner(uid, gid);
+                    }
+                    "assume-modes" => {
+                        family_only.push(("--assume-modes", "fat"));
+                        let (file, dir) = parse::modes(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                        synthesis = synthesis.modes(file, dir);
                     }
                     "grow" => {
+                        family_only.push(("--grow", "ext"));
                         grow =
                             parse::grow(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
                     }
                     "journal" => {
+                        family_only.push(("--journal", "ext"));
                         journal = parse::journal(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "errors" => {
+                        family_only.push(("--errors", "ext"));
                         errors = parse::error_behavior(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "fixed-time" => {
+                        family_only.push(("--fixed-time", "ext"));
                         fixed_time = Some(
                             parse::seconds(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
                     "hash" => {
+                        family_only.push(("--hash", "ext"));
                         hash_version = parse::hash_version(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "hash-signedness" => {
+                        family_only.push(("--hash-signedness", "ext"));
                         hash_signedness = parse::hash_signedness(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "hash-seed" => {
+                        family_only.push(("--hash-seed", "ext"));
                         hash_seed = Some(
                             parse::hex16(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
@@ -757,10 +905,13 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
             // `-O` and `-t` are read here but applied below, once the whole line is known:
             // the base profile seeds the set and every `-O` list layers on top, left to
             // right, so two `-O`s compose and the last element to name a feature wins.
-            Arg::Short('O', attached) => feature_ops.push(args.value("-O", attached)?),
+            Arg::Short('O', attached) => {
+                family_only.push(("-O", "ext"));
+                feature_ops.push(args.value("-O", attached)?);
+            }
             Arg::Short('t', attached) => {
-                profile =
-                    Some(parse::profile(&args.value("-t", attached)?).map_err(value_err("-t"))?);
+                fs_type =
+                    Some(parse::fs_type(&args.value("-t", attached)?).map_err(value_err("-t"))?);
             }
             Arg::Short('h', attached) => {
                 Args::no_value("-h", attached)?;
@@ -799,10 +950,22 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
             }
         },
     };
-    let uuid = uuid.ok_or(UsageError::MissingRequired {
-        command: CMD,
-        flag: "--uuid",
-    })?;
+    // The family, and with it which of the options above apply at all. `-t` names it and
+    // ext4 is what an unnamed one means, which is what keeps every ext command line that
+    // worked before working unchanged.
+    let fs_type = fs_type.unwrap_or_default();
+    // An option belonging to the family that was not named is refused rather than passed
+    // over. Silently ignoring `--journal` on a FAT format would report a volume built the
+    // way it was asked for when it was not.
+    for (flag, family) in &family_only {
+        if *family != fs_type.family() {
+            return Err(UsageError::FlagNotForFamily {
+                flag,
+                family,
+                named: fs_type.name(),
+            });
+        }
+    }
     // `--size auto` and a named size are one setting; `--slack` modifies only the first,
     // since a size that was named has no room to find.
     let size = match (size, fit) {
@@ -837,47 +1000,91 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     if owner.is_some() && !matches!(contents, Some(Contents::Dir(_))) {
         return Err(UsageError::OwnerWithoutDir);
     }
-    // Compose the feature set now that the whole line is read: the base profile seeds it
-    // (ext4 when no `-t` was given), the size options override, and the `-O` lists layer on
-    // last, left to right. A combination that must never reach disk is a request that cannot
-    // be honoured, so it is refused here, by the name of the conflict, rather than deep in
-    // the planner.
-    let mut feature = profile.unwrap_or_default().feature_set();
-    if let Some(block_size) = block_size {
-        feature.block_size = block_size;
+    // `--atomic` is about how the destination is replaced, and `--dry-run` never opens one:
+    // the run reports the plan and returns before the destination is touched. Together they
+    // are a flag that decides nothing, refused for the same reason as every other inert
+    // pairing — an accepted flag that changes nothing reads as one that worked.
+    if atomic && dry_run {
+        return Err(UsageError::AtomicWithDryRun);
     }
-    if let Some(inode_size) = inode_size {
-        feature.inode_size = inode_size;
-    }
-    for op in &feature_ops {
-        feature = parse::features(feature, op).map_err(value_err("-O"))?;
-    }
-    feature.validate()?;
+    // Now that the family is settled, build what only it takes.
+    let target = match fs_type {
+        FsType::Ext(profile) => {
+            // Compose the feature set: the base profile seeds it (ext4 when no `-t` was
+            // given), the size options override, and the `-O` lists layer on last, left to
+            // right. A combination that must never reach disk is a request that cannot be
+            // honoured, so it is refused here, by the name of the conflict, rather than deep
+            // in the planner.
+            let mut feature = profile.feature_set();
+            if let Some(block_size) = block_size {
+                feature.block_size = block_size;
+            }
+            if let Some(inode_size) = inode_size {
+                feature.inode_size = inode_size;
+            }
+            for op in &feature_ops {
+                feature = parse::features(feature, op).map_err(value_err("-O"))?;
+            }
+            feature.validate()?;
+
+            let uuid = uuid.ok_or(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--uuid",
+            })?;
+            let volume_name = match &label {
+                Some(bytes) => parse::label(bytes).map_err(value_err("--label"))?,
+                None => [0u8; 16],
+            };
+            Target::Ext(Box::new(ExtTarget {
+                uuid,
+                feature,
+                errors,
+                inodes,
+                reserved,
+                volume_name,
+                grow,
+                journal,
+                fixed_time: fixed_time.map(Timestamp::from_secs),
+                hash_version,
+                hash_signedness,
+                // The seed defaults to the UUID's bytes: an identity the caller already
+                // supplied, rather than one the tool would have to invent from a random
+                // source it does not have.
+                hash_seed: hash_seed.unwrap_or(uuid),
+            }))
+        }
+        FsType::Fat(request) => {
+            let volume_id = volume_id.ok_or(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--volume-id",
+            })?;
+            let label = match &label {
+                Some(bytes) => Some(
+                    VolumeLabel::from_bytes(bytes)
+                        .map_err(|e| value_err("--label")(ValueError::from(e)))?,
+                ),
+                None => None,
+            };
+            Target::Fat(FatTarget {
+                request,
+                volume_id,
+                label,
+                accepted_loss,
+                synthesis,
+            })
+        }
+    };
 
     Ok(Command::Format(Box::new(FormatArgs {
         out,
         size,
-        uuid,
         time: Timestamp::from_secs(time),
         contents,
         owner,
-        feature,
-        errors,
-        inodes,
-        reserved,
-        volume_name,
-        grow,
-        journal,
-        fixed_time: fixed_time.map(Timestamp::from_secs),
-        hash_version,
-        hash_signedness,
-        // The seed defaults to the UUID's bytes: an identity the caller already supplied,
-        // rather than one the tool would have to invent from a random source it does not
-        // have.
-        hash_seed: hash_seed.unwrap_or(uuid),
         json,
         atomic,
         dry_run,
+        target,
     })))
 }
 
@@ -900,6 +1107,11 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     // is not thereby broken. Faulting it would make `inspect` a check on its own output
     // rather than on ext4, so `conformance` is an opt-in self-check and not the default.
     let mut fail_on = Some(Severity::Integrity);
+    // Whether the threshold above was *asked for*, which the value alone cannot say: the
+    // default and an explicit `--fail-on integrity` are the same `Some(Integrity)`. The
+    // pairing check below needs to tell them apart, because refusing the default would refuse
+    // every `--quick` run there is.
+    let mut fail_on_given = false;
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -917,6 +1129,7 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
                     "fail-on" => {
                         fail_on = parse::fail_on(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
+                        fail_on_given = true;
                     }
                     "json" => {
                         Args::no_value(&flag, attached)?;
@@ -980,6 +1193,13 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     }
     if sarif && groups {
         return Err(UsageError::SarifWithGroups);
+    }
+    // `--fail-on` is a verdict on the scan, and `--quick` is the flag that skips the scan.
+    // Together they are a gate that looks armed and cannot fire: a CI step reading
+    // `--quick --fail-on structural` exits zero on a filesystem whose bytes are destroyed.
+    // That is the one inert pairing with a consequence, so it is refused like the rest.
+    if quick && fail_on_given {
+        return Err(UsageError::FailOnWithQuick);
     }
     Ok(Command::Inspect(InspectArgs {
         image,
@@ -1155,6 +1375,8 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     let mut json = false;
     let mut max_file_bytes: Option<u64> = None;
     let mut atomic = false;
+    let mut strict = false;
+    let mut synthesis = Synthesis::new();
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -1204,6 +1426,23 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
                     "atomic" => {
                         Args::no_value(&flag, attached)?;
                         atomic = true;
+                    }
+                    "strict" => {
+                        Args::no_value(&flag, attached)?;
+                        strict = true;
+                    }
+                    // What to assume where the filesystem records nothing. Named "assume"
+                    // rather than "set", because a value here never overrides what an image
+                    // does hold.
+                    "assume-owner" => {
+                        let (uid, gid) = parse::owner(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                        synthesis = synthesis.owner(uid, gid);
+                    }
+                    "assume-modes" => {
+                        let (file, dir) = parse::modes(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                        synthesis = synthesis.modes(file, dir);
                     }
                     _ => {
                         return Err(UsageError::UnknownFlag { command: CMD, flag });
@@ -1270,16 +1509,52 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
 
     Ok(Command::Extract(ExtractArgs {
         image,
+        strict,
         offset,
         mode,
         max_file_bytes,
         atomic,
+        synthesis,
     }))
 }
 
 #[cfg(test)]
 mod tests {
+    /// What an extraction assumes where the filesystem records nothing.
+    #[test]
+    fn the_assume_flags_set_what_a_read_invents() {
+        // Nothing named is the conservative default: owned by root, and never more
+        // permissive than a plain file and a searchable directory.
+        match line("extract image.img --list").expect("parses") {
+            Command::Extract(a) => assert_eq!(a.synthesis, Synthesis::new()),
+            other => panic!("expected extract, got {other:?}"),
+        }
+        match line("extract image.img --list --assume-owner 1000:100 --assume-modes 600:700")
+            .expect("parses")
+        {
+            Command::Extract(a) => {
+                assert_eq!(a.synthesis.uid, 1000);
+                assert_eq!(a.synthesis.gid, 100);
+                assert_eq!(a.synthesis.file_mode, 0o600);
+                assert_eq!(a.synthesis.dir_mode, 0o700);
+            }
+            other => panic!("expected extract, got {other:?}"),
+        }
+        // A value neither flag can read is a usage error rather than a silent default,
+        // since a default here decides what a whole tree is owned by.
+        for bad in [
+            "extract image.img --list --assume-owner 1000",
+            "extract image.img --list --assume-modes 644",
+            "extract image.img --list --assume-modes 10000:755",
+        ] {
+            assert!(line(bad).is_err(), "{bad} should be a usage error");
+        }
+    }
+
     use super::*;
+    use ferrosys::Property;
+    use ferrosys::ext::Profile;
+    use ferrosys::fat::FatType;
 
     /// Parse a command line written as it would be typed.
     fn line(s: &str) -> Result<Command, UsageError> {
@@ -1295,6 +1570,22 @@ mod tests {
         }
     }
 
+    /// The ext half of a `format` line, for the cases that must reach the ext family.
+    fn ext(s: &str) -> ExtTarget {
+        match fmt(s).target {
+            Target::Ext(target) => *target,
+            other => panic!("expected an ext target, got {other:?}"),
+        }
+    }
+
+    /// The FAT half of a `format` line, for the cases that must reach the FAT family.
+    fn fat(s: &str) -> FatTarget {
+        match fmt(s).target {
+            Target::Fat(target) => target,
+            other => panic!("expected a fat target, got {other:?}"),
+        }
+    }
+
     const UUID: &str = "f0e17055-0000-4000-8000-000000000000";
     const UUID_BYTES: [u8; 16] = [
         0xf0, 0xe1, 0x70, 0x55, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0,
@@ -1302,20 +1593,22 @@ mod tests {
 
     #[test]
     fn format_takes_its_required_inputs() {
-        let a = fmt(&format!(
-            "format --size 512M --uuid {UUID} --time 1700000000 out.img"
-        ));
+        let text = format!("format --size 512M --uuid {UUID} --time 1700000000 out.img");
+        let a = fmt(&text);
         assert_eq!(a.out, PathBuf::from("out.img"));
         assert_eq!(a.size, Size::Bytes(512 << 20));
-        assert_eq!(a.uuid, UUID_BYTES);
         assert_eq!(a.time, Timestamp::from_secs(1_700_000_000));
-        // The hash seed defaults to the UUID: an identity the caller supplied, rather
-        // than one the tool would have had to invent.
-        assert_eq!(a.hash_seed, UUID_BYTES);
-        assert_eq!(a.feature, FeatureSet::DEFAULT);
         assert_eq!(a.contents, None);
         assert_eq!(a.owner, None);
         assert!(!a.json);
+
+        // Naming no type writes ext4, so the identity and the feature set are ext's.
+        let target = ext(&text);
+        assert_eq!(target.uuid, UUID_BYTES);
+        // The hash seed defaults to the UUID: an identity the caller supplied, rather
+        // than one the tool would have had to invent.
+        assert_eq!(target.hash_seed, UUID_BYTES);
+        assert_eq!(target.feature, FeatureSet::DEFAULT);
     }
 
     #[test]
@@ -1489,7 +1782,7 @@ mod tests {
 
     #[test]
     fn format_folds_the_feature_options_together() {
-        let a = fmt(&format!(
+        let a = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 --block-size 1024 \
              --inode-size 128 -O ^has_journal -O ^orphan_file,^metadata_csum_seed \
              -O ^metadata_csum out.img"
@@ -1506,18 +1799,18 @@ mod tests {
     #[test]
     fn format_seeds_the_base_profile() {
         // Each `-t`/`--type` seeds the whole feature set from that profile's baseline.
-        let ext2 = fmt(&format!(
+        let ext2 = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 -t ext2 out.img"
         ));
         assert_eq!(ext2.feature, FeatureSet::EXT2);
         assert_eq!(Profile::of(ext2.feature), Profile::Ext2);
-        let ext3 = fmt(&format!(
+        let ext3 = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 --type ext3 out.img"
         ));
         assert_eq!(ext3.feature, FeatureSet::EXT3);
         // Naming no profile selects ext4, so the flag is an override rather than a
         // requirement.
-        let ext4 = fmt(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
+        let ext4 = ext(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
         assert_eq!(ext4.feature, FeatureSet::DEFAULT);
         assert_eq!(Profile::of(ext4.feature), Profile::Ext4);
     }
@@ -1526,10 +1819,10 @@ mod tests {
     fn the_base_profile_seeds_and_o_layers_on_top_in_any_order() {
         // `-O` composes over the profile whichever came first on the line: the profile is
         // the base, the `-O` deltas layer on last. A journal over the ext2 baseline is ext3.
-        let a = fmt(&format!(
+        let a = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 -t ext2 -O has_journal out.img"
         ));
-        let b = fmt(&format!(
+        let b = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 -O has_journal -t ext2 out.img"
         ));
         assert_eq!(
@@ -1540,7 +1833,7 @@ mod tests {
         assert_eq!(Profile::of(a.feature), Profile::Ext3);
 
         // The size options override the profile's baseline sizes, in any position.
-        let sized = fmt(&format!(
+        let sized = ext(&format!(
             "format --size 64M --uuid {UUID} --time 1 --block-size 1024 -t ext2 out.img"
         ));
         assert_eq!(sized.feature.block_size, 1024);
@@ -1556,8 +1849,139 @@ mod tests {
     }
 
     #[test]
+    fn a_fat_format_takes_this_family_s_identity_and_its_label() {
+        let a = fat("format --size 512M --volume-id 1A2B-3C4D --time 1 -t fat32 esp.img");
+        assert_eq!(a.request, FatTypeRequest::Exactly(FatType::Fat32));
+        assert_eq!(a.volume_id, 0x1a2b_3c4d);
+        assert_eq!(a.label, None, "a volume with no label carries none");
+        // Nothing may be lost until the caller has said what may.
+        assert!(a.accepted_loss.is_empty());
+        // The point a loss is measured against, at the conservative default: a root-owned
+        // `0644`/`0755` tree survives, so nothing about it is lost.
+        assert_eq!(a.synthesis, Synthesis::new());
+
+        // The label goes through this family's own rules, which upper-case it into the
+        // eleven bytes both places that store it hold.
+        let named =
+            fat("format --size 512M --volume-id 00000001 --time 1 -t fat32 --label esp e.img");
+        assert_eq!(
+            named.label.expect("a label was given").as_bytes(),
+            b"ESP        "
+        );
+        // Twelve bytes is one more than the field holds, and it is refused rather than
+        // truncated — the tool never writes a name the caller did not give it.
+        assert!(matches!(
+            line(
+                "format --size 512M --volume-id 00000001 --time 1 -t fat32 --label ABCDEFGHIJKL e.img"
+            ),
+            Err(UsageError::Value {
+                source: ValueError::NotAFatLabel(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_format_refuses_the_other_family_s_options_wherever_the_type_appears() {
+        // Each family names its own identity, so neither flag reaches the other. The
+        // refusal names the option and both families rather than reporting an unknown flag,
+        // which would be wrong: the option exists.
+        assert_eq!(
+            line("format --size 512M --uuid f0e17055-0000-4000-8000-000000000000 --time 1 -t fat32 o.img")
+                .unwrap_err(),
+            UsageError::FlagNotForFamily {
+                flag: "--uuid",
+                family: "ext",
+                named: "fat32",
+            }
+        );
+        assert_eq!(
+            line(&format!(
+                "format --size 512M --volume-id 00000001 --uuid {UUID} --time 1 out.img"
+            ))
+            .unwrap_err(),
+            UsageError::FlagNotForFamily {
+                flag: "--volume-id",
+                family: "fat",
+                named: "ext4",
+            }
+        );
+
+        // Position does not matter: the whole line is read before the family decides which
+        // options applied, so `-t` disqualifies an option that came before it as well as
+        // one that came after.
+        for text in [
+            "format --size 512M --volume-id 00000001 --time 1 -t fat32 --journal 4096 o.img",
+            "format --size 512M --volume-id 00000001 --time 1 --journal 4096 -t fat32 o.img",
+        ] {
+            assert!(
+                matches!(
+                    line(text).unwrap_err(),
+                    UsageError::FlagNotForFamily {
+                        flag: "--journal",
+                        ..
+                    }
+                ),
+                "{text}"
+            );
+        }
+
+        // And the identity each family does take is required, by its own name.
+        assert_eq!(
+            line("format --size 512M --time 1 -t fat32 o.img").unwrap_err(),
+            UsageError::MissingRequired {
+                command: "format",
+                flag: "--volume-id",
+            }
+        );
+        assert_eq!(
+            line("format --size 512M --time 1 out.img").unwrap_err(),
+            UsageError::MissingRequired {
+                command: "format",
+                flag: "--uuid",
+            }
+        );
+    }
+
+    #[test]
+    fn a_fat_format_takes_the_losses_it_is_told_it_may_take() {
+        let a = fat("format --size 512M --volume-id 00000001 --time 1 -t fat32 \
+             --accept-loss ownership,permissions --assume-owner 1000:1000 \
+             --assume-modes 600:700 o.img");
+        assert!(a.accepted_loss.contains(Property::Ownership));
+        assert!(a.accepted_loss.contains(Property::Permissions));
+        assert!(
+            !a.accepted_loss.contains(Property::Kind),
+            "a symbolic link still stops the build"
+        );
+        // The synthesis is what a read would fill in, so naming it here is what makes the
+        // two ends of a round trip agree about which values survived.
+        assert_eq!(a.synthesis.uid, 1000);
+        assert_eq!(a.synthesis.gid, 1000);
+        assert_eq!(a.synthesis.file_mode, 0o600);
+        assert_eq!(a.synthesis.dir_mode, 0o700);
+    }
+
+    #[test]
+    fn a_fat_format_finds_its_size_like_any_other_family() {
+        // `--size auto` and `--slack` belong to no family: what a candidate is measured in
+        // differs between them, and asking for the smallest filesystem that holds a tree
+        // does not.
+        let args = fmt(
+            "format --size auto --slack 20% --volume-id 00000001 --time 1 -t fat32 \
+             --from-dir staging o.img",
+        );
+        assert_eq!(args.size, Size::Fit(Slack::Share(2000)));
+
+        let bare = fmt(
+            "format --size auto --volume-id 00000001 --time 1 -t fat16 --from-dir staging o.img",
+        );
+        assert_eq!(bare.size, Size::Fit(Slack::None));
+    }
+
+    #[test]
     fn format_takes_the_sizing_and_label_options() {
-        let a = fmt(&format!(
+        let a = ext(&format!(
             "format --size 256M --uuid {UUID} --time 1 --inodes 5000 \
              --reserved-percent 1.5 --label rootfs out.img"
         ));
@@ -1570,7 +1994,7 @@ mod tests {
         assert_eq!(a.volume_name[6], 0, "the label is NUL-padded");
 
         // The two inode knobs share one setting; the last to appear wins.
-        let a = fmt(&format!(
+        let a = ext(&format!(
             "format --size 256M --uuid {UUID} --time 1 --inodes 5000 --bytes-per-inode 65536 out.img"
         ));
         assert_eq!(
@@ -1579,7 +2003,7 @@ mod tests {
         );
 
         // The defaults when none are given: size-driven inodes, 5% reserved, no label.
-        let a = fmt(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
+        let a = ext(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
         assert_eq!(a.inodes, InodeCount::Auto);
         assert_eq!(a.reserved, ReservedRatio::DEFAULT);
         assert_eq!(a.volume_name, [0u8; 16]);
@@ -1593,12 +2017,12 @@ mod tests {
             ("remount-ro", ErrorBehavior::RemountReadOnly),
             ("panic", ErrorBehavior::Panic),
         ] {
-            let a = fmt(&format!(
+            let a = ext(&format!(
                 "format --size 64M --uuid {UUID} --time 1 --errors {name} out.img"
             ));
             assert_eq!(a.errors, want, "--errors {name}");
         }
-        let a = fmt(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
+        let a = ext(&format!("format --size 64M --uuid {UUID} --time 1 out.img"));
         assert_eq!(a.errors, ErrorBehavior::Continue, "the default is continue");
 
         // A name outside the set is a usage error, not a silent fallback to the default.
@@ -1691,10 +2115,9 @@ mod tests {
         // An option that needs a value takes the next token verbatim, even `--`: it does
         // not end the options there. So `--label -- out.img` gives the label the value
         // `--` and leaves `out.img` the output, matching getopt and the value() rule.
-        let a = fmt(&format!(
-            "format --size 64M --uuid {UUID} --time 1 --label -- out.img"
-        ));
-        assert_eq!(a.out, PathBuf::from("out.img"));
+        let text = format!("format --size 64M --uuid {UUID} --time 1 --label -- out.img");
+        assert_eq!(fmt(&text).out, PathBuf::from("out.img"));
+        let a = ext(&text);
         assert_eq!(&a.volume_name[..2], b"--");
         assert_eq!(a.volume_name[2], 0, "the label is exactly `--`, NUL-padded");
     }
@@ -1874,6 +2297,26 @@ mod tests {
             line("extract --to-dir d --atomic image.img").unwrap_err(),
             UsageError::AtomicWithoutFile
         );
+        // `--atomic` decides how a destination is replaced, and `--dry-run` opens none. The
+        // pair is the same inert-flag mistake, refused rather than passed over.
+        assert_eq!(
+            line(
+                "format --size 16M --uuid f0e17055-0000-4000-8000-000000000000 \
+                  --time 1700000000 --dry-run --atomic out.img"
+            )
+            .unwrap_err(),
+            UsageError::AtomicWithDryRun
+        );
+        // And the one inert pairing with a consequence: a verdict on a scan that was
+        // skipped is a CI gate that looks armed and exits zero on a destroyed filesystem.
+        assert_eq!(
+            line("inspect --quick --fail-on structural image.img").unwrap_err(),
+            UsageError::FailOnWithQuick
+        );
+        // The default threshold is not a request for one, so `--quick` alone still parses.
+        assert!(line("inspect --quick image.img").is_ok());
+        // Nor is an explicit threshold a problem without `--quick`.
+        assert!(line("inspect --fail-on structural image.img").is_ok());
         // And the skip is about writing a tree, so it goes nowhere else.
         for spelling in [
             "extract --to-tar out.tar --skip-privileged image.img",
@@ -1889,6 +2332,14 @@ mod tests {
 
     #[test]
     fn extract_atomic_needs_a_destination_to_rename_into() {
+        match line("extract --strict --to-tar out.tar image.img").expect("parses") {
+            Command::Extract(a) => assert!(a.strict, "--strict reaches the extract"),
+            other => panic!("expected extract, got {other:?}"),
+        }
+        match line("extract --to-tar out.tar image.img").expect("parses") {
+            Command::Extract(a) => assert!(!a.strict, "and is off unless asked for"),
+            other => panic!("expected extract, got {other:?}"),
+        }
         match line("extract --to-tar out.tar --atomic image.img").expect("parses") {
             Command::Extract(a) => {
                 assert_eq!(a.mode, ExtractMode::ToTar(Stream::File("out.tar".into())));

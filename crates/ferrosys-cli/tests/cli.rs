@@ -790,7 +790,11 @@ fn format_writes_the_selected_base_profile() {
         );
         let report = fields(&String::from_utf8_lossy(&ok(&["inspect", path])));
         assert_eq!(
-            report["Filesystem profile"], profile,
+            report["Filesystem family"], "ext",
+            "inspect names the family in the report's head"
+        );
+        assert_eq!(
+            report["Filesystem variant"], profile,
             "inspect labels the {profile} image as {profile}"
         );
 
@@ -1319,8 +1323,10 @@ fn format_applies_the_label_inode_and_reserved_options() {
 
     let report = fields(&String::from_utf8_lossy(&ok(&["inspect", path])));
     assert_eq!(report["Filesystem volume name"], "rootfs");
-    // The writer emits ext4, and inspect labels it as the family its feature words classify to.
-    assert_eq!(report["Filesystem profile"], "ext4");
+    // The writer emits ext4, and inspect labels it as the variant its feature words
+    // classify to, in the report's family-neutral head.
+    assert_eq!(report["Filesystem family"], "ext");
+    assert_eq!(report["Filesystem variant"], "ext4");
     // 5000 spread across two groups, each rounded up to fill its inode-table blocks.
     assert_eq!(report["Inode count"], "5024");
     // floor(65536 blocks * 1.5%), computed exactly, no floating point.
@@ -1388,7 +1394,7 @@ fn inspect_reports_every_group_and_scans_by_default() {
         );
     }
     // The scan ran, and found nothing.
-    assert!(text.contains("no anomalies"));
+    assert!(text.contains("no findings"));
 }
 
 #[test]
@@ -1397,8 +1403,8 @@ fn inspect_groups_survives_a_hostile_group_count() {
     // `blocks_per_group` of one). The group listing must not pre-size a vector from that
     // count: reserving capacity for it would ask for hundreds of gigabytes and abort the
     // process before a single descriptor was read. The descriptor loop grows as real
-    // descriptors are found and stops when the table runs past the image — a clean
-    // image-bad exit, not a crash.
+    // descriptors are found, is bounded above whatever the count claims, and stops where the
+    // image runs out — a clean image-bad exit, not a crash.
     let dir = scratch();
     let image = at(&dir, "fs.img");
     // Small on purpose: the loop reads descriptors until it runs off the end of the
@@ -1424,6 +1430,100 @@ fn inspect_groups_survives_a_hostile_group_count() {
         IMAGE_BAD,
         "a hostile group count is a bad image, not a crash:\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn one_bad_image_extracts_to_the_same_exit_code_whichever_destination_it_is_given() {
+    // The exit code says what kind of failure it was, and the kind cannot depend on where
+    // the output was going: one image that cannot be read is a bad filesystem through
+    // `--to-tar` and must be a bad filesystem through `--to-dir` too. A caller reading 8
+    // from one and 4 from the other would conclude the run was the tool's fault in one case
+    // and the image's in the other, about the same bytes.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "16M", None)), OK);
+
+    // The root inode's type, rewritten to a regular file: the superblock still parses, and
+    // the tree cannot be walked because its root is not a directory. `i_mode` opens the
+    // inode, little-endian, so the high byte carries the type bits.
+    let bad = at(&dir, "bad.img");
+    let mut bytes = std::fs::read(&image).expect("read");
+    let root_inode = inode_table_offset(&bytes) + 256;
+    bytes[root_inode + 1] = 0x81;
+    std::fs::write(&bad, &bytes).expect("write");
+    let path = bad.to_str().expect("a text path");
+
+    let tar = at(&dir, "out.tar");
+    let to_tar = run(&[
+        "extract",
+        path,
+        "--to-tar",
+        tar.to_str().expect("a text path"),
+    ]);
+    let out = at(&dir, "unpacked");
+    let to_dir = run(&[
+        "extract",
+        path,
+        "--to-dir",
+        out.to_str().expect("a text path"),
+    ]);
+
+    assert_eq!(
+        code(&to_tar),
+        IMAGE_BAD,
+        "--to-tar:\n{}",
+        String::from_utf8_lossy(&to_tar.stderr)
+    );
+    assert_eq!(
+        code(&to_dir),
+        code(&to_tar),
+        "--to-dir reports a different kind of failure about the same image:\n{}",
+        String::from_utf8_lossy(&to_dir.stderr)
+    );
+}
+
+#[test]
+fn inspect_groups_is_bounded_by_more_than_the_length_the_image_claims() {
+    // The other half of the same hostile count, and the one a bound on the *image* does not
+    // catch: a file that claims 32 GiB and occupies nothing. Every descriptor offset lands
+    // inside the claimed length, so every read succeeds, and a loop bounded only by that
+    // gathers tens of gigabytes of tuples and renders a string of the same order — from a
+    // file taking up no disk blocks at all.
+    //
+    // So the listing has a ceiling of its own, and a run that reaches it says the listing is
+    // short rather than passing it off as the whole table.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "16M", None)), OK);
+
+    let mut bytes = std::fs::read(&image).expect("read the image");
+    bytes[1024 + 0x04..1024 + 0x08].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[1024 + 0x20..1024 + 0x24].copy_from_slice(&1u32.to_le_bytes());
+    std::fs::write(&image, &bytes).expect("write the image");
+    // Sparse: the length is a claim, and the file still occupies what it did.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
+        .expect("open the image")
+        .set_len(32 << 30)
+        .expect("claim 32 GiB");
+
+    // `--quick` so the scan is not what this measures: the group listing is.
+    let out = run(&[
+        "inspect",
+        "--groups",
+        "--quick",
+        image.to_str().expect("a text path"),
+    ]);
+    assert!(
+        out.status.code().is_some(),
+        "the process exited rather than aborting"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("groups listed; the rest were not read"),
+        "a listing that stopped short says so:\n{stdout}"
     );
 }
 
@@ -1455,20 +1555,32 @@ import json, sys
 doc = json.load(sys.stdin)
 # Every document this tool emits names its shape with the same field, so a consumer
 # reads one key wherever it looks.
-assert doc["schema"] == 1, doc["schema"]
+assert doc["schema"] == 2, doc["schema"]
 assert "version" not in doc, "the envelope field is `schema` in every document"
-sb = doc["superblock"]
-assert sb["uuid"] == "f0e17055-0000-4000-8000-000000000000", sb["uuid"]
+# The head means the same thing whatever family answered, so a consumer that reads only
+# these five fields and the findings never learns what a group descriptor is.
+assert doc["family"] == "ext", doc["family"]
+assert doc["variant"] == "ext4", doc["variant"]
+assert doc["size"] == 64 * 1024 * 1024, doc["size"]
+assert doc["allocation_unit"] == 4096, doc["allocation_unit"]
+assert doc["identifier"] == "f0e17055-0000-4000-8000-000000000000", doc["identifier"]
+assert doc["findings"]["clean"] is True, doc["findings"]
+assert doc["findings"]["findings"] == [], doc["findings"]
+assert doc["findings"]["schema"] == 2, doc["findings"]
+# The body is entirely ext's own, and a later family adds one beside it.
+ext = doc["ext"]
+sb = ext["superblock"]
+assert sb["uuid"] == doc["identifier"], sb["uuid"]
 assert sb["block_size"] == 4096, sb["block_size"]
-assert sb["blocks"] * sb["block_size"] == 64 * 1024 * 1024, sb["blocks"]
+assert sb["blocks"] * sb["block_size"] == doc["size"], sb["blocks"]
 assert sb["created"] == 1700000000, sb["created"]
-feats = doc["features"]
+feats = ext["features"]
 assert "has_journal" in feats["compat"], feats["compat"]
 assert "extent" in feats["incompat"], feats["incompat"]
-assert feats["profile"] == "ext4", feats["profile"]
+# The family's own label lives in the head as `variant`, not twice.
+assert "profile" not in feats, feats
 assert feats["unknown"] == {"compat": 0, "incompat": 0, "ro_compat": 0}, feats["unknown"]
-assert doc["scan"]["clean"] is True and doc["scan"]["anomalies"] == [], doc["scan"]
-groups = doc["groups"]
+groups = ext["groups"]
 assert len(groups) == 1 and groups[0]["group"] == 0, groups
 assert groups[0]["free_inodes"] == sb["free_inodes"], groups
 "#;
@@ -1576,7 +1688,7 @@ fn a_filesystem_another_formatter_wrote_is_not_thereby_bad() {
         // And it was really read, not merely opened: the report describes it.
         let report = String::from_utf8_lossy(&out.stdout);
         assert!(
-            report.contains("Block count:") && report.contains("no anomalies"),
+            report.contains("Block count:") && report.contains("no findings"),
             "the {kind} filesystem was scanned:\n{report}"
         );
     }
@@ -1886,8 +1998,8 @@ fn stat_reports_one_path_with_its_attributes_and_acls() {
         stat["Modified"]
     );
 
-    // An ACL is stored in ext's compact form, which nothing else can read: it is decoded to
-    // the text `getfacl` prints, or it is not really reported at all.
+    // An ACL comes back as bytes no person reads: it is decoded to the text `getfacl`
+    // prints, or it is not really reported at all.
     let report = String::from_utf8(ok(&["extract", path, "--stat", "/home"])).expect("text");
     let stat = fields(&report);
     assert_eq!(stat["Type"], "directory");
@@ -1930,7 +2042,7 @@ fn the_json_documents_carry_attributes_and_both_spellings_of_a_mode() {
     let judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["schema"] == 1, doc["schema"]
+assert doc["schema"] == 2, doc["schema"]
 by_path = {e["path"]: e for e in doc["entries"]}
 h = by_path["/etc/hostname"]
 assert h["mode"] == 0o644 and h["mode_octal"] == "0644", h
@@ -1955,7 +2067,7 @@ assert "xattrs" not in by_path["/etc"], by_path["/etc"]
     let stat_judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["schema"] == 1, doc["schema"]
+assert doc["schema"] == 2, doc["schema"]
 e = doc["entry"]
 assert e["path"] == "/etc/hostname" and e["mode_octal"] == "0644", e
 assert e["crtime"] == e["mtime"], e
@@ -2033,6 +2145,53 @@ fn a_read_is_bounded_by_the_cap_it_is_given() {
     ]);
     assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(out.stdout.len(), 5000);
+}
+
+#[test]
+fn a_read_is_bounded_even_when_no_cap_is_given() {
+    // The scenario the cap exists for was the out-of-the-box behavior: an inode declaring a
+    // size nothing structural bounds, and an extraction writing that many bytes because a
+    // hole reads back as zeros. The library's default is no cap, which is right for a caller
+    // that knows what it opened; this tool is most often pointed at an image someone else
+    // produced, so it derives one from the image's own length.
+    if !available("debugfs") || !available("e2fsck") {
+        return;
+    }
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "16M", Some(&archive))), OK);
+    let path = image.to_str().expect("a text path");
+
+    // A terabyte declared by a sixteen-mebibyte image: legal on its face, since a sparse
+    // file's holes cost no storage, and past sixteen times what the image holds. `debugfs`
+    // recomputes the inode's checksum as the kernel would, so the image is still sound —
+    // which is the point, since a refusal that only fires on a damaged image would prove
+    // nothing about this one.
+    let out = tool("debugfs")
+        .args(["-w", "-R", "sif /etc/big size 1099511627776"])
+        .arg(&image)
+        .output()
+        .expect("spawn debugfs");
+    assert!(out.status.success(), "debugfs did not run");
+
+    let out = run(&["extract", path, "--cat", "/etc/big"]);
+    assert_ne!(
+        code(&out),
+        OK,
+        "a file whose declared size dwarfs the image must not be written out by default"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "no bytes are written before the refusal"
+    );
+    // And the message says where the cap came from, so a run stopped by a default the
+    // invocation did not name has somewhere to go.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--max-file-bytes"),
+        "the refusal names what raises the cap: {stderr}"
+    );
 }
 
 #[test]
@@ -2196,7 +2355,7 @@ fn atomic_leaves_the_destination_alone_when_the_walk_fails() {
 /// A filesystem holding a socket, which no archive can express — built through the
 /// library, since no archive could describe it to `format --from-tar` either.
 fn build_image_with_socket(path: &Path) {
-    use ferrosys::ext::ondisk::Timestamp;
+    use ferrosys::ext::Timestamp;
     use ferrosys::ext::{FormatOptions, GrowReservation, Metadata, TreeBuilder, format_to};
 
     let time = Timestamp::from_secs(1_700_000_000);
@@ -2236,7 +2395,7 @@ fn a_filesystem_inside_a_larger_image_is_read_at_its_offset() {
     // With it, the filesystem is there, sound, and readable.
     let report = String::from_utf8(ok(&["inspect", "--offset", "1M", path])).expect("text");
     assert!(report.contains(UUID));
-    assert!(report.contains("no anomalies"));
+    assert!(report.contains("no findings"));
     assert_eq!(
         ok(&["extract", "--offset", "1M", path, "--cat", "/etc/hostname"]),
         b"ferrosys\n"
@@ -2531,4 +2690,457 @@ fn identity_refuses_a_uuid_that_seeds_the_checksums_and_leaves_the_image_alone()
     if available("e2fsck") {
         e2fsck_clean(&image);
     }
+}
+
+// -- the FAT family -------------------------------------------------------------------
+//
+// The binary compiles in every family the library has, so an image of any of them is one
+// this tool identifies, describes, and reads back. These gates are the second family's
+// half of that claim, and `fsck.fat` is the foreign judge for the images they write —
+// the same contract `e2fsck_clean` carries above.
+
+/// The `dosfstools` release the FAT gates are written against, mirroring the pin in
+/// `ferrosys/tests/util/mod.rs`.
+const DOSFSTOOLS_VERSION: &str = "4.2";
+
+/// Whether `fsck.fat` is runnable and is the pinned version.
+///
+/// `fsck.fat` prints its banner only while failing, so the probe points it at a device it
+/// certainly cannot check and reads the banner off the complaint.
+fn fsck_fat_available() -> bool {
+    let probe = tool("fsck.fat").args(["-n", "/dev/null"]).output();
+    let Ok(probe) = probe else {
+        assert!(
+            std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
+            "gate requires `fsck.fat` but it was not found on PATH"
+        );
+        eprintln!(
+            "\n!!! SKIPPING gate: `fsck.fat` not found on PATH — \
+             this was NOT verified against a foreign implementation !!!\n"
+        );
+        return false;
+    };
+    let banner = format!(
+        "{}{}",
+        String::from_utf8_lossy(&probe.stdout),
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let version = banner
+        .split_whitespace()
+        .skip_while(|t| *t != "fsck.fat")
+        .nth(1)
+        .unwrap_or("unknown");
+    if version != DOSFSTOOLS_VERSION {
+        assert!(
+            std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
+            "the gates pin dosfstools {DOSFSTOOLS_VERSION} as their oracle, \
+             but `fsck.fat` reports {version}"
+        );
+        eprintln!(
+            "note: `fsck.fat` is version {version}, not the {DOSFSTOOLS_VERSION} the gates \
+             are written against"
+        );
+    }
+    true
+}
+
+/// Check a FAT image with `fsck.fat -n`, which answers no to every repair — so the image
+/// is never modified and the exit status is a verdict rather than a report of repairs.
+fn fsck_fat_clean(image: &Path) {
+    let out = tool("fsck.fat")
+        .arg("-n")
+        .arg(image)
+        .output()
+        .expect("fsck.fat runs");
+    assert!(
+        out.status.success(),
+        "fsck.fat exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A serial number in the form the tool prints and reads.
+const SERIAL: &str = "1A2B-3C4D";
+
+/// Build the ESP-shaped tree the FAT gates format: a boot payload under `/EFI/BOOT`, and
+/// a file at the root.
+///
+/// Every mode is what a read of a FAT image fills in — `0755` for a directory and `0644`
+/// for a file — so nothing about them is lost. The times are the host's, and those are
+/// what the gates accept the loss of.
+fn esp_tree(dir: &tempfile::TempDir) -> PathBuf {
+    let root = dir.path().join("tree");
+    std::fs::create_dir_all(root.join("EFI/BOOT")).expect("make the tree");
+    std::fs::write(root.join("EFI/BOOT/BOOTX64.EFI"), b"MZ payload").expect("write the payload");
+    std::fs::write(root.join("readme.txt"), b"hello\n").expect("write the file");
+    let paths = [
+        root.clone(),
+        root.join("EFI"),
+        root.join("EFI/BOOT"),
+        root.join("EFI/BOOT/BOOTX64.EFI"),
+        root.join("readme.txt"),
+    ];
+    for path in &paths {
+        let mode = if path.is_dir() { 0o755 } else { 0o644 };
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .expect("set the mode");
+    }
+    // The two losses this tree exists to exercise are stated here rather than left to the
+    // host to supply.
+    //
+    // A change time is lost only where it differs from the modification time, and the
+    // difference `set_permissions` leaves behind is however much of it the kernel's
+    // timestamp granularity records. On a kernel with fine-grained change times that is
+    // tens of microseconds and the loss is reported; on one without, the chmod lands in the
+    // same tick as the write, the two times are equal to the nanosecond, and this tree
+    // loses nothing at all -- so a build that must refuse succeeds and a report that must
+    // name the change time does not. Naming the modification time outright puts it years
+    // before the change time on any kernel.
+    //
+    // The second it names is odd, which FAT's two-second field cannot hold, so the
+    // precision is lost as deliberately as the change time is. It sits one second past
+    // `TIME`, the instant the volume itself is stamped with.
+    for path in &paths {
+        let status = std::process::Command::new("touch")
+            .args(["-d", "@1700000001"])
+            .arg(path)
+            .status()
+            .expect("run touch");
+        assert!(
+            status.success(),
+            "set the modification time on {}",
+            path.display()
+        );
+    }
+    root
+}
+
+/// Format the ESP tree as a FAT32 volume, accepting the two losses a host tree always
+/// takes: the change time, which the format has no field for, and the precision of the
+/// times it does record.
+fn format_esp(image: &Path, tree: &Path) -> Output {
+    run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "fat32",
+        "--volume-id",
+        SERIAL,
+        "--time",
+        TIME,
+        "--label",
+        "ESP",
+        "--owner",
+        "0:0",
+        "--accept-loss",
+        "change-time,time-precision",
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+        image.to_str().expect("a text path"),
+    ])
+}
+
+#[test]
+fn an_auto_size_fits_a_fat_volume_and_slack_leaves_room_in_it() {
+    let dir = scratch();
+    let tree = esp_tree(&dir);
+
+    let fit = |image: &Path, slack: Option<&str>| {
+        let mut argv = vec![
+            "format",
+            "--size",
+            "auto",
+            "-t",
+            "fat32",
+            "--volume-id",
+            SERIAL,
+            "--time",
+            TIME,
+            "--owner",
+            "0:0",
+            "--accept-loss",
+            "change-time,time-precision",
+            "--from-dir",
+            tree.to_str().expect("a text path"),
+        ];
+        if let Some(pct) = slack {
+            argv.extend(["--slack", pct]);
+        }
+        argv.push(image.to_str().expect("a text path"));
+        let out = run(&argv);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        fields(&String::from_utf8_lossy(&out.stderr))
+    };
+
+    // Sized to the tree rather than to a number the caller guessed.
+    let tight_img = at(&dir, "tight.img");
+    let tight = fit(&tight_img, None);
+    let sectors: u64 = tight["Total sectors"].parse().expect("a sector count");
+    let sector: u64 = tight["Bytes per sector"].parse().expect("a sector size");
+    let clusters: u64 = tight["Clusters"].parse().expect("a cluster count");
+    let free: u64 = tight["Free clusters"].parse().expect("a free count");
+
+    // The image on disk is the size the search settled on, and a fitted volume is exactly
+    // its own filesystem: nothing was rounded into it afterwards and nothing left over.
+    assert_eq!(
+        std::fs::metadata(&tight_img)
+            .expect("the image exists")
+            .len(),
+        sectors * sector
+    );
+
+    // A small tree lands on FAT32's own floor — the type needs 65525 clusters whatever it
+    // holds — so it is already almost entirely free, and a share cannot make it grow.
+    assert_eq!(clusters, 65_525, "the smallest FAT32 there is");
+    assert!(free > clusters - 1_000, "and nearly all of it is free");
+
+    // Room named in bytes is what does make it grow, because it is a claim the floor does
+    // not already satisfy.
+    let roomy_img = at(&dir, "roomy.img");
+    let roomy = fit(&roomy_img, Some("200M"));
+    let roomy_clusters: u64 = roomy["Clusters"].parse().expect("a cluster count");
+    let roomy_free: u64 = roomy["Free clusters"].parse().expect("a free count");
+    assert!(
+        roomy_clusters > clusters,
+        "asking for room produces a larger volume: {roomy_clusters} against {clusters}"
+    );
+    let roomy_cluster_bytes: u64 = roomy["Bytes per cluster"].parse().expect("a cluster size");
+    assert!(
+        roomy_free * roomy_cluster_bytes >= 200 << 20,
+        "200 MiB is free: {roomy_free} clusters of {roomy_cluster_bytes}"
+    );
+    assert!(free < roomy_free, "and the tight one leaves less");
+
+    // Both are volumes a foreign checker accepts. A fitted volume is the tightest one this
+    // tool writes, which is where an off-by-one in the search would show.
+    if fsck_fat_available() {
+        fsck_fat_clean(&tight_img);
+        fsck_fat_clean(&roomy_img);
+    }
+}
+
+#[test]
+fn a_fat_volume_the_tool_wrote_is_one_a_foreign_checker_accepts() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    let out = format_esp(&image, &tree);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The summary names what the volume could not carry, in the words `--accept-loss`
+    // reads — so a property the report shows is one that can be typed back in.
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("change-time"), "{said}");
+    assert!(said.contains("Volume serial number:   1A2B-3C4D"), "{said}");
+    // The label as it was given, not as the eleven-byte field pads it.
+    assert!(said.contains("Volume label:           ESP\n"), "{said}");
+
+    if fsck_fat_available() {
+        fsck_fat_clean(&image);
+    }
+}
+
+#[test]
+fn a_fat_volume_is_detected_described_and_read_back_by_the_binary() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    assert_eq!(code(&format_esp(&image, &tree)), OK);
+    let path = image.to_str().expect("a text path");
+
+    // `detect` names the type, not just the family: the word a caller acts on, and the
+    // same word `-t` takes. Answering `unrecognized` here is the failure this whole
+    // workstream exists to end.
+    assert_eq!(ok(&["detect", path]), b"fat32\n");
+
+    // `inspect` describes it through the same envelope an ext image gets: a head that
+    // means the same thing for both, then this family's own body.
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Filesystem family:          fat"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem variant:         fat32"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem identifier:      1A2B-3C4D"),
+        "{report}"
+    );
+    // The body is FAT's own vocabulary, and none of ext's.
+    assert!(report.contains("Bytes per cluster:"), "{report}");
+    assert!(report.contains("Allocation tables:"), "{report}");
+    assert!(!report.contains("Block groups:"), "{report}");
+
+    // ...and the whole image was scanned, so this is a verdict rather than a description.
+    assert!(report.contains("no findings"), "{report}");
+
+    // `extract` reads the tree back out through the shared extraction surface.
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    for name in ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI", "/readme.txt"] {
+        assert!(listing.contains(name), "{name} is missing from\n{listing}");
+    }
+    assert_eq!(ok(&["extract", path, "--cat", "/readme.txt"]), b"hello\n");
+}
+
+#[test]
+fn a_fat_report_omits_what_the_format_has_no_answer_for() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    assert_eq!(code(&format_esp(&image, &tree)), OK);
+    let path = image.to_str().expect("a text path");
+
+    let json =
+        String::from_utf8(ok(&["extract", path, "--stat", "/readme.txt", "--json"])).expect("text");
+    // FAT has no inode numbers and no second name for a node. The fields are absent
+    // rather than null or zero: a zero would be this tool answering a question the format
+    // never asked.
+    assert!(!json.contains("\"inode\""), "{json}");
+    assert!(!json.contains("\"links\""), "{json}");
+    // What the report *did* fill in is named, in the spelling `--accept-loss` reads.
+    assert!(json.contains("\"synthesized\":["), "{json}");
+    assert!(json.contains("\"ownership\""), "{json}");
+    assert!(json.contains("\"change-time\""), "{json}");
+
+    // The same two fields are present on an ext image, and its synthesized list is empty:
+    // an ext inode records every property a report names.
+    let ext_image = at(&dir, "ext.img");
+    assert_eq!(code(&format(&ext_image, "64M", None)), OK);
+    let json = String::from_utf8(ok(&[
+        "extract",
+        ext_image.to_str().unwrap(),
+        "--stat",
+        "/",
+        "--json",
+    ]))
+    .expect("text");
+    assert!(json.contains("\"inode\":2"), "{json}");
+    assert!(json.contains("\"links\":"), "{json}");
+    assert!(json.contains("\"synthesized\":[]"), "{json}");
+}
+
+#[test]
+fn an_option_of_one_family_is_refused_for_another_rather_than_ignored() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let path = image.to_str().expect("a text path");
+
+    // A journal is ext's, and a FAT volume has none. Refused by name: a run that was
+    // handed a volume built differently from the one it asked for would never know.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "fat32",
+        "--volume-id",
+        SERIAL,
+        "--time",
+        TIME,
+        "--journal",
+        "4096",
+        path,
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--journal"), "{said}");
+    assert!(said.contains("ext family"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+
+    // ...and the reporting side of the same rule: a block group is how an ext filesystem
+    // divides itself, so `--groups` on a FAT volume is a question with no answer.
+    let tree = esp_tree(&dir);
+    assert_eq!(code(&format_esp(&image, &tree)), OK);
+    let out = run(&["inspect", "--groups", path]);
+    assert_eq!(code(&out), OPERATIONAL);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--groups does not apply"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_fat_build_refuses_what_it_would_lose_until_it_is_told_it_may() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    let path = image.to_str().expect("a text path");
+    let tree_path = tree.to_str().expect("a text path");
+
+    // The same line without `--accept-loss`: the host tree's change times have nowhere to
+    // go, and the build says so rather than dropping them.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "fat32",
+        "--volume-id",
+        SERIAL,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        tree_path,
+        path,
+    ]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("change time"), "{said}");
+    assert!(!image.exists(), "a refused build wrote nothing");
+
+    // A symbolic link is a loss of a different kind, and accepting the times does not
+    // accept it: the acknowledgement names properties for exactly this reason.
+    std::os::unix::fs::symlink("readme.txt", tree.join("link")).expect("make a symlink");
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "fat32",
+        "--volume-id",
+        SERIAL,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--accept-loss",
+        "change-time,time-precision",
+        "--from-dir",
+        tree_path,
+        path,
+    ]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("/link"), "{said}");
+
+    // Naming that one too is what lets it through, and the link is simply not there.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "fat32",
+        "--volume-id",
+        SERIAL,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--accept-loss",
+        "change-time,time-precision,kind",
+        "--from-dir",
+        tree_path,
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    assert!(!listing.contains("/link"), "{listing}");
 }

@@ -8,9 +8,9 @@
 //!
 //! The walk carries the fidelity an image builder needs: mode bits, ownership, access,
 //! change, and modification times to the nanosecond, symlinks, device and FIFO nodes,
-//! sockets, hard links, and extended attributes — including a POSIX ACL, which is
-//! translated from the version-2 form the syscall boundary speaks into the compact form
-//! ext stores (see [`crate::acl`]).
+//! sockets, hard links, and extended attributes — including a POSIX ACL, which is carried
+//! in the version-2 form the syscall boundary speaks and validated on the way through (see
+//! [`crate::acl`]).
 //!
 //! A regular file's contents become a [`FileRange`] naming the file on the host, read only
 //! when that file is placed, so a format's peak memory is the largest single file rather
@@ -61,8 +61,10 @@ mod sink;
 pub use sink::{DirectorySink, ExtractReport};
 
 use crate::acl::Acl;
-use crate::ondisk::{Timestamp, Xattr};
+use crate::escape::{printable, printable_path};
 use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry};
+use crate::time::Timestamp;
+use crate::xattr::Xattr;
 
 /// A failure walking a host directory tree.
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +72,7 @@ use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceE
 pub enum HostError {
     /// A path could not be read: opening it, listing it, reading its metadata, reading a
     /// symlink's target, or reading its extended attributes.
-    #[error("{}: {source}", path.display())]
+    #[error("{}: {source}", printable_path(.path))]
     #[non_exhaustive]
     Io {
         /// The offending path on the host.
@@ -80,21 +82,24 @@ pub enum HostError {
         source: std::io::Error,
     },
     /// The root of the walk is not a directory.
-    #[error("{}: not a directory", path.display())]
+    #[error("{}: not a directory", printable_path(.path))]
     #[non_exhaustive]
     NotADirectory {
         /// The path the walk was asked to start from.
         path: PathBuf,
     },
     /// A path is of a kind no filesystem entry represents.
-    #[error("{}: has a file type that cannot be written to a filesystem", path.display())]
+    #[error(
+        "{}: has a file type that cannot be written to a filesystem",
+        printable_path(.path)
+    )]
     #[non_exhaustive]
     Unsupported {
         /// The offending path on the host.
         path: PathBuf,
     },
-    /// A stored POSIX ACL could not be translated into the form ext stores.
-    #[error("{}: has an invalid ACL: {source}", path.display())]
+    /// A `system.posix_acl_*` attribute on the host holds bytes that are not a POSIX ACL.
+    #[error("{}: has an invalid ACL: {source}", printable_path(.path))]
     #[non_exhaustive]
     Acl {
         /// The offending path on the host.
@@ -103,19 +108,42 @@ pub enum HostError {
         #[source]
         source: crate::acl::AclError,
     },
+    /// A path's extended attributes changed faster than they could be read.
+    ///
+    /// Reading one means asking the kernel for its size and then for that many bytes, and a
+    /// value that grew in between is asked for again. A path whose attributes keep changing
+    /// across every attempt is a tree being edited while it is walked, which is a failure of
+    /// the tree rather than of the host: what such a walk would record is neither the tree it
+    /// started from nor the one it ended at. It is distinct from [`Io`](Self::Io) so a caller
+    /// can tell a tree to settle and walk again apart from a fault it can do nothing about.
+    #[error(
+        "{}: the {} kept changing while it was read, across {attempts} attempts",
+        printable_path(.path),
+        unstable_subject(.name)
+    )]
+    #[non_exhaustive]
+    UnstableXattrs {
+        /// The offending path on the host.
+        path: PathBuf,
+        /// The attribute whose value kept changing, or `None` when it was the list of names
+        /// itself.
+        name: Option<Vec<u8>>,
+        /// How many times the read was attempted before it was given up on.
+        attempts: usize,
+    },
     /// The filesystem being written out could not be read.
     #[error(transparent)]
     #[non_exhaustive]
     Read {
         /// The failure the reader reported.
-        source: crate::read::ReadError,
+        source: crate::tree::TreeError,
     },
     /// The directory an extraction is to write into already holds something.
     ///
     /// An extraction states what the filesystem holds, so a name already in the destination
     /// is an entry that cannot be created — discovered part-way through, with the tree half
     /// written. Refusing before anything is written is the failure a caller can act on.
-    #[error("{}: is not empty", path.display())]
+    #[error("{}: is not empty", printable_path(.path))]
     #[non_exhaustive]
     NotEmpty {
         /// The destination directory.
@@ -128,15 +156,84 @@ pub enum HostError {
     /// holds reaches this: it is what makes an image an input rather than an instruction.
     #[error(
         "{}: is a name that cannot be written into a directory",
-        String::from_utf8_lossy(.path)
+        printable(.path)
     )]
     #[non_exhaustive]
     HostileName {
         /// The offending path inside the filesystem.
         path: Vec<u8>,
     },
+    /// An entry arrived before the directory that holds it.
+    ///
+    /// Every family's walk emits a parent before its children, which is what lets an
+    /// extraction hold one open handle per directory on the current path and create each
+    /// name through the handle for its own parent. An entry whose parent is not the
+    /// directory currently open is a walk that did not keep that order, and writing it
+    /// anyway would create it in whichever directory happens to be on top of the stack.
+    ///
+    /// Nothing in this crate's readers produces it — it is checked rather than assumed
+    /// because of what would follow if it were ever wrong.
+    #[error(
+        "{}: arrived before the directory that holds it, so there is no directory to \
+         create it in",
+        printable(.path)
+    )]
+    #[non_exhaustive]
+    OutOfOrder {
+        /// The path inside the filesystem whose parent was not the directory being written.
+        path: Vec<u8>,
+    },
+    /// More directories are waiting for their metadata than this extraction will hold open
+    /// at once.
+    ///
+    /// A directory whose recorded mode denies its owner search permission keeps its handle
+    /// until the walk is over, because applying that mode would close it to the walk still
+    /// going on. Which directories those are is the *image's* choice, so an image whose
+    /// directories are all `0o600` asks for one open handle per directory in the tree — and
+    /// about eleven hundred of them, four or five mebibytes of image, passes the default
+    /// `RLIMIT_NOFILE`. What follows is worse than the stop: the deferred directories never
+    /// get their mode or their owner, so the tree is left half written, which is the failure
+    /// the deferral was introduced to remove.
+    ///
+    /// So the wait has a ceiling, and reaching it is a typed refusal that leaves the
+    /// destination to the caller rather than a descriptor exhaustion part-way through.
+    #[error(
+        "more than {limit} directories are waiting for their metadata: this filesystem \
+         defers a directory whose mode denies its owner search permission, and holds its \
+         handle until the walk is over"
+    )]
+    #[non_exhaustive]
+    TooManyDeferredDirectories {
+        /// The most directories one extraction defers.
+        limit: usize,
+    },
+    /// This host will not hold this extended attribute on a node of this kind, whatever
+    /// privilege the process has.
+    ///
+    /// The kernel restricts two attributes by the *type* of what they are set on rather than
+    /// by who is setting them: a `user.*` attribute is refused on anything that is not a
+    /// regular file or a directory, and a default POSIX ACL is refused on anything that is
+    /// not a directory. Both come back as the errno a missing privilege uses, and neither is
+    /// one — running as root fails identically. A filesystem that records no such rule can
+    /// hold either combination perfectly well, so an image carrying one is not malformed;
+    /// this host simply has nowhere to put it.
+    ///
+    /// [`DirectorySink::skip_privileged`] records it as a dropped attribute instead.
+    #[error(
+        "{}: this host will not hold {} on a node of this kind, whatever privilege the \
+         process has",
+        printable(.path),
+        printable(.name)
+    )]
+    #[non_exhaustive]
+    UnsupportedAttribute {
+        /// The entry the attribute belongs to.
+        path: Vec<u8>,
+        /// The attribute's name.
+        name: Vec<u8>,
+    },
     /// Reproducing an entry needs a privilege this process does not have.
-    #[error("{}: {what}", String::from_utf8_lossy(.path))]
+    #[error("{}: {what}", printable(.path))]
     #[non_exhaustive]
     Unprivileged {
         /// The offending path inside the filesystem.
@@ -148,7 +245,7 @@ pub enum HostError {
     /// "leave this one alone", so there is no call that sets it.
     #[error(
         "{}: records owner {uid}:{gid}, which cannot be set",
-        String::from_utf8_lossy(.path)
+        printable(.path)
     )]
     #[non_exhaustive]
     UnrepresentableOwner {
@@ -163,8 +260,8 @@ pub enum HostError {
     #[error(
         "{}: is the same directory as {} — walking it again would write that subtree \
          into the image a second time, and a mount of an ancestor would never end",
-        path.display(),
-        first.display()
+        printable_path(.path),
+        printable_path(.first)
     )]
     #[non_exhaustive]
     RepeatedDirectory {
@@ -173,6 +270,15 @@ pub enum HostError {
         /// The path the directory was already reached by.
         first: PathBuf,
     },
+}
+
+/// What kept changing, for [`HostError::UnstableXattrs`]'s message: one named attribute's
+/// value, or the list of names itself.
+fn unstable_subject(name: &Option<Vec<u8>>) -> String {
+    match name {
+        Some(name) => format!("extended attribute {}", printable(name)),
+        None => "list of extended attributes".to_string(),
+    }
 }
 
 /// A [`Source`] that yields the entries walked from a directory on the host.
@@ -184,8 +290,8 @@ pub enum HostError {
 /// # Example
 ///
 /// ```no_run
-/// use ferrosys::ext::{DirectorySource, FormatOptions, format_to};
-/// use ferrosys::ext::ondisk::Timestamp;
+/// use ferrosys::{DirectorySource, Timestamp};
+/// use ferrosys::ext::{FormatOptions, format_to};
 ///
 /// let time = Timestamp::from_secs(1_700_000_000);
 /// // A build running as an ordinary user wants the image owned by root, not by itself.
@@ -202,7 +308,11 @@ impl DirectorySource {
     /// Walk the directory tree at `root` into a source.
     ///
     /// Symlinks are recorded as symlinks and never followed, so a link pointing outside
-    /// the tree is written as the link it is. Every directory below `root` is descended,
+    /// the tree is written as the link it is — and that holds of what the *format* reads as
+    /// well as of what the walk records: a file's bytes are read at placement time, by a
+    /// name, and that open does not follow a link either. A local writer replacing a staged
+    /// name with a link between the walk and the placement gets an error rather than the
+    /// target's bytes in the image. Every directory below `root` is descended,
     /// including one on another mounted filesystem — but each is descended once: two paths
     /// naming a single directory, which a bind mount produces, is
     /// [`HostError::RepeatedDirectory`] rather than a second copy of that subtree in the
@@ -329,9 +439,8 @@ impl DirectorySource {
     /// This makes a walked entry's times what [`Metadata::new`] gives for that entry's
     /// modification time, so one tree walks to one image however many times it has been
     /// read or restaged. It is the clamp for a build that needs reproducible bytes and
-    /// keeps per-file modification times;
-    /// [`FormatOptions::fixed_time`](crate::ext::FormatOptions::fixed_time) is the clamp
-    /// for one that forces every inode to a single time instead.
+    /// keeps per-file modification times; a family's own `fixed_time` is the clamp for one
+    /// that forces every inode to a single time instead.
     ///
     /// The creation time is derived from the modification time by the model, so it follows
     /// without being named here.
@@ -363,7 +472,8 @@ impl Source for DirectorySource {
     }
 }
 
-/// Attach a path to an I/O failure, so every message names what could not be read.
+/// Attach a path to an I/O failure, so every message names the file it concerns. Both
+/// directions use it: a walk names what could not be read, a sink what could not be written.
 fn io_at(path: &Path) -> impl Fn(std::io::Error) -> HostError + '_ {
     move |source| HostError::Io {
         path: path.to_path_buf(),
@@ -434,10 +544,10 @@ fn metadata_of(meta: &std::fs::Metadata) -> Metadata {
 }
 
 /// One host timestamp. A nanosecond field outside its range is a value no filesystem
-/// produces; it is clamped rather than allowed to reach the on-disk encoding, which holds
-/// thirty bits of it.
+/// produces; it is clamped to the nearest end of that range rather than allowed to reach the
+/// on-disk encoding, which holds thirty bits of it.
 fn time_of(secs: i64, nanos: i64) -> Timestamp {
-    let nanos = u32::try_from(nanos).unwrap_or(0).min(999_999_999);
+    let nanos = nanos.clamp(0, 999_999_999) as u32;
     Timestamp { secs, nanos }
 }
 
@@ -467,16 +577,16 @@ fn xattrs_of(host_path: &Path) -> Result<Vec<Xattr>, HostError> {
             // carried, which is what the tree now holds.
             continue;
         };
-        let value = if name == Acl::ACCESS_NAME || name == Acl::DEFAULT_NAME {
-            Acl::decode_xattr_v2(&value)
-                .map_err(|source| HostError::Acl {
-                    path: host_path.to_path_buf(),
-                    source,
-                })?
-                .encode()
-        } else {
-            value
-        };
+        // An ACL travels in the form the host handed over, which is the form every boundary
+        // speaks. It is parsed anyway: a value the kernel cannot mean is worth refusing here,
+        // where the path that holds it is still in hand, rather than at whichever family's
+        // edge eventually narrows it.
+        if name == Acl::ACCESS_NAME || name == Acl::DEFAULT_NAME {
+            Acl::decode(&value).map_err(|source| HostError::Acl {
+                path: host_path.to_path_buf(),
+                source,
+            })?;
+        }
         xattrs.push(Xattr { name, value });
     }
     // The kernel lists attributes in the order the filesystem holds them, which is not a
@@ -522,9 +632,11 @@ fn list_xattrs(host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
             Err(e) => return Err(io_at(host_path)(e.into())),
         }
     }
-    Err(io_at(host_path)(std::io::Error::other(
-        "the extended attributes kept changing while they were being read",
-    )))
+    Err(HostError::UnstableXattrs {
+        path: host_path.to_path_buf(),
+        name: None,
+        attempts: XATTR_ATTEMPTS,
+    })
 }
 
 /// One extended attribute's value, or `None` if it is gone by the time it is read.
@@ -558,9 +670,11 @@ fn get_xattr(host_path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>, HostError
             Err(e) => return Err(io_at(host_path)(e.into())),
         }
     }
-    Err(io_at(host_path)(std::io::Error::other(
-        "an extended attribute kept changing while it was being read",
-    )))
+    Err(HostError::UnstableXattrs {
+        path: host_path.to_path_buf(),
+        name: Some(name.as_bytes().to_vec()),
+        attempts: XATTR_ATTEMPTS,
+    })
 }
 
 /// Whether the failure is the filesystem saying it holds no extended attributes at all.
@@ -610,6 +724,44 @@ mod tests {
         );
         assert_eq!(time_of(5, 2_000_000_000).nanos, 999_999_999);
         assert_eq!(time_of(5, -1).nanos, 0);
+        // Both ends clamp to the end they overran, however far past it the value is: an
+        // over-large field is the last nanosecond of its second and a negative one the
+        // first, rather than either wrapping to the other end.
+        assert_eq!(time_of(5, i64::from(u32::MAX) + 1).nanos, 999_999_999);
+        assert_eq!(time_of(5, i64::MAX).nanos, 999_999_999);
+        assert_eq!(time_of(5, i64::MIN).nanos, 0);
+    }
+
+    #[test]
+    fn a_churning_xattr_names_itself_and_a_churning_list_says_so() {
+        // The two shapes the failure takes. The read that gave up is the one thing a caller
+        // acting on this has to know, so each says which it was rather than both reporting
+        // the path alone.
+        let one = HostError::UnstableXattrs {
+            path: PathBuf::from("/tree/file"),
+            name: Some(b"user.tag".to_vec()),
+            attempts: XATTR_ATTEMPTS,
+        };
+        assert_eq!(
+            one.to_string(),
+            format!(
+                "/tree/file: the extended attribute user.tag kept changing while it was \
+                 read, across {XATTR_ATTEMPTS} attempts"
+            )
+        );
+
+        let all = HostError::UnstableXattrs {
+            path: PathBuf::from("/tree/file"),
+            name: None,
+            attempts: XATTR_ATTEMPTS,
+        };
+        assert_eq!(
+            all.to_string(),
+            format!(
+                "/tree/file: the list of extended attributes kept changing while it was \
+                 read, across {XATTR_ATTEMPTS} attempts"
+            )
+        );
     }
 
     /// The paths a walk produced, in the order it produced them.
@@ -800,8 +952,8 @@ mod tests {
     }
 
     #[test]
-    fn extended_attributes_are_carried_in_name_order_and_an_acl_is_translated() {
-        use crate::acl::{AclEntry, AclQualifier, EXEC, READ, WRITE};
+    fn extended_attributes_are_carried_in_name_order_and_an_acl_keeps_its_boundary_form() {
+        use crate::acl::{AclEntry, AclQualifier};
 
         let dir = tempfile::tempdir().expect("temp dir");
         let file = dir.path().join("ping");
@@ -829,33 +981,34 @@ mod tests {
             })
             .expect("the fallback cannot fail");
 
-        // A stored ACL arrives in the version-2 form the syscall boundary speaks, which is
-        // not the compact form ext stores. It names a user beyond the owner, since an ACL
-        // that says no more than the mode bits do is not stored at all.
+        // A stored ACL arrives in the version-2 form the syscall boundary speaks, and the
+        // walk carries it in that form: narrowing it is the business of whichever family
+        // the entry is eventually written to. It names a user beyond the owner, since an
+        // ACL that says no more than the mode bits do is not stored at all.
         let acl = Acl::new(vec![
             AclEntry {
                 who: AclQualifier::UserObj,
-                perm: READ | WRITE | EXEC,
+                perm: Acl::READ | Acl::WRITE | Acl::EXEC,
             },
             AclEntry {
                 who: AclQualifier::User(1000),
-                perm: READ | WRITE,
+                perm: Acl::READ | Acl::WRITE,
             },
             AclEntry {
                 who: AclQualifier::GroupObj,
-                perm: READ | EXEC,
+                perm: Acl::READ | Acl::EXEC,
             },
             AclEntry {
                 who: AclQualifier::Mask,
-                perm: READ | WRITE | EXEC,
+                perm: Acl::READ | Acl::WRITE | Acl::EXEC,
             },
             AclEntry {
                 who: AclQualifier::Other,
-                perm: READ,
+                perm: Acl::READ,
             },
         ])
         .expect("a well-formed ACL");
-        let v2 = acl.encode_xattr_v2();
+        let v2 = acl.encode();
         let has_acl = set("system.posix_acl_access", &v2).is_ok();
 
         let source = DirectorySource::from_path(dir.path()).expect("walk the tree");
@@ -878,15 +1031,12 @@ mod tests {
                 .iter()
                 .find(|x| x.name == Acl::ACCESS_NAME)
                 .expect("the ACL set on the file");
-            assert_ne!(
-                stored.value, v2,
-                "the version-2 form must not reach the image verbatim"
-            );
             assert_eq!(
-                stored.value,
-                acl.encode(),
-                "it is the compact form ext stores"
+                stored.value, v2,
+                "the walk carries the form the host handed over"
             );
+            // What a family then narrows it to is that family's own test to write; this
+            // module has no business naming one.
         } else {
             eprintln!("SKIPPED: {} holds no POSIX ACL", file.display());
         }

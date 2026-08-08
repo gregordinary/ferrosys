@@ -1,8 +1,9 @@
 //! A small JSON writer: objects, arrays, and the four value kinds this tool emits.
 //!
-//! JSON is built rather than templated, so a value cannot escape its string: every
-//! string goes through [`push_string`], which escapes what the grammar requires and
-//! writes a control byte as a `\u00xx` escape.
+//! JSON is built rather than templated, so a value cannot escape its string: every string
+//! goes through [`push_string`], which escapes what the grammar requires and, beyond it,
+//! every character a terminal acts on rather than shows — so a name out of an image cannot
+//! move or reorder what whoever reads the document sees.
 //!
 //! A filesystem name is a byte string and need not be text, but JSON strings are text.
 //! [`Obj::bytes`] renders a name the way it reads and, when that rendering is not the
@@ -17,29 +18,37 @@ use std::fmt::Write as _;
 ///
 /// A downstream parser depends on the shape, and no signature describes it, so the shape
 /// names its own version — and it is named the same thing in every document the tool emits,
-/// including the library's own scan report (`ext::read::SCAN_SCHEMA_VERSION`), so a consumer
-/// reads one field wherever it looks. The tool's version says what wrote a document; this
-/// says what the document *is*, and the two move independently.
-pub const SCHEMA_VERSION: u64 = 1;
+/// including the library's own findings report (`ferrosys::FINDINGS_SCHEMA_VERSION`), so a
+/// consumer reads one field wherever it looks. The tool's version says what wrote a
+/// document; this says what the document *is*, and the two move independently.
+pub const SCHEMA_VERSION: u64 = 2;
 
-/// Append a JSON string literal for `s`, escaping what the grammar requires.
-pub fn push_string(out: &mut String, s: &str) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+/// One whole document, ready to emit: the object `build` fills, opened with the
+/// [`SCHEMA_VERSION`] field every document leads with and closed by the newline every one
+/// ends in.
+///
+/// Both of those are contract rather than convention — a consumer reads the schema field
+/// wherever it looks, and a document that did not end in a newline would run into whatever
+/// followed it on a stream. Stamping them here makes them properties of the writer instead
+/// of a step each command has to remember.
+pub fn document(build: impl FnOnce(&mut Obj<'_>)) -> String {
+    let mut out = String::new();
+    let mut o = Obj::new(&mut out);
+    o.u64("schema", SCHEMA_VERSION);
+    build(&mut o);
+    o.end();
+    out.push('\n');
+    out
 }
+
+/// Append a JSON string literal for `s`, escaping what the grammar requires and what a
+/// terminal acts on.
+///
+/// This is the library's own [`ferrosys::push_json_string`], not a copy of it: a document
+/// this tool emits and the findings report the library renders into it are read by the same
+/// consumer through the same `jq`, so one escaper writes both and there is nowhere for the
+/// rule to drift to.
+pub use ferrosys::push_json_string as push_string;
 
 /// The lowercase hex of `bytes`, with no separators.
 pub fn hex(bytes: &[u8]) -> String {
@@ -111,6 +120,11 @@ impl<'a> Obj<'a> {
     /// When the rendering is not the bytes themselves, a `<key>_hex` field carries them
     /// exactly. The hex field is absent when it would say nothing new, so its presence
     /// is itself the signal that the name is not text.
+    ///
+    /// A name that *is* text needs no companion even when it holds a character a terminal
+    /// acts on: [`push_string`] writes that character as the `\uXXXX` escape the grammar
+    /// defines, which a parser reads back as the character the name held. The document
+    /// carries the name exactly and nothing acts on it on the way.
     pub fn bytes(&mut self, key: &str, value: &[u8]) {
         let shown = String::from_utf8_lossy(value);
         self.str(key, &shown);
@@ -183,12 +197,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strings_escape_what_the_grammar_requires() {
+    fn every_string_a_document_carries_goes_through_the_escaper() {
+        // The rules and their cases are the library's, and are tested there. What is
+        // asserted here is that this writer puts every string through them: a key, a value,
+        // and an array element alike. A direction override is the sharp case, because it is
+        // valid UTF-8 and category `Cf` rather than a control, so it survives every other
+        // check a document makes and reorders the line for whoever prints it.
         let mut out = String::new();
-        push_string(&mut out, "a\"b\\c\nd\te\u{1}f");
-        // A control byte has no literal form in a JSON string, so it goes out as the
-        // escape the grammar defines for it.
-        assert_eq!(out, r#""a\"b\\c\nd\te\u0001f""#);
+        let mut o = Obj::new(&mut out);
+        o.str("label\u{1b}", "photo\u{202e}gnp.exe");
+        o.strings("features", &["a\u{9b}[31m"]);
+        o.end();
+        assert_eq!(
+            out,
+            r#"{"label\u001b":"photo\u202egnp.exe","features":["a\u009b[31m"]}"#
+        );
     }
 
     #[test]

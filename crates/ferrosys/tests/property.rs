@@ -23,6 +23,8 @@
 //!
 //! [`ModelError`]: ferrosys::ext::ModelError
 
+#![cfg(feature = "ext")]
+
 mod util;
 
 use std::collections::{BTreeMap, HashSet};
@@ -32,13 +34,15 @@ use std::path::Path;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-use ferrosys::ext::acl::{EXEC, READ, WRITE};
-use ferrosys::ext::ondisk::{Inode, Timestamp};
+use ferrosys::Slack;
+use ferrosys::ext::Timestamp;
+use ferrosys::ext::ondisk::{self, Inode};
 use ferrosys::ext::{
-    Acl, AclEntry, AclQualifier, AllocError, Compat, FeatureSet, FormatError, FormatOptions,
-    FormatPlan, GeometryError, GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount,
-    ReadError, Reader, ReservedRatio, RoCompat, Slack, TreeBuilder, format_to,
+    AllocError, Compat, FeatureSet, FormatError, FormatOptions, FormatPlan, GeometryError,
+    GrowReservation, HashSignedness, HashVersion, Incompat, InodeCount, ReadError, Reader,
+    ReservedRatio, RoCompat, TreeBuilder, format_to,
 };
+use ferrosys::{Acl, AclEntry, AclQualifier};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -401,13 +405,13 @@ fn time_sel() -> impl Strategy<Value = TimeSel> {
         1 => Just(0i64),
         // Pre-1970: the signed field goes negative with the epoch bits still zero.
         // The range floor is the on-disk minimum, which is inside 1901.
-        2 => Timestamp::EPOCH_MIN..0,
-        1 => Just(Timestamp::EPOCH_MIN),
+        2 => ondisk::TIME_SECS_MIN..0,
+        1 => Just(ondisk::TIME_SECS_MIN),
         // Either side of 2038: the last second the bare field holds, then the
         // seconds that need a nonzero epoch.
         1 => Just(i64::from(i32::MAX)),
         2 => i64::from(i32::MAX) + 1..i64::from(i32::MAX) + (1i64 << 33),
-        1 => Just(Timestamp::EPOCH_MAX),
+        1 => Just(ondisk::TIME_SECS_MAX),
     ];
     let nanos = prop_oneof![
         3 => Just(0u32),
@@ -657,19 +661,19 @@ fn access_acl(uid: u32) -> Vec<u8> {
     Acl::new(vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE,
+            perm: Acl::READ | Acl::WRITE,
         },
         AclEntry {
             who: AclQualifier::User(uid),
-            perm: READ,
+            perm: Acl::READ,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ,
+            perm: Acl::READ,
         },
         AclEntry {
             who: AclQualifier::Mask,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Other,
@@ -685,15 +689,15 @@ fn default_acl() -> Vec<u8> {
     Acl::new(vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE | EXEC,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Other,
-            perm: READ,
+            perm: Acl::READ,
         },
     ])
     .expect("a valid default ACL")
@@ -1047,7 +1051,7 @@ fn check_round_trip(
     if !report.is_clean() {
         return Err(TestCaseError::fail(format!(
             "a strict scan of a freshly written image found anomalies: {}",
-            report.to_table()
+            report.to_report().to_table()
         )));
     }
 
@@ -1496,6 +1500,203 @@ fn the_compacted_generator_mostly_produces_filesystems_that_fit() {
     assert!(
         fitted * 2 > SAMPLES,
         "only {fitted} of {SAMPLES} generated cases reached a fitted size: the fit \
+         property is close to vacuous"
+    );
+}
+
+// ── The FAT family's fit search ──
+//
+// The ext property above draws from a generator shaped around ext's envelope. FAT's accepted
+// sizes are shaped differently — a type request bounds the cluster count from both ends, and
+// a pinned cluster size splits the domain in two — so this tier draws its own parameters and
+// carries its own yield guard, for the reason the ext one does: a generator that mostly
+// refuses makes a property that mostly returns early, and a tier that mostly returns early
+// asserts nothing.
+
+/// One FAT sizing case: the geometry knobs and the tree to fit into it.
+#[derive(Clone, Debug)]
+struct FatFitSpec {
+    bytes_per_sector: u32,
+    cluster: Option<u32>,
+    request: ferrosys::fat::FatTypeRequest,
+    fats: u32,
+    files: usize,
+    each: usize,
+    slack: Slack,
+}
+
+impl FatFitSpec {
+    fn options(&self) -> ferrosys::fat::FormatOptions {
+        use ferrosys::fat::{ClusterSize, FormatOptions, PlanRequest, Timestamp};
+        let mut plan = PlanRequest::new(0)
+            .bytes_per_sector(self.bytes_per_sector)
+            .fats(self.fats)
+            .fat_type(self.request);
+        if let Some(n) = self.cluster {
+            plan = plan.cluster_size(ClusterSize::Sectors(n));
+        }
+        FormatOptions::new(0x1A2B_3C4D, Timestamp::from_secs(1_426_325_212))
+            .accept_all_loss()
+            .plan(plan)
+    }
+
+    fn tree(&self) -> ferrosys::TreeBuilder {
+        use ferrosys::{Metadata, TreeBuilder};
+        let time = ferrosys::Timestamp::from_secs(1_426_325_212);
+        let mut b = TreeBuilder::new().directory(b"/d".to_vec(), Metadata::new(0o755, time));
+        for i in 0..self.files {
+            b = b.file(
+                format!("/d/f{i:04}").into_bytes(),
+                vec![0x5A; self.each],
+                Metadata::new(0o644, time),
+            );
+        }
+        b
+    }
+}
+
+fn fat_fit_spec() -> impl Strategy<Value = FatFitSpec> {
+    use ferrosys::fat::{FatType, FatTypeRequest};
+    (
+        prop::sample::select(vec![512u32, 1024, 2048, 4096]),
+        prop::option::of(prop::sample::select(vec![1u32, 2, 4, 8, 16, 32, 64, 128])),
+        prop::sample::select(vec![
+            FatTypeRequest::Auto,
+            FatTypeRequest::Exactly(FatType::Fat12),
+            FatTypeRequest::Exactly(FatType::Fat16),
+            FatTypeRequest::Exactly(FatType::Fat32),
+            FatTypeRequest::UndersizedFat32,
+        ]),
+        prop::sample::select(vec![1u32, 2]),
+        1usize..40,
+        0usize..20_000,
+        prop::sample::select(vec![Slack::None, Slack::Bytes(1 << 20), Slack::Share(1500)]),
+    )
+        .prop_map(
+            |(bytes_per_sector, cluster, request, fats, files, each, slack)| FatFitSpec {
+                bytes_per_sector,
+                cluster,
+                request,
+                fats,
+                files,
+                each,
+                slack,
+            },
+        )
+}
+
+/// Whether a refusal is the search reporting that this family accepts no such volume, as
+/// against a defect. A pinned cluster with a pinned type is a narrow domain, and a tree may
+/// genuinely have no volume in it.
+fn fat_refusal_is_a_capacity_answer(e: &ferrosys::fat::FormatError) -> bool {
+    use ferrosys::fat::{FormatError, GeometryError};
+    matches!(
+        e,
+        FormatError::DoesNotFit { .. }
+            | FormatError::Geometry(
+                GeometryError::ClustersAboveMaximum { .. }
+                    | GeometryError::ClustersBelowMinimum { .. }
+                    | GeometryError::NoTypeFits { .. }
+                    | GeometryError::AmbiguousClusterCount { .. }
+                    | GeometryError::VolumeTooLarge { .. }
+                    | GeometryError::ClusterTooLarge { .. }
+                    | GeometryError::ClusterSizeUnsupported { .. }
+            )
+            | FormatError::Model(_)
+    )
+}
+
+proptest! {
+    #![proptest_config(config(24))]
+
+    /// The guarantee, over the parameter space rather than the handful of cases the unit
+    /// tests pin: the volume the search returns holds the tree, and the sector below it does
+    /// not. Both ends are checked by actually planning them.
+    #[test]
+    fn a_fitted_fat_volume_is_the_smallest_that_formats(spec in fat_fit_spec()) {
+        use ferrosys::fat::FormatPlan;
+
+        let options = spec.options();
+        let plan = match FormatPlan::fit(spec.tree(), options, spec.slack) {
+            Ok(plan) => plan,
+            Err(e) if fat_refusal_is_a_capacity_answer(&e) => return Ok(()),
+            Err(e) => panic!("fit refused an in-envelope tree with a non-capacity error: {e}"),
+        };
+
+        // A fitted volume is exactly its own filesystem: the smallest volume holding a tree
+        // has its last cluster used, so it is never inside the range the planner shortens a
+        // volume out of.
+        prop_assert_eq!(plan.volume_bytes(), plan.layout().total_bytes());
+        let l = plan.layout();
+        prop_assert_eq!(
+            u64::from(l.total_sectors) - u64::from(l.first_data_sector),
+            u64::from(l.clusters) * u64::from(l.sectors_per_cluster)
+        );
+
+        let sector = u64::from(l.bytes_per_sector);
+        let bytes = plan.volume_bytes();
+        prop_assert!(FormatPlan::new(spec.tree(), bytes, options).is_ok());
+
+        // The predicate the search closed on is the tree *and* the room asked for, so that
+        // is what the sector below has to fail. `FormatPlan::new` alone would only ask
+        // whether the tree fits, which for a slack-driven size is a different question and a
+        // weaker one.
+        let required = |p: &FormatPlan| -> u64 {
+            let clusters = u64::from(p.layout().clusters);
+            match spec.slack {
+                Slack::Bytes(n) => n.div_ceil(u64::from(p.layout().bytes_per_cluster())),
+                Slack::Share(h) => clusters * u64::from(h) / 10_000,
+                _ => 0,
+            }
+        };
+        prop_assert!(
+            u64::from(plan.free_clusters()) >= required(&plan),
+            "the fitted volume leaves the room that was asked for"
+        );
+        match FormatPlan::new(spec.tree(), bytes - sector, options) {
+            Err(_) => {}
+            Ok(below) => prop_assert!(
+                u64::from(below.free_clusters()) < required(&below),
+                "one sector below the fitted size satisfies the search's own predicate too"
+            ),
+        }
+    }
+}
+
+/// The FAT fit property's own yield guard.
+///
+/// It needs one more than the ext tier does, not less: a pinned type bounds the cluster count
+/// from both ends and a pinned cluster size narrows every band, so this generator refuses far
+/// more often than ext's — and the property returns early on every refusal. Without this,
+/// a change that made most of the space unreachable would make the tier vacuous and green.
+#[test]
+fn the_fat_generator_mostly_produces_volumes_that_fit() {
+    use ferrosys::fat::FormatPlan;
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    const SAMPLES: u32 = 120;
+    let mut runner = TestRunner::deterministic();
+    let strategy = fat_fit_spec();
+    let mut fitted = 0;
+    let mut refused = 0;
+
+    for _ in 0..SAMPLES {
+        let spec = strategy
+            .new_tree(&mut runner)
+            .expect("generate a spec")
+            .current();
+        match FormatPlan::fit(spec.tree(), spec.options(), spec.slack) {
+            Ok(_) => fitted += 1,
+            Err(e) if fat_refusal_is_a_capacity_answer(&e) => refused += 1,
+            Err(e) => panic!("fit refused an in-envelope tree with a non-capacity error: {e}"),
+        }
+    }
+
+    eprintln!("fitted {fitted} of {SAMPLES}, refused {refused}");
+    assert!(
+        fitted * 2 > SAMPLES,
+        "only {fitted} of {SAMPLES} generated cases reached a fitted volume: the FAT fit \
          property is close to vacuous"
     );
 }

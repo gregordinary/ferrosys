@@ -30,23 +30,33 @@
 //!
 //! The handle opens over any [`Read`] + [`Seek`] source at an arbitrary byte offset,
 //! so it reads a filesystem embedded in a larger device or partition image as
-//! readily as a bare one.
+//! readily as a bare one. That embedding is why the filesystem's own block count bounds
+//! every reference before it is followed, separately from the source's length: the bytes
+//! after the final block belong to whatever the image sits in, and a reference reaching
+//! them is out of range however much source there is behind it.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::acl::Acl;
 use crate::csum::{Checksummer, Crc32c};
 use crate::extent::{ExtentNode, MAX_EXTENT_DEPTH, parse_node, tail_offset};
 use crate::feature::{FeatureSet, Incompat, LARGE_FILE_MIN_SIZE, Profile};
+use crate::fidelity::Synthesis;
+use crate::finding::{Coordinate, Family, Finding, FindingReport, Severity};
 use crate::model::ROOT_INO;
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, DIR_TAIL_LEN, DX_CHECKSUM_OFFSET, DX_ENTRY_LEN,
     DX_NODE_COUNT_OFFSET, DX_ROOT_COUNT_OFFSET, DX_TAIL_LEN, DirEntry, EXTENT_ENTRY_SIZE,
     EXTENT_TAIL_LEN, FileType, GOOD_OLD_FIRST_INODE, GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode,
-    InodeFlags, ParseError, SuperBlock, Xattr, decode_device, dx_tail_offset, get_u16, get_u32,
+    InodeFlags, ParseError, SuperBlock, decode_device, dx_tail_offset, get_u16, get_u32,
     orphan_entries_len, parse_block, parse_inline, put_u16, read_dx_entries, read_dx_root_info,
     read_orphan_tail,
 };
+use crate::policy::{Limits, ReadPolicy};
+use crate::source::Metadata;
+use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::xattr::Xattr;
 
 /// The `incompat` features whose on-disk layout this reader interprets. Every one is a
 /// format this crate reads and, where relevant, writes: typed directory entries, extent
@@ -152,10 +162,7 @@ const MAX_LOGICAL_BLOCKS: u64 = 1 << 32;
 /// this crate did not write.
 pub const MAX_SYMLINK_HOPS: u32 = 40;
 
-/// The longest symbolic-link target a resolution will read, matching Linux's `PATH_MAX`.
-/// A link's target is bounded by its block on a well-formed image; this bounds it on one
-/// whose `i_size` claims otherwise, before the bytes are read.
-const MAX_PATH: usize = 4096;
+use crate::policy::MAX_PATH;
 
 /// The fewest bytes one directory record can occupy: the eight-byte header plus a name of
 /// at least one byte, rounded up to the four-byte alignment every `rec_len` obeys.
@@ -197,13 +204,29 @@ fn is_regular(inode: &Inode) -> bool {
 }
 
 /// Whether a directory-entry name is one a real ext4 filesystem could not hold: it
-/// contains a path separator or a NUL. The kernel's `ext4_check_dir_entry` forbids
-/// both, so either marks a crafted or corrupt image. A name carrying `/` traverses out
-/// of its directory (`../../etc/...`); one carrying a NUL ends early at the C-string
-/// boundary a consumer would build a host path against. A walk builds no path from such
-/// a name, and a scan reports it.
+/// is empty, or contains a path separator or a NUL. The kernel's `ext4_check_dir_entry`
+/// forbids the last two, so either marks a crafted or corrupt image. A name carrying `/`
+/// traverses out of its directory (`../../etc/...`); one carrying a NUL ends early at the
+/// C-string boundary a consumer would build a host path against.
+///
+/// The test is applied where bytes become a name — [`read_dir`](Reader::read_dir) — so one
+/// check covers listing, resolution, walking, and every sink a walk feeds. A strict read
+/// refuses ([`ReadError::HostileName`]), a lenient one leaves the entry out, and a
+/// [`scan`](Reader::scan) reports it wherever it sits in the image.
+///
+/// `.` and `..` are not hostile here, unlike in a FAT directory: they are entries an ext4
+/// directory genuinely holds, `resolve` walks `..` through the one the directory carries,
+/// and a listing that omitted them would not be the directory. It is the *walk* that
+/// declines to descend through them, by name, where a path is built.
+///
+/// An empty name is not a name. `DirEntry::read_from` accepts a zero `name_len` beside a
+/// non-zero inode, so a crafted directory holds one — and the path a walk would build from
+/// it is the *directory's own path* with a trailing separator. Two such siblings produce two
+/// entries at identical paths, which contradicts what a walk promises; and an archive writer
+/// renders one as a member ending in `/`, which every tar reader takes for a directory, so
+/// it collides with the real entry of that name and changes its type.
 fn name_is_hostile(name: &[u8]) -> bool {
-    name.contains(&b'/') || name.contains(&0)
+    name.is_empty() || name.contains(&b'/') || name.contains(&0)
 }
 
 /// Whether a symlink stores its target inline in the inode's `i_block` area rather
@@ -243,40 +266,6 @@ fn maps_data(inode: &Inode, block_size: usize) -> bool {
     }
 }
 
-/// How serious a deviation from what this crate emits is, ordered least to most
-/// serious so a policy can set a fatal threshold over it.
-///
-/// The order is the comparison order: `Cosmetic < Conformance < Integrity <
-/// Structural`. [`ReadPolicy::Strict`] is fatal at [`Conformance`](Self::Conformance)
-/// and above.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum Severity {
-    /// Valid and harmless: a representation a conformant reader accepts without
-    /// remark.
-    Cosmetic,
-    /// Valid ext4, but not the form this crate emits.
-    Conformance,
-    /// Parses, but fails its own checksum — the bytes are self-inconsistent.
-    Integrity,
-    /// Cannot be parsed further: a structure the reader must follow is unreadable or
-    /// out of range.
-    Structural,
-}
-
-impl Severity {
-    /// The lowercase name of this severity, for a rendered report.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Severity::Cosmetic => "cosmetic",
-            Severity::Conformance => "conformance",
-            Severity::Integrity => "integrity",
-            Severity::Structural => "structural",
-        }
-    }
-}
-
 /// The subsystem a deviation was found in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
@@ -305,7 +294,7 @@ pub enum Category {
 impl Category {
     /// The lowercase name of this subsystem, for a rendered report.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Category::Superblock => "superblock",
             Category::GroupDescriptor => "group descriptor",
@@ -319,17 +308,6 @@ impl Category {
         }
     }
 }
-
-/// The version of the emitted scan schema — the JSON a report renders and the record
-/// each anomaly renders within it.
-///
-/// The Rust types are pinned by the compiler and by the crate's API snapshot; the
-/// *emitted document* is a contract of its own that neither of those sees, so it carries
-/// a version a consumer can branch on. It changes only when the shape changes: a field
-/// added, renamed, or removed, or a value's spelling altered. The
-/// [SARIF](ScanReport::to_sarif) projection is versioned by SARIF itself and does not
-/// carry this.
-pub const SCAN_SCHEMA_VERSION: u32 = 1;
 
 /// Where in the image a deviation sits. Every field is optional: a deviation carries
 /// only the coordinates that locate it.
@@ -348,13 +326,12 @@ pub struct Location {
 /// A typed deviation from what this crate would emit, carrying its severity, the
 /// subsystem it was found in, where it sits, and a human description.
 ///
-/// This is the structured value; a JSON record, a rendered table, and a SARIF finding are
-/// projections of it. The projections live here rather than at the edge, and deliberately:
-/// a projection written outside this crate would enumerate the fields from outside, where
-/// `#[non_exhaustive]` blocks the exhaustive destructure that keeps it complete — so a
-/// fact learned about a finding would silently stop being reported. Here, adding a field
-/// is a compile error in [`to_json`](Self::to_json), and the emitted shape is pinned by a
-/// golden test and versioned by [`SCAN_SCHEMA_VERSION`].
+/// This is ext's structured value, and it stays ext's: the subsystem is a [`Category`]
+/// rather than a word, and the place is a group, an inode, and a block rather than a byte
+/// offset, because those are what a consumer reasoning about an ext4 image acts on.
+///
+/// Rendering goes through [`to_finding`](Self::to_finding), which projects into the
+/// crate's [`Finding`] — the frame every family shares and every renderer consumes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -370,14 +347,18 @@ pub struct Anomaly {
 }
 
 impl Anomaly {
-    /// Render this anomaly as a single JSON object: `severity`, `category`, a
-    /// `location` holding only the coordinates that are set, and the `detail` string.
-    /// This is a projection of the typed value computed here, not a stored wire
-    /// format.
+    /// Project this anomaly into the crate's family-agnostic [`Finding`], resolving a
+    /// block-addressed location to the byte offset that block sits at under `block_size`.
+    ///
+    /// The coordinates carry ext's own words for what they address, outermost first —
+    /// `group`, then `inode`, then `block` — which is the order a person reads a location
+    /// in. A group or an inode number is not converted to an offset, because where each
+    /// sits depends on the layout rather than on the number alone, so an anomaly located
+    /// only by one of those carries no offset.
     #[must_use]
-    pub fn to_json(&self) -> String {
+    pub fn to_finding(&self, block_size: u32) -> Finding {
         // Destructured exhaustively on purpose: a field added to `Anomaly` is a compile
-        // error here, which forces a decision about the emitted record rather than
+        // error here, which forces a decision about what the projection carries rather than
         // letting a new fact about a finding go silently unreported.
         let Self {
             severity,
@@ -385,192 +366,35 @@ impl Anomaly {
             location,
             detail,
         } = self;
-        let mut out = String::from("{\"severity\":\"");
-        out.push_str(severity.as_str());
-        out.push_str("\",\"category\":\"");
-        out.push_str(category.as_str());
-        out.push_str("\",\"location\":");
-        push_location_json(&mut out, location);
-        out.push_str(",\"detail\":");
-        push_json_string(&mut out, detail);
-        out.push('}');
-        out
-    }
-}
+        let Location {
+            block,
+            group,
+            inode,
+        } = *location;
 
-/// Append a JSON object for a location, emitting only the coordinates that are set.
-fn push_location_json(out: &mut String, loc: &Location) {
-    // Exhaustive on purpose: a coordinate added to `Location` is a compile error here.
-    let Location {
-        block,
-        group,
-        inode,
-    } = *loc;
-    out.push('{');
-    let mut first = true;
-    if let Some(b) = block {
-        push_json_field(out, &mut first, "block", b);
-    }
-    if let Some(g) = group {
-        push_json_field(out, &mut first, "group", u64::from(g));
-    }
-    if let Some(i) = inode {
-        push_json_field(out, &mut first, "inode", u64::from(i));
-    }
-    out.push('}');
-}
+        let mut coordinates: Vec<Coordinate> = Vec::new();
+        if let Some(group) = group {
+            coordinates.push((std::borrow::Cow::Borrowed("group"), u64::from(group)));
+        }
+        if let Some(inode) = inode {
+            coordinates.push((std::borrow::Cow::Borrowed("inode"), u64::from(inode)));
+        }
+        if let Some(block) = block {
+            coordinates.push((std::borrow::Cow::Borrowed("block"), block));
+        }
 
-/// Append `"key":value` to a JSON object, with a leading comma once past the first
-/// field.
-fn push_json_field(out: &mut String, first: &mut bool, key: &str, value: u64) {
-    if !*first {
-        out.push(',');
-    }
-    *first = false;
-    out.push('"');
-    out.push_str(key);
-    out.push_str("\":");
-    out.push_str(&value.to_string());
-}
-
-/// Append a JSON string literal, escaping the characters JSON requires.
-fn push_json_string(out: &mut String, s: &str) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let byte = c as u32;
-                out.push_str("\\u00");
-                out.push(char::from_digit(byte >> 4, 16).expect("high nibble is 0..16"));
-                out.push(char::from_digit(byte & 0xf, 16).expect("low nibble is 0..16"));
-            }
-            c => out.push(c),
+        Finding {
+            severity: *severity,
+            family: Family::Ext,
+            category: std::borrow::Cow::Borrowed(category.as_str()),
+            // A block number out of an untrusted image can be anything, so the
+            // multiplication is checked: a product that does not fit means the block is not
+            // in the image at all, and there is no offset to name.
+            offset: block.and_then(|b| b.checked_mul(u64::from(block_size))),
+            coordinates,
+            detail: detail.clone(),
         }
     }
-    out.push('"');
-}
-
-/// A compact one-line location for the human table: the set coordinates joined by
-/// spaces, or `-` when none are.
-fn location_compact(loc: &Location) -> String {
-    let mut parts = Vec::new();
-    if let Some(g) = loc.group {
-        parts.push(format!("group {g}"));
-    }
-    if let Some(i) = loc.inode {
-        parts.push(format!("inode {i}"));
-    }
-    if let Some(b) = loc.block {
-        parts.push(format!("block {b}"));
-    }
-    if parts.is_empty() {
-        "-".to_string()
-    } else {
-        parts.join(" ")
-    }
-}
-
-/// The SARIF result level an anomaly severity maps to. SARIF offers three actionable
-/// levels; `structural` and `integrity` both mean the image is unsound, so both are
-/// `error`, and the exact severity is preserved in the result's `properties`.
-fn sarif_level(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Structural | Severity::Integrity => "error",
-        Severity::Conformance => "warning",
-        Severity::Cosmetic => "note",
-    }
-}
-
-/// Append the SARIF `rules` array: one rule per distinct anomaly category present, in the
-/// order the categories first appear, so every `ruleId` a result names is defined without
-/// emitting a rule for a subsystem the scan said nothing about.
-fn push_sarif_rules(out: &mut String, anomalies: &[Anomaly]) {
-    let mut seen: Vec<&'static str> = Vec::new();
-    for a in anomalies {
-        let id = a.category.as_str();
-        if !seen.contains(&id) {
-            if !seen.is_empty() {
-                out.push(',');
-            }
-            seen.push(id);
-            out.push_str("{\"id\":");
-            push_json_string(out, id);
-            out.push_str(",\"name\":");
-            push_json_string(out, id);
-            out.push_str(",\"shortDescription\":{\"text\":");
-            push_json_string(out, &format!("{id} anomaly"));
-            out.push_str("}}");
-        }
-    }
-}
-
-/// Append one SARIF result for an anomaly: its rule (the category), level (from the
-/// severity), message (the detail), a location carrying the artifact and the logical
-/// address when either is known, and the full typed value in `properties`.
-fn push_sarif_result(out: &mut String, a: &Anomaly, artifact_uri: Option<&str>) {
-    out.push_str("{\"ruleId\":");
-    push_json_string(out, a.category.as_str());
-    out.push_str(",\"level\":\"");
-    out.push_str(sarif_level(a.severity));
-    out.push_str("\",\"message\":{\"text\":");
-    push_json_string(out, &a.detail);
-    out.push('}');
-
-    // Emit `locations` only when there is a coordinate to record: an empty location object
-    // would carry nothing.
-    let address = location_compact(&a.location);
-    let has_address = address != "-";
-    if artifact_uri.is_some() || has_address {
-        out.push_str(",\"locations\":[{");
-        let mut first = true;
-        if let Some(uri) = artifact_uri {
-            out.push_str("\"physicalLocation\":{\"artifactLocation\":{\"uri\":");
-            push_json_string(out, uri);
-            out.push_str("}}");
-            first = false;
-        }
-        if has_address {
-            if !first {
-                out.push(',');
-            }
-            out.push_str("\"logicalLocations\":[{\"fullyQualifiedName\":");
-            push_json_string(out, &address);
-            out.push_str("}]");
-        }
-        out.push_str("}]");
-    }
-
-    out.push_str(",\"properties\":");
-    push_sarif_properties(out, a);
-    out.push('}');
-}
-
-/// Append the SARIF `properties` bag for an anomaly: the exact severity and category as
-/// strings, then whichever of block/group/inode are set — the coordinates and the precise
-/// severity SARIF's three-level `level` cannot itself carry.
-fn push_sarif_properties(out: &mut String, a: &Anomaly) {
-    out.push_str("{\"severity\":");
-    push_json_string(out, a.severity.as_str());
-    out.push_str(",\"category\":");
-    push_json_string(out, a.category.as_str());
-    // `severity` and `category` are already written, so every further field takes a leading
-    // comma: seed `first` false so `push_json_field` emits one.
-    let mut first = false;
-    if let Some(b) = a.location.block {
-        push_json_field(out, &mut first, "block", b);
-    }
-    if let Some(g) = a.location.group {
-        push_json_field(out, &mut first, "group", u64::from(g));
-    }
-    if let Some(i) = a.location.inode {
-        push_json_field(out, &mut first, "inode", u64::from(i));
-    }
-    out.push('}');
 }
 
 /// Project a [`ReadError`] to an [`Anomaly`] and stamp it with the inode it was found
@@ -608,22 +432,6 @@ fn anomaly_in_mapping(err: &ReadError, ino: u32, category: Category) -> Anomaly 
         a.location.inode.get_or_insert(ino);
     }
     a
-}
-
-/// A structural anomaly for a directory holding a name a real ext4 filesystem could
-/// not: one carrying a path separator or a NUL (see [`name_is_hostile`]). The offending
-/// name is deliberately not echoed into the detail — it is attacker-controlled and may
-/// carry terminal control bytes — so the anomaly names the directory, not the name.
-fn hostile_name_anomaly(ino: u32) -> Anomaly {
-    Anomaly {
-        severity: Severity::Structural,
-        category: Category::Directory,
-        location: Location {
-            inode: Some(ino),
-            ..Location::default()
-        },
-        detail: "a directory entry name contains a path separator or NUL".to_string(),
-    }
 }
 
 /// Project an error found while checking group `g`'s bitmaps, filing an out-of-range
@@ -691,35 +499,6 @@ fn extent_tail_offset(node: &[u8], node_bytes: usize) -> usize {
     tail_offset(node_bytes)
 }
 
-/// The conformance-strictness policy a read applies: a threshold over [`Severity`].
-///
-/// Robustness (bounds-checking, never-panic) is unconditional and not governed by
-/// this; the policy decides only where the fatal line sits on the anomaly severity
-/// scale.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ReadPolicy {
-    /// Fatal at [`Severity::Conformance`] and above: the read fails on anything a
-    /// conformant ext4 would not carry, so what a strict read returns is a filesystem
-    /// whose every field it recognized.
-    #[default]
-    Strict,
-    /// Fatal at nothing: a lenient read collects every [`Anomaly`] as structured data
-    /// and rejects no image, so a malformed image is reported rather than refused.
-    /// This is the reading a whole-image [`scan`](Reader::scan) reports under.
-    Lenient,
-}
-
-impl ReadPolicy {
-    /// Whether an anomaly of this severity is fatal under the policy.
-    #[must_use]
-    pub fn is_fatal(self, severity: Severity) -> bool {
-        match self {
-            ReadPolicy::Strict => severity >= Severity::Conformance,
-            ReadPolicy::Lenient => false,
-        }
-    }
-}
-
 /// A failure reading an image.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -771,6 +550,37 @@ pub enum ReadError {
     /// an entry running past the block, or a tree deeper than the reader follows.
     #[error("directory structure is malformed")]
     BadDirectory,
+    /// A directory entry names an inode number the filesystem does not have. Zero is the
+    /// unused slot and names nothing, so this is a *nonzero* number past
+    /// `s_inodes_count`: a reference to an inode that cannot exist, which is the
+    /// corruption `e2fsck` reports as "entry 'name' in / (2) has invalid inode #".
+    ///
+    /// The entry's own name is not carried. It is bytes the image chose, and a fault
+    /// about a reference is located by the directory holding it rather than by a name a
+    /// consumer would render.
+    #[error("a directory entry names inode {inode}, which the filesystem does not have")]
+    #[non_exhaustive]
+    DirEntryNoSuchInode {
+        /// The inode number the entry names.
+        inode: u32,
+    },
+    /// A directory entry carries a name a real ext4 filesystem could not hold: an empty
+    /// one, or one containing a path separator or a NUL. The kernel's
+    /// `ext4_check_dir_entry` forbids the last two, so an image holding one was crafted or
+    /// corrupted. `.` and `..` are not among them — an ext4 directory holds both, and a
+    /// listing without them would not be the directory.
+    ///
+    /// The name itself is not carried, for the same reason
+    /// [`DirEntryNoSuchInode`](Self::DirEntryNoSuchInode) does not carry one: it is bytes
+    /// the image chose, and rendering them is what the escaping rules exist to control.
+    /// The inode the entry names identifies it within its directory without echoing
+    /// anything the image wrote.
+    #[error("a directory entry naming inode {inode} has a name no directory can hold")]
+    #[non_exhaustive]
+    HostileName {
+        /// The inode number the offending entry names.
+        inode: u32,
+    },
     /// The journal inode or its jbd2 superblock was malformed.
     #[error("journal structure is malformed")]
     BadJournal,
@@ -821,6 +631,23 @@ pub enum ReadError {
         inode: u32,
         /// The block it names.
         block: u64,
+    },
+    /// A `system.posix_acl_*` attribute holds bytes that are not a stored ACL.
+    ///
+    /// The attribute is read back in the form every boundary speaks, so a value that will
+    /// not parse has no form to be read back in. Reporting the stored bytes instead would
+    /// hand a consumer something it would install as an ACL and the kernel would refuse.
+    #[error(
+        "the {} attribute is not an ACL: {source}",
+        crate::escape::printable(.name)
+    )]
+    #[non_exhaustive]
+    MalformedAcl {
+        /// The attribute's name.
+        name: Vec<u8>,
+        /// The underlying ACL error.
+        #[source]
+        source: crate::acl::AclError,
     },
     /// A regular file is [`LARGE_FILE_MIN_SIZE`] or
     /// larger, but the superblock does not enable the `large_file` feature that describes
@@ -880,14 +707,14 @@ pub enum ReadError {
         block: u64,
     },
     /// A path named no entry in the filesystem.
-    #[error("no such path: {}", String::from_utf8_lossy(path))]
+    #[error("no such path: {}", crate::escape::printable(path))]
     #[non_exhaustive]
     NotFound {
         /// The path that named no entry.
         path: Vec<u8>,
     },
     /// A path used something that is not a directory as one.
-    #[error("not a directory: {}", String::from_utf8_lossy(path))]
+    #[error("not a directory: {}", crate::escape::printable(path))]
     #[non_exhaustive]
     NotADirectory {
         /// The path whose component is not a directory.
@@ -895,11 +722,30 @@ pub enum ReadError {
     },
     /// Resolving a path followed more symbolic links than the reader will, which a cycle
     /// (`a -> b -> a`) and a chain long enough to be a denial of service both produce.
-    #[error("too many symbolic links resolving: {}", String::from_utf8_lossy(path))]
+    #[error(
+        "too many symbolic links resolving: {}",
+        crate::escape::printable(path)
+    )]
     #[non_exhaustive]
     SymlinkLoop {
         /// The path whose resolution ran out of link budget.
         path: Vec<u8>,
+    },
+    /// A walked path is longer than any consumer of one could use.
+    ///
+    /// Nothing in the format bounds how deep a tree nests, and the walk's entry cap counts
+    /// *names* rather than the bytes their paths occupy — so a tree of directories each
+    /// holding one entry naming the next stays under every count while its paths grow by a
+    /// component each and cost the walk their sum.
+    ///
+    /// The bound is `PATH_MAX`, which is the ceiling on what a path can be *used* for: a
+    /// consumer resolving one against a host gets `ENAMETOOLONG` past it, so a longer path
+    /// is not a path anything could act on.
+    #[error("a walked path is longer than the {limit} bytes a path may be")]
+    #[non_exhaustive]
+    PathTooLong {
+        /// The longest path a walk builds.
+        limit: usize,
     },
     /// A tree holds more names than a walk is bounded to gather.
     ///
@@ -916,8 +762,11 @@ pub enum ReadError {
     /// A whole-file read was asked for a file larger than [`Limits::max_file_bytes`], the
     /// cap the caller set on it.
     ///
-    /// The bound is the caller's alone — no structural bound exists behind it, since a
-    /// legitimate all-hole file and a crafted `i_size` are the same shape from the outside.
+    /// The bound is usually the caller's alone — no structural bound exists behind it for a
+    /// regular file, since a legitimate all-hole one and a crafted `i_size` are the same
+    /// shape from the outside. A symbolic link is the exception: no path is longer than
+    /// `PATH_MAX`, so [`read_symlink`](Reader::read_symlink) holds a target to that ceiling
+    /// whatever a caller asked for.
     /// Reaching it is an error rather than a short buffer for the same reason
     /// [`WalkTooLarge`](Self::WalkTooLarge) is: a caller extracting a file from a truncated
     /// read would write an incomplete one and see success. To read part of a file
@@ -1023,6 +872,17 @@ impl ReadError {
                 Category::Directory,
                 Location::default(),
             ),
+            // A reference to an inode that cannot exist is a fault in the directory that
+            // holds it, so the location is stamped with that directory by whichever walk
+            // reached the entry — not with the number the entry names, which locates
+            // nothing.
+            // A name no directory could hold is a fault in the directory holding it, located
+            // the same way and by the same callers as the reference fault above.
+            ReadError::DirEntryNoSuchInode { .. } | ReadError::HostileName { .. } => (
+                Severity::Structural,
+                Category::Directory,
+                Location::default(),
+            ),
             ReadError::BadJournal => (Severity::Structural, Category::Journal, Location::default()),
             ReadError::BadOrphanFile => {
                 (Severity::Structural, Category::Orphan, Location::default())
@@ -1032,7 +892,7 @@ impl ReadError {
             // A bound reached is a fact about the walk, not about the image's soundness
             // — a caller's own cap reaches it too — so it is filed as a structural
             // finding about the directory tree it stopped in.
-            ReadError::WalkTooLarge { .. } => (
+            ReadError::PathTooLong { .. } | ReadError::WalkTooLarge { .. } => (
                 Severity::Structural,
                 Category::Directory,
                 Location::default(),
@@ -1134,6 +994,13 @@ impl ReadError {
                     ..Location::default()
                 },
             ),
+            // The attribute parsed; its value did not. Nothing downstream can follow it, so
+            // it is structural, in the subsystem whose name it was stored under. The inode
+            // is stamped by whichever walk reached the attribute, since an on-disk inode
+            // does not carry its own number.
+            ReadError::MalformedAcl { .. } => {
+                (Severity::Structural, Category::Xattr, Location::default())
+            }
             // The size and the index are read correctly either way; what is missing is the
             // feature word that should advertise them. Both are conformance deviations —
             // valid ext4 as bytes, not as a self-consistent filesystem.
@@ -1199,17 +1066,22 @@ impl ReadError {
     }
 }
 
-/// The result of a whole-image [`scan`](Reader::scan): every [`Anomaly`] the scan
-/// found, in the order it walked them — the superblock, then each group descriptor,
-/// then each in-use inode and its extent tree.
+/// The result of a whole-image [`scan`](Reader::scan): every [`Anomaly`] the scan found,
+/// in the order it walked them — the superblock, then each group descriptor, then each
+/// in-use inode and its extent tree.
 ///
-/// A lenient read rejects no image, so an empty report means the image is
-/// byte-conformant to what this crate emits and a non-empty one is a list of
-/// findings, not a failure. [`has_fatal`](Self::has_fatal) applies a [`ReadPolicy`]
-/// threshold back to those findings, and [`to_json`](Self::to_json) /
-/// [`to_table`](Self::to_table) project them for a machine or a person.
+/// A lenient read rejects no image, so an empty report means the image is byte-conformant
+/// to what this crate emits and a non-empty one is a list of findings, not a failure.
+/// [`has_fatal`](Self::has_fatal) applies a [`ReadPolicy`] threshold back to those
+/// findings.
 ///
-/// A report holds at most [`Limits::max_anomalies`] findings and says so through
+/// This is ext's own taxonomy, kept typed: an [`Anomaly`] names the subsystem as a
+/// [`Category`] value and its place as a [`Location`] of group, inode, and block, which is
+/// what a consumer reasoning about ext4 wants. Rendering it — as JSON, as SARIF, as a table
+/// — goes through [`to_report`](Self::to_report), which projects into the crate's
+/// family-agnostic [`FindingReport`] so one document shape serves every family.
+///
+/// A report holds at most [`Limits::max_findings`] findings and says so through
 /// [`is_truncated`](Self::is_truncated) when it stopped there.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -1217,7 +1089,7 @@ pub struct ScanReport {
     anomalies: Vec<Anomaly>,
     truncated: bool,
     /// The findings cap the scan that produced this report ran under — the
-    /// [`Limits::max_anomalies`] it was opened with, which a caller may set to anything.
+    /// [`Limits::max_findings`] it was opened with, which a caller may set to anything.
     /// Kept so a truncation notice names the bound that actually applied rather than the
     /// default constant, which need not be the same number.
     ///
@@ -1225,6 +1097,14 @@ pub struct ScanReport {
     /// report's findings, and `truncated` already says whether it was reached.
     #[cfg_attr(feature = "serde", serde(skip))]
     cap: usize,
+    /// The block size of the filesystem scanned, which turns a block-addressed anomaly
+    /// into the byte offset a [`Finding`] carries. Zero for a report no scan produced,
+    /// where there is nothing to convert.
+    ///
+    /// Not serialized for the same reason the cap is not: it describes the filesystem the
+    /// scan ran over rather than any finding in it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    block_size: u32,
 }
 
 impl Default for ScanReport {
@@ -1233,23 +1113,13 @@ impl Default for ScanReport {
         Self {
             anomalies: Vec::new(),
             truncated: false,
-            cap: Self::MAX_ANOMALIES,
+            cap: FindingReport::MAX_FINDINGS,
+            block_size: 0,
         }
     }
 }
 
 impl ScanReport {
-    /// The default of [`Limits::max_anomalies`]: the most findings one report holds
-    /// unless a caller names another cap.
-    ///
-    /// A scan reads an image it has no reason to trust, and how many findings that image
-    /// yields is the image's own claim: a handful of crafted inodes can name the same
-    /// blocks over and over, and each faulty block is a finding carrying an owned
-    /// description. The cap is what keeps a report's memory a property of this crate
-    /// rather than of the bytes it was pointed at, and it is far past the count anyone
-    /// reads: a filesystem with ten thousand findings is diagnosed by its first ten.
-    pub const MAX_ANOMALIES: usize = 10_000;
-
     /// The anomalies found, in scan order.
     #[must_use]
     pub fn anomalies(&self) -> &[Anomaly] {
@@ -1259,11 +1129,11 @@ impl ScanReport {
     /// Whether the scan stopped at its findings cap with the image still unfinished.
     ///
     /// A truncated report is a floor, not a full accounting: the image holds at least
-    /// these findings, and the scan did not look at the rest of it. Everything derived
-    /// from the report — [`worst_severity`](Self::worst_severity),
+    /// these findings, and the scan did not look at the rest of it. Everything derived from
+    /// the report — [`worst_severity`](Self::worst_severity),
     /// [`has_fatal`](Self::has_fatal) — is likewise a floor, and
-    /// [`is_clean`](Self::is_clean) is `false` whatever the report holds, since a scan
-    /// that stopped short has seen nothing that would let it call an image clean.
+    /// [`is_clean`](Self::is_clean) is `false` whatever the report holds, since a scan that
+    /// stopped short has seen nothing that would let it call an image clean.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
@@ -1290,171 +1160,32 @@ impl ScanReport {
     /// [`ReadPolicy::Strict`] enforces when opening an image. Under
     /// [`ReadPolicy::Lenient`] it is always `false`.
     ///
-    /// This is the scan's verdict, which is not the whole of a strict read. A scan
-    /// checks the metadata a strict read checks — feature support, every checksum, and
-    /// structural placement — but it does not parse every directory entry or follow
-    /// every path, so a fault only a full read reaches (a malformed directory block on
-    /// an image that carries no checksum to catch it, say) leaves the scan clean while
-    /// the read that reaches it still fails.
+    /// This is the scan's verdict, which is not the whole of a strict read. A scan checks
+    /// the metadata a strict read checks — feature support, every checksum, and structural
+    /// placement — but it does not parse every directory entry or follow every path, so a
+    /// fault only a full read reaches (a malformed directory block on an image that carries
+    /// no checksum to catch it, say) leaves the scan clean while the read that reaches it
+    /// still fails.
     #[must_use]
     pub fn has_fatal(&self, policy: ReadPolicy) -> bool {
         self.anomalies.iter().any(|a| policy.is_fatal(a.severity))
     }
 
-    /// Render the report as a JSON object: `clean` (bool), `count`, `truncated` (bool),
-    /// and an `anomalies` array of [`Anomaly::to_json`] records. A projection computed
-    /// here, not a stored wire format.
+    /// Project the report into the crate's family-agnostic frame, which is what renders.
     ///
-    /// `truncated` is always present, true or false: a consumer must be able to tell a
-    /// complete report from one that stopped at its findings cap, and an absent field
-    /// would read as complete.
-    ///
-    /// The document opens with `"schema"`, holding [`SCAN_SCHEMA_VERSION`]. A downstream
-    /// parser has a contract that no Rust signature describes, so the emitted shape names
-    /// its own version rather than leaving a change to be discovered by a parse failure.
+    /// Each [`Anomaly`] becomes a [`Finding`] carrying the same severity, ext's own
+    /// subsystem word as its category, its group/inode/block coordinates under those names,
+    /// and — where the anomaly is block-addressed — the byte offset that block sits at.
+    /// Truncation and the cap that caused it carry across, so the projected report says the
+    /// same thing about how much of the image was looked at.
     #[must_use]
-    pub fn to_json(&self) -> String {
-        let mut out = String::from("{\"schema\":");
-        out.push_str(&SCAN_SCHEMA_VERSION.to_string());
-        out.push_str(",\"clean\":");
-        out.push_str(if self.is_clean() { "true" } else { "false" });
-        out.push_str(",\"count\":");
-        out.push_str(&self.anomalies.len().to_string());
-        out.push_str(",\"truncated\":");
-        out.push_str(if self.truncated { "true" } else { "false" });
-        out.push_str(",\"anomalies\":[");
-        for (i, a) in self.anomalies.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(&a.to_json());
-        }
-        out.push_str("]}");
-        out
-    }
-
-    /// Render the report as a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log: a
-    /// single run whose tool is this reader and whose results are the anomalies, one per
-    /// finding, for a static-analysis or forensic pipeline that speaks SARIF.
-    ///
-    /// Severity maps onto SARIF's three actionable levels — `structural` and `integrity`
-    /// are `error`, `conformance` is `warning`, `cosmetic` is `note` — and the exact
-    /// severity, subsystem, and block/group/inode coordinates ride in each result's
-    /// `properties`, so nothing the level collapse would lose is lost. The block/group/inode
-    /// address becomes a SARIF logical location. Like [`to_json`](Self::to_json), the
-    /// document is a pure function of the report — no tool version or timestamp enters it —
-    /// so identical findings render identical bytes.
-    ///
-    /// A report that stopped at its findings cap carries a warning-level
-    /// `toolExecutionNotifications` entry saying so, naming the cap that applied, which is
-    /// where SARIF records something about the run rather than about the artifact. A
-    /// complete report emits no `invocations` at all, so the document a clean or short
-    /// scan renders is unchanged by the cap existing.
-    ///
-    /// `artifact_uri`, when set, becomes each result's physical artifact location: the
-    /// reader reads an anonymous stream, so the image's identity is the caller's to supply.
-    /// It is written through unchanged, which makes it a precondition that the string is
-    /// already a URI reference as [RFC 3986] defines one. A host path is not: a space is
-    /// not allowed in a URI at all, and `#`, `?`, and `%` each mean something else, so a
-    /// strict SARIF consumer rejects a document carrying one. Percent-encode a path — every
-    /// byte outside `A`-`Z`, `a`-`z`, `0`-`9`, `-`, `.`, `_`, `~`, keeping `/` — before
-    /// passing it here.
-    ///
-    /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
-    #[must_use]
-    pub fn to_sarif(&self, artifact_uri: Option<&str>) -> String {
-        let mut out = String::from(
-            "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
-             \"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"ferrosys\",\"rules\":[",
-        );
-        push_sarif_rules(&mut out, &self.anomalies);
-        out.push_str("]}},\"results\":[");
-        for (i, a) in self.anomalies.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            push_sarif_result(&mut out, a, artifact_uri);
-        }
-        out.push(']');
-        if self.truncated {
-            // `executionSuccessful` is required of an invocation: the scan did run to the
-            // cap, so it succeeded — the notification is what says the results stop short
-            // of the image.
-            out.push_str(
-                ",\"invocations\":[{\"executionSuccessful\":true,\
-                 \"toolExecutionNotifications\":[{\"level\":\"warning\",\"message\":{\"text\":",
-            );
-            push_json_string(&mut out, &self.truncation_notice());
-            out.push_str("}}]}]");
-        }
-        out.push_str("}]}");
-        out
-    }
-
-    /// Render the report as a fixed-column human table: a header row, then one line
-    /// per anomaly with its severity, category, location, and detail. A clean report
-    /// renders a single `no anomalies` line.
-    ///
-    /// A [`truncated`](Self::is_truncated) report ends with the notice saying so, whether
-    /// or not it holds findings — an empty one is the case where saying so matters most,
-    /// since `no anomalies` on its own would read as a verdict the scan never reached.
-    #[must_use]
-    pub fn to_table(&self) -> String {
-        if self.anomalies.is_empty() {
-            let mut out = String::from("no anomalies\n");
-            if self.truncated {
-                out.push('\n');
-                out.push_str(&self.truncation_notice());
-                out.push('\n');
-            }
-            return out;
-        }
-        let rows: Vec<(&str, &str, String, &str)> = self
+    pub fn to_report(&self) -> FindingReport {
+        let findings = self
             .anomalies
             .iter()
-            .map(|a| {
-                (
-                    a.severity.as_str(),
-                    a.category.as_str(),
-                    location_compact(&a.location),
-                    a.detail.as_str(),
-                )
-            })
+            .map(|a| a.to_finding(self.block_size))
             .collect();
-        let mut sev_w = "SEVERITY".len();
-        let mut cat_w = "CATEGORY".len();
-        let mut loc_w = "LOCATION".len();
-        for (s, c, l, _) in &rows {
-            sev_w = sev_w.max(s.len());
-            cat_w = cat_w.max(c.len());
-            loc_w = loc_w.max(l.len());
-        }
-        let mut out = format!(
-            "{:<sev_w$}  {:<cat_w$}  {:<loc_w$}  {}\n",
-            "SEVERITY", "CATEGORY", "LOCATION", "DETAIL"
-        );
-        for (s, c, l, d) in &rows {
-            out.push_str(&format!("{s:<sev_w$}  {c:<cat_w$}  {l:<loc_w$}  {d}\n"));
-        }
-        if self.truncated {
-            out.push('\n');
-            out.push_str(&self.truncation_notice());
-            out.push('\n');
-        }
-        out
-    }
-
-    /// The one sentence a truncated report renders, in whichever projection asks for it.
-    ///
-    /// It names the cap the scan actually ran under, which is a caller's
-    /// [`Limits::max_anomalies`] and not necessarily
-    /// [`MAX_ANOMALIES`](Self::MAX_ANOMALIES): a report that stopped at seven findings
-    /// because seven is what was asked for must not say it stopped at ten thousand.
-    fn truncation_notice(&self) -> String {
-        format!(
-            "report truncated at {} anomalies; the rest of the image was not scanned",
-            self.cap
-        )
+        FindingReport::new(findings, self.truncated, self.cap)
     }
 }
 
@@ -1497,6 +1228,10 @@ pub struct WalkEntry {
 pub struct Reader<R> {
     src: R,
     base: u64,
+    /// The bytes the source holds from [`base`](Self::base) on, measured at open. Every
+    /// structural bound the reader applies is derived from it, so it is the filesystem's
+    /// share of the source rather than the whole of it.
+    source_len: u64,
     sb: SuperBlock,
     /// The superblock exactly as it sits on disk.
     ///
@@ -1592,98 +1327,6 @@ impl OpenOptions {
     pub const fn csum_seed(mut self, seed: u32) -> Self {
         self.csum_seed = Some(seed);
         self
-    }
-}
-
-/// Caps on what one read of an untrusted image may allocate.
-///
-/// **These are caller-imposed caps on top of bounds the reader applies regardless.** A
-/// count or size field in an image is the image's own claim, so every read that
-/// allocates from one is bounded by what the source could actually hold: a file cannot
-/// be larger than the filesystem containing it, and a tree cannot hold more names than
-/// its blocks have room for. Those structural bounds are always on and cannot reject a
-/// well-formed filesystem, because a well-formed filesystem satisfies them by
-/// construction.
-///
-/// What is left for a caller is a *tighter* bound than the structure implies — reading a
-/// 9 TiB image with a gigabyte of memory, say — and one read where no structural bound
-/// exists at all ([`max_file_bytes`](Self::max_file_bytes)). The defaults impose none, so
-/// a legitimate image of any size reads back at the default settings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
-pub struct Limits {
-    /// The most findings one [`scan`](Reader::scan) reports before stopping and marking
-    /// its report [`truncated`](ScanReport::is_truncated). Defaults to
-    /// [`ScanReport::MAX_ANOMALIES`].
-    pub max_anomalies: usize,
-    /// The most entries one [`walk`](Reader::walk) gathers before refusing with
-    /// [`ReadError::WalkTooLarge`]. Defaults to no caller-imposed cap; the walk is bounded
-    /// regardless by the names the image's blocks have room to hold.
-    pub max_walk_entries: usize,
-    /// The largest file a whole-file read will read. Defaults to no cap, which is the
-    /// documented contract: [`read_data`](Reader::read_data) trusts `i_size`.
-    ///
-    /// A file larger than this is [`ReadError::FileTooLarge`], not a shortened buffer. The
-    /// three caps here agree on that shape wherever a short answer could be mistaken for a
-    /// whole one: a walk that reached its bound errors, a read that reached this one errors,
-    /// and only a scan — whose report says [`is_truncated`](ScanReport::is_truncated) in
-    /// the document it emits — returns what it managed to gather. A caller extracting a
-    /// file from a truncated read would otherwise write an incomplete one and see success.
-    ///
-    /// It bounds both whole-file forms, [`read_data`](Reader::read_data) and
-    /// [`read_data_to`](Reader::read_data_to), because what it expresses is distrust of the
-    /// declared size rather than a memory bound. To read part of a file deliberately, use
-    /// [`read_into`](Reader::read_into): it is bounded by the buffer the caller supplies —
-    /// mapping included — and reports how much of it was filled, so a partial read is
-    /// representable rather than silent.
-    ///
-    /// This one has no structural bound behind it, and that is a property of the format
-    /// rather than an omission. A sparse file's holes cost no blocks, so a file whose
-    /// logical size dwarfs the filesystem holding it is well-formed and must read back at
-    /// its full size — which makes a legitimate all-hole file indistinguishable from a
-    /// crafted `i_size`. Set this when reading an image that has not earned that trust,
-    /// or use [`scan`](Reader::scan), which allocates nothing per logical block.
-    pub max_file_bytes: u64,
-}
-
-impl Limits {
-    /// No caller-imposed cap beyond the structural bounds the reader always applies,
-    /// except on findings, which stop at [`ScanReport::MAX_ANOMALIES`].
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            max_anomalies: ScanReport::MAX_ANOMALIES,
-            max_walk_entries: usize::MAX,
-            max_file_bytes: u64::MAX,
-        }
-    }
-
-    /// Report at most `max` findings per scan.
-    #[must_use]
-    pub const fn max_anomalies(mut self, max: usize) -> Self {
-        self.max_anomalies = max;
-        self
-    }
-
-    /// Refuse a walk that would gather more than `max` entries.
-    #[must_use]
-    pub const fn max_walk_entries(mut self, max: usize) -> Self {
-        self.max_walk_entries = max;
-        self
-    }
-
-    /// Return at most `max` bytes per file read.
-    #[must_use]
-    pub const fn max_file_bytes(mut self, max: u64) -> Self {
-        self.max_file_bytes = max;
-        self
-    }
-}
-
-impl Default for Limits {
-    /// The limits in [`Limits::new`].
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1791,6 +1434,30 @@ impl<R: Read + Seek> Reader<R> {
                 value: u64::from(sb.desc_size),
             }));
         }
+        // A group holds at least one block and at most what its one-block block bitmap
+        // indexes, and at least one inode and at most what its one-block inode bitmap does.
+        // Both fields divide, and both decide how much of the filesystem is examined at all:
+        // a zero `s_blocks_per_group` makes the group count zero, so every scan loop runs no
+        // times and reports a clean filesystem; a zero `s_inodes_per_group` lets the group
+        // loop run and examines no inode in any of them, while `inode_raw` answers
+        // `NoSuchInode` for every number — a filesystem with no readable inode at all,
+        // reported clean. `e2fsck` refuses both, and `is_clean()` is the verdict a forensic
+        // caller acts on, so they are refused here rather than scanned around.
+        let per_group_cap = 8 * block_size as u64;
+        if sb.blocks_per_group == 0 || u64::from(sb.blocks_per_group) > per_group_cap {
+            return Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "superblock",
+                field: "s_blocks_per_group",
+                value: u64::from(sb.blocks_per_group),
+            }));
+        }
+        if sb.inodes_per_group == 0 || u64::from(sb.inodes_per_group) > per_group_cap {
+            return Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "superblock",
+                field: "s_inodes_per_group",
+                value: u64::from(sb.inodes_per_group),
+            }));
+        }
         // The `incompat` word is the one an implementation must refuse when it carries a
         // bit it does not recognize: those features change the on-disk format in ways that
         // make unaware access unsafe. A strict read refuses such an image at open; a
@@ -1801,9 +1468,15 @@ impl<R: Read + Seek> Reader<R> {
         if unsupported != 0 && policy.is_fatal(Severity::Structural) {
             return Err(ReadError::UnsupportedIncompat { bits: unsupported });
         }
+        // What the source has for this filesystem, which every structural bound is derived
+        // from. Measured here rather than at each use: a bound that governs how much a
+        // verifier examines must not depend on a seek that could fail mid-read, and the
+        // filesystem's length does not change under a reader.
+        let source_len = src.seek(SeekFrom::End(0))?.saturating_sub(base);
         Ok(Self {
             src,
             base,
+            source_len,
             sb,
             sb_raw: sb_bytes,
             feature,
@@ -1865,7 +1538,15 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// The bytes of block `block`, read into an owned buffer.
+    ///
+    /// Every read of a numbered block goes through here, so this is where the
+    /// filesystem's own bound is applied to whatever named it — a group descriptor's
+    /// bitmap or inode table, an extent tree's index entry, a directory's mapping. Each
+    /// is a reference out of the image's own bytes, and each is checked against
+    /// [`check_block`](Self::check_block) before any i/o rather than against the source's
+    /// length alone.
     fn block(&mut self, block: u64) -> Result<Vec<u8>, ReadError> {
+        self.check_block(block)?;
         let start = block
             .checked_mul(self.block_size as u64)
             .ok_or(ReadError::OutOfRange {
@@ -1927,6 +1608,18 @@ impl<R: Read + Seek> Reader<R> {
         let desc_size = self.desc_size();
         let table = u64::from(self.sb.first_data_block) + 1;
         let off = table * self.block_size as u64 + u64::from(group) * desc_size as u64;
+        // The table's place is set by `s_first_data_block` and its extent by the group
+        // number, both of which the image supplies, so the descriptor's bytes are bounded
+        // by the filesystem exactly as a block reference is. A table a malformed
+        // superblock pushed past the final block would otherwise be read from whatever
+        // follows an embedded filesystem.
+        let last_block = (off + desc_size as u64 - 1) / self.block_size as u64;
+        if last_block >= self.sb.blocks_count {
+            return Err(ReadError::OutOfRange {
+                what: "group",
+                index: u64::from(group),
+            });
+        }
         match self.read_at(off, desc_size) {
             Err(ReadError::OutOfRange { .. }) => Err(ReadError::OutOfRange {
                 what: "group",
@@ -1957,18 +1650,29 @@ impl<R: Read + Seek> Reader<R> {
         addressable.div_ceil(bpg).min(u64::from(u32::MAX)) as u32
     }
 
-    /// The length the underlying source reports, in bytes. The forensic scan uses it
-    /// to bound how far it will look, so a superblock count field a bit-flip inflated
-    /// cannot drive a loop past the end of the source. An unseekable source reports
-    /// zero, which bounds the scan to nothing rather than looping.
+    /// The bytes the source has for this filesystem: its length from
+    /// [`base`](OpenOptions::base) on. The forensic scan uses it to bound how far it will
+    /// look, so a superblock count field a bit-flip inflated cannot drive a loop past the
+    /// end of the source.
+    ///
+    /// It is measured from the base and not from the start of the source, because every
+    /// bound built on it is a statement about the *filesystem*. A 16 MiB partition at the
+    /// end of a 2 TiB disk image is bounded by the 16 MiB that could hold it, not by
+    /// everything in front of it — which is the embedded case this reader is built for, and
+    /// the case a whole-source length would bound most loosely.
     ///
     /// This is the source's apparent length, which is the only length a `Seek` source
     /// offers: a sparse file reports the size it claims, not the blocks it occupies.
     /// The bound is therefore a real limit on how far a walk reaches, and the cost of
     /// reaching it scales with the size an image claims rather than with the bytes
     /// stored for it.
-    fn source_len(&mut self) -> u64 {
-        self.src.seek(SeekFrom::End(0)).unwrap_or(0)
+    ///
+    /// It is measured once, at open. A source that cannot report its end fails the open
+    /// rather than reporting zero here: zero is not a conservative answer for a bound that
+    /// governs how much a verifier examines — it would make every loop built on it run no
+    /// times and report a filesystem with nothing wrong.
+    const fn source_len(&self) -> u64 {
+        self.source_len
     }
 
     /// The in-use inode numbers in group `g`, taken from its inode bitmap.
@@ -2149,7 +1853,8 @@ impl<R: Read + Seek> Reader<R> {
                 }
                 examined += 1;
                 let raw = self.inode_raw(n)?;
-                let inode = Inode::read_from(&raw, self.sb.inode_size)?;
+                let mut inode = Inode::read_from(&raw, self.sb.inode_size)?;
+                self.mask_ungated_halves(&mut inode);
                 let (stored, computed) = self.inode_checksum(n, &raw, &csum, seed);
                 if computed != stored {
                     return Err(ReadError::ChecksumMismatch {
@@ -2704,7 +2409,6 @@ impl<R: Read + Seek> Reader<R> {
         if phys == 0 {
             return Ok(());
         }
-        self.check_data_block(phys)?;
         let mut block = self.block(phys)?;
         if block.len() < 20 {
             return Ok(());
@@ -2737,7 +2441,7 @@ impl<R: Read + Seek> Reader<R> {
     /// Every allocation the scan makes is bounded by the bytes the source actually holds,
     /// not by a count an image claims: the objects walked are capped at the groups and
     /// inodes the source can physically hold, each metadata block is read once, and the
-    /// findings themselves stop at [`Limits::max_anomalies`] with
+    /// findings themselves stop at [`Limits::max_findings`] with
     /// [`ScanReport::is_truncated`] recording that they did. That is what makes this the
     /// path to point at an image that may have been built to be hostile.
     #[must_use]
@@ -2787,7 +2491,7 @@ impl<R: Read + Seek> Reader<R> {
             .min(u64::from(u32::MAX)) as u32;
         let desc_size = self.desc_size();
         for g in 0..self.group_count().min(group_bound) {
-            if anomalies.len() >= self.limits.max_anomalies {
+            if anomalies.len() >= self.limits.max_findings {
                 truncated = true;
                 break;
             }
@@ -2858,7 +2562,7 @@ impl<R: Read + Seek> Reader<R> {
             // A report already at its cap collects nothing more, so the walk stops here
             // rather than reading every remaining group's bitmap for findings it would
             // discard.
-            if anomalies.len() >= self.limits.max_anomalies {
+            if anomalies.len() >= self.limits.max_findings {
                 truncated = true;
                 break;
             }
@@ -2877,7 +2581,7 @@ impl<R: Read + Seek> Reader<R> {
                 // completion, so a report never holds half an inode's account of itself.
                 // Each contributes at most one finding per distinct block it names, so the
                 // overshoot past the cap is bounded by the blocks the image holds.
-                if anomalies.len() >= self.limits.max_anomalies {
+                if anomalies.len() >= self.limits.max_findings {
                     truncated = true;
                     break 'inodes;
                 }
@@ -2891,7 +2595,8 @@ impl<R: Read + Seek> Reader<R> {
                 };
                 match Inode::read_from(&raw, inode_size) {
                     Err(e) => anomalies.push(anomaly_at_inode(&ReadError::Parse(e), n)),
-                    Ok(inode) => {
+                    Ok(mut inode) => {
+                        self.mask_ungated_halves(&mut inode);
                         if has_csum {
                             let (stored, computed) = self.inode_checksum(n, &raw, &csum, seed);
                             if computed != stored {
@@ -2911,6 +2616,7 @@ impl<R: Read + Seek> Reader<R> {
                         // it is a disagreement between two fields, not a corruption a
                         // checksum would catch.
                         self.scan_feature_coherence(n, &inode, &mut anomalies);
+                        self.scan_acl_values(n, &inode, &mut anomalies);
                         self.scan_inode_map(
                             n,
                             &inode,
@@ -2919,10 +2625,11 @@ impl<R: Read + Seek> Reader<R> {
                             &mut visited,
                             &mut anomalies,
                         );
-                        // A directory-entry name a real filesystem could not hold is a
-                        // structural fault whether or not the image carries checksums, so
-                        // it is checked outside the `has_csum` block below.
-                        self.scan_dirent_names(n, &inode, &mut anomalies);
+                        // A directory entry whose name a real filesystem could not hold, or
+                        // whose inode the filesystem does not have, is a structural fault
+                        // whether or not the image carries checksums, so both are checked
+                        // outside the `has_csum` block below.
+                        self.scan_dirents(n, &inode, &mut anomalies);
                         if has_csum {
                             let mut faults = Vec::new();
                             self.collect_directory_faults(n, &inode, &csum, seed, &mut faults);
@@ -2955,14 +2662,15 @@ impl<R: Read + Seek> Reader<R> {
 
         // The cap is a bound on what a report holds, so it is applied to the collected
         // findings as well as to the walk that gathered them.
-        if anomalies.len() > self.limits.max_anomalies {
-            anomalies.truncate(self.limits.max_anomalies);
+        if anomalies.len() > self.limits.max_findings {
+            anomalies.truncate(self.limits.max_findings);
             truncated = true;
         }
         ScanReport {
             anomalies,
             truncated,
-            cap: self.limits.max_anomalies,
+            cap: self.limits.max_findings,
+            block_size: self.block_size as u32,
         }
     }
 
@@ -3080,20 +2788,50 @@ impl<R: Read + Seek> Reader<R> {
         }
     }
 
-    /// Flag directory `ino` when any entry's name is one a real ext4 filesystem could not
-    /// hold — one carrying a path separator or a NUL (see [`name_is_hostile`]). Such a
-    /// name is impossible on a kernel-checked filesystem, so its presence is a structural
-    /// fault and the diagnostic that keeps `walk`'s silent skip of it from being the only
-    /// signal. A non-directory has no entries.
+    /// Flag inode `ino` when a `system.posix_acl_*` attribute holds bytes that are not a
+    /// stored ACL.
+    ///
+    /// Checked on every image rather than only a checksummed one: the bytes are exactly as
+    /// they were written, so no checksum disagrees with them. What disagrees is the name
+    /// and the value — an attribute the kernel will read as an ACL and refuse — and a read
+    /// of that inode's attributes fails, so this is what says which inode holds it.
+    ///
+    /// Only the malformed-ACL failure is reported. Every other way reading the attributes
+    /// can fail is the attribute region's own, and the scan reports those where it walks
+    /// the region.
+    fn scan_acl_values(&mut self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
+        if let Err(e @ ReadError::MalformedAcl { .. }) = self.xattrs(inode) {
+            out.push(anomaly_at_inode(&e, ino));
+        }
+    }
+
+    /// Flag directory `ino` for the faults its entry records carry: a name a real ext4
+    /// filesystem could not hold, and a reference to an inode the filesystem does not
+    /// have. A non-directory has no entries.
+    ///
+    /// Both are structural, and both are checked on every image rather than only a
+    /// checksummed one — the records are exactly as they were written, so no checksum
+    /// disagrees with them, and an image crafted to carry either recomputes its checksums
+    /// over it.
+    ///
+    /// A hostile name carries a path separator or a NUL (see [`name_is_hostile`]) and is
+    /// impossible on a kernel-checked filesystem. A reference past `s_inodes_count` names
+    /// an inode that cannot exist, which is what `e2fsck` reports as an entry with an
+    /// invalid inode number. [`read_dir`](Self::read_dir) refuses both, and reporting them
+    /// here is what finds them across the whole image without resolving anything — a
+    /// directory nothing ever lists is one no read would reach.
     ///
     /// The blocks are walked here rather than through [`read_dir`](Self::read_dir), which
-    /// is strict: it abandons a whole directory at its first malformed record, and a
-    /// directory carrying a hostile name is exactly the one likely to carry a malformed
-    /// record too — so reading through it would skip the check on the directories that
-    /// most need it. A record this cannot parse ends that *block*, and the walk goes on to
-    /// the next. Each physical block is read once, and one anomaly stands for the whole
-    /// directory, so a crafted map cannot make one inode's finding into thousands.
-    fn scan_dirent_names(&mut self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
+    /// is strict: it abandons a whole directory at its first bad record, and a directory
+    /// carrying either fault is exactly the one likely to carry a malformed record too —
+    /// so reading through it would skip the check on the directories that most need it. A
+    /// record this cannot parse ends that *block*, and the walk goes on to the next.
+    ///
+    /// Each physical block is read once, and each kind of fault is reported once for the
+    /// whole directory, so a crafted map cannot make one inode's finding into thousands.
+    /// The walk carries on past a fault it has reported, since the records after it may
+    /// hold the other kind, and stops once both have been found.
+    fn scan_dirents(&mut self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
         if !is_dir(inode) {
             return;
         }
@@ -3103,6 +2841,7 @@ impl<R: Read + Seek> Reader<R> {
             return;
         };
         let mut read = HashSet::new();
+        let (mut bad_name, mut bad_reference) = (false, false);
         for phys in blocks {
             if phys == 0 || !read.insert(phys) {
                 continue;
@@ -3122,9 +2861,23 @@ impl<R: Read + Seek> Reader<R> {
                 if rec_len == 0 {
                     break;
                 }
-                if entry.inode != 0 && name_is_hostile(&entry.name) {
-                    out.push(hostile_name_anomaly(ino));
-                    return;
+                // A zero inode is an unused slot: it holds neither a reference nor a name
+                // the directory carries.
+                if entry.inode != 0 {
+                    if !bad_name && name_is_hostile(&entry.name) {
+                        out.push(anomaly_at_inode(
+                            &ReadError::HostileName { inode: entry.inode },
+                            ino,
+                        ));
+                        bad_name = true;
+                    }
+                    if !bad_reference && let Err(e) = self.check_dir_entry_inode(entry.inode) {
+                        out.push(anomaly_at_inode(&e, ino));
+                        bad_reference = true;
+                    }
+                    if bad_name && bad_reference {
+                        return;
+                    }
                 }
                 off += rec_len;
             }
@@ -3214,7 +2967,33 @@ impl<R: Read + Seek> Reader<R> {
     /// [`ReadError`] variants if its bytes cannot be located or parsed.
     pub fn inode(&mut self, number: u32) -> Result<Inode, ReadError> {
         let raw = self.inode_raw(number)?;
-        Ok(Inode::read_from(&raw, self.sb.inode_size)?)
+        let mut inode = Inode::read_from(&raw, self.sb.inode_size)?;
+        self.mask_ungated_halves(&mut inode);
+        Ok(inode)
+    }
+
+    /// Drop the high half of the two inode fields whose upper bytes are another field
+    /// entirely when the feature that defines them is clear.
+    ///
+    /// The byte layer joins both halves unconditionally, because whether the upper bytes are
+    /// a high half at all is a question about the *feature words*, which the byte layer does
+    /// not have. Here it does, so this is where the gate belongs — and it is the same rule
+    /// the kernel applies, in `ext4_inode_blocks` and `ext4_iget` respectively.
+    ///
+    /// Without `huge_file`, offsets 0x74 and 0x75 are ext2's `l_i_frag` and `l_i_fsize`;
+    /// without `64bit`, 0x76 is `i_pad1`. Nothing a Linux filesystem writes leaves them
+    /// non-zero, which is exactly why an image that does is worth being right about:
+    /// `e2fsck` carries a problem code for each, so images with bytes there occur. Read as
+    /// high halves they change what the inode *is* — a fast symlink classifies as slow and
+    /// its target is walked as a block map, or a slow symlink classifies as fast and block
+    /// pointers are returned as the target.
+    fn mask_ungated_halves(&self, inode: &mut Inode) {
+        if !self.feature.has_huge_file() {
+            inode.blocks &= u64::from(u32::MAX);
+        }
+        if !self.feature.is_64bit() {
+            inode.file_acl &= u64::from(u32::MAX);
+        }
     }
 
     /// Read inode `number` exactly as it sits on disk, at this filesystem's
@@ -3249,6 +3028,20 @@ impl<R: Read + Seek> Reader<R> {
                 what: "inode",
                 index: u64::from(number),
             })?;
+        // The table is placed by a group descriptor, so these bytes are a reference like
+        // any other and must lie inside the filesystem. What is bounded is the inode's
+        // whole byte range, through the block its last byte falls in rather than the block
+        // the table begins in: a table starting inside the filesystem and running past its
+        // final block holds inodes on both sides of the boundary, and only the ones wholly
+        // inside it are this filesystem's. `read_at` bounds the same bytes by the source,
+        // which on an image embedded in a larger one is a different bound and not this one.
+        let last_block = off.saturating_add(isize as u64 - 1) / self.block_size as u64;
+        if last_block >= self.sb.blocks_count {
+            return Err(ReadError::OutOfRange {
+                what: "inode",
+                index: u64::from(number),
+            });
+        }
         match self.read_at(off, isize) {
             Err(ReadError::OutOfRange { .. }) => Err(ReadError::OutOfRange {
                 what: "inode",
@@ -3265,16 +3058,40 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// [`ReadError::BadExtentTree`] if the tree exceeds [`MAX_EXTENT_DEPTH`];
     /// [`ReadError`] variants if a node cannot be read.
+    #[cfg(test)]
     fn extent_leaves(
         &mut self,
         inode: &Inode,
+    ) -> Result<Vec<crate::ondisk::ExtentLeaf>, ReadError> {
+        self.extent_leaves_in(inode, 0..u64::MAX)
+    }
+
+    /// The leaves whose logical runs meet `window`, following only the index entries whose
+    /// subtrees could hold one.
+    ///
+    /// An index entry names the first logical block its subtree covers and the entries of a
+    /// node are sorted, so the next entry's first block is where this one's coverage ends —
+    /// which is enough to skip a whole subtree without reading a block of it. That is what
+    /// makes reading part of a file cost part of a tree: without it every window rebuilds
+    /// the entire tree, so a read through an 8 KiB buffer walks it once per two blocks, and
+    /// a fragmented file streamed to an archive costs a tree walk per window for as many
+    /// windows as it has.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::BadExtentTree`] if the tree exceeds [`MAX_EXTENT_DEPTH`];
+    /// [`ReadError`] variants if a node cannot be read.
+    fn extent_leaves_in(
+        &mut self,
+        inode: &Inode,
+        window: std::ops::Range<u64>,
     ) -> Result<Vec<crate::ondisk::ExtentLeaf>, ReadError> {
         let mut leaves = Vec::new();
         // One visited set per tree: a well-formed extent tree references each external
         // node once, so a repeated child pointer is a cycle or fan-out and bounds the
         // walk to the blocks that actually exist rather than looping.
         let mut visited = HashSet::new();
-        self.walk_extent_node(&inode.block, 0, &mut visited, &mut leaves)?;
+        self.walk_extent_node(&inode.block, 0, &window, &mut visited, &mut leaves)?;
         // Leaves come out in logical order because entries within a node are sorted
         // and index nodes are visited in order.
         Ok(leaves)
@@ -3284,6 +3101,7 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         node: &[u8],
         depth: u16,
+        window: &std::ops::Range<u64>,
         visited: &mut HashSet<u64>,
         out: &mut Vec<crate::ondisk::ExtentLeaf>,
     ) -> Result<(), ReadError> {
@@ -3305,30 +3123,74 @@ impl<R: Read + Seek> Reader<R> {
                         });
                     }
                 }
-                out.extend(leaves);
+                // Every leaf in the node is validated, whatever the window: a reference
+                // out of range is refused wherever it sits, so which part of a file a
+                // caller read cannot decide whether its map is judged. Only the leaves the
+                // window meets are collected.
+                out.extend(leaves.into_iter().filter(|leaf| {
+                    let lo = u64::from(leaf.block);
+                    let hi = lo.saturating_add(u64::from(leaf.len));
+                    hi > window.start && lo < window.end
+                }));
             }
             ExtentNode::Index { entries, .. } => {
-                for idx in entries {
-                    // A child block reached twice is a cyclic or fan-out tree, not a
-                    // tree: reject it rather than walk it unbounded.
+                for (at, idx) in entries.iter().enumerate() {
+                    // Where this subtree's coverage ends: the next entry's first logical
+                    // block, since the entries of a node are sorted and cover the logical
+                    // range between them. The last entry runs to the end of the file, which
+                    // nothing here bounds, so it is open.
+                    let lo = u64::from(idx.block);
+                    let hi = entries
+                        .get(at + 1)
+                        .map_or(u64::MAX, |next| u64::from(next.block));
+                    // Every subtree is checked against `visited` whether or not it is
+                    // descended into: a repeated pointer is a cyclic tree, and a window that
+                    // skipped one would make the refusal depend on which part was read.
                     if !visited.insert(idx.leaf) {
                         return Err(ReadError::BadExtentTree);
                     }
+                    if hi <= window.start || lo >= window.end {
+                        continue;
+                    }
                     let child = self.block(idx.leaf)?;
-                    self.walk_extent_node(&child, depth + 1, visited, out)?;
+                    self.walk_extent_node(&child, depth + 1, window, visited, out)?;
                 }
             }
         }
         Ok(())
     }
 
-    /// Reject a block pointer naming a block the filesystem does not have.
-    fn check_data_block(&self, block: u64) -> Result<(), ReadError> {
+    /// Reject a reference naming a block the filesystem does not have.
+    ///
+    /// This is the filesystem's own boundary, and it is a different bound from the
+    /// source's length: an image that occupies a partition or a region of a larger file
+    /// has bytes past its final block that a reference can still reach, and following one
+    /// would read whatever lies beyond the filesystem as its own metadata. The two are
+    /// kept together — this bound rejects the reference, and the source's length still
+    /// catches an image truncated short of the blocks it claims.
+    ///
+    /// [`block`](Self::block) applies it to every block it reads. It is called directly
+    /// where a pointer is validated without being read: a forensic walk records that a
+    /// mapping names a block outside the filesystem rather than fetching what it names.
+    fn check_block(&self, block: u64) -> Result<(), ReadError> {
         if block >= self.sb.blocks_count {
             return Err(ReadError::OutOfRange {
                 what: "block",
                 index: block,
             });
+        }
+        Ok(())
+    }
+
+    /// Reject a directory entry naming an inode the filesystem does not have.
+    ///
+    /// An entry's inode number is a reference like a block pointer, and the superblock's
+    /// inode count is what bounds it. Inodes are numbered from one, and the zero an
+    /// unused slot carries names nothing at all, so it is not a reference and never
+    /// reaches here.
+    fn check_dir_entry_inode(&self, inode: u32) -> Result<(), ReadError> {
+        if inode > self.sb.inodes_count {
+            return Err(ReadError::DirEntryNoSuchInode { inode });
         }
         Ok(())
     }
@@ -3451,9 +3313,10 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Place the part of an inode's extent tree that falls in the window.
     ///
-    /// [`extent_leaves`](Self::extent_leaves) has already checked every leaf's physical
-    /// run against the block count, so placing a leaf here is a matter of its logical
-    /// offset: a run is clipped to the window and a run entirely outside it is skipped.
+    /// [`extent_leaves_in`](Self::extent_leaves_in) descends only the index entries whose
+    /// subtrees the window meets, and has already checked every leaf's physical run against
+    /// the block count — so placing a leaf here is a matter of its logical offset: a run is
+    /// clipped to the window and a run entirely outside it is skipped.
     fn extent_window(
         &mut self,
         inode: &Inode,
@@ -3461,7 +3324,8 @@ impl<R: Read + Seek> Reader<R> {
         map: &mut [u64],
     ) -> Result<(), ReadError> {
         let end = first.saturating_add(map.len());
-        for leaf in self.extent_leaves(inode)? {
+        let window = first as u64..end as u64;
+        for leaf in self.extent_leaves_in(inode, window)? {
             let lo = leaf.block as usize;
             let hi = lo.saturating_add(leaf.len as usize);
             // An uninitialized run occupies blocks but holds no data: it reads back as
@@ -3494,7 +3358,7 @@ impl<R: Read + Seek> Reader<R> {
         for i in first..DIRECT_BLOCKS.min(end) {
             let ptr = u64::from(get_u32(&inode.block, i * 4));
             if ptr != 0 {
-                self.check_data_block(ptr)?;
+                self.check_block(ptr)?;
             }
             map[i - first] = ptr;
         }
@@ -3536,7 +3400,6 @@ impl<R: Read + Seek> Reader<R> {
         if block == 0 {
             return Ok(());
         }
-        self.check_data_block(block)?;
         let buf = self.block(block)?;
         let per_block = self.block_size / 4;
         // What one slot of this block covers: a slot of a single-indirect block is one
@@ -3554,7 +3417,7 @@ impl<R: Read + Seek> Reader<R> {
             let ptr = u64::from(get_u32(&buf, i * 4));
             if level == 1 {
                 if ptr != 0 {
-                    self.check_data_block(ptr)?;
+                    self.check_block(ptr)?;
                 }
                 map[lo - first] = ptr;
             } else {
@@ -3583,7 +3446,7 @@ impl<R: Read + Seek> Reader<R> {
         for i in 0..DIRECT_BLOCKS {
             let ptr = u64::from(get_u32(&inode.block, i * 4));
             if ptr != 0 {
-                self.check_data_block(ptr)?;
+                self.check_block(ptr)?;
             }
         }
         for level in 1..=INDIRECT_LEVELS {
@@ -3605,19 +3468,20 @@ impl<R: Read + Seek> Reader<R> {
         if block == 0 {
             return Ok(());
         }
-        self.check_data_block(block)?;
         // A repeated indirect block is a cycle or fan-out, not a map: validated once, it
         // is not walked again, so a crafted map cannot fan the walk out without bound.
         if !visited.insert(block) {
             return Ok(());
         }
+        // The pointer at this block is bounded by the read of it; the ones it holds are
+        // bounded below, where they are validated without being read.
         let buf = self.block(block)?;
         let per_block = self.block_size / 4;
         for i in 0..per_block {
             let ptr = u64::from(get_u32(&buf, i * 4));
             if level == 1 {
                 if ptr != 0 {
-                    self.check_data_block(ptr)?;
+                    self.check_block(ptr)?;
                 }
             } else {
                 self.scan_indirect(ptr, level - 1, visited)?;
@@ -3866,8 +3730,16 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Read a symlink's target, whether stored inline (fast) or in a data block (slow).
     ///
+    /// A target longer than `PATH_MAX` is refused rather than read. A symbolic link's
+    /// target has a structural ceiling that a regular file's contents do not — no path this
+    /// or any other kernel resolves is longer — so trusting `i_size` here is not the
+    /// defensible trade-off it is for a sparse file. Without the bound a slow symlink falls
+    /// through to a whole-file read and allocates whatever its size field claims, which at
+    /// the 32 bits a symlink's size is read at is four gibibytes per link.
+    ///
     /// # Errors
     ///
+    /// [`ReadError::FileTooLarge`] if the target's declared length is past `PATH_MAX`;
     /// [`ReadError`] variants if a slow symlink's block cannot be read.
     pub fn read_symlink(&mut self, inode: &Inode) -> Result<Vec<u8>, ReadError> {
         // Whether the target is stored inline is a matter of the blocks the inode owns,
@@ -3879,6 +3751,12 @@ impl<R: Read + Seek> Reader<R> {
                 .unwrap_or(usize::MAX)
                 .min(inode.block.len());
             return Ok(inode.block[..len].to_vec());
+        }
+        if inode.size > MAX_PATH as u64 {
+            return Err(ReadError::FileTooLarge {
+                size: inode.size,
+                limit: MAX_PATH as u64,
+            });
         }
         self.read_data(inode)
     }
@@ -3892,13 +3770,25 @@ impl<R: Read + Seek> Reader<R> {
     pub fn xattrs(&mut self, inode: &Inode) -> Result<Vec<Xattr>, ReadError> {
         let mut out = parse_inline(&inode.inline_xattr)?;
         if inode.file_acl != 0 {
-            // The attribute-block pointer is checked against the filesystem's block
-            // count exactly as a data-block pointer is. Bounding it by the source alone
-            // would let a pointer past the filesystem but inside a larger disk image
-            // read whatever sits beyond the partition as attributes.
-            self.check_data_block(inode.file_acl)?;
+            // The read bounds the pointer by the filesystem's own block count, so a
+            // pointer past the filesystem but inside a larger disk image cannot read
+            // whatever sits beyond the partition back as this inode's attributes.
             let block = self.block(inode.file_acl)?;
             out.extend(parse_block(&block)?);
+        }
+        // An ACL leaves in the form every boundary speaks, which is the same widening the
+        // inode's own times get: what is stored is this format's packing of a value, and
+        // what a read reports is the value.
+        for x in &mut out {
+            if x.name != Acl::ACCESS_NAME && x.name != Acl::DEFAULT_NAME {
+                continue;
+            }
+            let acl =
+                crate::ondisk::decode_acl(&x.value).map_err(|source| ReadError::MalformedAcl {
+                    name: x.name.clone(),
+                    source,
+                })?;
+            x.value = acl.encode();
         }
         Ok(out)
     }
@@ -3924,14 +3814,44 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Read a directory's entries, skipping the unused slots and the checksum tail.
     ///
+    /// Every entry handed back names an inode the filesystem has. An entry naming one it
+    /// does not is refused where the entry is *read* rather than where a later resolution of
+    /// it fails, so a caller listing a directory and a caller walking the tree get the same
+    /// account of the same corruption. Whether the inode is *in use* is a separate question,
+    /// which the bitmaps answer and a [`scan`](Self::scan) asks.
+    ///
+    /// What "refused" means is the policy's, and it is the same answer a name no directory
+    /// could hold gets: a strict read stops at [`ReadError::DirEntryNoSuchInode`], and a
+    /// lenient one leaves the entry out and lets the scan report it. Two structurally
+    /// equivalent faults in one record are not given opposite treatments, and a lenient read
+    /// keeps the good entries beside the bad one — which is what it exists for.
+    ///
+    /// This is one of the reads [`Limits::max_walk_entries`] governs: a directory is a
+    /// structure read whole, so the cap on how many entries one read gathers applies here
+    /// and not only across a tree. Past it the answer is
+    /// [`ReadError::WalkTooLarge`] rather than a short listing.
+    ///
+    /// A block the mapping names more than once is read once. Nothing in the format stops a
+    /// mapping pointing every one of its slots at a single block, and a directory of eight
+    /// gibibytes' apparent length can do it from ten kilobytes of real content — so without
+    /// this the entries of one block are yielded a million times over. The scan path already
+    /// judged such a mapping once per block; the read path now reads it once per block.
+    ///
     /// # Errors
     ///
-    /// [`ReadError`] variants if the directory's blocks cannot be read or parsed.
+    /// [`ReadError::DirEntryNoSuchInode`] under a strict policy if an entry names an inode
+    /// past the filesystem's inode count; [`ReadError::WalkTooLarge`] if the directory holds
+    /// more
+    /// entries than the bounds allow; [`ReadError`] variants if the directory's blocks
+    /// cannot be read or parsed.
     pub fn read_dir(&mut self, inode: &Inode) -> Result<Vec<Entry>, ReadError> {
+        let cap = self.limits.max_walk_entries.min(self.max_names());
         let mut entries = Vec::new();
+        let mut seen_blocks = HashSet::new();
         for phys in self.data_blocks(inode)? {
-            // A directory block a mapping does not name holds no entries.
-            if phys == 0 {
+            // A directory block a mapping does not name holds no entries, and one it names
+            // twice holds them once.
+            if phys == 0 || !seen_blocks.insert(phys) {
                 continue;
             }
             let block = self.block(phys)?;
@@ -3953,6 +3873,32 @@ impl<R: Read + Seek> Reader<R> {
                     return Err(ReadError::BadDirectory);
                 }
                 if entry.inode != 0 {
+                    // An entry naming an inode the filesystem does not have and an entry
+                    // carrying a name no directory could hold are the same fault in two
+                    // fields, and get the same treatment: a policy that refuses deviations
+                    // refuses them, and one that does not leaves the entry out and lets the
+                    // scan report it. Failing the whole listing instead discards the good
+                    // entries beside the bad one — which is precisely what a lenient read
+                    // exists to recover.
+                    //
+                    // Both checks sit here because this is where bytes become a name and a
+                    // reference: one check covers listing, resolution, the walk, and every
+                    // sink a walk feeds, and no later caller has to remember either.
+                    let fault = if name_is_hostile(&entry.name) {
+                        Some(ReadError::HostileName { inode: entry.inode })
+                    } else {
+                        self.check_dir_entry_inode(entry.inode).err()
+                    };
+                    if let Some(e) = fault {
+                        if self.policy.is_fatal(Severity::Structural) {
+                            return Err(e);
+                        }
+                        off += rec_len;
+                        continue;
+                    }
+                    if entries.len() >= cap {
+                        return Err(ReadError::WalkTooLarge { limit: cap });
+                    }
                     entries.push(Entry {
                         name: entry.name,
                         inode: entry.inode,
@@ -4084,6 +4030,10 @@ impl<R: Read + Seek> Reader<R> {
     /// with nothing to say it had, and a caller extracting a tree would write an
     /// incomplete one and see success.
     ///
+    /// The bound counts every name the walk has *found*, not only the ones it has yielded.
+    /// Each name reached may reveal a whole directory's worth more, so a bound on what is
+    /// yielded alone would leave what is held bounded by the product of the two.
+    ///
     /// The structural bound is what makes this safe to point at an image built to be
     /// hostile: distinct directory inodes may map the *same* data blocks, so a small image
     /// can describe an unbounded number of names, while a well-formed one spends at least
@@ -4092,7 +4042,8 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// # Errors
     ///
-    /// [`ReadError`] variants if any directory along the walk cannot be read, or
+    /// [`ReadError::NotADirectory`] if the root inode is not a directory, [`ReadError`]
+    /// variants if any directory along the walk cannot be read, or
     /// [`ReadError::WalkTooLarge`] if the tree holds more names than the bounds allow.
     pub fn walk(&mut self) -> Result<Vec<WalkEntry>, ReadError> {
         let mut out = Vec::new();
@@ -4107,10 +4058,23 @@ impl<R: Read + Seek> Reader<R> {
     /// than gathering them all first.
     ///
     /// The order, the bounds, and the cycle handling are [`walk`](Self::walk)'s exactly;
-    /// what differs is that nothing accumulates, so a tree of any size costs the walk's own
-    /// state rather than one full [`Inode`] and path per name. That is what makes a whole
-    /// tree processable in a fixed working set — writing an archive, counting a tree,
-    /// building an index.
+    /// what differs is what the walk holds. `walk` accumulates every name, so it costs one
+    /// whole [`Inode`] and path per name in the tree, all of them live at once. This holds
+    /// only the *frontier* — the names reached and not yet visited — and holds each of those
+    /// as a path and an inode number rather than as an inode, reading the inode back when
+    /// the name comes up. That is what makes a whole tree processable without its size
+    /// setting the working set: writing an archive, counting a tree, building an index.
+    ///
+    /// It is a frontier and not a fixed set. Depth-first over an explicit stack, the
+    /// frontier is every unvisited sibling along the path currently being walked, so a
+    /// directory holding a million names does put a million paths on it — bounded, but not
+    /// small. What it is *not* is the whole tree, and it costs no inode per pending name.
+    ///
+    /// The names on the frontier count against the walk's bounds exactly as the names
+    /// already visited do, which is what keeps the bound a bound on an image built to be
+    /// hostile: without it, one bound's worth of visits could each discover a whole
+    /// directory's worth of names, and the frontier would be the product rather than the
+    /// sum.
     ///
     /// `visit` receives the reader itself, so it may read each entry's contents,
     /// attributes, or link target as it goes. It is called once per name, in walk order,
@@ -4124,8 +4088,9 @@ impl<R: Read + Seek> Reader<R> {
     /// # Errors
     ///
     /// Whatever `visit` returns, or the [`walk`](Self::walk) errors converted into it:
-    /// [`ReadError`] variants if a directory cannot be read, or [`ReadError::WalkTooLarge`]
-    /// if the tree holds more names than the bounds allow.
+    /// [`ReadError::NotADirectory`] if the root inode is not a directory, [`ReadError`]
+    /// variants if a directory cannot be read, or [`ReadError::WalkTooLarge`] if the tree
+    /// holds more names than the bounds allow.
     pub fn walk_with<E: From<ReadError>>(
         &mut self,
         mut visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>,
@@ -4133,67 +4098,312 @@ impl<R: Read + Seek> Reader<R> {
         let cap = self.limits.max_walk_entries.min(self.max_names());
         let mut seen = 0usize;
         let root = self.inode(ROOT_INO).map_err(E::from)?;
+        // The root is descended into like any other directory, so it is checked to be one
+        // like any other. It was the single descent that was not: every child below is
+        // guarded, and so is each component `resolve` walks through.
+        //
+        // What an unguarded root costs is not a wrong listing. A directory's logical length
+        // is bounded by the blocks it could materially hold; a regular file's is not, because
+        // it may legitimately be sparse. So inode 2 with a regular-file mode and a large
+        // `i_size` sends `read_dir` to build a block map at the full logical size before a
+        // single entry exists to read — tens of gigabytes from an image of a few kilobytes,
+        // reached by a plain `walk()` with no sink involved.
+        if !is_dir(&root) {
+            return Err(E::from(ReadError::NotADirectory {
+                path: b"/".to_vec(),
+            }));
+        }
         // Track the directory inodes descended into: a well-formed tree reaches each
         // exactly once, so declining to re-descend a repeat bounds the walk against a
         // directory cycle or a hard-linked directory rather than fanning out.
         let mut visited = HashSet::new();
         visited.insert(ROOT_INO);
-        // An explicit stack of entries still to visit, rather than recursion, so a tree
-        // nested arbitrarily deep is walked without a call-stack bound. The root has no
-        // name, so the walk seeds from its children. Children are pushed in reverse name
-        // order, so popping yields them in order and a directory's whole subtree is
-        // emitted before its next sibling — the documented depth-first, names-sorted
-        // order the recursion produced.
+        // An explicit stack of the names reached and not yet visited, rather than recursion,
+        // so a tree nested arbitrarily deep is walked without a call-stack bound. The root
+        // has no name, so the walk seeds from its children. Children are pushed in reverse
+        // name order, so popping yields them in order and a directory's whole subtree is
+        // emitted before its next sibling — the documented depth-first, names-sorted order
+        // the recursion produced.
+        //
+        // Each element is a path and an inode number, not an inode: an `Inode` carries its
+        // inline attribute block, which is the inode size less 128 bytes, and holding one per
+        // pending name would make the frontier cost what the whole tree does. The inode is
+        // read at the pop instead, which is the same one read per name the listing would
+        // have done — moved, not added.
         let mut stack = self.walk_children(&root, &[]).map_err(E::from)?;
-        while let Some(entry) = stack.pop() {
+        // The root's own children are the first frontier, and answer to the bound below
+        // like every later one.
+        if stack.len() > cap {
+            return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
+        }
+        while let Some((path, number)) = stack.pop() {
             if seen >= cap {
                 return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
             }
             seen += 1;
+            let inode = self.inode(number).map_err(E::from)?;
             // Descend into a subdirectory only the first time its inode is reached; a
             // repeat is a directory cycle or hard link, so re-descending would not
-            // terminate. The visited set bounds fan-out; the explicit stack bounds
-            // nothing but the heap, so depth is limited only by the image.
-            if is_dir(&entry.inode) && visited.insert(entry.number) {
-                let children = self
-                    .walk_children(&entry.inode, &entry.path)
-                    .map_err(E::from)?;
+            // terminate.
+            if is_dir(&inode) && visited.insert(number) {
+                let children = self.walk_children(&inode, &path).map_err(E::from)?;
+                // The cap bounds the names *pushed*, not only the names popped. Each
+                // iteration may push a whole directory's worth of children, and distinct
+                // directory inodes may map the same data blocks, so bounding pops alone
+                // would leave the stack bounded by the cap times a directory's fan-out
+                // rather than by the cap. Every name pushed is a name this walk must yield,
+                // so a frontier that already exceeds what is left of the cap is a walk that
+                // has exceeded it — reported here rather than after the memory is spent.
+                if seen
+                    .saturating_add(stack.len())
+                    .saturating_add(children.len())
+                    > cap
+                {
+                    return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
+                }
                 stack.extend(children);
             }
-            visit(self, entry)?;
+            visit(
+                self,
+                WalkEntry {
+                    path,
+                    number,
+                    inode,
+                },
+            )?;
         }
         Ok(())
     }
 
-    /// The child entries of directory `inode` as walk entries, in reverse name order so
-    /// a stack pops them in name order. `.` and `..` are skipped; each child's inode is
-    /// read once here.
-    fn walk_children(&mut self, inode: &Inode, prefix: &[u8]) -> Result<Vec<WalkEntry>, ReadError> {
+    /// The names below directory `inode`, each as a path and an inode number, in reverse
+    /// name order so a stack pops them in name order. `.` and `..` are skipped.
+    ///
+    /// The inode itself is deliberately not read here: the walk reads it when the name comes
+    /// off the stack, so a pending name costs its path and four bytes rather than a whole
+    /// [`Inode`].
+    fn walk_children(
+        &mut self,
+        inode: &Inode,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, u32)>, ReadError> {
         let mut entries = self.read_dir(inode)?;
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let mut children = Vec::new();
         for e in entries.iter().rev() {
+            // The two entries a directory holds for itself and its parent are not names
+            // below it, so no path is built from either. A name no directory could hold
+            // needs no test here: `read_dir` above either refused it or left it out, so
+            // one never reaches this loop.
             if e.name == b"." || e.name == b".." {
-                continue;
-            }
-            // A name a real directory could not hold is not built into a path: a `/`
-            // would traverse out of the tree and a NUL would truncate the path a
-            // consumer forms from it. The entry is skipped here; a scan reports it.
-            if name_is_hostile(&e.name) {
                 continue;
             }
             let mut path = prefix.to_vec();
             path.push(b'/');
             path.extend_from_slice(&e.name);
-            let child = self.inode(e.inode)?;
-            children.push(WalkEntry {
-                path,
-                number: e.inode,
-                inode: child,
-            });
+            if path.len() > MAX_PATH {
+                return Err(ReadError::PathTooLong { limit: MAX_PATH });
+            }
+            children.push((path, e.inode));
         }
         Ok(children)
     }
+}
+
+/// How a read failure classifies in the crate's family-agnostic frame.
+///
+/// The mapping is what the crate's shared surface can say about an ext failure: a source
+/// that could not be read stays exactly what it was, a feature this reader does not follow
+/// is unsupported, a caller's bound being reached is a limit, and everything else is the
+/// image's own bytes being wrong.
+impl From<ReadError> for TreeError {
+    fn from(err: ReadError) -> Self {
+        match err {
+            ReadError::Io { kind, message } => TreeError::Io { kind, message },
+            ReadError::UnsupportedIncompat { .. } => TreeError::Unsupported {
+                family: Family::Ext,
+                detail: err.to_string(),
+            },
+            ReadError::FileTooLarge { .. }
+            | ReadError::PathTooLong { .. }
+            | ReadError::WalkTooLarge { .. } => TreeError::LimitExceeded {
+                family: Family::Ext,
+                detail: err.to_string(),
+            },
+            other => TreeError::Malformed {
+                family: Family::Ext,
+                detail: other.to_string(),
+            },
+        }
+    }
+}
+
+/// The ext family's implementation of the crate's extraction surface.
+///
+/// The node handle is the [`Inode`] itself, which the walk already read, so a sink that
+/// stats and then reads a file costs no second lookup of it.
+impl<R: Read + Seek> FsTree for Reader<R> {
+    type Node = Inode;
+
+    fn walk_tree<E, F>(&mut self, mut visit: F) -> Result<(), E>
+    where
+        E: From<TreeError>,
+        F: FnMut(&mut Self, TreeEntry<Inode>) -> Result<(), E>,
+    {
+        // The root has no name, so `walk_with` does not reach it. Yielding it first under
+        // the empty path is what lets a sink apply the root's own metadata without a second
+        // way of asking for it.
+        //
+        // It is classified the same way every other node is rather than assumed to be a
+        // directory: the root of a sound filesystem is one, and an image that says
+        // otherwise is what a sink has to be told about rather than shown a kind the bytes
+        // do not carry.
+        let root = self
+            .inode(ROOT_INO)
+            .map_err(|e| E::from(TreeError::from(e)))?;
+        let root_entry = WalkEntry {
+            path: Vec::new(),
+            number: ROOT_INO,
+            inode: root,
+        };
+        let root_entry = tree_entry(self, root_entry).map_err(E::from)?;
+        visit(self, root_entry)?;
+
+        // `walk_with` reports in the caller's error type and needs it to carry a
+        // `ReadError`; the visitor here carries a `TreeError` instead. This holds both for
+        // the length of the walk and unwraps them at the end, so a failure of the
+        // filesystem and a failure of the sink each reach the caller as itself.
+        let outcome = self.walk_with::<WalkFail<E>>(|reader, entry| {
+            let node = tree_entry(reader, entry).map_err(WalkFail::Tree)?;
+            visit(reader, node).map_err(WalkFail::Visitor)
+        });
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(WalkFail::Read(e)) => Err(E::from(TreeError::from(e))),
+            Err(WalkFail::Tree(e)) => Err(E::from(e)),
+            Err(WalkFail::Visitor(e)) => Err(e),
+        }
+    }
+
+    fn stat(&mut self, node: &Inode, _synthesis: &Synthesis) -> Result<Attributes, TreeError> {
+        // ext4 records every property the shared frame names, so nothing is invented and
+        // the synthesis inputs go unused. A caller's values are not applied over what the
+        // image holds: what is stored is what is reported.
+        let xattrs = self.xattrs(node)?;
+        Ok(Attributes::read(
+            Metadata {
+                mode: node.mode & 0o7777,
+                uid: node.uid,
+                gid: node.gid,
+                atime: node.atime,
+                ctime: node.ctime,
+                mtime: node.mtime,
+            },
+            xattrs,
+        ))
+    }
+
+    fn read_bytes(
+        &mut self,
+        node: &Inode,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, TreeError> {
+        Ok(Reader::read_into(self, node, offset, buf)?)
+    }
+
+    fn link_target(&mut self, node: &Inode) -> Result<Vec<u8>, TreeError> {
+        if node.mode & 0o170000 != 0o120000 {
+            return Err(TreeError::Malformed {
+                family: Family::Ext,
+                detail: "the node is not a symbolic link".to_string(),
+            });
+        }
+        Ok(self.read_symlink(node)?)
+    }
+
+    fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
+        let cap = self.limits.max_file_bytes;
+        if size > cap {
+            return Err(TreeError::LimitExceeded {
+                family: Family::Ext,
+                detail: format!(
+                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read \
+                     is held to",
+                    crate::escape::printable(path)
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Either failure a walk through the shared surface can have: the filesystem's, which
+/// `walk_with` produces, or the visitor's, which is the sink's own.
+enum WalkFail<E> {
+    Read(ReadError),
+    /// A node the walk reached that the shared frame cannot describe.
+    Tree(TreeError),
+    Visitor(E),
+}
+
+impl<E> From<ReadError> for WalkFail<E> {
+    fn from(err: ReadError) -> Self {
+        WalkFail::Read(err)
+    }
+}
+
+/// Project one walk entry into the shared frame: what the node is, and whether the image
+/// says more than one name reaches it.
+///
+/// The type nibble of a mode names one of seven things, and an inode carrying any other
+/// value is malformed — so it is refused here rather than resolved to whichever kind is
+/// nearest. Guessing would be the shape of bug that turns an unreadable inode into a socket
+/// a sink then goes and creates: a lenient open reaches this with whatever the image said,
+/// so the nibble is the image's claim rather than a fact.
+fn tree_entry<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    entry: WalkEntry,
+) -> Result<TreeEntry<Inode>, TreeError> {
+    let WalkEntry {
+        path,
+        number,
+        inode,
+        ..
+    } = entry;
+    let kind = match inode.mode & 0o170000 {
+        0o040000 => NodeKind::Directory,
+        0o100000 => NodeKind::File {
+            size: reader.file_len(&inode),
+        },
+        0o120000 => NodeKind::Symlink,
+        0o020000 => {
+            let (major, minor) = reader.device(&inode);
+            NodeKind::CharDevice { major, minor }
+        }
+        0o060000 => {
+            let (major, minor) = reader.device(&inode);
+            NodeKind::BlockDevice { major, minor }
+        }
+        0o010000 => NodeKind::Fifo,
+        0o140000 => NodeKind::Socket,
+        other => {
+            return Err(TreeError::Malformed {
+                family: Family::Ext,
+                detail: format!(
+                    "inode {number} records file type {other:#o}, which names no file type"
+                ),
+            });
+        }
+    };
+    // A directory has more than one link by construction — its own name and its `.` — so
+    // its link count says nothing, and it is never a second name for anything. Only an
+    // inode the image says has more than one name carries an identity, which keeps a sink's
+    // table down to the tree's hard links rather than a path per file in it.
+    let shared = (!matches!(kind, NodeKind::Directory) && inode.links_count > 1)
+        .then_some(u64::from(number));
+    let mut entry = TreeEntry::new(path, kind, inode);
+    entry.shared = shared;
+    Ok(entry)
 }
 
 #[cfg(test)]
@@ -4201,8 +4411,8 @@ mod tests {
     use super::*;
     use crate::geometry::GrowReservation;
     use crate::materialize::{FormatOptions, format};
-    use crate::ondisk::Timestamp;
     use crate::source::{Metadata, TreeBuilder};
+    use crate::time::Timestamp;
 
     const MIB: u64 = 1024 * 1024;
 
@@ -4447,6 +4657,167 @@ mod tests {
     }
 
     #[test]
+    fn the_bytes_above_i_blocks_are_read_as_a_high_half_only_where_the_feature_says_so() {
+        // Without `huge_file` the two bytes at 0x74 are ext2's `l_i_frag` and `l_i_fsize`,
+        // and without `64bit` the two at 0x76 are `i_pad1`. Read as high halves they change
+        // what an inode *is*: `is_fast_symlink` keys on the block count matching the
+        // attribute blocks, so a fast symlink whose fragment bytes are non-zero classifies
+        // as slow and its inline target is walked as a block map.
+        //
+        // No Linux-written image leaves those bytes set — which is why the differential
+        // gate, built from `mke2fs` output, cannot see this, and why `e2fsck` carries a
+        // problem code for each of them: images that do occur.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new().symlink(
+            b"/short".to_vec(),
+            b"/etc/passwd".to_vec(),
+            Metadata::new(0o777, time),
+        );
+        let mut options = opts_no_csum();
+        options.feature = FeatureSet::EXT2;
+        let mut bytes = format(src, 16 * MIB, options).unwrap().into_bytes();
+
+        let (number, target) = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let (number, inode) = r.lookup_no_follow(b"/short").expect("the link is there");
+            (number, r.read_symlink(&inode).expect("read the target"))
+        };
+        assert_eq!(target, b"/etc/passwd", "the fixture is a fast symlink");
+
+        // The ext2 fragment fields, and the padding word beside them, set to what a
+        // filesystem another system wrote could leave there.
+        let at = inode_offset(&bytes, number);
+        crate::ondisk::put_u16(&mut bytes[at..], 0x74, 0xBEEF);
+        crate::ondisk::put_u16(&mut bytes[at..], 0x76, 0xFACE);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (_, inode) = r
+            .lookup_no_follow(b"/short")
+            .expect("the link is still there");
+        assert_eq!(
+            inode.blocks, 0,
+            "without huge_file the block count is i_blocks_lo alone"
+        );
+        assert_eq!(
+            inode.file_acl, 0,
+            "without 64bit the attribute block is i_file_acl alone"
+        );
+        assert_eq!(
+            r.read_symlink(&inode).expect("read the target"),
+            b"/etc/passwd",
+            "the link still reads as the fast symlink it is"
+        );
+    }
+
+    #[test]
+    fn a_directory_entry_with_no_name_is_flagged_and_never_walked() {
+        // `DirEntry::read_from` accepts a zero `name_len` beside a non-zero inode, so a
+        // crafted directory holds an entry with no name at all. The path a walk would build
+        // from it is the *directory's own* path with a trailing separator — so two such
+        // siblings produce two entries at identical paths, contradicting what a walk
+        // promises about them, and an archive writer renders one as a member ending in `/`,
+        // which every tar reader takes for a directory and merges with the real entry of
+        // that name.
+        //
+        // An empty name is not a name. The sink one module away already said so; the reader
+        // now agrees, in both families.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new()
+            .file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time))
+            .file(b"/g".to_vec(), b"y".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 16 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let block = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let root = r.inode(ROOT_INO).unwrap();
+            usize::try_from(r.extent_leaves(&root).unwrap()[0].start).unwrap() * 4096
+        };
+        // The record for `f`, with its name length struck out. The inode stays, so the
+        // record is live and the name is nothing.
+        let mut off = block;
+        loop {
+            let (entry, rec_len) = DirEntry::read_from(&bytes[off..block + 4096], 4096).unwrap();
+            if entry.name == b"f" {
+                break;
+            }
+            off += rec_len;
+        }
+        bytes[off + 6] = 0;
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        // A strict read refuses rather than walking past it: an omission a caller is not
+        // told about is a tree that looks complete and is not.
+        assert!(matches!(r.walk(), Err(ReadError::HostileName { .. })));
+        // A lenient read is the one that recovers, and no path it builds is the directory's
+        // own with a trailing separator.
+        let mut lenient = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let walked = lenient
+            .walk()
+            .expect("a lenient walk hands back what it can");
+        for entry in &walked {
+            assert!(
+                !entry.path.is_empty() && !entry.path.ends_with(b"/"),
+                "the walk built {:?} from a nameless entry",
+                String::from_utf8_lossy(&entry.path)
+            );
+        }
+        assert!(
+            walked.iter().any(|e| e.path == b"/g"),
+            "the entry beside it survives: {:?}",
+            walked.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        // And the scan says the directory holds a name no directory could.
+        let report = r.scan();
+        assert!(
+            report.anomalies().iter().any(|a| {
+                a.location.inode == Some(ROOT_INO)
+                    && a.category == Category::Directory
+                    && a.severity == Severity::Structural
+            }),
+            "the scan reports the nameless entry: {:#?}",
+            report.anomalies()
+        );
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn a_root_that_is_not_a_directory_is_refused_before_it_is_descended_into() {
+        // Every descent below the root is guarded by `is_dir`, and so is each component
+        // `resolve` walks through. The root was the one that was not, and it is the one an
+        // image controls with a single mode word.
+        //
+        // The cost is not a wrong listing. A directory's logical length is bounded by what it
+        // could materially hold; a regular file's is not, because a sparse file legitimately
+        // claims far more than it stores. So a root inode with a regular-file mode and a
+        // terabyte of claimed size sends the walk to build a block map at the full logical
+        // size — tens of gigabytes of allocation from an image of a few kilobytes — before
+        // there is a single entry to read. A test that reaches the old code path does not
+        // fail; it takes the machine down, which is the point.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 16 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let at = inode_offset(&bytes, ROOT_INO);
+        // `i_mode` opens the inode and `i_size_lo` is four bytes in. Regular file, 1 TiB.
+        crate::ondisk::put_u16(&mut bytes[at..], 0, 0o100_755);
+        crate::ondisk::put_u32(&mut bytes[at..], 4, 0xFFFF_FFFF);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        assert!(
+            matches!(r.walk(), Err(ReadError::NotADirectory { ref path }) if path == b"/"),
+            "a root that is not a directory is refused by name"
+        );
+        // And through the caller that takes a closure, which is the path every sink uses.
+        let walked: Result<(), ReadError> = r.walk_with(|_, _| Ok(()));
+        assert!(matches!(walked, Err(ReadError::NotADirectory { .. })));
+    }
+
+    #[test]
     fn a_symlink_owning_a_data_block_reads_its_target_from_the_block() {
         // Whether a target is stored inline is a matter of the blocks the inode owns,
         // not of its size: a symlink holding a data block keeps its target there however
@@ -4535,6 +4906,58 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_acl_that_is_not_an_acl_is_refused_and_reported() {
+        // The attribute parses; its value does not. Handing the stored bytes back would
+        // give a consumer something it installs as an ACL and the kernel refuses, so the
+        // read fails — and the scan is what says which inode holds it.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let acl = crate::acl::Acl::new(vec![
+            crate::acl::AclEntry {
+                who: crate::acl::AclQualifier::UserObj,
+                perm: crate::acl::Acl::READ | crate::acl::Acl::WRITE,
+            },
+            crate::acl::AclEntry {
+                who: crate::acl::AclQualifier::GroupObj,
+                perm: crate::acl::Acl::READ,
+            },
+            crate::acl::AclEntry {
+                who: crate::acl::AclQualifier::Other,
+                perm: crate::acl::Acl::READ,
+            },
+        ])
+        .expect("a well-formed ACL");
+        let src = TreeBuilder::new()
+            .file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time))
+            .xattr(crate::acl::Acl::ACCESS_NAME.to_vec(), acl.encode());
+        let mut bytes = format(src, 64 * MIB, opts()).unwrap().into_bytes();
+
+        // Find the stored form in the image and give it a version no ACL has. The pattern
+        // is the whole encoded value, so it names the one place the ACL lives.
+        let stored = crate::ondisk::encode_acl(&acl);
+        let at = bytes
+            .windows(stored.len())
+            .position(|w| w == stored.as_slice())
+            .expect("the stored ACL is in the image");
+        bytes[at] = 0x07;
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (ino, _) = r.lookup(b"/f").expect("lookup /f");
+        let inode = r.inode(ino).expect("the inode still reads");
+        assert!(
+            matches!(r.xattrs(&inode), Err(ReadError::MalformedAcl { .. })),
+            "a value that is not an ACL has no form to be read back in"
+        );
+
+        let report = r.scan();
+        let found = report
+            .anomalies
+            .iter()
+            .find(|a| a.category == Category::Xattr && a.location.inode == Some(ino))
+            .expect("the scan names the inode holding it");
+        assert_eq!(found.severity, Severity::Structural);
+    }
+
+    #[test]
     fn an_attribute_block_pointer_past_the_filesystem_is_refused() {
         // A filesystem embedded in a larger disk image has bytes beyond its own block
         // count that a pointer can still reach. `i_file_acl` is checked against the
@@ -4557,7 +4980,7 @@ mod tests {
         // The neighbour: one block past the filesystem, holding a well-formed attribute
         // block. Parsing it in isolation proves it is readable, so the bounds check is
         // the only thing that can stop the read below.
-        let planted = crate::ondisk::Xattr {
+        let planted = crate::xattr::Xattr {
             name: b"user.neighbour".to_vec(),
             value: b"from the next partition".to_vec(),
         };
@@ -4589,6 +5012,446 @@ mod tests {
             ),
             "an attribute block outside the filesystem was read: {:?}",
             r.xattrs(&inode)
+        );
+    }
+
+    /// Plant `block` one block past the end of `bytes`, which the caller has arranged to
+    /// be exactly the filesystem's own length, and return the block number it occupies.
+    ///
+    /// This is the neighbour every boundary test needs: bytes that sit inside the source
+    /// and outside the filesystem, so a reference reaching them is stopped by the
+    /// filesystem's bound rather than by the source running out. Each such test plants
+    /// something a reader would happily accept if it got there, so what is being asserted
+    /// is the bound and not the plant.
+    fn plant_beyond(bytes: &mut Vec<u8>, block: &[u8]) -> u64 {
+        let at = bytes.len();
+        assert_eq!(at % 4096, 0, "the image ends on a block boundary");
+        bytes.extend_from_slice(block);
+        (at / 4096) as u64
+    }
+
+    #[test]
+    fn an_inode_table_pointed_past_the_filesystem_is_refused() {
+        // A group descriptor is what says where its group's inodes live, so a descriptor
+        // pointing past the filesystem's final block would have the reader take an inode —
+        // the root among them — out of the bytes that follow an embedded image. Every
+        // property of that inode would then be the surrounding disk's to choose: its mode,
+        // its mapping, its inline symlink target.
+        let mut bytes = format(TreeBuilder::new(), 64 * MIB, opts_no_csum())
+            .unwrap()
+            .into_bytes();
+        let (table, blocks_count, inode_size) = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            (
+                usize::try_from(r.group_descriptor(0).unwrap().inode_table).unwrap(),
+                r.superblock().blocks_count,
+                usize::from(r.superblock().inode_size),
+            )
+        };
+        assert_eq!(bytes.len() as u64, blocks_count * 4096);
+
+        // The neighbour: a copy of the real table's first block, with the root inode turned
+        // into a symlink. An unbounded read reports that inode as the root, so the mode is
+        // what makes the escape visible from outside.
+        let mut planted = bytes[table * 4096..table * 4096 + 4096].to_vec();
+        // The root is inode 2, the table's second slot, and `i_mode` opens an inode record.
+        put_u16(&mut planted, inode_size, 0o120777);
+        let neighbour = plant_beyond(&mut bytes, &planted);
+        assert_eq!(neighbour, blocks_count);
+        // Group 0's descriptor opens the block after the superblock's, and
+        // `bg_inode_table_lo` sits at descriptor offset 0x08.
+        crate::ondisk::put_u32(&mut bytes[4096..], 0x08, u32::try_from(neighbour).unwrap());
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        assert!(
+            matches!(
+                r.inode(2),
+                Err(ReadError::OutOfRange {
+                    what: "inode",
+                    index: 2
+                })
+            ),
+            "the root inode was read from past the filesystem: {:?}",
+            r.inode(2)
+        );
+        let report = r.scan();
+        assert!(
+            report
+                .anomalies()
+                .iter()
+                .any(|a| { a.category == Category::Inode && a.severity == Severity::Structural }),
+            "the scan reports the unreachable inode table: {report:?}"
+        );
+    }
+
+    #[test]
+    fn an_inode_at_the_end_of_a_table_that_runs_past_the_filesystem_is_refused() {
+        // The bound is on the inode's own bytes, not on the block its table starts in: a
+        // table beginning inside the filesystem and running past its final block holds
+        // inodes on both sides of the boundary, and only the ones wholly inside it are
+        // this filesystem's.
+        let mut bytes = format(TreeBuilder::new(), 64 * MIB, opts_no_csum())
+            .unwrap()
+            .into_bytes();
+        let (blocks_count, inode_size, ipg) = {
+            let r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            (
+                r.superblock().blocks_count,
+                u64::from(r.superblock().inode_size),
+                u64::from(r.superblock().inodes_per_group),
+            )
+        };
+        // A table beginning in the filesystem's final block: its first inodes sit inside
+        // and every one after them does not.
+        let table = blocks_count - 1;
+        crate::ondisk::put_u32(&mut bytes[4096..], 0x08, u32::try_from(table).unwrap());
+        // A neighbour holding a copy of the group's inodes, so the reads below are stopped
+        // by the boundary rather than by the source ending.
+        plant_beyond(&mut bytes, &vec![0u8; 4096]);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let per_block = 4096 / inode_size;
+        // The last inode of the final block reads; the first past it does not.
+        assert!(r.inode(u32::try_from(per_block).unwrap()).is_ok());
+        let outside = u32::try_from(per_block + 1).unwrap();
+        assert!(outside <= u32::try_from(ipg).unwrap());
+        assert!(
+            matches!(
+                r.inode(outside),
+                Err(ReadError::OutOfRange { what: "inode", .. })
+            ),
+            "an inode past the filesystem's final block was read: {:?}",
+            r.inode(outside)
+        );
+    }
+
+    #[test]
+    fn an_inode_bitmap_pointed_past_the_filesystem_is_refused() {
+        // Which inodes a group holds is read from its bitmap, and `flex_bg` permits that
+        // bitmap anywhere — so the placement rule that would catch this on an ext2 image
+        // says nothing here, and the filesystem's own bound is the whole of what stands
+        // between a descriptor and the bytes after the image.
+        let mut bytes = format(TreeBuilder::new(), 64 * MIB, opts_no_csum())
+            .unwrap()
+            .into_bytes();
+        let blocks_count = Reader::open(std::io::Cursor::new(&bytes))
+            .unwrap()
+            .superblock()
+            .blocks_count;
+        // The neighbour: a bitmap with every bit set, which an unbounded read would
+        // enumerate as a group full of inodes that are not there.
+        let neighbour = plant_beyond(&mut bytes, &vec![0xffu8; 4096]);
+        // `bg_inode_bitmap_lo` is at descriptor offset 0x04.
+        crate::ondisk::put_u32(&mut bytes[4096..], 0x04, u32::try_from(neighbour).unwrap());
+
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let report = r.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.category == Category::Bitmap && a.location.group == Some(0))
+            .unwrap_or_else(|| panic!("the scan reports the unreachable bitmap: {report:?}"));
+        assert_eq!(found.severity, Severity::Structural);
+        assert_eq!(
+            found.location.block,
+            Some(blocks_count),
+            "the anomaly names the block the descriptor pointed at"
+        );
+    }
+
+    #[test]
+    fn an_extent_index_pointed_past_the_filesystem_is_refused() {
+        // An index entry names the block holding a child node, and a tree is followed by
+        // reading what it names. A child past the filesystem would have the mapping of a
+        // file — which blocks it owns, and so which bytes it reads back — supplied from
+        // outside the image.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 64 * MIB, opts_no_csum()).unwrap().into_bytes();
+        let (ino, blocks_count) = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            (
+                r.lookup(b"/f").expect("lookup /f").0,
+                r.superblock().blocks_count,
+            )
+        };
+
+        // The neighbour: a well-formed leaf node mapping a block of the filesystem. It
+        // parses on its own, so nothing but the bound stops the walk from following it.
+        let mut planted = vec![0u8; 4096];
+        crate::extent::write_node(
+            &ExtentNode::Leaves(vec![crate::ondisk::ExtentLeaf {
+                block: 0,
+                len: 1,
+                start: 100,
+                initialized: true,
+            }]),
+            crate::extent::node_capacity(4096),
+            &mut planted,
+        )
+        .expect("the planted node is well formed");
+        assert!(parse_node(&planted).is_ok());
+        let neighbour = plant_beyond(&mut bytes, &planted);
+
+        // Turn the file's inline root into a one-entry index node pointing at the
+        // neighbour. `i_block` opens at inode offset 0x28, the header's `eh_depth` is six
+        // bytes into it, and the entry that follows becomes an index entry whole — a leaf
+        // and an index lay their twelve bytes out differently, so it is written as one.
+        let off = inode_offset(&bytes, ino) + 0x28;
+        put_u16(&mut bytes[off..], 6, 1);
+        let entry = crate::ondisk::ExtentIdx {
+            block: 0,
+            leaf: neighbour,
+        }
+        .to_bytes();
+        bytes[off + EXTENT_ENTRY_SIZE..off + 2 * EXTENT_ENTRY_SIZE].copy_from_slice(&entry);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let inode = r.inode(ino).unwrap();
+        assert!(
+            matches!(
+                r.read_data(&inode),
+                Err(ReadError::OutOfRange { what: "block", index }) if index == blocks_count
+            ),
+            "an extent node outside the filesystem was followed: {:?}",
+            r.read_data(&inode)
+        );
+        let report = r.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.category == Category::ExtentTree && a.location.inode == Some(ino))
+            .unwrap_or_else(|| panic!("the scan reports the unreachable node: {report:?}"));
+        assert_eq!(found.severity, Severity::Structural);
+    }
+
+    #[test]
+    fn an_extent_header_whose_counts_disagree_is_reported() {
+        // `eh_max` is the node's own account of what it can hold, and a walk that reads
+        // only `eh_entries` never consults it. A header the kernel and `e2fsck` both call
+        // corrupt would then be followed as a mapping and pass a scan as clean, which is
+        // an integrity verdict on a structure no ext4 driver would accept.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let clean = format(src, 64 * MIB, opts_no_csum()).unwrap().into_bytes();
+        let ino = {
+            let mut r = Reader::open(std::io::Cursor::new(&clean)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            r.lookup(b"/f").expect("lookup /f").0
+        };
+        let root = inode_offset(&clean, ino) + 0x28;
+
+        // `i_block` opens with the header: `eh_entries` two bytes in, `eh_max` four.
+        for (field, at, value) in [
+            ("eh_max", 4u16, 0u16),
+            ("eh_max", 4, 5), // one past the four the sixty-byte inline area holds
+            ("eh_entries", 2, 2), // two entries in a node declaring room for one
+        ] {
+            let mut bytes = clean.clone();
+            if field == "eh_entries" {
+                put_u16(&mut bytes[root..], 4, 1);
+            }
+            put_u16(&mut bytes[root..], usize::from(at), value);
+
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let inode = r.inode(ino).unwrap();
+            assert!(
+                matches!(
+                    r.read_data(&inode),
+                    Err(ReadError::Parse(ParseError::InvalidField {
+                        structure: "ExtentHeader",
+                        field: f,
+                        ..
+                    })) if f == field
+                ),
+                "a {field} of {value} was followed as a mapping: {:?}",
+                r.read_data(&inode)
+            );
+            let report = r.scan();
+            let found = report
+                .anomalies()
+                .iter()
+                .find(|a| a.category == Category::ExtentTree && a.location.inode == Some(ino))
+                .unwrap_or_else(|| panic!("a {field} of {value} is reported: {report:?}"));
+            assert_eq!(found.severity, Severity::Structural);
+            assert!(!report.is_clean());
+        }
+    }
+
+    #[test]
+    fn a_directory_entry_naming_an_inode_that_does_not_exist_is_refused() {
+        // An entry's inode number is a reference, and the superblock's inode count bounds
+        // it. Handing back an entry naming an inode the filesystem does not have leaves
+        // the corruption to be discovered by whoever resolves it, and leaves a scan of the
+        // whole image reporting nothing at all — the structural fault `e2fsck` names as an
+        // entry with an invalid inode number.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 64 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let (block, inodes_count) = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            let root = r.inode(ROOT_INO).unwrap();
+            let block = r.extent_leaves(&root).unwrap()[0].start;
+            (
+                usize::try_from(block).unwrap() * 4096,
+                r.superblock().inodes_count,
+            )
+        };
+
+        // The root's entry for `f`, made to name one inode past the last the filesystem
+        // has. A directory record opens with its inode number.
+        let mut off = block;
+        loop {
+            let (entry, rec_len) = DirEntry::read_from(&bytes[off..block + 4096], 4096).unwrap();
+            if entry.name == b"f" {
+                break;
+            }
+            off += rec_len;
+        }
+        let missing = inodes_count + 1;
+        crate::ondisk::put_u32(&mut bytes[off..], 0, missing);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let root = r.inode(ROOT_INO).unwrap();
+        assert_eq!(
+            r.read_dir(&root).err(),
+            Some(ReadError::DirEntryNoSuchInode { inode: missing }),
+            "a directory listing handed back an entry naming inode {missing}"
+        );
+        // The walk reaches the same refusal through the same read, so no path is built
+        // from an entry that resolves to nothing.
+        assert!(r.walk().is_err());
+
+        // A lenient read is the one that recovers, and it keeps what it can: the bad entry
+        // is left out and the good ones beside it come back. Discarding the whole listing
+        // over one reference would cost exactly what a forensic read is for — and it would
+        // treat a bad reference and a name no directory can hold, two faults of the same
+        // shape in the same record, in opposite ways.
+        let mut lenient = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let root = lenient.inode(ROOT_INO).unwrap();
+        let names: Vec<Vec<u8>> = lenient
+            .read_dir(&root)
+            .expect("a lenient read hands back what it can")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == b"."),
+            "the good entries survive: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == b"f"),
+            "and the one naming nothing does not: {names:?}"
+        );
+
+        let report = r.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.category == Category::Directory && a.location.inode == Some(ROOT_INO))
+            .unwrap_or_else(|| panic!("the scan reports the bad reference: {report:?}"));
+        assert_eq!(found.severity, Severity::Structural);
+        assert!(
+            found.detail.contains(&missing.to_string()),
+            "the finding names the inode the entry pointed at: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_entry_carrying_a_name_no_directory_can_hold_is_refused() {
+        // The sibling of the test above, for the other field of the same record. A name
+        // holding a path separator traverses out of its directory and a NUL truncates the
+        // path a consumer builds; the kernel forbids both, so an image carrying one was
+        // crafted. Leaving the entry out of the walk and saying nothing means an extraction
+        // writes a tree missing files and reports success, which is the failure a reader of
+        // hostile bytes must not have.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let mut bytes = format(src, 64 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let block = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            let root = r.inode(ROOT_INO).unwrap();
+            usize::try_from(r.extent_leaves(&root).unwrap()[0].start).unwrap() * 4096
+        };
+
+        // The root's entry for `f`, its one-byte name overwritten with a path separator.
+        // The record keeps its length and its reference, so the only thing wrong with the
+        // directory is the name — which is what makes this a test of the name check and not
+        // of the parser.
+        let mut off = block;
+        loop {
+            let (entry, rec_len) = DirEntry::read_from(&bytes[off..block + 4096], 4096).unwrap();
+            if entry.name == b"f" {
+                break;
+            }
+            off += rec_len;
+        }
+        let (entry, _) = DirEntry::read_from(&bytes[off..block + 4096], 4096).unwrap();
+        let named = entry.inode;
+        bytes[off + 8] = b'/';
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let root = r.inode(ROOT_INO).unwrap();
+        assert_eq!(
+            r.read_dir(&root).err(),
+            Some(ReadError::HostileName { inode: named }),
+            "a directory listing handed back a name no directory can hold"
+        );
+        // The walk reaches the refusal through the same read, so no sink is ever offered a
+        // path built from such a name — and no walk quietly omits the entry instead.
+        assert!(r.walk().is_err());
+
+        let mut lenient = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let root = lenient.inode(ROOT_INO).unwrap();
+        let names: Vec<Vec<u8>> = lenient
+            .read_dir(&root)
+            .expect("a lenient read hands back what it can")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == b"."),
+            "the good entries survive: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(&b'/')),
+            "and the one no directory can hold does not: {names:?}"
+        );
+
+        let report = r.scan();
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.category == Category::Directory && a.location.inode == Some(ROOT_INO))
+            .unwrap_or_else(|| panic!("the scan reports the name: {report:?}"));
+        assert_eq!(found.severity, Severity::Structural);
+        assert!(!report.is_clean());
+        // The detail says what is wrong without echoing the bytes that are wrong.
+        assert!(
+            !found.detail.contains('/'),
+            "the finding does not render the name: {found:?}"
         );
     }
 
@@ -5505,11 +6368,11 @@ mod tests {
         assert_eq!(report.worst_severity(), None);
         assert!(!report.has_fatal(ReadPolicy::Strict));
         assert!(!report.has_fatal(ReadPolicy::Lenient));
-        assert_eq!(report.to_table(), "no anomalies\n");
+        assert_eq!(report.to_report().to_table(), "no findings\n");
         assert!(!report.is_truncated());
         assert_eq!(
-            report.to_json(),
-            "{\"schema\":1,\"clean\":true,\"count\":0,\"truncated\":false,\"anomalies\":[]}"
+            report.to_report().to_json(),
+            "{\"schema\":2,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[]}"
         );
     }
 
@@ -5760,15 +6623,16 @@ mod tests {
         );
         assert_eq!(
             report.anomalies().len(),
-            ScanReport::MAX_ANOMALIES,
+            FindingReport::MAX_FINDINGS,
             "a truncated report holds exactly the cap"
         );
         // The truncation reaches every projection: a consumer of any of them must be able
         // to tell a complete report from one that stopped.
-        assert!(report.to_json().contains("\"truncated\":true"));
-        assert!(report.to_table().contains("report truncated at 10000"));
+        let projected = report.to_report();
+        assert!(projected.to_json().contains("\"truncated\":true"));
+        assert!(projected.to_table().contains("report truncated at 10000"));
         assert!(
-            report
+            projected
                 .to_sarif(None)
                 .contains("\"toolExecutionNotifications\""),
             "SARIF records the short run as a notification about the invocation"
@@ -5784,13 +6648,14 @@ mod tests {
             std::io::Cursor::new(&bytes),
             &OpenOptions::new()
                 .policy(ReadPolicy::Lenient)
-                .limits(Limits::new().max_anomalies(7)),
+                .limits(Limits::new().max_findings(7)),
         )
         .unwrap();
         let short = tight.scan();
         assert!(short.is_truncated());
         assert_eq!(short.anomalies().len(), 7);
-        let notice = "report truncated at 7 anomalies; the rest of the image was not scanned";
+        let notice = "report truncated at 7 findings; the rest of the image was not scanned";
+        let short = short.to_report();
         assert!(short.to_table().contains(notice), "{}", short.to_table());
         assert!(short.to_sarif(None).contains(notice));
 
@@ -5801,7 +6666,7 @@ mod tests {
             std::io::Cursor::new(&bytes),
             &OpenOptions::new()
                 .policy(ReadPolicy::Lenient)
-                .limits(Limits::new().max_anomalies(0)),
+                .limits(Limits::new().max_findings(0)),
         )
         .unwrap();
         let empty = none.scan();
@@ -5811,8 +6676,9 @@ mod tests {
             !empty.is_clean(),
             "a truncated report claimed the image was clean"
         );
+        let empty = empty.to_report();
         assert!(empty.to_json().contains("\"clean\":false"));
-        assert!(empty.to_table().contains("report truncated at 0 anomalies"));
+        assert!(empty.to_table().contains("report truncated at 0 findings"));
     }
 
     #[test]
@@ -5852,6 +6718,229 @@ mod tests {
             capped.walk(),
             Err(ReadError::WalkTooLarge { limit: 2 })
         ));
+    }
+
+    #[test]
+    fn the_names_a_walk_has_found_count_against_its_bound_too() {
+        // The bound governs the frontier, not only what has been handed to the visitor. It
+        // has to: each visit may discover a whole directory's worth of names, so a bound on
+        // visits alone would leave the frontier bounded by the product rather than by the
+        // bound — and distinct directory inodes may map the same blocks, so a small image
+        // can present many such directories.
+        let time = Timestamp::from_secs(0);
+        let mut source = TreeBuilder::new();
+        for n in 0..8u8 {
+            source = source.file(
+                format!("/f{n}").into_bytes(),
+                b"x".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        }
+        let bytes = format(source, 64 * MIB, opts()).unwrap().into_bytes();
+
+        let mut capped = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().limits(Limits::new().max_walk_entries(3)),
+        )
+        .unwrap();
+        let mut visited = 0usize;
+        let stopped = capped.walk_with::<ReadError>(|_, _| {
+            visited += 1;
+            Ok(())
+        });
+        assert!(matches!(stopped, Err(ReadError::WalkTooLarge { limit: 3 })));
+        // And it is refused where the frontier passes the bound, not after a bound's worth
+        // of names has been visited off the front of it.
+        assert_eq!(visited, 0, "the walk stopped before it spent the memory");
+    }
+
+    #[test]
+    fn the_bounds_are_measured_from_the_filesystem_and_not_from_the_source() {
+        // Every structural bound is derived from this: the blocks a scan walks, the inodes
+        // it verifies, the names a walk may find. All three are statements about the
+        // filesystem, which begins at the offset the image was opened at — so a small
+        // partition inside a large disk image must be bounded by the partition.
+        const BASE: usize = 1 << 20;
+        const TRAILING: usize = 3 << 20;
+
+        let source = TreeBuilder::new().file(
+            b"/f".to_vec(),
+            b"x".to_vec(),
+            Metadata::new(0o644, Timestamp::from_secs(0)),
+        );
+        let image = format(source, 8 * MIB, opts()).unwrap().into_bytes();
+
+        let mut disk = vec![0u8; BASE];
+        disk.extend_from_slice(&image);
+        disk.extend_from_slice(&vec![0u8; TRAILING]);
+
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&disk),
+            &OpenOptions::new().base(BASE as u64),
+        )
+        .unwrap();
+        assert_eq!(
+            r.source_len(),
+            (image.len() + TRAILING) as u64,
+            "what is in front of the filesystem is not the filesystem's to be bounded by"
+        );
+        // The filesystem itself still reads whole: the bound is a ceiling, and tightening
+        // it must not refuse an image that fits under it.
+        assert!(r.walk().unwrap().iter().any(|e| e.path == b"/f"));
+    }
+
+    #[test]
+    fn a_window_takes_only_the_extent_leaves_it_falls_in() {
+        // `map_window` says only the mapping structures the window touches are read, and the
+        // extent side read the entire tree for every window: a fresh walk, a fresh `Vec`, and
+        // a fresh `HashSet` per call, with no `first`/`len` passed to the descent at all.
+        // The tar path streams through an 8 KiB window, so that was a whole tree walk per two
+        // blocks.
+        //
+        // The descent is now bounded by the window at both ends: an index entry whose
+        // subtree lies outside it is skipped without its child block being read, and a leaf
+        // outside it is not collected. Only the second is observable on a tree small enough
+        // for this harness to build — a multi-level tree needs a file the allocator will not
+        // lay out contiguously, which nothing here can ask for — so that is what is asserted,
+        // and it is the same bound applied at the level above.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new().file(
+            b"/f".to_vec(),
+            vec![b'x'; 64 * 4096],
+            Metadata::new(0o644, time),
+        );
+        let bytes = format(src, 16 * MIB, opts()).unwrap().into_bytes();
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (_, inode) = r.lookup(b"/f").unwrap();
+        assert!(
+            !r.extent_leaves_in(&inode, 0..64).unwrap().is_empty(),
+            "the file's own blocks are in the window that covers them"
+        );
+        assert!(
+            r.extent_leaves_in(&inode, 1_000..1_064).unwrap().is_empty(),
+            "a window past everything the file maps takes no leaf"
+        );
+        // And the whole-tree form is still the whole tree, which is what the scan reads.
+        assert_eq!(
+            r.extent_leaves(&inode).unwrap(),
+            r.extent_leaves_in(&inode, 0..u64::MAX).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_directory_answers_to_the_walk_cap_and_reads_each_of_its_blocks_once() {
+        // `Limits::max_walk_entries` says it governs a single directory as well as a tree,
+        // and it did not: a whole listing was gathered before a tree walk consulted the cap
+        // once. A mapping may point every one of its slots at one block — nothing in the
+        // format stops it, and a directory of eight gibibytes' apparent length can do it
+        // from ten kilobytes of real content — so a listing that read each named block
+        // yielded that block's entries a million times over before any bound applied.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut src = TreeBuilder::new().directory(b"/d".to_vec(), Metadata::new(0o755, time));
+        for i in 0..64 {
+            src = src.file(
+                format!("/d/f{i:03}").into_bytes(),
+                b"x".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        }
+        let bytes = format(src, 16 * MIB, opts()).unwrap().into_bytes();
+
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().limits(Limits::new().max_walk_entries(8)),
+        )
+        .unwrap();
+        let (_, dir) = r.lookup(b"/d").unwrap();
+        assert!(
+            matches!(r.read_dir(&dir), Err(ReadError::WalkTooLarge { limit: 8 })),
+            "one directory answers to the cap where it is read"
+        );
+
+        // And the same directory under no cap lists each of its names once, which is what
+        // reading a repeated block twice would break.
+        let mut r = Reader::open_with(std::io::Cursor::new(&bytes), &OpenOptions::new()).unwrap();
+        let (_, dir) = r.lookup(b"/d").unwrap();
+        let names: Vec<Vec<u8>> = r
+            .read_dir(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        let unique: HashSet<&Vec<u8>> = names.iter().collect();
+        assert_eq!(names.len(), unique.len(), "a name is listed once");
+    }
+
+    #[test]
+    fn a_walk_refuses_a_path_longer_than_a_path_may_be() {
+        // Nothing in the format bounds how deep a tree nests, and the walk's entry cap counts
+        // names rather than the bytes their paths occupy — so a tree of directories each
+        // holding one entry naming the next stays under every count while its paths grow by
+        // a component each and cost the walk their sum.
+        //
+        // A path past `PATH_MAX` is not a path anything could act on: a consumer resolving
+        // one against a host gets `ENAMETOOLONG`. So the walk stops there and says so.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut src = TreeBuilder::new();
+        let mut path = String::new();
+        // Each component is 40 bytes, so a hundred and twenty of them run past 4096.
+        for i in 0..120 {
+            path.push('/');
+            path.push_str(&format!("{i:03}-a-component-of-substantial-length"));
+            src = src.directory(path.clone().into_bytes(), Metadata::new(0o755, time));
+        }
+        assert!(
+            path.len() > 4096,
+            "the fixture reaches past a path's length"
+        );
+        let bytes = format(src, 32 * MIB, opts()).unwrap().into_bytes();
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        assert!(
+            matches!(r.walk(), Err(ReadError::PathTooLong { limit: 4096 })),
+            "a walk that would build a path no consumer could use stops instead"
+        );
+    }
+
+    #[test]
+    fn a_symlink_target_is_bounded_by_what_a_path_can_be() {
+        // A slow symlink falls through to a whole-file read, which trusts `i_size` — so a
+        // crafted size made one link allocate whatever it claimed, and a symlink's size is
+        // read at 32 bits, which is four gibibytes per link. `resolve` already applied the
+        // right ceiling in the one place it looked; every other caller of `read_symlink`
+        // did not, and `FsTree::link_target` is on that list, so every sink was too.
+        //
+        // A target has a structural ceiling a regular file's contents do not: no path this
+        // or any other kernel resolves is longer than `PATH_MAX`.
+        let time = Timestamp::from_secs(1_700_000_000);
+        // Long enough to need a block of its own, which is what makes it a slow symlink.
+        let src = TreeBuilder::new().symlink(
+            b"/link".to_vec(),
+            vec![b'a'; 200],
+            Metadata::new(0o777, time),
+        );
+        let mut bytes = format(src, 16 * MIB, opts_no_csum()).unwrap().into_bytes();
+
+        let number = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let (number, inode) = r.lookup_no_follow(b"/link").unwrap();
+            assert_eq!(r.read_symlink(&inode).unwrap().len(), 200);
+            number
+        };
+
+        // `i_size` at 400 MiB, which is what the read would have allocated.
+        let at = inode_offset(&bytes, number);
+        crate::ondisk::put_u32(&mut bytes[at..], 4, 400 << 20);
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (_, inode) = r.lookup_no_follow(b"/link").unwrap();
+        assert!(
+            matches!(
+                r.read_symlink(&inode),
+                Err(ReadError::FileTooLarge { limit: 4096, .. })
+            ),
+            "a target longer than a path can be is refused before it is read"
+        );
     }
 
     #[test]
@@ -6177,7 +7266,7 @@ mod tests {
                 .iter()
                 .any(|a| a.category == Category::Orphan),
             "the orphan file's claim is faulted: {}",
-            report.to_table()
+            report.to_report().to_table()
         );
         // The journal's first block is read, and it holds no journal superblock.
         assert!(
@@ -6186,7 +7275,7 @@ mod tests {
                 .iter()
                 .any(|a| a.category == Category::Journal),
             "the journal's first block is judged: {}",
-            report.to_table()
+            report.to_report().to_table()
         );
         // Reading the journal directly is likewise bounded, and reaches the same verdict.
         assert!(matches!(
@@ -6543,7 +7632,7 @@ mod tests {
         assert!(!report.has_fatal(ReadPolicy::Lenient));
 
         // The table has a header and one row per anomaly, carrying the located inode.
-        let table = report.to_table();
+        let table = report.to_report().to_table();
         let mut lines = table.lines();
         let header = lines.next().unwrap();
         assert!(header.starts_with("SEVERITY"));
@@ -6783,9 +7872,10 @@ mod tests {
     }
 
     #[test]
-    fn anomaly_projects_to_json_with_escaping() {
-        // Every field renders, the location holds only the coordinates that are set,
-        // and the detail string escapes quotes, backslashes, and control characters.
+    fn an_anomaly_projects_into_the_shared_finding_frame() {
+        // ext keeps its typed taxonomy; what crosses into the shared frame is the severity,
+        // the family, ext's own subsystem word, the coordinates under ext's own names, and
+        // — where the anomaly names a block — the byte offset that block sits at.
         let a = Anomaly {
             severity: Severity::Structural,
             category: Category::ExtentTree,
@@ -6794,101 +7884,59 @@ mod tests {
                 group: None,
                 inode: Some(12),
             },
-            detail: "bad \"node\"\n\\path".to_string(),
+            detail: "bad node".to_string(),
         };
-        let expected = String::from("{\"severity\":\"structural\",\"category\":\"extent tree\",")
-            + "\"location\":{\"block\":99,\"inode\":12},"
-            + "\"detail\":\"bad \\\"node\\\"\\n\\\\path\"}";
-        assert_eq!(a.to_json(), expected);
+        let f = a.to_finding(4096);
+        assert_eq!(f.severity, Severity::Structural);
+        assert_eq!(f.family, Family::Ext);
+        assert_eq!(f.category, "extent tree");
+        assert_eq!(f.offset, Some(99 * 4096));
+        assert_eq!(
+            f.coordinates,
+            vec![
+                (std::borrow::Cow::Borrowed("inode"), 12),
+                (std::borrow::Cow::Borrowed("block"), 99),
+            ]
+        );
 
-        // A location with no coordinates renders an empty object.
-        let empty = Anomaly {
+        // An anomaly located only by a group or an inode number has no offset: where each
+        // sits depends on the layout, not on the number.
+        let no_block = Anomaly {
             severity: Severity::Cosmetic,
             category: Category::Journal,
             location: Location::default(),
             detail: "x".to_string(),
         };
-        assert_eq!(
-            empty.to_json(),
-            "{\"severity\":\"cosmetic\",\"category\":\"journal\",\"location\":{},\"detail\":\"x\"}"
-        );
+        let f = no_block.to_finding(4096);
+        assert_eq!(f.offset, None);
+        assert!(f.coordinates.is_empty());
     }
 
     #[test]
-    fn the_scan_document_is_a_versioned_golden_shape() {
-        // The emitted JSON is a contract no Rust signature describes: a downstream parser
-        // depends on it, and `cargo semver-checks` sees nothing when it changes. So the
-        // whole document is pinned here, byte for byte. A diff in this assertion is a
-        // change every consumer's parser sees — which is exactly when `schema` must go up
-        // and the change must be deliberate.
-        let report = ScanReport {
-            anomalies: vec![
-                Anomaly {
-                    severity: Severity::Integrity,
-                    category: Category::Inode,
-                    location: Location {
-                        block: Some(40),
-                        group: Some(3),
-                        inode: Some(12),
-                    },
-                    detail: "checksum mismatch".to_string(),
-                },
-                Anomaly {
-                    severity: Severity::Cosmetic,
-                    category: Category::Journal,
-                    location: Location::default(),
-                    detail: "note".to_string(),
-                },
-            ],
-            truncated: false,
-            cap: ScanReport::MAX_ANOMALIES,
+    fn a_block_number_no_image_could_hold_names_no_offset() {
+        // A block number out of an untrusted image is whatever the bytes said, so the
+        // conversion to an offset is checked: a product that does not fit is a block that
+        // is not in the image, and the finding says where it is by number instead.
+        let a = Anomaly {
+            severity: Severity::Structural,
+            category: Category::Directory,
+            location: Location {
+                block: Some(u64::MAX),
+                ..Location::default()
+            },
+            detail: "out of range".to_string(),
         };
+        let f = a.to_finding(4096);
+        assert_eq!(f.offset, None);
         assert_eq!(
-            report.to_json(),
-            "{\"schema\":1,\"clean\":false,\"count\":2,\"truncated\":false,\"anomalies\":[\
-             {\"severity\":\"integrity\",\"category\":\"inode\",\
-             \"location\":{\"block\":40,\"group\":3,\"inode\":12},\
-             \"detail\":\"checksum mismatch\"},\
-             {\"severity\":\"cosmetic\",\"category\":\"journal\",\"location\":{},\
-             \"detail\":\"note\"}]}"
+            f.coordinates,
+            vec![(std::borrow::Cow::Borrowed("block"), u64::MAX)]
         );
-        assert_eq!(
-            report.to_table(),
-            "SEVERITY   CATEGORY  LOCATION                   DETAIL\n\
-             integrity  inode     group 3 inode 12 block 40  checksum mismatch\n\
-             cosmetic   journal   -                          note\n"
-        );
-
-        // A clean report is its own shape, and it carries the version too: a consumer
-        // that only ever sees sound images must still be able to read the field.
-        let clean = ScanReport {
-            anomalies: Vec::new(),
-            truncated: false,
-            cap: ScanReport::MAX_ANOMALIES,
-        };
-        assert_eq!(
-            clean.to_json(),
-            "{\"schema\":1,\"clean\":true,\"count\":0,\"truncated\":false,\"anomalies\":[]}"
-        );
-        assert_eq!(clean.to_table(), "no anomalies\n");
-        assert_eq!(SCAN_SCHEMA_VERSION, 1);
     }
 
-    #[test]
-    fn report_projects_to_sarif() {
-        // A clean report is a well-formed, empty SARIF log: no rules, no results.
-        let clean = ScanReport::default();
-        assert_eq!(
-            clean.to_sarif(None),
-            "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
-             \"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"ferrosys\",\
-             \"rules\":[]}},\"results\":[]}]}"
-        );
-
-        // Two anomalies, two categories: one rule apiece, severity maps to the SARIF level,
-        // the address becomes a logical location, the image URI a physical one, and the
-        // typed value rides in `properties`. The detail escapes like any JSON string.
-        let report = ScanReport {
+    /// A report of two anomalies at a 4 KiB block, for the golden document tests.
+    fn golden_report() -> ScanReport {
+        ScanReport {
             anomalies: vec![
                 Anomaly {
                     severity: Severity::Integrity,
@@ -6908,23 +7956,81 @@ mod tests {
                 },
             ],
             truncated: false,
-            cap: ScanReport::MAX_ANOMALIES,
-        };
+            cap: FindingReport::MAX_FINDINGS,
+            block_size: 4096,
+        }
+    }
+
+    #[test]
+    fn the_findings_document_is_a_versioned_golden_shape() {
+        // The emitted JSON is a contract no Rust signature describes: a downstream parser
+        // depends on it, and `cargo semver-checks` sees nothing when it changes. So the
+        // whole document is pinned here, byte for byte, as an ext scan renders it — which
+        // is the projection and the family's own words together, which is what a consumer
+        // actually reads. A diff in this assertion is a change every consumer's parser
+        // sees — which is exactly when `schema` must go up and the change must be
+        // deliberate.
+        assert_eq!(
+            golden_report().to_report().to_json(),
+            "{\"schema\":2,\"clean\":false,\"count\":2,\"truncated\":false,\"findings\":[\
+             {\"severity\":\"integrity\",\"family\":\"ext\",\"category\":\"inode\",\
+             \"offset\":163840,\"location\":{\"group\":3,\"inode\":12,\"block\":40},\
+             \"detail\":\"checksum \\\"bad\\\"\"},\
+             {\"severity\":\"cosmetic\",\"family\":\"ext\",\"category\":\"journal\",\
+             \"location\":{},\"detail\":\"note\"}]}"
+        );
+        assert_eq!(
+            golden_report().to_report().to_table(),
+            "SEVERITY   CATEGORY  LOCATION                   DETAIL\n\
+             integrity  inode     group 3 inode 12 block 40  checksum \"bad\"\n\
+             cosmetic   journal   -                          note\n"
+        );
+
+        // A clean report is its own shape, and it carries the version too: a consumer that
+        // only ever sees sound images must still be able to read the field.
+        let clean = ScanReport::default().to_report();
+        assert_eq!(
+            clean.to_json(),
+            "{\"schema\":2,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[]}"
+        );
+        assert_eq!(clean.to_table(), "no findings\n");
+        assert_eq!(crate::finding::FINDINGS_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn the_findings_document_projects_to_sarif() {
+        // A clean report is a well-formed, empty SARIF log: no rules, no results.
+        assert_eq!(
+            ScanReport::default().to_report().to_sarif(None),
+            "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
+             \"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"ferrosys\",\
+             \"rules\":[]}},\"results\":[]}]}"
+        );
+
+        // Two anomalies, two categories: one rule apiece, named for the family as well as
+        // the subsystem; severity maps to the SARIF level, the coordinates become a logical
+        // location, the byte offset an address, the image URI a physical location, and the
+        // typed value rides in `properties`. The detail escapes like any JSON string.
         let expected = String::from(
             "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
              \"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"ferrosys\",\"rules\":[",
-        ) + "{\"id\":\"inode\",\"name\":\"inode\",\"shortDescription\":{\"text\":\"inode anomaly\"}},"
-            + "{\"id\":\"journal\",\"name\":\"journal\",\"shortDescription\":{\"text\":\"journal anomaly\"}}"
+        ) + "{\"id\":\"ext/inode\",\"name\":\"ext/inode\",\"shortDescription\":{\"text\":\"ext inode finding\"}},"
+            + "{\"id\":\"ext/journal\",\"name\":\"ext/journal\",\"shortDescription\":{\"text\":\"ext journal finding\"}}"
             + "]}},\"results\":["
-            + "{\"ruleId\":\"inode\",\"level\":\"error\",\"message\":{\"text\":\"checksum \\\"bad\\\"\"},"
-            + "\"locations\":[{\"physicalLocation\":{\"artifactLocation\":{\"uri\":\"disk.img\"}},"
+            + "{\"ruleId\":\"ext/inode\",\"level\":\"error\",\"message\":{\"text\":\"checksum \\\"bad\\\"\"},"
+            + "\"locations\":[{\"physicalLocation\":{\"artifactLocation\":{\"uri\":\"disk.img\"},"
+            + "\"address\":{\"absoluteAddress\":163840}},"
             + "\"logicalLocations\":[{\"fullyQualifiedName\":\"group 3 inode 12 block 40\"}]}],"
-            + "\"properties\":{\"severity\":\"integrity\",\"category\":\"inode\",\"block\":40,\"group\":3,\"inode\":12}},"
-            + "{\"ruleId\":\"journal\",\"level\":\"note\",\"message\":{\"text\":\"note\"},"
+            + "\"properties\":{\"severity\":\"integrity\",\"family\":\"ext\",\"category\":\"inode\","
+            + "\"offset\":163840,\"group\":3,\"inode\":12,\"block\":40}},"
+            + "{\"ruleId\":\"ext/journal\",\"level\":\"note\",\"message\":{\"text\":\"note\"},"
             + "\"locations\":[{\"physicalLocation\":{\"artifactLocation\":{\"uri\":\"disk.img\"}}}],"
-            + "\"properties\":{\"severity\":\"cosmetic\",\"category\":\"journal\"}}"
+            + "\"properties\":{\"severity\":\"cosmetic\",\"family\":\"ext\",\"category\":\"journal\"}}"
             + "]}]}";
-        assert_eq!(report.to_sarif(Some("disk.img")), expected);
+        assert_eq!(
+            golden_report().to_report().to_sarif(Some("disk.img")),
+            expected
+        );
 
         // Without an artifact URI and with no coordinates, a result carries no `locations`.
         let bare = ScanReport {
@@ -6935,11 +8041,12 @@ mod tests {
                 detail: "x".to_string(),
             }],
             truncated: false,
-            cap: ScanReport::MAX_ANOMALIES,
+            cap: FindingReport::MAX_FINDINGS,
+            block_size: 4096,
         };
-        assert!(bare.to_sarif(None).contains(
-            "\"ruleId\":\"superblock\",\"level\":\"warning\",\"message\":{\"text\":\"x\"},\
-             \"properties\":{\"severity\":\"conformance\",\"category\":\"superblock\"}"
+        assert!(bare.to_report().to_sarif(None).contains(
+            "\"ruleId\":\"ext/superblock\",\"level\":\"warning\",\"message\":{\"text\":\"x\"},\
+             \"properties\":{\"severity\":\"conformance\",\"family\":\"ext\",\"category\":\"superblock\"}"
         ));
     }
 

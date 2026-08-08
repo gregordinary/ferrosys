@@ -21,15 +21,15 @@
 //! needs and, when that tool is absent, prints a loud banner and returns rather than
 //! asserting success — a skipped gate is reported, never silently green.
 
+#![cfg(feature = "ext")]
+
 mod util;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ferrosys::ext::acl::{EXEC, READ, WRITE};
-use ferrosys::ext::{
-    Acl, AclEntry, AclQualifier, OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr,
-};
+use ferrosys::ext::{OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr};
+use ferrosys::{Acl, AclEntry, AclQualifier};
 use util::{available, e2fsck_clean, tool};
 
 /// The contents of a file in the source tree, keyed by its path in the image.
@@ -1101,19 +1101,19 @@ fn access_entries() -> Vec<AclEntry> {
     vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE,
+            perm: Acl::READ | Acl::WRITE,
         },
         AclEntry {
             who: AclQualifier::User(1000),
-            perm: READ,
+            perm: Acl::READ,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ,
+            perm: Acl::READ,
         },
         AclEntry {
             who: AclQualifier::Mask,
-            perm: READ | WRITE,
+            perm: Acl::READ | Acl::WRITE,
         },
         AclEntry {
             who: AclQualifier::Other,
@@ -1127,11 +1127,11 @@ fn default_entries() -> Vec<AclEntry> {
     vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE | EXEC,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Other,
@@ -1247,9 +1247,10 @@ fn foreign_xattrs_and_acls_read_back() {
     let etc_attrs = xattr_map(r.xattrs(&etc).expect("xattrs of /etc"));
     assert_eq!(etc_attrs[b"user.dirattr".as_slice()], b"on-a-directory");
 
-    // The ACLs come back as the on-disk encoding libext2fs's converter wrote. That
-    // must be byte-for-byte what this crate's encoder produces for the same entries —
-    // two implementations, one on-disk form — and must decode back to them.
+    // The ACLs come back in the boundary form, from bytes libext2fs's converter wrote in
+    // ext's own. That is the strongest statement this gate makes about an ACL: libext2fs
+    // narrowed the value on the way in, this crate widened it on the way out, and the two
+    // are inverses across implementations that share no code.
     let (_, fstab) = r.lookup(b"/etc/fstab").expect("lookup /etc/fstab");
     let fstab_attrs = xattr_map(r.xattrs(&fstab).expect("xattrs of /etc/fstab"));
     let access = Acl::new(access_entries()).expect("a valid access ACL");
@@ -1257,22 +1258,14 @@ fn foreign_xattrs_and_acls_read_back() {
     assert_eq!(
         *on_disk,
         access.encode(),
-        "libext2fs and this crate disagree on the on-disk access-ACL encoding"
-    );
-    assert_eq!(
-        Acl::decode(on_disk).expect("decode the foreign access ACL"),
-        access
+        "libext2fs and this crate disagree on the access ACL that round trips"
     );
     let default = Acl::new(default_entries()).expect("a valid default ACL");
     let on_disk = &etc_attrs[Acl::DEFAULT_NAME];
     assert_eq!(
         *on_disk,
         default.encode(),
-        "libext2fs and this crate disagree on the on-disk default-ACL encoding"
-    );
-    assert_eq!(
-        Acl::decode(on_disk).expect("decode the foreign default ACL"),
-        default
+        "libext2fs and this crate disagree on the default ACL that round trips"
     );
 }
 
@@ -1497,7 +1490,7 @@ fn feature_incoherent_foreign_images_are_flagged() {
                 panic!(
                     "{}: the scan calls this image clean where e2fsck faults it:\n{}",
                     case.what,
-                    report.to_table()
+                    report.to_report().to_table()
                 )
             });
         assert_eq!(found.severity, case.severity, "{}", case.what);

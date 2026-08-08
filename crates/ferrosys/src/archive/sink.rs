@@ -17,6 +17,18 @@
 //! header's own path and link-target fields hold the same value when it fits in them, and
 //! are left empty when it does not — so they are either right or absent, never subtly wrong.
 //!
+//! A record is written in the length-prefixed form the format defines, so its value is
+//! delimited by the count and not by the newline that ends the record. A filesystem holding a
+//! name with a newline in it therefore round-trips: the length says where the value stops.
+//!
+//! # Any family, and what that costs a value
+//!
+//! The source is any [`FsTree`], so the same sink drains whatever `open` hands back. A
+//! filesystem that does not record ownership or permission bits has them filled from the
+//! [`Synthesis`] the caller named, and every value invented that way is named in the
+//! [`FidelityReport`] the write returns — so an archive built from such an image says what
+//! in it was the image's and what was policy.
+//!
 //! # What comes out is what goes back in
 //!
 //! The archive opens with a `./` member describing the root directory, which is how the
@@ -28,34 +40,21 @@
 //! A file's bytes are streamed from the filesystem into the archive, so an archive of a tree
 //! far larger than memory costs the working set of one read rather than the size of its
 //! largest file. The tree is walked entry by entry for the same reason: nothing accumulates
-//! but the hard-link table, which holds one path per inode that has more than one name.
+//! but the hard-link table, which holds one path per node that has more than one name.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 
 use tar::{Builder, EntryType, Header};
 
-use crate::acl::Acl;
 use crate::archive::ArchiveError;
-use crate::ondisk::{Inode, Timestamp, Xattr};
-use crate::read::{ReadError, Reader, WalkEntry};
+use crate::fidelity::{Direction, FidelityReport, Synthesis};
+use crate::time::Timestamp;
+use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
 
 /// `/lost+found`, the one path an archive must not carry: every filesystem makes it for
 /// itself, and a formatter refuses a source that tries to make it again.
 const LOST_FOUND: &[u8] = b"/lost+found";
-
-/// The root directory's inode number.
-const ROOT_INO: u32 = 2;
-
-/// The file-type bits of a mode, and the types they name.
-const IFMT: u16 = 0o170000;
-const IFDIR: u16 = 0o040000;
-const IFREG: u16 = 0o100000;
-const IFLNK: u16 = 0o120000;
-const IFCHR: u16 = 0o020000;
-const IFBLK: u16 = 0o060000;
-const IFIFO: u16 = 0o010000;
-const IFSOCK: u16 = 0o140000;
 
 /// Writes a filesystem's contents out as a tar archive with PAX extensions.
 ///
@@ -64,16 +63,19 @@ const IFSOCK: u16 = 0o140000;
 /// the round trip describes the same filesystem at both ends.
 ///
 /// ```no_run
-/// # use ferrosys::ext::{ArchiveSink, Reader};
+/// # use ferrosys::ArchiveSink;
+/// # use ferrosys::ext::Reader;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut reader = Reader::open(std::fs::File::open("rootfs.img")?)?;
 /// let out = std::io::BufWriter::new(std::fs::File::create("rootfs.tar")?);
-/// ArchiveSink::new(out).write_tree(&mut reader)?;
+/// let fidelity = ArchiveSink::new(out).write_tree(&mut reader)?;
+/// assert!(fidelity.is_faithful());
 /// # Ok(())
 /// # }
 /// ```
 pub struct ArchiveSink<W: Write> {
     builder: Builder<W>,
+    synthesis: Synthesis,
 }
 
 impl<W: Write> ArchiveSink<W> {
@@ -86,7 +88,18 @@ impl<W: Write> ArchiveSink<W> {
     pub fn new(out: W) -> Self {
         Self {
             builder: Builder::new(out),
+            synthesis: Synthesis::new(),
         }
+    }
+
+    /// Name what to record for a property the source filesystem has no field for.
+    ///
+    /// Defaults to [`Synthesis::new`] — owned by root, `0644` for a file and `0755` for a
+    /// directory. Ignored entirely by a filesystem that records the property itself.
+    #[must_use]
+    pub fn synthesis(mut self, synthesis: Synthesis) -> Self {
+        self.synthesis = synthesis;
+        self
     }
 
     /// Write the filesystem's whole tree, then finish the archive.
@@ -94,7 +107,11 @@ impl<W: Write> ArchiveSink<W> {
     /// The archive's first member is `./`, the root directory, so the root's own metadata
     /// and attributes survive; `/lost+found` and everything under it is omitted. Every other
     /// name the filesystem holds appears exactly once, with the second and later names for
-    /// one inode written as hard links to the first.
+    /// one node written as hard links to the first.
+    ///
+    /// The returned [`FidelityReport`] names every property the source filesystem had no
+    /// field for and the archive therefore carries an invented value of. It is faithful for
+    /// a family that records everything.
     ///
     /// # Errors
     ///
@@ -102,59 +119,53 @@ impl<W: Write> ArchiveSink<W> {
     /// destination cannot be written; [`ArchiveError::Unrepresentable`] if the filesystem
     /// holds a socket, and [`ArchiveError::XattrNameUnrepresentable`] if an attribute's name
     /// cannot be written to a PAX record.
-    pub fn write_tree<R: Read + Seek>(
-        mut self,
-        reader: &mut Reader<R>,
-    ) -> Result<(), ArchiveError> {
-        // The root has no name, so the walk does not reach it; the `./` member is what
-        // carries its mode, ownership, times, and attributes across.
-        let root = reader.inode(ROOT_INO)?;
-        let xattrs = reader.xattrs(&root)?;
-        self.append(reader, &Member::root(root, xattrs))?;
-
-        // The first name to reach an inode is the file; every later name for the same inode
-        // is another name for it — a hard link — and the archive says so rather than storing
+    pub fn write_tree<T: FsTree>(mut self, tree: &mut T) -> Result<FidelityReport, ArchiveError> {
+        // The first name to reach a node is the file; every later name for the same node is
+        // another name for it — a hard link — and the archive says so rather than storing
         // the bytes a second time.
-        let mut named: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut named: HashMap<u64, Vec<u8>> = HashMap::new();
+        let mut fidelity = FidelityReport::new();
+        let synthesis = self.synthesis;
+
         // Walked entry by entry rather than gathered, so the memory an archive costs does
         // not grow with the number of names in the tree. The walk reports in this module's
         // own error vocabulary, so a member that cannot be written and a directory that
-        // cannot be read both stop it as themselves.
-        reader.walk_with(|reader, entry| {
+        // cannot be read both stop it as themselves. The root arrives first, under the empty
+        // path, which is what becomes the `./` member.
+        tree.walk_tree(|tree, entry| {
             if is_lost_found(&entry.path) {
                 return Ok(());
             }
-            let member = Member::of(reader, entry, &mut named)?;
-            self.append(reader, &member)
+            let member = Member::of(tree, entry, &mut named, &synthesis, &mut fidelity)?;
+            self.append(tree, &member)
         })?;
 
-        self.builder.finish().map_err(ArchiveError::Io)
+        self.builder.finish().map_err(ArchiveError::Io)?;
+        Ok(fidelity)
     }
 
     /// Append one member: its PAX records, then its header and contents.
     ///
     /// The records go first because that is where they apply — an `x` header describes the
     /// entry that follows it.
-    fn append<R: Read + Seek>(
-        &mut self,
-        reader: &mut Reader<R>,
-        m: &Member,
-    ) -> Result<(), ArchiveError> {
-        let kind = m.inode.mode & IFMT;
-        let name = member_name(&m.path, kind == IFDIR);
+    fn append<T: FsTree>(&mut self, tree: &mut T, m: &Member<T::Node>) -> Result<(), ArchiveError> {
+        let name = member_name(&m.path, matches!(m.kind, NodeKind::Directory));
 
         let entry_type = if m.hardlink.is_some() {
             EntryType::Link
         } else {
-            match kind {
-                IFDIR => EntryType::Directory,
-                IFREG => EntryType::Regular,
-                IFLNK => EntryType::Symlink,
-                IFCHR => EntryType::Char,
-                IFBLK => EntryType::Block,
-                IFIFO => EntryType::Fifo,
-                // A socket is refused before a member is ever built for it.
-                _ => {
+            match m.kind {
+                NodeKind::Directory => EntryType::Directory,
+                NodeKind::File { .. } => EntryType::Regular,
+                NodeKind::Symlink => EntryType::Symlink,
+                NodeKind::CharDevice { .. } => EntryType::Char,
+                NodeKind::BlockDevice { .. } => EntryType::Block,
+                NodeKind::Fifo => EntryType::Fifo,
+                // A socket has no tar entry type at all, and is refused before a member is
+                // ever built for it. Matched by name rather than by wildcard so a
+                // `NodeKind` a later family adds is a compile error here, which forces a
+                // decision about how tar carries it.
+                NodeKind::Socket => {
                     return Err(ArchiveError::Unrepresentable {
                         path: m.path.clone(),
                     });
@@ -162,6 +173,7 @@ impl<W: Write> ArchiveSink<W> {
             }
         };
         let target = m.hardlink.as_ref().or(m.symlink.as_ref());
+        let meta = &m.attrs.meta;
 
         // Every field the header cannot hold exactly goes into a PAX record, and the ones it
         // can go into both: the record is authoritative, and every reader that honours it —
@@ -169,20 +181,17 @@ impl<W: Write> ArchiveSink<W> {
         // value whatever the header says.
         let mut records: Vec<(String, Vec<u8>)> = vec![
             ("path".to_string(), name.clone()),
-            ("atime".to_string(), pax_time(m.inode.atime).into()),
-            ("ctime".to_string(), pax_time(m.inode.ctime).into()),
-            ("mtime".to_string(), pax_time(m.inode.mtime).into()),
-            ("uid".to_string(), m.inode.uid.to_string().into()),
-            ("gid".to_string(), m.inode.gid.to_string().into()),
+            ("atime".to_string(), pax_time(meta.atime).into()),
+            ("ctime".to_string(), pax_time(meta.ctime).into()),
+            ("mtime".to_string(), pax_time(meta.mtime).into()),
+            ("uid".to_string(), meta.uid.to_string().into()),
+            ("gid".to_string(), meta.gid.to_string().into()),
         ];
         if let Some(target) = target {
             records.push(("linkpath".to_string(), target.clone()));
         }
-        for xattr in &m.xattrs {
-            records.push((
-                pax_xattr_key(&m.path, &xattr.name)?,
-                xattr_value(&m.path, xattr)?,
-            ));
+        for xattr in &m.attrs.xattrs {
+            records.push((pax_xattr_key(&m.path, &xattr.name)?, xattr.value.clone()));
         }
         let borrowed: Vec<(&str, &[u8])> = records
             .iter()
@@ -194,14 +203,16 @@ impl<W: Write> ArchiveSink<W> {
 
         let mut header = Header::new_ustar();
         header.set_entry_type(entry_type);
-        header.set_mode(u32::from(m.inode.mode & 0o7777));
-        header.set_uid(u64::from(m.inode.uid));
-        header.set_gid(u64::from(m.inode.gid));
+        header.set_mode(u32::from(meta.mode & 0o7777));
+        header.set_uid(u64::from(meta.uid));
+        header.set_gid(u64::from(meta.gid));
         // The header's time is unsigned whole seconds, so a file older than the epoch or one
         // carrying a sub-second time cannot be written there. The PAX record above holds the
         // real value; this is the approximation a reader that ignores it would see.
-        header.set_mtime(u64::try_from(m.inode.mtime.secs).unwrap_or(0));
-        if let Some((major, minor)) = m.device {
+        header.set_mtime(u64::try_from(meta.mtime.secs).unwrap_or(0));
+        if let NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } =
+            m.kind
+        {
             header.set_device_major(major).map_err(ArchiveError::Io)?;
             header.set_device_minor(minor).map_err(ArchiveError::Io)?;
         }
@@ -222,18 +233,21 @@ impl<W: Write> ArchiveSink<W> {
 
         // A regular file's bytes are streamed out of the filesystem rather than held: the
         // reader fills the archive from the blocks as it goes. Everything else has no body
-        // at all — a hard link's contents belong to the inode the first name wrote.
+        // at all — a hard link's contents belong to the node the first name wrote.
         //
         // The size declared is the length the body will actually run to, which is what the
-        // reader will yield rather than what the inode's size field claims: the two agree
-        // for every file a mapping reaches, and above the logical ceiling a map addresses
-        // the field is the larger. A header promising more than the body carries is an
-        // archive a reader that trusts it mis-frames.
-        let size = if m.streams_data {
-            reader.file_len(&m.inode)
-        } else {
-            0
+        // walk reported rather than what any size field claims. A header promising more than
+        // the body carries is an archive a reader that trusts it mis-frames.
+        let size = match m.kind {
+            NodeKind::File { size } if m.hardlink.is_none() => size,
+            _ => 0,
         };
+        // What an archive *writes* is driven entirely by a length the filesystem declares,
+        // and a hole reads back as zeros — so an inode claiming terabytes and mapping
+        // nothing costs terabytes of members, from an image of a few kilobytes. The cap a
+        // caller set on what a read will return governs that too, checked before a byte is
+        // written and against the same declared length a whole-file read would have refused.
+        tree.check_file_size(&m.path, size)?;
         header.set_size(size);
         header.set_cksum();
         if size == 0 {
@@ -242,7 +256,7 @@ impl<W: Write> ArchiveSink<W> {
                 .append(&header, std::io::empty())
                 .map_err(ArchiveError::Io);
         }
-        let body = InodeData::new(reader, m.inode.clone());
+        let body = NodeData::new(tree, &m.node, size);
         self.builder
             .append(&header, body)
             .map_err(|e| ArchiveError::from_body_io(e, &m.path))
@@ -253,32 +267,41 @@ impl<W: Write> ArchiveSink<W> {
 ///
 /// This is what keeps an archive's memory bounded: `tar` copies a body out of a reader, so
 /// handing it one that reads through the filesystem means neither side ever holds the file.
-struct InodeData<'a, R> {
-    reader: &'a mut Reader<R>,
-    inode: Inode,
+struct NodeData<'a, T: FsTree> {
+    tree: &'a mut T,
+    node: &'a T::Node,
     offset: u64,
+    /// The length the header declared, which the body is held to exactly: a filesystem
+    /// yielding more than was promised would push the archive's framing out of step with it.
+    size: u64,
 }
 
-impl<'a, R: Read + Seek> InodeData<'a, R> {
-    fn new(reader: &'a mut Reader<R>, inode: Inode) -> Self {
+impl<'a, T: FsTree> NodeData<'a, T> {
+    fn new(tree: &'a mut T, node: &'a T::Node, size: u64) -> Self {
         Self {
-            reader,
-            inode,
+            tree,
+            node,
             offset: 0,
+            size,
         }
     }
 }
 
-impl<R: Read + Seek> Read for InodeData<'_, R> {
+impl<T: FsTree> Read for NodeData<'_, T> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.size.saturating_sub(self.offset);
+        if left == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = usize::try_from(left).unwrap_or(usize::MAX).min(buf.len());
         // A read failure of the *filesystem* has to reach the caller through `io::Error`,
         // because that is the only failure a `Read` has. The kind is kept, and the message
         // carries what the reader said, so nothing is lost on the way through.
         let filled = self
-            .reader
-            .read_into(&self.inode, self.offset, buf)
+            .tree
+            .read_bytes(self.node, self.offset, &mut buf[..want])
             .map_err(|e| match e {
-                ReadError::Io { kind, message } => std::io::Error::new(kind, message),
+                TreeError::Io { kind, message } => std::io::Error::new(kind, message),
                 other => std::io::Error::other(other.to_string()),
             })?;
         self.offset += filled as u64;
@@ -286,108 +309,81 @@ impl<R: Read + Seek> Read for InodeData<'_, R> {
     }
 }
 
-/// One archive member: what the header and its records say, and whether a body follows.
-struct Member {
+/// One archive member: what the header and its records say, and the node a body comes from.
+struct Member<N> {
     /// The path in the filesystem. Empty for the root, which has no name of its own.
     path: Vec<u8>,
-    /// The mode, ownership, times, and size to record.
-    inode: Inode,
-    /// The attributes to carry, in the form an archive holds them.
-    xattrs: Vec<Xattr>,
+    /// What is at the path.
+    kind: NodeKind,
+    /// The mode, ownership, times, and attributes to record.
+    attrs: Attributes,
     /// The member this name is a second name for, when it is a hard link.
     hardlink: Option<Vec<u8>>,
     /// Where a symbolic link points.
     symlink: Option<Vec<u8>>,
-    /// A device node's major and minor numbers.
-    device: Option<(u32, u32)>,
-    /// Whether a body follows the header — true only for the first name of a regular file.
-    streams_data: bool,
+    /// The family's handle to the node, for streaming a regular file's bytes.
+    node: N,
 }
 
-impl Member {
-    /// The `./` member describing the filesystem root.
-    fn root(inode: Inode, xattrs: Vec<Xattr>) -> Self {
-        Self {
-            path: Vec::new(),
-            inode,
-            xattrs,
-            hardlink: None,
-            symlink: None,
-            device: None,
-            streams_data: false,
-        }
-    }
-
+impl<N> Member<N> {
     /// Everything one walk entry contributes to the archive.
-    fn of<R: Read + Seek>(
-        reader: &mut Reader<R>,
-        entry: WalkEntry,
-        named: &mut HashMap<u32, Vec<u8>>,
+    fn of<T: FsTree<Node = N>>(
+        tree: &mut T,
+        entry: TreeEntry<N>,
+        named: &mut HashMap<u64, Vec<u8>>,
+        synthesis: &Synthesis,
+        fidelity: &mut FidelityReport,
     ) -> Result<Self, ArchiveError> {
-        let WalkEntry {
+        let TreeEntry {
             path,
-            number,
-            inode,
+            kind,
+            shared,
+            node,
             ..
         } = entry;
-        let kind = inode.mode & IFMT;
-        if kind == IFSOCK {
+        if matches!(kind, NodeKind::Socket) {
             return Err(ArchiveError::Unrepresentable { path });
         }
 
-        // A directory has more than one link by construction — its own name and its `.` — so
-        // link counts say nothing about it, and it is never another name for anything.
-        let hardlink = if kind == IFDIR {
-            None
-        } else {
-            match named.get(&number) {
-                // A hard link's target is a member of this same archive, so it is named the
-                // way that member is named.
+        // A node the walk says is reachable by more than one name is the file the first time
+        // it is seen and a hard link every time after. Only such a node carries an identity,
+        // so the table holds the tree's hard links rather than a path per file in it.
+        let hardlink = match shared {
+            // A hard link's target is a member of this same archive, so it is named the way
+            // that member is named.
+            Some(id) => match named.get(&id) {
                 Some(first) => Some(member_name(first, false)),
                 None => {
-                    // Only an inode the image says has more than one name is held, so the
-                    // table holds the tree's hard links rather than a path per file in it.
-                    if inode.links_count > 1 {
-                        named.insert(number, path.clone());
-                    }
+                    named.insert(id, path.clone());
                     None
                 }
-            }
+            },
+            None => None,
         };
+
+        let mut attrs = tree.stat(&node, synthesis)?;
+        for property in &attrs.synthesized {
+            fidelity.record(Direction::Synthesized, &path, *property);
+        }
         // A hard link carries nothing of its own: the contents and the attributes belong to
-        // the inode, which the name that came first already wrote.
+        // the node, which the name that came first already wrote.
         if hardlink.is_some() {
-            return Ok(Self {
-                path,
-                inode,
-                xattrs: Vec::new(),
-                hardlink,
-                symlink: None,
-                device: None,
-                streams_data: false,
-            });
+            attrs.xattrs.clear();
         }
 
-        let symlink = if kind == IFLNK {
-            Some(reader.read_symlink(&inode)?)
+        let symlink = if matches!(kind, NodeKind::Symlink) && hardlink.is_none() {
+            Some(tree.link_target(&node)?)
         } else {
             None
         };
-        let device = if kind == IFCHR || kind == IFBLK {
-            Some(reader.device(&inode))
-        } else {
-            None
-        };
-        let xattrs = reader.xattrs(&inode)?;
 
         Ok(Self {
             path,
-            inode,
-            xattrs,
-            hardlink: None,
+            kind,
+            attrs,
+            hardlink,
             symlink,
-            device,
-            streams_data: kind == IFREG,
+            node,
         })
     }
 }
@@ -421,11 +417,11 @@ fn member_name(path: &[u8], directory: bool) -> Vec<u8> {
 /// `Timestamp { secs: -6, nanos: 750_000_000 }` is written `-5.250000000`, which is the
 /// instant it names.
 ///
-/// An inode's stored fraction is a thirty-bit field, so a filesystem this crate did not
-/// write can name more nanoseconds than there are in a second. Such a fraction is carried
-/// into the seconds before anything is written, so the record names the instant the two
-/// fields describe and always holds a nine-digit fraction — rather than a ten-digit one a
-/// reader would scale wrongly.
+/// A filesystem's stored fraction need not divide a second — ext4's is a thirty-bit field —
+/// so an image this crate did not write can name more nanoseconds than there are in one.
+/// Such a fraction is carried into the seconds before anything is written, so the record
+/// names the instant the two fields describe and always holds a nine-digit fraction, rather
+/// than a ten-digit one a reader would scale wrongly.
 #[must_use]
 fn pax_time(t: Timestamp) -> String {
     // Normalize first: every case below assumes a fraction smaller than a second.
@@ -468,24 +464,6 @@ fn pax_xattr_key(path: &[u8], name: &[u8]) -> Result<String, ArchiveError> {
             name: name.to_vec(),
         }),
     }
-}
-
-/// The value an extended attribute takes in an archive.
-///
-/// A POSIX ACL is stored on disk in ext4's compact form, which is not the form the
-/// `getxattr` boundary speaks — and an archive holds what `getxattr` would have given it.
-/// So an ACL is decoded and written back out in the version-2 form, which is what GNU tar
-/// reads and what the archive source expects on the way back in. Every other attribute is
-/// bytes, and travels as bytes.
-fn xattr_value(path: &[u8], xattr: &Xattr) -> Result<Vec<u8>, ArchiveError> {
-    if xattr.name == Acl::ACCESS_NAME || xattr.name == Acl::DEFAULT_NAME {
-        let acl = Acl::decode(&xattr.value).map_err(|source| ArchiveError::Acl {
-            path: path.to_vec(),
-            source,
-        })?;
-        return Ok(acl.encode_xattr_v2());
-    }
-    Ok(xattr.value.clone())
 }
 
 #[cfg(test)]
@@ -565,15 +543,15 @@ mod tests {
 
     #[test]
     fn a_pax_time_carries_an_over_long_fraction_into_the_seconds() {
-        // An inode's fraction is a thirty-bit field, so an image this crate did not write
-        // can name more nanoseconds than a second holds. The record still names the
-        // instant the two fields describe, with a nine-digit fraction: writing the raw
-        // value would make a ten-digit one, which a reader scales as a tenth of what was
+        // A filesystem's stored fraction need not divide a second, so an image this crate
+        // did not write can name more nanoseconds than a second holds. The record still
+        // names the instant the two fields describe, with a nine-digit fraction: writing the
+        // raw value would make a ten-digit one, which a reader scales as a tenth of what was
         // meant.
         assert_eq!(
             pax_time(Timestamp {
                 secs: 100,
-                nanos: 1_073_741_823 // the largest the field holds
+                nanos: 1_073_741_823 // the largest ext4's field holds
             }),
             "101.073741823"
         );

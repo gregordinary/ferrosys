@@ -9,6 +9,23 @@
 //! this", and an image that is recognizably ext but not conformant is still ext — so a
 //! quirk that a strict read refuses is not allowed to turn into "unrecognized", which
 //! would be the one answer that is certainly wrong.
+//!
+//! # The order families are tried in
+//!
+//! The list is hardcoded and short, but the *rule* that orders it is written down so a
+//! family added later inserts itself mechanically rather than by argument:
+//!
+//! - **Tier 1** is a family whose images carry a distinctive multi-byte magic at a fixed
+//!   offset. Two such magics do not collide, so at most one tier-1 family claims any image
+//!   and order within the tier does not matter.
+//! - **Tier 2** is a family whose magic is weak enough to collide with something else, or
+//!   that has none at all. Such a family is classified only by checking a whole header for
+//!   internal consistency, and it runs after every tier-1 family — because a false positive
+//!   there is the one detection failure that silently misidentifies a healthy filesystem.
+//!
+//! Within tier 2, order must not be relied on either: if that tier ever holds more than one
+//! family, an ordered list is the wrong structure and each family should declare a probe of
+//! its own.
 
 use std::io::{Read, Seek};
 
@@ -23,6 +40,11 @@ pub enum Filesystem {
     /// words classify to — ext2, ext3, or ext4.
     #[cfg(feature = "ext")]
     Ext(crate::feature::Profile),
+    /// A FAT filesystem, labeled by the [`FatType`](crate::fat::FatType) its cluster count
+    /// derives to — FAT12, FAT16, or FAT32. Nothing in a FAT image records which of the
+    /// three it is, so this is computed rather than read.
+    #[cfg(feature = "fat")]
+    Fat(crate::fat::FatType),
 }
 
 /// Where to look for a filesystem, and anything else detection needs to be told.
@@ -124,25 +146,75 @@ pub fn detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError> {
 /// Returns [`DetectError::Io`] when the source cannot be read, or
 /// [`DetectError::Unrecognized`] when no compiled-in family recognizes the image.
 pub fn detect_with<R: Read + Seek>(
-    src: R,
+    #[allow(unused_mut)] mut src: R,
     options: &DetectOptions,
 ) -> Result<Filesystem, DetectError> {
+    // Tier 1: every family whose images carry a distinctive multi-byte magic at a fixed
+    // offset. Order within the tier does not matter and must not be relied on — two such
+    // magics do not collide, so at most one claims any image.
     #[cfg(feature = "ext")]
-    {
-        use crate::read::{OpenOptions, ReadError, ReadPolicy, Reader};
-        let open = OpenOptions::new()
-            .base(options.base)
-            .policy(ReadPolicy::Lenient);
-        match Reader::open_with(src, &open) {
-            Ok(reader) => Ok(Filesystem::Ext(reader.profile())),
-            Err(ReadError::Io { kind, message }) => Err(DetectError::Io { kind, message }),
-            Err(_) => Err(DetectError::Unrecognized),
-        }
+    match ext_claim(&mut src, options) {
+        Ok(Some(fs)) => return Ok(fs),
+        Ok(None) => {}
+        Err(e) => return Err(e),
     }
-    #[cfg(not(feature = "ext"))]
-    {
-        let _ = (src, options);
-        Err(DetectError::Unrecognized)
+
+    // Tier 2: every family whose magic is weak enough to collide, or that has none at all,
+    // and which is therefore classified only by checking a whole header for internal
+    // consistency. A family in this tier runs after every tier-1 family precisely because it
+    // can claim an image that is really something else, and if this tier ever holds more
+    // than one family the list is the wrong structure — each family should declare a probe
+    // instead.
+    //
+    // FAT is here because its only fixed marker is the boot signature, which every bootable
+    // sector ever written carries.
+    #[cfg(feature = "fat")]
+    match crate::fat::claim(&mut src, options) {
+        Ok(Some(fs)) => return Ok(fs),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Detection answers with one family rather than every family that might match. An image
+    // that plausibly classifies two ways is a real forensic situation, and the answer is
+    // that the caller re-runs detection against the families it wants to distinguish, not
+    // that every caller pays for a list of maybes.
+    let _ = (&mut src, options);
+    Err(DetectError::Unrecognized)
+}
+
+/// Whether the ext family claims the image, and as what.
+///
+/// `Ok(None)` is "not ours"; an I/O failure is the source's rather than the image's and
+/// stops detection rather than moving on, since every later probe would fail the same way.
+///
+/// Running out of source is the exception, and it has to be: this probe reads 1024 bytes at
+/// `base + 1024`, and a source shorter than that is not a source that failed — it is a source
+/// with no ext superblock in it. A later probe reading less may still recognize what it
+/// holds, and a carved FAT fragment of one sector is exactly that shape, so an end of file
+/// here is "not ours" rather than an answer for every family.
+///
+/// A lenient open is what asks the question: an image whose superblock reads is ext,
+/// whatever a strict read would go on to refuse about it.
+#[cfg(feature = "ext")]
+fn ext_claim<R: Read + Seek>(
+    src: R,
+    options: &DetectOptions,
+) -> Result<Option<Filesystem>, DetectError> {
+    use crate::policy::ReadPolicy;
+    use crate::read::{OpenOptions, ReadError, Reader};
+
+    let open = OpenOptions::new()
+        .base(options.base)
+        .policy(ReadPolicy::Lenient);
+    match Reader::open_with(src, &open) {
+        Ok(reader) => Ok(Some(Filesystem::Ext(reader.profile()))),
+        Err(ReadError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            ..
+        }) => Ok(None),
+        Err(ReadError::Io { kind, message }) => Err(DetectError::Io { kind, message }),
+        Err(_) => Ok(None),
     }
 }
 
@@ -198,8 +270,8 @@ mod tests {
     use super::{DetectOptions, Filesystem, detect, detect_with};
     use crate::feature::Profile;
     use crate::materialize::{FormatOptions, format};
-    use crate::ondisk::Timestamp;
     use crate::source::TreeBuilder;
+    use crate::time::Timestamp;
 
     /// A formatted image's bytes at the default profile.
     fn image() -> Vec<u8> {
@@ -208,6 +280,30 @@ mod tests {
         format(TreeBuilder::new(), 32 << 20, options)
             .expect("format")
             .into_bytes()
+    }
+
+    #[test]
+    #[cfg(feature = "fat")]
+    fn a_source_too_short_for_an_ext_superblock_still_reaches_the_later_probes() {
+        // The ext probe reads 1024 bytes at `base + 1024`, so a source shorter than 2048 is
+        // one it cannot read at all. Reported as an I/O failure that ends detection, that
+        // answer would stand for every family — and it is wrong for the very next one: the
+        // FAT probe reads sector zero and nothing else, so a carved fragment of one sector
+        // is a volume it recognizes.
+        //
+        // Running out of source is "not ours", not "nobody's".
+        let mut fragment = vec![0u8; 512];
+        // A boot sector minimal enough for the FAT probe to have an opinion about, which is
+        // all this needs: what matters is that the probe was *reached*.
+        fragment[510] = 0x55;
+        fragment[511] = 0xAA;
+        assert!(
+            !matches!(
+                detect(Cursor::new(fragment)),
+                Err(super::DetectError::Io { .. })
+            ),
+            "a short source ended detection instead of failing the ext probe"
+        );
     }
 
     #[test]

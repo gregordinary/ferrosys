@@ -22,7 +22,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, Write};
 
 use crate::alloc::{AllocError, Allocator};
 use crate::crc32c::crc32c;
@@ -32,7 +32,6 @@ use crate::extent::{
     ExtentError, build_leaves, build_tree, node_capacity, plan_tree, tail_offset, write_node,
 };
 use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE, Profile, resize_inode_size};
-use crate::fit::Slack;
 use crate::geometry::{
     BlockRange, GeometryError, GroupLayout, GrowReservation, InodeCount, Layout, PlanRequest,
     ReservedRatio, plan_layout,
@@ -45,11 +44,15 @@ use crate::model::{
 };
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, DIR_TAIL_LEN, DX_ENTRY_LEN, DX_TAIL_LEN,
-    DirEntry, GroupDescriptor, Inode, InodeFlags, ParseError, SuperBlock, Timestamp, Xattr,
-    encode_block, encode_device, encode_inline, extra_isize_for, get_u16, orphan_entries_len,
-    orphan_tail_bytes, put_u16, put_u32, split_for_storage, write_dir_tail, write_dx_tail,
+    DirEntry, GroupDescriptor, Inode, InodeFlags, ParseError, SuperBlock, encode_block,
+    encode_device, encode_inline, extra_isize_for, get_u16, orphan_entries_len, orphan_tail_bytes,
+    put_u16, put_u32, split_for_storage, write_dir_tail, write_dx_tail,
 };
+use crate::sink::ByteSink;
+use crate::sizing::Slack;
 use crate::source::Source;
+use crate::time::Timestamp;
+use crate::xattr::Xattr;
 
 /// The reserved inode mapping the reserved group-descriptor-table blocks.
 const RESIZE_INO: u32 = 7;
@@ -91,6 +94,13 @@ fn first_user_inode(feature: &FeatureSet) -> u32 {
         FIRST_USER_INO
     }
 }
+
+/// The most 512-byte sectors an inode is charged without `huge_file`.
+///
+/// `i_blocks_lo` is 32 bits wide, and without the feature the two bytes above it are ext2's
+/// `l_i_frag` and `l_i_fsize` rather than a high half — so this is the whole field. Two
+/// tebibytes, less one sector.
+const MAX_SECTORS_WITHOUT_HUGE_FILE: u64 = u32::MAX as u64;
 
 /// The orphan file's size in blocks: one block per 4096 filesystem blocks, held between
 /// 32 and 512 blocks. The floor keeps concurrent deletions on a small filesystem from
@@ -346,6 +356,29 @@ pub enum FormatError {
         /// The size it declares.
         size: u64,
     },
+    /// An inode is charged more 512-byte sectors than a feature set without `huge_file`
+    /// records. Without the feature only `i_blocks_lo` exists — the two bytes beside it are
+    /// ext2's `l_i_frag` and `l_i_fsize` — so the count is 32 bits wide and stops at two
+    /// tebibytes.
+    ///
+    /// A classic block map reaches 4.004 TiB at a 4096-byte block, and
+    /// [`FeatureSet::validate`] refuses `huge_file` on a non-extent set — so on ext2 and
+    /// ext3 the map outruns the field, and a file in that range is refused here rather than
+    /// serialized with a wrapped low half and a high half the feature words say is not
+    /// there.
+    #[error(
+        "the {what} is charged {sectors} sectors, past the {limit} an inode records \
+         without the huge_file feature"
+    )]
+    #[non_exhaustive]
+    BlockCountWithoutHugeFile {
+        /// The structure whose block count crosses the bound.
+        what: &'static str,
+        /// The 512-byte sectors it is charged.
+        sectors: u64,
+        /// The most an inode records without the feature.
+        limit: u64,
+    },
     /// A file needs more blocks than a classic (ext2/ext3) block map reaches: twelve direct
     /// pointers and three levels of indirect blocks, `12 + p + p² + p³` blocks for
     /// `p = block_size / 4`. That is 16.06 GiB at a 1024-byte block and 4.004 TiB at the
@@ -571,8 +604,7 @@ pub fn format(
 ///   holds its bytes from the moment the source is built, so a list of them costs the sum
 ///   of every file. A [`FileContent::Range`](crate::source::FileContent::Range) is read at
 ///   placement and dropped after, so a list of them costs the largest single file.
-///   [`ArchiveSource::from_path`](crate::archive::ArchiveSource::from_path) is the
-///   difference for a tar source.
+///   `ArchiveSource::from_path` is the difference for a tar source.
 /// - **The allocator's used-block bitmap**, for the whole run, at one bit per filesystem
 ///   block: `total_blocks / 8` bytes, 128 MiB for a 4 TiB image at a 4 KiB block.
 ///
@@ -616,7 +648,7 @@ pub fn format_to(
 ///
 /// ```no_run
 /// # use ferrosys::ext::{FormatOptions, FormatPlan, TreeBuilder};
-/// # use ferrosys::ext::ondisk::Timestamp;
+/// # use ferrosys::ext::Timestamp;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
 /// let plan = FormatPlan::new(TreeBuilder::new(), 64 << 20, options)?;
@@ -697,8 +729,8 @@ impl FormatPlan {
     /// sizes it tries would cost, and it tries sizes near the answer.
     ///
     /// ```no_run
-    /// # use ferrosys::ext::{FormatOptions, FormatPlan, Slack, TreeBuilder};
-    /// # use ferrosys::ext::ondisk::Timestamp;
+    /// # use ferrosys::Slack;
+    /// # use ferrosys::ext::{FormatOptions, FormatPlan, Timestamp, TreeBuilder};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let source = TreeBuilder::new();
     /// let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
@@ -832,11 +864,8 @@ impl FormatPlan {
             journal_blocks,
         } = self;
         let feature = options.feature;
-        let bytes = Bytes {
-            sink: &mut sink,
-            written_end: 0,
-        };
-        let mut writer = Writer::new(&layout, &feature, options, journal_blocks, bytes);
+        let bytes = Bytes(ByteSink::new(&mut sink));
+        let mut writer = Writer::new(&layout, &feature, options, journal_blocks, bytes)?;
         writer.materialize(&model)?;
         writer.extend_to_full_size()?;
         Ok(layout)
@@ -894,7 +923,7 @@ pub(crate) fn free_after_placing(
     model: &FsModel,
 ) -> Result<u64, FormatError> {
     let feature = options.feature;
-    let mut writer = Writer::new(layout, &feature, *options, journal_blocks, Discard);
+    let mut writer = Writer::new(layout, &feature, *options, journal_blocks, Discard)?;
     writer.place(model)?;
     Ok(writer.alloc.free_count())
 }
@@ -1275,20 +1304,14 @@ trait Sink {
 }
 
 /// The sink that writes: bytes go to a seekable destination at absolute offsets, and
-/// nothing is ever read back.
-struct Bytes<W> {
-    sink: W,
-    /// One past the highest byte offset written, so the destination can be extended
-    /// to the filesystem's full size when the last block holds nothing.
-    written_end: u64,
-}
+/// nothing is ever read back. The destination itself is [`ByteSink`], which every family's
+/// materializer writes through; what this adds is the fit search's question of whether the
+/// bytes are being kept.
+struct Bytes<W>(ByteSink<W>);
 
 impl<W: Write + Seek> Sink for Bytes<W> {
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), FormatError> {
-        self.sink.seek(SeekFrom::Start(offset))?;
-        self.sink.write_all(bytes)?;
-        self.written_end = self.written_end.max(offset + bytes.len() as u64);
-        Ok(())
+        Ok(self.0.write_at(offset, bytes)?)
     }
 
     fn keeps_bytes(&self) -> bool {
@@ -1296,12 +1319,7 @@ impl<W: Write + Seek> Sink for Bytes<W> {
     }
 
     fn extend_to(&mut self, size: u64) -> Result<(), FormatError> {
-        if self.written_end < size {
-            // The last byte was never written, so it is already zero; writing a zero
-            // there only grows the destination.
-            self.write_at(size - 1, &[0])?;
-        }
-        Ok(())
+        Ok(self.0.extend_to(size)?)
     }
 }
 
@@ -1363,7 +1381,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         options: FormatOptions,
         journal_blocks: Option<u32>,
         sink: S,
-    ) -> Self {
+    ) -> Result<Self, FormatError> {
         let block_size = layout.block_size as usize;
         let csum: Box<dyn Checksummer> = if feature.has_metadata_csum() {
             Box::new(Crc32c::new(&options.uuid))
@@ -1386,11 +1404,11 @@ impl<'a, S: Sink> Writer<'a, S> {
                 },
             })
         };
-        Self {
+        Ok(Self {
             layout,
             feature,
             options,
-            alloc: Allocator::new(layout),
+            alloc: Allocator::new(layout)?,
             sink,
             block_size,
             csum,
@@ -1399,7 +1417,7 @@ impl<'a, S: Sink> Writer<'a, S> {
             gdt_bytes: Vec::new(),
             journal_backup: None,
             journal_blocks,
-        }
+        })
     }
 
     /// Place every block the filesystem occupies: the source's inodes, then the ones the
@@ -1514,7 +1532,7 @@ impl<'a, S: Sink> Writer<'a, S> {
                 // into, because a content that read short is a file that changed since the
                 // source named it, which `FileContent::read` refuses rather than reports.
                 let count = content.len().div_ceil(self.block_size as u64);
-                let physical = self.map_data_blocks(minode.number, &mut inode, count)?;
+                let physical = self.map_data_blocks(minode.number, &mut inode, count, "file")?;
                 if self.sink.keeps_bytes() {
                     // The bytes are read here, at placement, rather than held from the
                     // moment the source was built: peak memory is the largest single file
@@ -1612,16 +1630,21 @@ impl<'a, S: Sink> Writer<'a, S> {
         ino: u32,
         inode: &mut Inode,
         count: u64,
+        what: &'static str,
     ) -> Result<Vec<u64>, FormatError> {
+        // Refused from the count, before a block is allocated, so the bound fires without a
+        // filesystem large enough to hold the file existing. The exact charge is checked
+        // again once the mapping's own blocks are known, since those only add to it.
+        self.check_sectors(count * self.sectors_per_block(), what)?;
         if self.feature.has_extents() {
             inode.flags = InodeFlags::EXTENTS;
             let ranges = self.alloc.allocate(count)?;
             let physical = flatten(&ranges);
             let meta = self.root_extent_tree(ino, inode, &ranges)?;
-            inode.blocks = (count + meta) * self.sectors_per_block();
+            self.charge_sectors(inode, (count + meta) * self.sectors_per_block(), what)?;
             Ok(physical)
         } else {
-            self.build_classic_map(inode, count)
+            self.build_classic_map(inode, count, what)
         }
     }
 
@@ -1640,7 +1663,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         // The blocks are consumed once, as they are written, so a caller may hand over
         // chunks that borrow their source rather than a materialized copy of it.
         let count = blocks.len();
-        let physical = self.map_data_blocks(ino, inode, count as u64)?;
+        let physical = self.map_data_blocks(ino, inode, count as u64, "file")?;
         for (data, &phys) in blocks.zip(&physical) {
             self.write_block(phys, data.as_ref())?;
         }
@@ -1662,7 +1685,15 @@ impl<'a, S: Sink> Writer<'a, S> {
     /// first entered, which is the order `mke2fs` writes and the interleaving that fixes
     /// each block's number. Sets `inode.flags` and `inode.blocks`; leaves `inode.size` to
     /// the caller.
-    fn build_classic_map(&mut self, inode: &mut Inode, n: u64) -> Result<Vec<u64>, FormatError> {
+    fn build_classic_map(
+        &mut self,
+        inode: &mut Inode,
+        n: u64,
+        what: &'static str,
+    ) -> Result<Vec<u64>, FormatError> {
+        // Reached directly by the journal as well as through `map_data_blocks`, so the
+        // charge bound is checked here too, before a block is allocated.
+        self.check_sectors(n * self.sectors_per_block(), what)?;
         // The map's words run out at three levels of indirection, and the loop below simply
         // stops when they do — so a file past the reach would be mapped short while its size
         // claimed the whole length, which is a file whose tail is neither mapped nor written.
@@ -1701,7 +1732,7 @@ impl<'a, S: Sink> Writer<'a, S> {
             );
         }
 
-        inode.blocks = (n + meta) * self.sectors_per_block();
+        self.charge_sectors(inode, (n + meta) * self.sectors_per_block(), what)?;
         Ok(physical)
     }
 
@@ -1906,7 +1937,11 @@ impl<'a, S: Sink> Writer<'a, S> {
         inode.flags = InodeFlags::EXTENTS;
         let meta = self.root_extent_tree(ORPHAN_INO, &mut inode, &ranges)?;
         inode.size = u64::from(blocks) * u64::from(self.feature.block_size);
-        inode.blocks = (u64::from(blocks) + meta) * self.sectors_per_block();
+        self.charge_sectors(
+            &mut inode,
+            (u64::from(blocks) + meta) * self.sectors_per_block(),
+            "orphan file",
+        )?;
 
         // The image starts zeroed and every entry is zero, so each block needs only its
         // tail written. The checksum covers the entry array — the block but for that
@@ -1964,13 +1999,17 @@ impl<'a, S: Sink> Writer<'a, S> {
             self.write_block(ranges[0].start, &sb)?;
             inode.flags = InodeFlags::EXTENTS;
             let meta = self.root_extent_tree(JOURNAL_INO, &mut inode, &ranges)?;
-            inode.blocks = (u64::from(blocks) + meta) * self.sectors_per_block();
+            self.charge_sectors(
+                &mut inode,
+                (u64::from(blocks) + meta) * self.sectors_per_block(),
+                "journal",
+            )?;
         } else {
             // ext3: the journal maps through the classic block map, its indirect blocks
             // interleaved with the log the same way `mke2fs` writes them. Only the first
             // block, the jbd2 superblock, is written; the rest stays zeroed.
             let physical = self
-                .build_classic_map(&mut inode, u64::from(blocks))
+                .build_classic_map(&mut inode, u64::from(blocks), "journal")
                 .map_err(journal_space)?;
             // As above: `blocks` is at least `MIN_JOURNAL_BLOCKS`, and the map holds one
             // entry per logical block, so there is a first one.
@@ -2046,7 +2085,11 @@ impl<'a, S: Sink> Writer<'a, S> {
         // resize inode a large file at a 4096-byte block — the pairing `validate` enforces.
         inode.size = resize_inode_size(self.layout.block_size);
         let data_blocks = 1 + u64::from(reserved) + u64::from(reserved) * backups.len() as u64;
-        inode.blocks = data_blocks * self.sectors_per_block();
+        self.charge_sectors(
+            &mut inode,
+            data_blocks * self.sectors_per_block(),
+            "resize inode",
+        )?;
         put_u32(&mut inode.block, 13 * 4, map_block(dind_block)?);
         Ok(inode)
     }
@@ -2415,6 +2458,37 @@ impl<'a, S: Sink> Writer<'a, S> {
     /// Blocks-to-512-byte-sectors conversion for `i_blocks`.
     fn sectors_per_block(&self) -> u64 {
         u64::from(self.layout.block_size) / 512
+    }
+
+    /// Record the sectors an inode is charged, refusing a count its feature set cannot hold.
+    ///
+    /// Every `i_blocks` this writer sets goes through here, because the field is only 32
+    /// bits wide without `huge_file` and the bytes above it are another field entirely. A
+    /// count past that would serialize as a wrapped low half beside a high half the feature
+    /// words deny — no panic, no error, and an image every checker faults.
+    fn charge_sectors(
+        &self,
+        inode: &mut Inode,
+        sectors: u64,
+        what: &'static str,
+    ) -> Result<(), FormatError> {
+        self.check_sectors(sectors, what)?;
+        inode.blocks = sectors;
+        Ok(())
+    }
+
+    /// The bound alone, for a caller that knows the count before it has an inode to put it
+    /// on — which is how a request too large to record is refused before a block of it is
+    /// allocated.
+    fn check_sectors(&self, sectors: u64, what: &'static str) -> Result<(), FormatError> {
+        if !self.feature.has_huge_file() && sectors > MAX_SECTORS_WITHOUT_HUGE_FILE {
+            return Err(FormatError::BlockCountWithoutHugeFile {
+                what,
+                sectors,
+                limit: MAX_SECTORS_WITHOUT_HUGE_FILE,
+            });
+        }
+        Ok(())
     }
 
     fn write_block(&mut self, block: u64, data: &[u8]) -> Result<(), FormatError> {
@@ -2801,7 +2875,8 @@ journal_blocks 1024
 
         let journal = journal_size(&layout, &options).expect("the journal size is realizable");
         // The refusal happens while placing, so no destination is needed to provoke it.
-        let mut writer = Writer::new(&layout, &feature, options, journal, Discard);
+        let mut writer = Writer::new(&layout, &feature, options, journal, Discard)
+            .expect("an allocator for a layout this size");
         let err = writer
             .materialize(&model)
             .expect_err("the collision is refused");
@@ -3052,6 +3127,55 @@ journal_blocks 1024
         assert_eq!(classic_map_reach(1024), 16_843_020); // 16.06 GiB
         assert_eq!(classic_map_reach(2048), 134_480_396); // 256.5 GiB
         assert_eq!(classic_map_reach(4096), 1_074_791_436); // 4.004 TiB
+    }
+
+    #[test]
+    fn a_block_count_the_feature_words_cannot_record_is_refused_rather_than_wrapped() {
+        // Without `huge_file` an inode's block count is `i_blocks_lo` alone — the two bytes
+        // above it are ext2's `l_i_frag` and `l_i_fsize`, not a high half. So the field
+        // stops at two tebibytes, while a classic map at a 4096-byte block reaches 4.004 —
+        // and `FeatureSet::validate` refuses adding `huge_file` to a non-extent set, so on
+        // ext2 and ext3 the map genuinely outruns the field.
+        //
+        // Written anyway, it serializes as a wrapped low half beside a high half the feature
+        // words deny: no panic, no error, and an image every checker faults. The journal is
+        // the structure an explicit size pushes there without a filesystem large enough to
+        // hold it existing.
+        let mut o = FormatOptions::new([1u8; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16])
+            .profile(Profile::Ext3);
+        o.grow = GrowReservation::None;
+        assert!(
+            !o.feature.has_huge_file(),
+            "the block-mapped profiles cannot carry huge_file"
+        );
+        // Two tebibytes at a 4096-byte block: 536,870,912 blocks of eight sectors each is
+        // exactly `u32::MAX + 1`, so this is the first count the field cannot hold.
+        o.journal = JournalSize::Blocks(536_870_912);
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("expected BlockCountWithoutHugeFile");
+        };
+        assert!(
+            matches!(
+                err,
+                FormatError::BlockCountWithoutHugeFile {
+                    what: "journal",
+                    limit,
+                    ..
+                } if limit == u64::from(u32::MAX)
+            ),
+            "expected BlockCountWithoutHugeFile, got {err:?}"
+        );
+
+        // And the bound is the field's, not a refusal of every large log: one block below it
+        // gets as far as running out of filesystem.
+        o.journal = JournalSize::Blocks(536_870_911);
+        let Err(err) = format(TreeBuilder::new(), 64 * MIB, o) else {
+            panic!("expected the log not to fit in 64 MiB");
+        };
+        assert!(
+            !matches!(err, FormatError::BlockCountWithoutHugeFile { .. }),
+            "the count one below the field's reach is a count it records: {err:?}"
+        );
     }
 
     #[test]

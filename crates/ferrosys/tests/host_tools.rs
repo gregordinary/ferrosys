@@ -7,6 +7,8 @@
 //! green. With `e2fsprogs` on `PATH` (as in CI) the gates run in
 //! full.
 
+#![cfg(feature = "ext")]
+
 mod util;
 
 use std::io::{self, Read as _, Seek as _, Write as _};
@@ -15,14 +17,14 @@ use std::path::Path;
 
 use util::{available, e2fsck_clean, tool};
 
-use ferrosys::ext::acl::{EXEC, READ, WRITE};
-use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::Slack;
+use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
-    Acl, AclEntry, AclQualifier, Compat, FormatOptions, FormatPlan, GrowReservation,
-    IdentityChange, IdentityError, Image, Incompat, InodeCount, LayeredSource, Metadata,
-    OpenOptions, Profile, Reader, ReservedRatio, RoCompat, Slack, Source, TreeBuilder, format,
-    format_to, rewrite_identity,
+    Compat, FormatOptions, FormatPlan, GrowReservation, IdentityChange, IdentityError, Image,
+    Incompat, InodeCount, LayeredSource, Metadata, OpenOptions, Profile, Reader, ReservedRatio,
+    RoCompat, Source, TreeBuilder, format, format_to, rewrite_identity,
 };
+use ferrosys::{Acl, AclEntry, AclQualifier};
 
 const MIB: u64 = 1024 * 1024;
 const GROW_TARGET: u64 = 32 * 1024 * MIB;
@@ -108,23 +110,23 @@ fn access_acl() -> Vec<u8> {
     Acl::new(vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE | EXEC,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::User(1000),
-            perm: READ | WRITE,
+            perm: Acl::READ | Acl::WRITE,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Mask,
-            perm: READ | WRITE | EXEC,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Other,
-            perm: READ,
+            perm: Acl::READ,
         },
     ])
     .expect("valid access ACL")
@@ -136,15 +138,15 @@ fn default_acl() -> Vec<u8> {
     Acl::new(vec![
         AclEntry {
             who: AclQualifier::UserObj,
-            perm: READ | WRITE | EXEC,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::GroupObj,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
         AclEntry {
             who: AclQualifier::Other,
-            perm: READ | EXEC,
+            perm: Acl::READ | Acl::EXEC,
         },
     ])
     .expect("valid default ACL")
@@ -1050,9 +1052,14 @@ fn debugfs_confirms_fidelity() {
     // Names prove presence; bytes prove fidelity. `ea_get -f` dumps each value raw
     // through libext2fs — the value as a foreign implementation reads it, compared
     // byte for byte, for one inline attribute and one that lives in the external
-    // block. (The `system.posix_acl_*` names are excluded deliberately: `ea_get`
-    // converts those to the userspace encoding rather than dumping the disk bytes;
-    // the foreign-image gate pins the ACL encoding differentially instead.)
+    // block. Both ACLs are compared too, but as values rather than as bytes: `ea_get`
+    // renders a `system.posix_acl_*` attribute in the boundary encoding rather than
+    // dumping the stored bytes, and it writes zero in the id field of the four tags that
+    // identify nobody where the kernel writes ACL_UNDEFINED_ID. Neither parser reads that
+    // field for those tags, so the two encodings mean one ACL and differ in bytes; the
+    // kernel's own rendering is pinned by the walk instead. What this gate states is that
+    // the ACL a source named survives ext's narrowing and comes back out of a foreign
+    // implementation as the same ACL.
     let dumps = tempfile::tempdir().expect("dump dir");
     let ea_value = |path: &str, name: &str| -> Vec<u8> {
         let out = dumps.path().join(name.replace('.', "_"));
@@ -1078,6 +1085,18 @@ fn debugfs_confirms_fidelity() {
         ea_value("/home/user/notes", "user.big"),
         vec![0xcd; 400],
         "the external-block value does not read back through debugfs"
+    );
+    let read_acl =
+        |name: &str| Acl::decode(&ea_value("/home/user", name)).expect("debugfs rendered an ACL");
+    assert_eq!(
+        read_acl("system.posix_acl_access"),
+        Acl::decode(&access_acl()).expect("the access ACL"),
+        "the access ACL does not read back through debugfs as it was stated"
+    );
+    assert_eq!(
+        read_acl("system.posix_acl_default"),
+        Acl::decode(&default_acl()).expect("the default ACL"),
+        "the default ACL does not read back through debugfs as it was stated"
     );
 }
 

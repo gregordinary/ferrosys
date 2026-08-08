@@ -180,11 +180,27 @@ fn read_members_with<R: Read>(
             EntryType::GNULongLink => {
                 long_link = Some(trim_nul(read_body(&mut reader, stored)?));
             }
-            // A `g` header carries archive-wide defaults, not a file — every
-            // `git archive` tarball begins with one. Its records are not applied,
-            // since this layer resolves per-member records only.
+            // A `g` header carries archive-wide defaults for the members that follow, not
+            // a file of its own. This layer resolves per-member records only, so a default
+            // is not applied — and a default that *would* have changed a member is refused
+            // rather than passed over, because an archive whose ownership or times or
+            // attributes are expressed only that way would otherwise convert to a
+            // filesystem that does not carry them, with nothing said.
+            //
+            // A key this parser ignores per-member is ignored here for the same reason and
+            // to the same effect, so it passes: every `git archive` tarball opens with a `g`
+            // header holding only `comment`, and refusing those would refuse most archives
+            // in the world over a record that means nothing to anybody.
             EntryType::XGlobalHeader => {
-                read_body(&mut reader, stored)?;
+                for record in parse_records(&read_body(&mut reader, stored)?)? {
+                    if applies_per_member(&record.key) {
+                        return Err(ArchiveError::Malformed {
+                            reason: "a PAX global header sets a default this parser would \
+                                     otherwise read per member, and archive-wide defaults \
+                                     are not applied",
+                        });
+                    }
+                }
             }
             // A GNU volume label (`tar --label`) names the archive itself, not a
             // file in it, so it is passed over the way every extractor passes it
@@ -345,6 +361,20 @@ fn verify_cksum(block: &[u8; BLOCK]) -> Result<(), ArchiveError> {
 /// Each record is `LEN KEY=VALUE\n`, where `LEN` counts the whole record. The
 /// length is what ends a record, so a value carrying a newline — or any other byte
 /// — is read intact. Trailing NUL padding some producers append is accepted.
+/// Whether a PAX keyword is one this parser reads off a member.
+///
+/// The list is exactly what the per-member record resolution dispatches on, and it is what
+/// makes the refusal above precise: a key here, set archive-wide, would have changed every
+/// member that followed, and a key not here changes nothing wherever it appears.
+fn applies_per_member(key: &[u8]) -> bool {
+    matches!(
+        key,
+        b"path" | b"linkpath" | b"size" | b"uid" | b"gid" | b"atime" | b"ctime" | b"mtime"
+    ) || key.starts_with(b"SCHILY.")
+        || key.starts_with(b"LIBARCHIVE.xattr.")
+        || key.starts_with(b"GNU.sparse.")
+}
+
 fn parse_records(body: &[u8]) -> Result<Vec<PaxRecord>, ArchiveError> {
     let malformed = || ArchiveError::Malformed {
         reason: "malformed PAX extended header",

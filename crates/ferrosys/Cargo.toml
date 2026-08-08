@@ -1,13 +1,16 @@
 [package]
 name = "ferrosys"
-description = "Pure-Rust, general-purpose ext2/3/4 filesystem implementation (formatter, reader, resize-safe geometry)"
+description = "Pure-Rust, general-purpose ext2/3/4 and FAT12/16/32 filesystem implementation (formatter, reader, byte-reproducible images)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-keywords = ["ext2", "ext3", "ext4", "filesystem", "mkfs"]
+# Five is the registry's limit, so each family gets the name someone searches for rather
+# than one entry per format. The lineages the two cover — ext2 and ext3, FAT12 and FAT16 —
+# are in the description, which the registry's own search reads.
+keywords = ["ext4", "fat32", "filesystem", "mkfs", "disk-image"]
 categories = ["filesystem", "os"]
 # The crate's front page on a registry. Its example is compiled as a doctest, so what
 # a reader sees there is what the API accepts.
@@ -15,36 +18,44 @@ readme = "README.md"
 documentation = "https://docs.rs/ferrosys"
 
 [features]
-# On by default. Without it the crate root carries only the family-agnostic substrate —
-# the `crc32c` primitive and the `Filesystem` / `detect` selector — and the `ext` module,
-# with the feature model, formatter, reader, and scan taxonomy, is absent.
+# The families a build carries. With none of them the crate root holds only the
+# family-agnostic substrate — the `crc32c` primitive, the byte accessors, the `Filesystem` /
+# `detect` selector, and the source and extraction vocabulary — and `detect` recognizes
+# nothing.
 default = ["ext"]
 # The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
 # structures, reached through the `ext` module.
 ext = []
-# The tar/PAX archive `Source`. Off by default so the base build carries only
+# The FAT12/FAT16/FAT32 family, reached through the `fat` module. Off by default: a
+# consumer that wants an ext image should not compile a FAT planner. Granularity is per
+# family rather than per format — the three FATs are one lineage sharing a BIOS parameter
+# block, a directory format, and a cluster heap, differing only in the width of a FAT entry
+# and in where the root directory sits.
+fat = []
+# The tar/PAX archive `Source` and `Sink`. Off by default so the base build carries only
 # `thiserror`; enabling it pulls in the `tar` crate (no default features, so no
 # host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
-# and SCHILY ACL records. The archive source feeds the ext writer, so it enables `ext`.
-tar = ["dep:tar", "ext"]
+# and SCHILY ACL records. It names no family: a source feeds whichever family is being
+# written, and a sink drains whichever one was opened.
+tar = ["dep:tar"]
 # The host-directory `Source` and `Sink`: the walk that turns a tree on this machine into
 # the entries a format writes, and the extraction that writes a filesystem's contents back
 # out as a tree. Off by default so the base build carries only `thiserror`; enabling it
 # pulls in `rustix` for the directory, node, ownership and extended-attribute calls the
 # standard library has no equivalent of. Both ends read and write Linux inode metadata and
-# Linux extended attributes, so they are present on Linux. Both sit against the ext writer
-# and reader, so this enables `ext`.
-dir = ["dep:rustix", "ext"]
-# `Serialize` on the values a consumer embeds in a report of its own: the scan taxonomy
-# (`Anomaly`, `ScanReport`, `Severity`, `Category`, `Location`), the planned geometry
-# (`Layout`, `GroupLayout`, `BlockRange`), and the feature model (`FeatureSet`, `Profile`).
+# Linux extended attributes, so they are present on Linux. Like `tar`, neither end names a
+# family.
+dir = ["dep:rustix"]
+# `Serialize` on the values a consumer embeds in a report of its own: the findings taxonomy
+# (`Finding`, `FindingReport`, `Severity`, `Coordinate`), each family's planned geometry
+# (`Layout`, `GroupLayout`, `BlockRange`; `FatLayout`, `Fat32Layout`, `FatType`), and the ext
+# feature model (`FeatureSet`, `Profile`).
 # Serialization only — nothing here is deserialized, since these values are read from an
 # image or produced by a planner, never reconstructed from a document. The crate's own
 # `to_json` / `to_sarif` emitters are unaffected: they stay the schema-versioned canonical
 # form, and this is for a consumer whose own document has its own shape. Off by default so
-# the base build carries only `thiserror`; the types it covers are the ext family's, so it
-# enables `ext`.
-serde = ["dep:serde", "ext"]
+# the base build carries only `thiserror`; it covers whatever families the build carries.
+serde = ["dep:serde"]
 
 [dependencies]
 # Typed error enums. Build-time proc-macro only; no runtime footprint.

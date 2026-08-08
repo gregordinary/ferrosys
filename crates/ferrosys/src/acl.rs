@@ -1,27 +1,21 @@
-//! POSIX.1e access control lists in ext4's compact on-disk form.
+//! POSIX.1e access control lists, and the form they take at a boundary.
 //!
-//! An ACL is a set of permission entries beyond the owner/group/other mode bits. On
-//! disk ext4 stores an ACL as the value of the `system.posix_acl_access` or
-//! `system.posix_acl_default` extended attribute, in a compact format that is *not*
-//! the version-2 `posix_acl_xattr` structure seen at the `getxattr`/`setxattr`
-//! boundary: a 4-byte version header (`a_version = 1`) followed by entries that omit
-//! the id field for the tags that do not need one. [`Acl::encode`] produces that
-//! byte form and [`Acl::decode`] parses it back.
+//! An ACL is a set of permission entries beyond the owner/group/other mode bits. It
+//! travels as the value of the `system.posix_acl_access` or `system.posix_acl_default`
+//! extended attribute, and the bytes that value holds are the version-2
+//! `posix_acl_xattr` structure the `getxattr`/`setxattr` boundary uses: a 4-byte version
+//! header (`a_version = 2`) followed by fixed 8-byte entries, each carrying an id field
+//! even for the tags that identify nobody. [`Acl::encode`] produces that byte form and
+//! [`Acl::decode`] parses it back.
 //!
-//! The version-2 form is what a source outside the filesystem carries — an archive
-//! storing an ACL as a binary extended attribute holds the bytes `getxattr` gave it.
-//! [`Acl::decode_xattr_v2`] parses that form, so an ACL arriving either way becomes the
-//! same [`Acl`] value and reaches the disk in ext4's compact form, and
-//! [`Acl::encode_xattr_v2`] produces it again for an ACL leaving the filesystem for a
-//! consumer that speaks the syscall boundary's language.
+//! That is the form an [`Acl`] takes everywhere outside a filesystem — in a host tree, in
+//! an archive, in a [`SourceEntry`](crate::SourceEntry) going in, and in the
+//! [`Attributes`](crate::Attributes) a read hands back. How a filesystem *stores* one is
+//! that family's own business, and the conversion belongs to the family's edge.
 //!
-//! This module is pure: it converts between an [`Acl`] value and its bytes, with no
-//! I/O. A caller attaches an ACL by encoding it and adding it as the corresponding
-//! extended attribute (see [`Acl::ACCESS_NAME`] and [`Acl::DEFAULT_NAME`]).
-
-/// The ext4 on-disk ACL version (`a_version`), distinct from the version-2
-/// `posix_acl_xattr` format used at the syscall boundary.
-const ACL_VERSION: u32 = 0x0001;
+//! This module is pure: it converts between an [`Acl`] value and its bytes, with no I/O.
+//! A caller attaches an ACL by encoding it and adding it as the corresponding extended
+//! attribute (see [`Acl::ACCESS_NAME`] and [`Acl::DEFAULT_NAME`]).
 
 /// The version of the `posix_acl_xattr` form used at the `getxattr`/`setxattr`
 /// boundary, which is what an archive carries in a binary `system.posix_acl_*`
@@ -36,20 +30,15 @@ const XATTR_ENTRY_LEN: usize = 8;
 /// the tags that identify no particular user or group.
 const ACL_UNDEFINED_ID: u32 = u32::MAX;
 
-/// Read permission bit (`ACL_READ`).
-pub const READ: u16 = 4;
-/// Write permission bit (`ACL_WRITE`).
-pub const WRITE: u16 = 2;
-/// Execute permission bit (`ACL_EXECUTE`).
-pub const EXEC: u16 = 1;
-
-// The on-disk tag values (`ACL_USER_OBJ` … `ACL_OTHER`).
-const TAG_USER_OBJ: u16 = 0x01;
-const TAG_USER: u16 = 0x02;
-const TAG_GROUP_OBJ: u16 = 0x04;
-const TAG_GROUP: u16 = 0x08;
-const TAG_MASK: u16 = 0x10;
-const TAG_OTHER: u16 = 0x20;
+// The tag values POSIX gives the six qualifiers (`ACL_USER_OBJ` … `ACL_OTHER`). Every
+// encoding of an ACL writes these same numbers; they are shared with the encodings a
+// family stores rather than restated by each.
+pub(crate) const TAG_USER_OBJ: u16 = 0x01;
+pub(crate) const TAG_USER: u16 = 0x02;
+pub(crate) const TAG_GROUP_OBJ: u16 = 0x04;
+pub(crate) const TAG_GROUP: u16 = 0x08;
+pub(crate) const TAG_MASK: u16 = 0x10;
+pub(crate) const TAG_OTHER: u16 = 0x20;
 
 /// A failure encoding or decoding an ACL.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
@@ -108,8 +97,8 @@ pub enum AclQualifier {
 }
 
 impl AclQualifier {
-    /// The on-disk tag value and, for a named user or group, the id stored after it.
-    fn tag_and_id(self) -> (u16, Option<u32>) {
+    /// The tag value and, for a named user or group, the id that accompanies it.
+    pub(crate) fn tag_and_id(self) -> (u16, Option<u32>) {
         match self {
             AclQualifier::UserObj => (TAG_USER_OBJ, None),
             AclQualifier::User(id) => (TAG_USER, Some(id)),
@@ -118,6 +107,23 @@ impl AclQualifier {
             AclQualifier::Mask => (TAG_MASK, None),
             AclQualifier::Other => (TAG_OTHER, None),
         }
+    }
+
+    /// The qualifier a tag names, or `None` for a tag no encoding defines.
+    ///
+    /// The id is read for every tag and kept only by the two that identify somebody; the
+    /// rest carry a placeholder in the encodings that reserve room for one, and nothing at
+    /// all in the encodings that do not.
+    pub(crate) fn from_tag(tag: u16, id: u32) -> Option<Self> {
+        Some(match tag {
+            TAG_USER_OBJ => AclQualifier::UserObj,
+            TAG_USER => AclQualifier::User(id),
+            TAG_GROUP_OBJ => AclQualifier::GroupObj,
+            TAG_GROUP => AclQualifier::Group(id),
+            TAG_MASK => AclQualifier::Mask,
+            TAG_OTHER => AclQualifier::Other,
+            _ => return None,
+        })
     }
 
     /// The sort key that puts entries in canonical POSIX order: by tag, then by id
@@ -133,7 +139,7 @@ impl AclQualifier {
 pub struct AclEntry {
     /// Who the entry applies to.
     pub who: AclQualifier,
-    /// Permission bits, an OR of [`READ`], [`WRITE`], and [`EXEC`].
+    /// Permission bits, an OR of [`Acl::READ`], [`Acl::WRITE`], and [`Acl::EXEC`].
     pub perm: u16,
 }
 
@@ -144,6 +150,13 @@ pub struct Acl {
 }
 
 impl Acl {
+    /// Read permission bit (`ACL_READ`).
+    pub const READ: u16 = 4;
+    /// Write permission bit (`ACL_WRITE`).
+    pub const WRITE: u16 = 2;
+    /// Execute permission bit (`ACL_EXECUTE`).
+    pub const EXEC: u16 = 1;
+
     /// The extended-attribute name an access ACL is stored under.
     pub const ACCESS_NAME: &'static [u8] = b"system.posix_acl_access";
     /// The extended-attribute name a default ACL (inherited by new files in a
@@ -159,7 +172,7 @@ impl Acl {
     /// group appears without a mask, or a permission field has stray bits.
     pub fn new(mut entries: Vec<AclEntry>) -> Result<Self, AclError> {
         for e in &entries {
-            if e.perm & !(READ | WRITE | EXEC) != 0 {
+            if e.perm & !(Self::READ | Self::WRITE | Self::EXEC) != 0 {
                 return Err(AclError::InvalidPerm { perm: e.perm });
             }
         }
@@ -237,105 +250,19 @@ impl Acl {
         Ok(())
     }
 
-    /// Encode to ext4's on-disk ACL bytes: the version header then each entry, with
-    /// named users and groups carrying their id and the rest in the short form.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + self.entries.len() * 8);
-        out.extend_from_slice(&ACL_VERSION.to_le_bytes());
-        for e in &self.entries {
-            let (tag, id) = e.who.tag_and_id();
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&e.perm.to_le_bytes());
-            if let Some(id) = id {
-                out.extend_from_slice(&id.to_le_bytes());
-            }
-        }
-        out
-    }
-
-    /// Parse ext4's on-disk ACL bytes back into an ACL, revalidating the result.
-    ///
-    /// The entries are re-sorted into canonical POSIX order, so an on-disk ACL whose
-    /// entries are stored out of order decodes into a canonical [`Acl`] rather than
-    /// being reported as malformed. The returned value reflects the ACL's meaning, not
-    /// the exact byte order it was stored in.
-    ///
-    /// # Errors
-    ///
-    /// [`AclError::Malformed`] if the version is not 1 or the bytes are truncated,
-    /// or a validity error from [`new`](Self::new).
-    pub fn decode(bytes: &[u8]) -> Result<Self, AclError> {
-        if bytes.len() < 4 {
-            return Err(AclError::Malformed {
-                reason: "shorter than the version header",
-            });
-        }
-        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if version != ACL_VERSION {
-            return Err(AclError::Malformed {
-                reason: "unexpected version",
-            });
-        }
-        let mut entries = Vec::new();
-        let mut off = 4;
-        while off < bytes.len() {
-            if off + 4 > bytes.len() {
-                return Err(AclError::Malformed {
-                    reason: "truncated entry",
-                });
-            }
-            let tag = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
-            let perm = u16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
-            off += 4;
-            let who = match tag {
-                TAG_USER_OBJ => AclQualifier::UserObj,
-                TAG_GROUP_OBJ => AclQualifier::GroupObj,
-                TAG_MASK => AclQualifier::Mask,
-                TAG_OTHER => AclQualifier::Other,
-                TAG_USER | TAG_GROUP => {
-                    if off + 4 > bytes.len() {
-                        return Err(AclError::Malformed {
-                            reason: "truncated entry id",
-                        });
-                    }
-                    let id = u32::from_le_bytes([
-                        bytes[off],
-                        bytes[off + 1],
-                        bytes[off + 2],
-                        bytes[off + 3],
-                    ]);
-                    off += 4;
-                    if tag == TAG_USER {
-                        AclQualifier::User(id)
-                    } else {
-                        AclQualifier::Group(id)
-                    }
-                }
-                _ => {
-                    return Err(AclError::Malformed {
-                        reason: "unknown tag",
-                    });
-                }
-            };
-            entries.push(AclEntry { who, perm });
-        }
-        Self::new(entries)
-    }
-
     /// Encode to the version-2 `posix_acl_xattr` bytes: the version header then one
     /// fixed 8-byte entry per ACL entry, each carrying an id — a real one for a named
     /// user or group, `ACL_UNDEFINED_ID` for the four tags that identify nobody in
     /// particular.
     ///
-    /// This is the form the `getxattr`/`setxattr` boundary uses, and so the form an
-    /// ACL must take to leave the filesystem: a `system.posix_acl_*` attribute written
-    /// into an archive, or handed to a tool that will `setxattr` it. ext4's compact
-    /// on-disk bytes ([`encode`](Self::encode)) are not interchangeable with these —
-    /// a consumer given the on-disk form reads a version-1 header where it requires a
-    /// version-2 one, and rejects the attribute.
+    /// This is the form the `getxattr`/`setxattr` boundary uses, and so the form an ACL
+    /// takes in every value this crate carries: a `system.posix_acl_*` attribute written
+    /// into an archive, handed to a tool that will `setxattr` it, or named in a
+    /// [`SourceEntry`](crate::SourceEntry). A filesystem that stores some narrower
+    /// encoding converts at its own edge, and a consumer given that stored form in place
+    /// of this one reads the wrong version number and rejects the attribute.
     #[must_use]
-    pub fn encode_xattr_v2(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + self.entries.len() * XATTR_ENTRY_LEN);
         out.extend_from_slice(&XATTR_ACL_VERSION.to_le_bytes());
         for e in &self.entries {
@@ -352,19 +279,19 @@ impl Acl {
     /// This is the form `getxattr` returns and an archive stores in a binary
     /// `system.posix_acl_access` or `system.posix_acl_default` attribute: a 4-byte
     /// version header followed by fixed 8-byte entries, each carrying an id field even
-    /// for the tags that do not use one. [`encode`](Self::encode) turns the result into
-    /// ext4's compact on-disk bytes, which is what the filesystem stores.
+    /// for the tags that do not use one.
     ///
-    /// As in [`decode`](Self::decode), the entries are re-sorted into canonical POSIX
-    /// order, so the returned value reflects the ACL's meaning rather than the byte
-    /// order it arrived in.
+    /// The entries are re-sorted into canonical POSIX order, so an ACL whose entries
+    /// arrive out of order parses into a canonical [`Acl`] rather than being reported as
+    /// malformed. The returned value reflects the ACL's meaning, not the byte order it
+    /// arrived in.
     ///
     /// # Errors
     ///
     /// [`AclError::Malformed`] if the version is not 2, the bytes are truncated or stop
     /// part-way through an entry, or a tag is unknown; or a validity error from
     /// [`new`](Self::new).
-    pub fn decode_xattr_v2(bytes: &[u8]) -> Result<Self, AclError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, AclError> {
         if bytes.len() < 4 {
             return Err(AclError::Malformed {
                 reason: "shorter than the version header",
@@ -389,19 +316,9 @@ impl Acl {
             // The id is meaningful only for a named user or group; the other tags carry
             // `ACL_UNDEFINED_ID` here, which the qualifier does not hold.
             let id = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
-            let who = match tag {
-                TAG_USER_OBJ => AclQualifier::UserObj,
-                TAG_USER => AclQualifier::User(id),
-                TAG_GROUP_OBJ => AclQualifier::GroupObj,
-                TAG_GROUP => AclQualifier::Group(id),
-                TAG_MASK => AclQualifier::Mask,
-                TAG_OTHER => AclQualifier::Other,
-                _ => {
-                    return Err(AclError::Malformed {
-                        reason: "unknown tag",
-                    });
-                }
-            };
+            let who = AclQualifier::from_tag(tag, id).ok_or(AclError::Malformed {
+                reason: "unknown tag",
+            })?;
             entries.push(AclEntry { who, perm });
         }
         Self::new(entries)
@@ -417,47 +334,26 @@ mod tests {
         Acl::new(vec![
             AclEntry {
                 who: AclQualifier::Other,
-                perm: READ,
+                perm: Acl::READ,
             },
             AclEntry {
                 who: AclQualifier::User(1000),
-                perm: READ | WRITE,
+                perm: Acl::READ | Acl::WRITE,
             },
             AclEntry {
                 who: AclQualifier::UserObj,
-                perm: READ | WRITE | EXEC,
+                perm: Acl::READ | Acl::WRITE | Acl::EXEC,
             },
             AclEntry {
                 who: AclQualifier::Mask,
-                perm: READ | WRITE | EXEC,
+                perm: Acl::READ | Acl::WRITE | Acl::EXEC,
             },
             AclEntry {
                 who: AclQualifier::GroupObj,
-                perm: READ | EXEC,
+                perm: Acl::READ | Acl::EXEC,
             },
         ])
         .expect("valid ACL")
-    }
-
-    #[test]
-    fn encodes_to_the_exact_ext4_byte_form() {
-        // Hand-computed from the ext4 on-disk format: version 1, then entries in
-        // canonical order with named users carrying their id.
-        let expected: Vec<u8> = vec![
-            0x01, 0x00, 0x00, 0x00, // a_version = 1
-            0x01, 0x00, 0x07, 0x00, // USER_OBJ rwx (short)
-            0x02, 0x00, 0x06, 0x00, 0xe8, 0x03, 0x00, 0x00, // USER 1000 rw- (long)
-            0x04, 0x00, 0x05, 0x00, // GROUP_OBJ r-x (short)
-            0x10, 0x00, 0x07, 0x00, // MASK rwx (short)
-            0x20, 0x00, 0x04, 0x00, // OTHER r-- (short)
-        ];
-        assert_eq!(sample().encode(), expected);
-    }
-
-    #[test]
-    fn round_trips_through_bytes() {
-        let acl = sample();
-        assert_eq!(Acl::decode(&acl.encode()).unwrap(), acl);
     }
 
     #[test]
@@ -465,20 +361,20 @@ mod tests {
         let acl = Acl::new(vec![
             AclEntry {
                 who: AclQualifier::UserObj,
-                perm: READ | WRITE,
+                perm: Acl::READ | Acl::WRITE,
             },
             AclEntry {
                 who: AclQualifier::GroupObj,
-                perm: READ,
+                perm: Acl::READ,
             },
             AclEntry {
                 who: AclQualifier::Other,
-                perm: READ,
+                perm: Acl::READ,
             },
         ])
         .expect("minimal ACL is valid without a mask");
-        // Short entries only: 4 + 3*4 = 16 bytes.
-        assert_eq!(acl.encode().len(), 16);
+        // Three entries, each with an id field: 4 + 3*8 = 28 bytes.
+        assert_eq!(acl.encode().len(), 28);
     }
 
     #[test]
@@ -486,19 +382,19 @@ mod tests {
         let err = Acl::new(vec![
             AclEntry {
                 who: AclQualifier::UserObj,
-                perm: READ | WRITE,
+                perm: Acl::READ | Acl::WRITE,
             },
             AclEntry {
                 who: AclQualifier::User(1000),
-                perm: READ,
+                perm: Acl::READ,
             },
             AclEntry {
                 who: AclQualifier::GroupObj,
-                perm: READ,
+                perm: Acl::READ,
             },
             AclEntry {
                 who: AclQualifier::Other,
-                perm: READ,
+                perm: Acl::READ,
             },
         ])
         .unwrap_err();
@@ -510,7 +406,7 @@ mod tests {
         assert_eq!(
             Acl::new(vec![AclEntry {
                 who: AclQualifier::UserObj,
-                perm: READ,
+                perm: Acl::READ,
             }])
             .unwrap_err(),
             AclError::MissingRequired {
@@ -539,12 +435,8 @@ mod tests {
             0x10, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // MASK rwx
             0x20, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff, // OTHER r--
         ];
-        let acl = Acl::decode_xattr_v2(&v2).expect("valid version-2 ACL");
+        let acl = Acl::decode(&v2).expect("valid version-2 ACL");
         assert_eq!(acl, sample());
-        // And it re-encodes to ext4's compact form, which is shorter: the four tags that
-        // need no id drop theirs.
-        assert_eq!(acl.encode(), sample().encode());
-        assert!(acl.encode().len() < v2.len());
     }
 
     #[test]
@@ -559,7 +451,7 @@ mod tests {
             0x10, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // MASK rwx
             0x20, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff, // OTHER r--
         ];
-        assert_eq!(sample().encode_xattr_v2(), expected);
+        assert_eq!(sample().encode(), expected);
     }
 
     #[test]
@@ -567,39 +459,19 @@ mod tests {
         // The two directions are inverses, so an ACL read from a filesystem and written
         // back out to a syscall-boundary consumer is the ACL that was stored.
         let acl = sample();
-        assert_eq!(Acl::decode_xattr_v2(&acl.encode_xattr_v2()).unwrap(), acl);
-        // And crossing the two forms is caught rather than misread: the on-disk decoder
-        // rejects the version-2 bytes, as the version-2 decoder rejects the on-disk ones.
-        assert!(matches!(
-            Acl::decode(&acl.encode_xattr_v2()),
-            Err(AclError::Malformed { .. })
-        ));
+        assert_eq!(Acl::decode(&acl.encode()).unwrap(), acl);
     }
 
     #[test]
     fn the_version_2_xattr_form_rejects_a_bad_version_and_a_partial_entry() {
-        // The compact on-disk form is not the version-2 form: feeding one to the other's
-        // parser is a malformed ACL, not a silent misread.
         assert!(matches!(
-            Acl::decode_xattr_v2(&sample().encode()),
+            Acl::decode(&[0x01, 0x00, 0x00, 0x00]),
             Err(AclError::Malformed { .. })
         ));
         let mut truncated = vec![0x02, 0x00, 0x00, 0x00];
         truncated.extend_from_slice(&[0x01, 0x00, 0x07, 0x00]); // half an entry
         assert!(matches!(
-            Acl::decode_xattr_v2(&truncated),
-            Err(AclError::Malformed { .. })
-        ));
-    }
-
-    #[test]
-    fn decode_rejects_bad_version_and_truncation() {
-        assert!(matches!(
-            Acl::decode(&[0x02, 0, 0, 0]),
-            Err(AclError::Malformed { .. })
-        ));
-        assert!(matches!(
-            Acl::decode(&[0x01]),
+            Acl::decode(&truncated),
             Err(AclError::Malformed { .. })
         ));
     }

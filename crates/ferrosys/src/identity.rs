@@ -137,6 +137,25 @@ pub enum IdentityError {
         /// What the filesystem's checksum features actually are.
         found: &'static str,
     },
+    /// The image ends before a group the superblock's geometry claims exists, so a backup
+    /// this rewrite must patch is not in the file at all.
+    ///
+    /// The group count follows from `s_blocks_count` and `s_blocks_per_group`, neither of
+    /// which opening the filesystem validates against the image it came from. A superblock
+    /// claiming far more groups than the file holds — from a bit-flip, or written that way
+    /// on purpose — is refused here rather than driving the rewrite through offsets that are
+    /// not there.
+    #[error(
+        "group {group}'s backup superblock lies past the end of a {blocks}-block image: \
+         the superblock describes a larger filesystem than this file holds"
+    )]
+    #[non_exhaustive]
+    BackupPastEnd {
+        /// The group whose backup is out of reach.
+        group: u32,
+        /// Blocks the image itself holds.
+        blocks: u64,
+    },
     /// A group that should carry a backup superblock does not hold one, so the copies
     /// cannot be brought into agreement.
     #[error(
@@ -150,15 +169,23 @@ pub enum IdentityError {
         /// The block the backup should begin at.
         block: u64,
     },
-    /// The primary superblock's own checksum does not match its contents, so the image is
+    /// A superblock copy's own checksum does not match its contents, so the image is
     /// damaged or is not what it claims and must not be rewritten.
+    ///
+    /// Every copy is held to this, not only the primary. A copy's checksum covers its own
+    /// bytes, so a backup left *stale* by a later change to the filesystem still checks out
+    /// against itself; only a damaged one fails. Patching a damaged copy would write a
+    /// freshly correct checksum over wrong bytes, which turns bit rot inside one copy into
+    /// self-consistency and takes it out of `e2fsck`'s reach.
     #[error(
-        "the primary superblock's checksum is {found:#010x} but its contents compute to \
-         {computed:#010x}: the image is damaged, and re-identifying it would write a \
-         correct checksum over a wrong superblock"
+        "the superblock in group {group} has checksum {found:#010x} but its contents \
+         compute to {computed:#010x}: the image is damaged, and re-identifying it would \
+         write a correct checksum over a wrong superblock"
     )]
     #[non_exhaustive]
     SuperblockChecksumMismatch {
+        /// The group whose copy does not check out; zero is the primary.
+        group: u32,
         /// The checksum the superblock stores.
         found: u32,
         /// The checksum its bytes compute to.
@@ -289,15 +316,36 @@ fn plan_rewrite<F: Read + Write + Seek>(
     let seeded = feature.has_csum_seed();
     let seed_to_set = decide_checksum_seed(change, &sb, checksummed, seeded)?;
 
+    // The image's own length in blocks, which is what bounds the loop below. The group
+    // count is derived from `s_blocks_count` and `s_blocks_per_group` and reaches `u32::MAX`,
+    // and neither field is validated against the file when the filesystem is opened — so
+    // without this the loop would build an entry per *claimed* group, and compute every
+    // offset, before the first read could refuse one.
+    let source_blocks = image.seek(SeekFrom::End(0))? / block_size;
+
     // The primary is 1024 bytes into the image whatever the block size; a backup begins at
     // its group's first block.
     let mut copies = vec![(0u32, 1024u64)];
     for group in 1..group_count {
+        // Checked, and checked before the sparse-super test rather than after it: a block
+        // number that leaves the range or leaves the image ends the loop whether or not that
+        // particular group carries a copy, so nothing is computed past the first group the
+        // image cannot hold.
+        let block = match u64::from(group)
+            .checked_mul(u64::from(sb.blocks_per_group))
+            .and_then(|b| b.checked_add(u64::from(sb.first_data_block)))
+        {
+            Some(block) if block < source_blocks => block,
+            _ => {
+                return Err(IdentityError::BackupPastEnd {
+                    group,
+                    blocks: source_blocks,
+                });
+            }
+        };
         if feature.is_sparse_super() && !sparse_super_has_copy(group) {
             continue;
         }
-        let block =
-            u64::from(sb.first_data_block) + u64::from(group) * u64::from(sb.blocks_per_group);
         copies.push((group, block * block_size));
     }
 
@@ -313,8 +361,15 @@ fn plan_rewrite<F: Read + Write + Seek>(
                 block: offset / block_size,
             });
         }
-        if group == 0 && checksummed {
-            verify_primary_checksum(&bytes)?;
+        // Every copy is checked, not only the primary. A copy is self-describing: its
+        // checksum covers its own bytes, so a *stale* backup — one written before some later
+        // change to the filesystem — still checks out against itself, and only a damaged one
+        // fails. Patching a damaged copy would write a freshly correct checksum over wrong
+        // bytes, which launders bit rot inside one copy into self-consistency and takes it
+        // out of `e2fsck`'s reach. That is the same reason the primary is checked, and the
+        // reason applies to each of them.
+        if checksummed {
+            verify_checksum(&bytes, group)?;
         }
         patch(&mut bytes, change, seed_to_set, checksummed);
         writes.push((offset, bytes));
@@ -408,7 +463,7 @@ fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksumm
 /// A log declaring `csum_v2` or `csum_v3` carries a crc32c over its whole superblock, and
 /// `s_uuid` is inside what that word covers — so a UUID written without it would leave a
 /// journal jbd2 refuses to load. The stored checksum is verified before the UUID moves, for
-/// the reason [`verify_primary_checksum`] verifies the filesystem's: a damaged log must be a
+/// the reason [`verify_checksum`] verifies each superblock copy's: a damaged log must be a
 /// refusal rather than a freshly correct checksum over wrong bytes.
 ///
 /// A log declaring neither carries no checksum here and takes the UUID alone. That is every
@@ -444,8 +499,8 @@ fn patch_journal(bytes: &mut [u8], uuid: [u8; 16]) -> Result<(), IdentityError> 
     Ok(())
 }
 
-/// Refuse a primary superblock whose stored checksum does not match its contents.
-fn verify_primary_checksum(bytes: &[u8]) -> Result<(), IdentityError> {
+/// Refuse a superblock copy whose stored checksum does not match its contents.
+fn verify_checksum(bytes: &[u8], group: u32) -> Result<(), IdentityError> {
     let found = u32::from_le_bytes([
         bytes[offset::CHECKSUM],
         bytes[offset::CHECKSUM + 1],
@@ -454,7 +509,11 @@ fn verify_primary_checksum(bytes: &[u8]) -> Result<(), IdentityError> {
     ]);
     let computed = crc32c(!0, &bytes[..offset::CHECKSUM]);
     if found != computed {
-        return Err(IdentityError::SuperblockChecksumMismatch { found, computed });
+        return Err(IdentityError::SuperblockChecksumMismatch {
+            group,
+            found,
+            computed,
+        });
     }
     Ok(())
 }
@@ -469,4 +528,106 @@ fn read_exact_at<F: Read + Seek>(
     let mut buf = vec![0u8; len];
     image.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::Profile;
+    use crate::materialize::{FormatOptions, format};
+    use crate::source::{Metadata, TreeBuilder};
+    use crate::time::Timestamp;
+    use std::io::Cursor;
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn options(profile: Profile) -> FormatOptions {
+        FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), [0u8; 16])
+            .profile(profile)
+    }
+
+    /// A small formatted image, at whichever profile the caller wants its checksum policy
+    /// from.
+    fn image(profile: Profile) -> Vec<u8> {
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new().file(
+            b"/a".to_vec(),
+            b"contents\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+        format(source, 8 * MIB, options(profile))
+            .expect("format")
+            .into_bytes()
+    }
+
+    /// Overwrite a little-endian `u32` in the primary superblock, which begins 1024 bytes in.
+    fn put_u32(bytes: &mut [u8], field: usize, value: u32) {
+        bytes[1024 + field..1024 + field + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn a_superblock_claiming_more_groups_than_the_image_holds_is_refused() {
+        // The group count is `s_blocks_count / s_blocks_per_group`, and opening a filesystem
+        // validates neither field against the file it came from. Both reach their whole
+        // range, so a superblock a bit-flip or a hostile writer left claiming hundreds of
+        // millions of groups drove one entry per *claimed* group to be built, and every
+        // offset computed, before the first read could refuse one — hundreds of megabytes of
+        // allocation, or seconds of spinning, from an image of a few kilobytes.
+        //
+        // The image's own length is what bounds it: a backup past the end of the file is a
+        // backup no read could reach, and the rewrite says so rather than working toward it.
+        let mut bytes = image(Profile::Ext2);
+        // 4 GiB of 1 KiB blocks in eight-block groups: 536,870,912 groups claimed by an
+        // 8 MiB file.
+        put_u32(&mut bytes, 0x04, u32::MAX);
+        put_u32(&mut bytes, 0x20, 8);
+
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        let err = rewrite_identity(&mut Cursor::new(&mut bytes), &change)
+            .expect_err("a geometry the file cannot hold is refused");
+        assert!(
+            matches!(err, IdentityError::BackupPastEnd { .. }),
+            "expected BackupPastEnd, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_size_that_puts_the_first_backup_past_the_image_is_refused_at_that_group() {
+        // The other end of the same field. A group of the largest size the format allows —
+        // what a one-block block bitmap indexes — puts the first backup's block far past
+        // anything an 8 MiB image holds, and the loop stops at the first group rather than
+        // computing offsets for the hundred thousand behind it.
+        //
+        // A group size past *that* is refused when the filesystem is opened, so the offset
+        // arithmetic can no longer be driven to overflow at all; the checked multiply
+        // remains because nothing in this function should depend on a bound another one
+        // applies.
+        let mut bytes = image(Profile::Ext2);
+        put_u32(&mut bytes, 0x04, u32::MAX);
+        put_u32(&mut bytes, 0x20, 8 * 4096);
+
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        let err = rewrite_identity(&mut Cursor::new(&mut bytes), &change)
+            .expect_err("an unreachable backup is refused");
+        assert!(
+            matches!(err, IdentityError::BackupPastEnd { group: 1, .. }),
+            "expected BackupPastEnd at group 1, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_untouched_image_still_rewrites_every_copy() {
+        // The bound is on the image, not on the work: a filesystem whose geometry the file
+        // does hold has every one of its backups patched, which is what the refusals above
+        // must not have cost.
+        let mut bytes = image(Profile::Ext2);
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        let report = rewrite_identity(&mut Cursor::new(&mut bytes), &change).expect("rewrite");
+        assert!(report.superblocks >= 1);
+        let reader = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
+        assert_eq!(reader.superblock().uuid, [0x5a; 16]);
+    }
 }

@@ -21,6 +21,12 @@
 //! handle already refers to, so the components between the destination and the entry are not
 //! walked again and nothing swapped into the tree mid-extraction can redirect the write.
 //!
+//! That one call is therefore the module's single dependency on `/proc` being mounted. It is
+//! reached only for an attribute on a symbolic link or a special node, and where `/proc` is
+//! absent — a minimal container is where that happens — it fails as an ordinary I/O error
+//! against the entry, naming `ENOENT`. Every other operation goes through a handle and needs
+//! nothing mounted.
+//!
 //! Symbolic links are a separate matter, and they are written exactly as the image records
 //! them: a link pointing at `/etc/passwd` or at `../../..` is that link, and reproducing it
 //! is what an extraction is for. It is safe because nothing here ever follows one — every
@@ -54,33 +60,27 @@
 //! A file's bytes are streamed from the filesystem into the destination a window at a time,
 //! so extracting a tree far larger than memory costs the working set of one read. What
 //! accumulates over the walk is one open handle per directory on the current path — depth,
-//! not size — and one path per inode that has more than one name.
+//! not size — one path per inode that has more than one name, and one held handle for each
+//! directory the image records without owner-search permission, whose own metadata is applied
+//! after the walk rather than as the walk leaves it.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, Timespec, Timestamps, Uid};
 
-use crate::acl::Acl;
-use crate::host::HostError;
-use crate::ondisk::{Inode, Timestamp, Xattr};
-use crate::read::{ReadError, Reader};
+use crate::fidelity::{Direction, FidelityReport, Synthesis};
+use crate::host::{HostError, io_at};
+use crate::source::Metadata;
+use crate::time::Timestamp;
+use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::xattr::Xattr;
 
 /// `/lost+found`, the one path an extraction must not write: every filesystem makes it for
 /// itself, and a source that tries to make it again is refused.
 const LOST_FOUND: &[u8] = b"/lost+found";
-
-/// The file-type bits of a mode, and the types they name.
-const IFMT: u16 = 0o170000;
-const IFDIR: u16 = 0o040000;
-const IFREG: u16 = 0o100000;
-const IFLNK: u16 = 0o120000;
-const IFCHR: u16 = 0o020000;
-const IFBLK: u16 = 0o060000;
-const IFIFO: u16 = 0o010000;
-const IFSOCK: u16 = 0o140000;
 
 /// The mode a directory is created with, before its children are written.
 ///
@@ -90,8 +90,12 @@ const IFSOCK: u16 = 0o140000;
 /// not wider.
 const BUILDING: Mode = Mode::from_bits_retain(0o700);
 
-/// How many bytes of a file move at a time. Large enough that a big file is not a syscall
-/// per block, small enough that the buffer is not worth thinking about.
+/// The most bytes of a file that move at a time. Large enough that a big file is not a
+/// syscall per block, small enough that the buffer is not worth thinking about.
+///
+/// It is a ceiling rather than the size: a file shorter than this gets a buffer its own size,
+/// so a root filesystem of many small files does not allocate and zero a mebibyte per entry
+/// to move a few hundred bytes through it.
 const WINDOW: usize = 1 << 20;
 
 /// What an extraction wrote, and what it left out.
@@ -103,7 +107,16 @@ pub struct ExtractReport {
     /// The paths not written because this process may not create them, in the image's own
     /// spelling. Empty unless [`skip_privileged`](DirectorySink::skip_privileged) was set —
     /// without it, the first such entry is an error instead.
+    ///
+    /// Named rather than counted, because a device node left out is a specific gap in a
+    /// specific tree and a caller acts on which. The list stops at
+    /// [`MAX_SKIPPED`](Self::MAX_SKIPPED) names and
+    /// [`more_skipped`](Self::more_skipped) says the rest are not there: how many entries a
+    /// tree produces is the tree's own claim, and a report's memory is a property of this
+    /// crate rather than of what it was pointed at.
     pub skipped: Vec<Vec<u8>>,
+    /// Whether more entries were skipped than [`skipped`](Self::skipped) names.
+    pub more_skipped: bool,
     /// Whether any entry's recorded ownership could not be applied, so the tree is owned by
     /// the process that wrote it. Only ever true under
     /// [`skip_privileged`](DirectorySink::skip_privileged).
@@ -118,6 +131,17 @@ pub struct ExtractReport {
     /// reserved attribute on nearly every inode, and naming each would make what an extraction
     /// holds grow with the size of the tree.
     pub xattrs_dropped: bool,
+    /// What the source filesystem had no field for, so the tree carries an invented value of.
+    ///
+    /// A filesystem that records ownership, permission bits, and times reports nothing here,
+    /// and [`FidelityReport::is_faithful`] is that claim. One that does not — a format with
+    /// no notion of an owner — has those values filled from the [`Synthesis`] the sink was
+    /// given, and every entry it happened to is named.
+    ///
+    /// This is separate from [`skipped`](Self::skipped) and the two flags above, which are
+    /// about what *this host* refused. A property the image never held is not something the
+    /// host declined to write.
+    pub fidelity: FidelityReport,
 }
 
 /// Writes a filesystem's contents out as a directory tree on this host.
@@ -130,7 +154,8 @@ pub struct ExtractReport {
 /// everything the filesystem holds appears beneath it at the path it holds inside the image.
 ///
 /// ```no_run
-/// # use ferrosys::ext::{DirectorySink, Reader};
+/// # use ferrosys::DirectorySink;
+/// # use ferrosys::ext::Reader;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut reader = Reader::open(std::fs::File::open("rootfs.img")?)?;
 /// std::fs::create_dir("unpacked")?;
@@ -145,6 +170,7 @@ pub struct DirectorySink {
     /// What the destination is called, for the failures that name it.
     root_path: PathBuf,
     skip_privileged: bool,
+    synthesis: Synthesis,
 }
 
 impl DirectorySink {
@@ -154,31 +180,53 @@ impl DirectorySink {
     /// destination would be an entry that cannot be created, discovered part-way through
     /// with the tree half written. Refusing at the start is the failure a caller can act on.
     ///
+    /// The name is resolved once. The handle is taken first and both questions — that it is a
+    /// directory, and that it is empty — are asked of the handle, so the object this sink
+    /// writes into is the same object it accepted. Asking the name twice would leave a window
+    /// in which what answered is not what receives the tree.
+    ///
     /// # Errors
     ///
     /// [`HostError::NotADirectory`] if `root` is not one, [`HostError::NotEmpty`] if it holds
     /// anything, and [`HostError::Io`] if it cannot be opened or listed.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, HostError> {
         let root_path = root.as_ref().to_path_buf();
-        let meta = std::fs::metadata(&root_path).map_err(io_at(&root_path))?;
-        if !meta.is_dir() {
-            return Err(HostError::NotADirectory { path: root_path });
-        }
-        let mut listing = std::fs::read_dir(&root_path).map_err(io_at(&root_path))?;
-        if listing.next().is_some() {
-            return Err(HostError::NotEmpty { path: root_path });
-        }
+        // `O_DIRECTORY` is the "it is a directory" test as well as the open: the kernel
+        // answers `ENOTDIR` rather than handing back a descriptor to something else.
         let fd = rustix::fs::open(
             &root_path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| io_at(&root_path)(e.into()))?;
+        .map_err(|e| match e {
+            rustix::io::Errno::NOTDIR => HostError::NotADirectory {
+                path: root_path.clone(),
+            },
+            other => io_at(&root_path)(other.into()),
+        })?;
+        if !is_empty_dir(&fd).map_err(|e| io_at(&root_path)(e.into()))? {
+            return Err(HostError::NotEmpty { path: root_path });
+        }
         Ok(Self {
             root: fd,
             root_path,
             skip_privileged: false,
+            synthesis: Synthesis::new(),
         })
+    }
+
+    /// Name what to record for a property the source filesystem has no field for.
+    ///
+    /// Defaults to [`Synthesis::new`] — owned by root, `0644` for a file and `0755` for a
+    /// directory. Ignored entirely by a filesystem that records the property itself, so an
+    /// ext image extracts with the ownership and modes it holds whatever is set here.
+    ///
+    /// The defaults are the conservative ones deliberately: a tree extracted from a format
+    /// with no permission bits must not land world-writable because nothing was named.
+    #[must_use]
+    pub fn synthesis(mut self, synthesis: Synthesis) -> Self {
+        self.synthesis = synthesis;
+        self
     }
 
     /// Write what this process may, rather than failing on what it may not.
@@ -202,11 +250,18 @@ impl DirectorySink {
     /// The destination directory takes the filesystem root's own mode, ownership, times, and
     /// extended attributes; `/lost+found` and everything under it is omitted. Every other
     /// name the filesystem holds is written exactly once, with the second and later names for
-    /// one inode created as hard links to the first.
+    /// one node created as hard links to the first.
     ///
     /// A directory's mode, ownership, and times are applied once its children are in place,
     /// so a directory the image records as read-only is still one its contents could be
-    /// written into.
+    /// written into. One the image records without owner-search permission waits longer
+    /// still — until the whole walk is done — because a second name for a hard-linked node
+    /// inside it is created by reaching the first, and a directory that cannot be searched
+    /// cannot be reached through.
+    ///
+    /// The source is any [`FsTree`], so the same sink drains whatever `open` hands back.
+    /// What a filesystem has no field for is filled from [`synthesis`](Self::synthesis) and
+    /// named in the report's [`fidelity`](ExtractReport::fidelity).
     ///
     /// # Errors
     ///
@@ -215,55 +270,70 @@ impl DirectorySink {
     /// directory cannot; [`HostError::Unprivileged`] if the tree needs a privilege this
     /// process does not have and [`skip_privileged`](Self::skip_privileged) was not set; and
     /// [`HostError::Acl`] if a stored POSIX ACL does not decode.
-    pub fn write_tree<R: Read + Seek>(
-        self,
-        reader: &mut Reader<R>,
-    ) -> Result<ExtractReport, HostError> {
+    pub fn write_tree<T: FsTree>(self, tree: &mut T) -> Result<ExtractReport, HostError> {
         let mut state = Extraction {
             sink: &self,
             report: ExtractReport::default(),
             named: HashMap::new(),
             open: Vec::new(),
+            held: Vec::new(),
         };
-
-        // The root has no name, so the walk does not reach it: the destination directory is
-        // what carries its mode, ownership, times, and attributes across. It goes on the
-        // stack under the empty path, which is what every top-level entry's parent is.
-        let root = reader.inode(ROOT_INO)?;
-        let xattrs = reader.xattrs(&root)?;
-        state.set_xattrs_on_fd(&self.root, &xattrs, b"/")?;
-        state.open.push(OpenDir {
-            path: Vec::new(),
-            fd: rustix::fs::openat(
-                &self.root,
-                c".",
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|e| state.io(b"/", e.into()))?,
-            inode: root,
-        });
+        let synthesis = self.synthesis;
 
         // Walked entry by entry rather than gathered, so what an extraction holds does not
         // grow with the number of names in the tree. The walk is depth-first with a parent
-        // before its children, which is what lets the open handles be a stack.
-        reader.walk_with(|reader, entry| {
+        // before its children, which is what lets the open handles be a stack — and it opens
+        // with the root, under the empty path, which is what every top-level entry's parent
+        // is.
+        tree.walk_tree(|tree, entry| {
             if is_lost_found(&entry.path) {
                 return Ok(());
             }
-            state.write_entry(reader, entry)
+            if entry.path.is_empty() {
+                // The root has no name of its own, so the destination directory is what
+                // carries its mode, ownership, times, and attributes across. Its own metadata
+                // waits, like every directory's, until its children are written.
+                let attrs = tree.stat(&entry.node, &synthesis)?;
+                state.note_synthesis(&attrs, b"/");
+                state.open.push(OpenDir {
+                    path: Vec::new(),
+                    fd: rustix::fs::openat(
+                        &self.root,
+                        c".",
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|e| state.io(b"/", e.into()))?,
+                    meta: attrs.meta,
+                    xattrs: attrs.xattrs,
+                });
+                return Ok(());
+            }
+            state.write_entry(tree, entry, &synthesis)
         })?;
 
         // Everything still open is a directory whose children are all written.
         while let Some(dir) = state.open.pop() {
-            state.finish_directory(&dir)?;
+            state.finish_directory(dir)?;
+        }
+        // And every directory held back because applying its mode would have closed the tree
+        // to the walk that was still going on. Nothing more is written into the destination
+        // from here, so there is no name left for a mode to put out of reach.
+        for dir in std::mem::take(&mut state.held) {
+            state.apply_directory(&dir)?;
         }
         Ok(state.report)
     }
 }
 
-/// The root directory's inode number.
-const ROOT_INO: u32 = 2;
+/// The most directories one extraction defers to the end of the walk.
+///
+/// Each one costs an open handle for the rest of the run, and which directories they are is
+/// the image's to decide — so this is what stands between a crafted tree and this process's
+/// descriptor limit. Two hundred and fifty-six is far past any real root filesystem: a
+/// directory reaches the list only by denying its own owner search permission, which is a
+/// mode a handful of directories in a tree carry and no ordinary one does.
+const MAX_DEFERRED_DIRECTORIES: usize = 256;
 
 /// A directory that has been created and is still being filled.
 struct OpenDir {
@@ -272,7 +342,19 @@ struct OpenDir {
     /// The handle every child of it is created through.
     fd: OwnedFd,
     /// What the image says it is, applied once its children are written.
-    inode: Inode,
+    meta: Metadata,
+    /// The extended attributes the image records for it, applied with the rest of its
+    /// metadata and in the same order every other node takes.
+    xattrs: Vec<Xattr>,
+}
+
+impl ExtractReport {
+    /// The most skipped paths one report names.
+    ///
+    /// Past it the names stop and [`more_skipped`](Self::more_skipped) says so. A tree with
+    /// more than this many entries a process may not create is one where the *pattern* is
+    /// the answer — no privilege at all — rather than a list to work through.
+    pub const MAX_SKIPPED: usize = 1024;
 }
 
 /// One run of [`DirectorySink::write_tree`]: what has been written, and where it is being
@@ -280,121 +362,139 @@ struct OpenDir {
 struct Extraction<'a> {
     sink: &'a DirectorySink,
     report: ExtractReport,
-    /// The first name to reach each inode. A later name for one is a hard link to it.
-    named: HashMap<u32, Vec<u8>>,
+    /// The first name to reach each node the walk says has more than one. A later name for
+    /// one is a hard link to it.
+    named: HashMap<u64, Vec<u8>>,
     /// The directories on the path currently being written, outermost first. The last is the
     /// one the next entry goes into.
     open: Vec<OpenDir>,
+    /// The directories whose children are written and whose own metadata is still to apply,
+    /// because the mode the image records for them denies their owner search permission.
+    /// Drained once the walk is over.
+    held: Vec<OpenDir>,
 }
 
 impl Extraction<'_> {
     /// Write one name.
-    fn write_entry<R: Read + Seek>(
+    fn write_entry<T: FsTree>(
         &mut self,
-        reader: &mut Reader<R>,
-        entry: crate::read::WalkEntry,
+        tree: &mut T,
+        entry: TreeEntry<T::Node>,
+        synthesis: &Synthesis,
     ) -> Result<(), HostError> {
         let (parent, name) = split(&entry.path)?;
         // Every directory deeper than this entry's parent is finished: the walk is
         // depth-first, so nothing will be added to one again.
         while self.open.len() > 1 && self.open[self.open.len() - 1].path != parent {
             let dir = self.open.pop().expect("the loop checked the length");
-            self.finish_directory(&dir)?;
+            self.finish_directory(dir)?;
         }
         if self.open.last().map(|d| d.path.as_slice()) != Some(parent) {
             // The walk emits a parent before its children, so this is unreachable for a tree
             // the walk produced. It is checked rather than assumed because what follows
             // writes into whatever handle is on top of the stack.
-            return Err(HostError::HostileName {
+            return Err(HostError::OutOfOrder {
                 path: entry.path.clone(),
             });
         }
 
-        let kind = entry.inode.mode & IFMT;
-        // A directory has more than one link by construction — its own name and its `.` — so
-        // its link count says nothing, and it is never another name for anything.
-        if kind != IFDIR
-            && let Some(first) = self.named.get(&entry.number)
+        // A node the walk says is reachable by more than one name is the file the first time
+        // it is seen and a hard link every time after.
+        if let Some(id) = entry.shared
+            && let Some(first) = self.named.get(&id)
         {
             let first = first.clone();
-            self.link(&first, name, &entry.path)?;
-            self.report.written += 1;
+            if self.link(&first, name, &entry.path)? {
+                self.report.written += 1;
+            }
             return Ok(());
         }
+
+        let attrs = tree.stat(&entry.node, synthesis)?;
+        self.note_synthesis(&attrs, &entry.path);
 
         // A regular file is the one kind that leaves a handle behind, since writing it is
         // what opened one; its attributes and metadata go through that rather than through
         // its name. Nothing else can be opened without either following it or having an
         // effect of its own.
-        let handle = match kind {
-            IFDIR => {
-                self.make_directory(name, &entry)?;
+        let handle = match entry.kind {
+            NodeKind::Directory => {
+                self.make_directory(name, &entry.path, &attrs)?;
                 None
             }
-            IFREG => Some(self.write_file(reader, name, &entry)?),
-            IFLNK => {
-                let target = reader.read_symlink(&entry.inode)?;
-                self.make_symlink(&target, name, &entry)?;
+            NodeKind::File { size } => Some(self.write_file(tree, name, &entry, size)?),
+            NodeKind::Symlink => {
+                let target = tree.link_target(&entry.node)?;
+                self.make_symlink(&target, name, &entry.path)?;
                 None
             }
-            IFCHR | IFBLK => {
-                let (major, minor) = reader.device(&entry.inode);
-                let file_type = if kind == IFCHR {
+            NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } => {
+                let file_type = if matches!(entry.kind, NodeKind::CharDevice { .. }) {
                     FileType::CharacterDevice
                 } else {
                     FileType::BlockDevice
                 };
-                if !self.make_node(file_type, rustix::fs::makedev(major, minor), name, &entry)? {
+                if !self.make_node(
+                    file_type,
+                    rustix::fs::makedev(major, minor),
+                    name,
+                    &entry.path,
+                    &attrs,
+                )? {
                     return Ok(());
                 }
                 None
             }
-            IFIFO => {
-                if !self.make_node(FileType::Fifo, 0, name, &entry)? {
+            NodeKind::Fifo => {
+                if !self.make_node(FileType::Fifo, 0, name, &entry.path, &attrs)? {
                     return Ok(());
                 }
                 None
             }
-            IFSOCK => {
-                if !self.make_node(FileType::Socket, 0, name, &entry)? {
+            // Matched exhaustively on purpose: a `NodeKind` a later family adds is a
+            // compile error here, which forces a decision about how to write it rather
+            // than letting it fall into a wildcard that creates something else.
+            NodeKind::Socket => {
+                if !self.make_node(FileType::Socket, 0, name, &entry.path, &attrs)? {
                     return Ok(());
                 }
                 None
-            }
-            _ => {
-                return Err(HostError::Unsupported {
-                    path: under_root(&self.sink.root_path, &entry.path),
-                });
             }
         };
 
-        // Now that the name exists, it is the one a later name for this inode links from.
+        // Now that the name exists, it is the one a later name for this node links from.
         // Recorded here rather than before the entry was made, because a node the host
         // refused was skipped: linking to it would fail for want of a name rather than
-        // report the privilege that was actually missing. Only an inode the image says has
-        // more than one name is held, so what this accumulates is the tree's hard links
-        // rather than a path per file in it.
-        if kind != IFDIR && entry.inode.links_count > 1 {
-            self.named.insert(entry.number, entry.path.clone());
+        // report the privilege that was actually missing.
+        if let Some(id) = entry.shared {
+            self.named.insert(id, entry.path.clone());
         }
 
         // A directory's own metadata waits until its children are written; everything else
         // is finished the moment it exists.
-        match (kind, &handle) {
-            (IFDIR, _) => {}
-            (_, Some(fd)) => {
-                let xattrs = reader.xattrs(&entry.inode)?;
-                self.set_xattrs_on_fd(fd, &xattrs, &entry.path)?;
-                self.finish_fd(fd, &entry.inode, &entry.path)?;
-            }
-            (_, None) => {
-                let xattrs = reader.xattrs(&entry.inode)?;
-                self.set_xattrs_by_name(name, &xattrs, &entry.path)?;
-                self.finish_name(name, &entry.inode, &entry.path, kind == IFLNK)?;
-            }
+        match (entry.kind, &handle) {
+            (NodeKind::Directory, _) => {}
+            (_, Some(fd)) => self.finish_fd(fd, &attrs.meta, &attrs.xattrs, &entry.path)?,
+            (_, None) => self.finish_name(
+                name,
+                &attrs.meta,
+                &attrs.xattrs,
+                &entry.path,
+                matches!(entry.kind, NodeKind::Symlink),
+            )?,
         }
         self.report.written += 1;
         Ok(())
+    }
+
+    /// Record every property the family invented rather than read, so an extraction says
+    /// what in the tree was policy rather than the image's.
+    fn note_synthesis(&mut self, attrs: &Attributes, path: &[u8]) {
+        for property in &attrs.synthesized {
+            self.report
+                .fidelity
+                .record(Direction::Synthesized, path, *property);
+        }
     }
 
     /// The handle the entry being written goes into.
@@ -411,33 +511,67 @@ impl Extraction<'_> {
     fn make_directory(
         &mut self,
         name: &[u8],
-        entry: &crate::read::WalkEntry,
+        path: &[u8],
+        attrs: &Attributes,
     ) -> Result<(), HostError> {
-        rustix::fs::mkdirat(self.dir(), name, BUILDING)
-            .map_err(|e| self.io(&entry.path, e.into()))?;
+        rustix::fs::mkdirat(self.dir(), name, BUILDING).map_err(|e| self.io(path, e.into()))?;
         let fd = rustix::fs::openat(
             self.dir(),
             name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| self.io(&entry.path, e.into()))?;
+        .map_err(|e| self.io(path, e.into()))?;
         self.open.push(OpenDir {
-            path: entry.path.clone(),
+            path: path.to_vec(),
             fd,
-            inode: entry.inode.clone(),
+            meta: attrs.meta,
+            xattrs: attrs.xattrs.clone(),
         });
         Ok(())
     }
 
-    /// Set a directory's ownership, mode, and times, now that everything inside it is
-    /// written — which is what the wait is for: a directory whose recorded mode denies its
-    /// owner write or search permission still had to receive its contents.
-    fn finish_directory(&mut self, dir: &OpenDir) -> Result<(), HostError> {
+    /// A directory whose children are all written: finish it, or hold it back until the walk
+    /// is over.
+    ///
+    /// Applying the recorded mode is what closes a directory, and a mode that denies its
+    /// owner search permission closes it to this run as well. That matters once the walk has
+    /// left the directory, because a second name for a hard-linked node inside it is created
+    /// by traversing to the first — so such a directory keeps [`BUILDING`] and its handle
+    /// until the walk is over, by which time there is no name left to reach. It is held by
+    /// handle rather than by path, so what finishes it is the object this run created and not
+    /// whatever its name resolves to by then.
+    ///
+    /// One bit decides, and it is the one that matters: every directory a mode leaves
+    /// searchable is finished where the walk leaves it, which is what keeps the handles a
+    /// walk holds down to the depth of the tree in the trees that have no such directory —
+    /// which is nearly all of them.
+    fn finish_directory(&mut self, dir: OpenDir) -> Result<(), HostError> {
+        if mode_of(&dir.meta).contains(Mode::XUSR) {
+            return self.apply_directory(&dir);
+        }
+        // Which directories wait is the image's choice, so the number of them is too. Past
+        // the ceiling the extraction stops as itself rather than running the process out of
+        // descriptors — where the drain below would never run, and every deferred directory
+        // would be left at `BUILDING` and owned by this process instead of at the mode and
+        // owner the image recorded.
+        if self.held.len() >= MAX_DEFERRED_DIRECTORIES {
+            return Err(HostError::TooManyDeferredDirectories {
+                limit: MAX_DEFERRED_DIRECTORIES,
+            });
+        }
+        self.held.push(dir);
+        Ok(())
+    }
+
+    /// Set a directory's ownership, mode, attributes, and times, now that everything inside
+    /// it is written — which is what the wait is for: a directory whose recorded mode denies
+    /// its owner write or search permission still had to receive its contents.
+    fn apply_directory(&mut self, dir: &OpenDir) -> Result<(), HostError> {
         // The path a failure names: the image path this directory holds, or the destination
         // itself for the root, whose path inside the image is empty.
         let path: &[u8] = if dir.path.is_empty() { b"/" } else { &dir.path };
-        self.finish_fd(&dir.fd, &dir.inode, path)
+        self.finish_fd(&dir.fd, &dir.meta, &dir.xattrs, path)
     }
 
     /// Create a regular file and stream its contents into it, returning the handle its
@@ -447,12 +581,19 @@ impl Extraction<'_> {
     /// reads as zeros — so a sparse file lands in the destination fully allocated, and a tree
     /// holding one occupies more space on the host than it does in the image. What is written
     /// is what a reader of either sees.
-    fn write_file<R: Read + Seek>(
+    fn write_file<T: FsTree>(
         &mut self,
-        reader: &mut Reader<R>,
+        tree: &mut T,
         name: &[u8],
-        entry: &crate::read::WalkEntry,
+        entry: &TreeEntry<T::Node>,
+        size: u64,
     ) -> Result<OwnedFd, HostError> {
+        // What a tree *writes* is driven entirely by the length the filesystem declares, and
+        // a hole reads back as zeros — so an inode claiming terabytes and mapping nothing
+        // fills the destination until it runs out of room, from an image of a few kilobytes.
+        // The cap a caller set on what a read will return governs that too, checked before
+        // the name is created so a refused file leaves nothing behind.
+        tree.check_file_size(&entry.path, size)?;
         // `EXCL` is what makes this a file this run created: nothing already at the name is
         // opened, written through, or followed.
         let fd = rustix::fs::openat(
@@ -464,10 +605,19 @@ impl Extraction<'_> {
         .map_err(|e| self.io(&entry.path, e.into()))?;
 
         let mut out = std::fs::File::from(fd);
-        let mut buf = vec![0u8; WINDOW];
+        // The window is a ceiling, not the size: most entries in a root filesystem are a few
+        // hundred bytes, and a mebibyte allocated and zeroed for each of them is the cost of
+        // the tree rather than of the largest file in it.
+        let window = usize::try_from(size).unwrap_or(usize::MAX).min(WINDOW);
+        let mut buf = vec![0u8; window];
         let mut offset = 0u64;
-        loop {
-            let filled = reader.read_into(&entry.inode, offset, &mut buf)?;
+        // Bounded by the length the walk reported as well as by what the reads yield, so a
+        // filesystem that keeps answering cannot write more than it said the file holds.
+        while offset < size {
+            let want = usize::try_from(size - offset)
+                .unwrap_or(usize::MAX)
+                .min(window);
+            let filled = tree.read_bytes(&entry.node, offset, &mut buf[..want])?;
             if filled == 0 {
                 break;
             }
@@ -482,13 +632,8 @@ impl Extraction<'_> {
     ///
     /// The target is written as it stands, absolute or `..`-relative or neither: reproducing
     /// the link is the whole point, and nothing here ever resolves one.
-    fn make_symlink(
-        &mut self,
-        target: &[u8],
-        name: &[u8],
-        entry: &crate::read::WalkEntry,
-    ) -> Result<(), HostError> {
-        rustix::fs::symlinkat(target, self.dir(), name).map_err(|e| self.io(&entry.path, e.into()))
+    fn make_symlink(&mut self, target: &[u8], name: &[u8], path: &[u8]) -> Result<(), HostError> {
+        rustix::fs::symlinkat(target, self.dir(), name).map_err(|e| self.io(path, e.into()))
     }
 
     /// Create a device node, FIFO, or socket. Reports whether it was created: a node this
@@ -503,14 +648,15 @@ impl Extraction<'_> {
         file_type: FileType,
         dev: rustix::fs::Dev,
         name: &[u8],
-        entry: &crate::read::WalkEntry,
+        path: &[u8],
+        attrs: &Attributes,
     ) -> Result<bool, HostError> {
-        match rustix::fs::mknodat(self.dir(), name, file_type, mode_of(&entry.inode), dev) {
+        match rustix::fs::mknodat(self.dir(), name, file_type, mode_of(&attrs.meta), dev) {
             Ok(()) => Ok(true),
             Err(e) if forbidden(e) => {
                 if !self.sink.skip_privileged {
                     return Err(HostError::Unprivileged {
-                        path: entry.path.clone(),
+                        path: path.to_vec(),
                         what: match file_type {
                             FileType::CharacterDevice | FileType::BlockDevice => {
                                 "a device node needs CAP_MKNOD to create"
@@ -519,24 +665,46 @@ impl Extraction<'_> {
                         },
                     });
                 }
-                self.report.skipped.push(entry.path.clone());
+                self.note_skipped(path);
                 Ok(false)
             }
-            Err(e) => Err(self.io(&entry.path, e.into())),
+            Err(e) => Err(self.io(path, e.into())),
         }
     }
 
     /// Create another name for a file already written, from the path that first named it.
+    /// Reports whether it was created, as [`make_node`](Self::make_node) does: a link this
+    /// host refuses is skipped rather than made under [`DirectorySink::skip_privileged`].
     ///
     /// The first name's directory is re-opened one component at a time from the destination,
     /// since the walk has usually left it behind by the time a second name for it appears.
     /// Opening it that way rather than joining the path keeps the rule the whole module holds
-    /// to: every write goes through a handle to a directory this run created.
-    fn link(&mut self, first: &[u8], name: &[u8], path: &[u8]) -> Result<(), HostError> {
+    /// to: every write goes through a handle to a directory this run created. Every directory
+    /// along the way is one that can be searched — a mode that would deny it is held back
+    /// until the walk is over, which is what [`finish_directory`](Self::finish_directory)
+    /// is for.
+    ///
+    /// A destination filesystem is free to refuse the link itself: one with no notion of a
+    /// second name for a node answers `EPERM` however the traversal went, and that is the
+    /// host declining what the image asks for exactly as a device node is.
+    fn link(&mut self, first: &[u8], name: &[u8], path: &[u8]) -> Result<bool, HostError> {
         let (first_parent, first_name) = split(first)?;
         let parent = self.open_dir(first_parent, path)?;
-        rustix::fs::linkat(&parent, first_name, self.dir(), name, AtFlags::empty())
-            .map_err(|e| self.io(path, e.into()))
+        match rustix::fs::linkat(&parent, first_name, self.dir(), name, AtFlags::empty()) {
+            Ok(()) => Ok(true),
+            Err(e) if forbidden(e) => {
+                if !self.sink.skip_privileged {
+                    return Err(HostError::Unprivileged {
+                        path: path.to_vec(),
+                        what: "a second name for a node needs a host that permits a hard link \
+                               to it",
+                    });
+                }
+                self.note_skipped(path);
+                Ok(false)
+            }
+            Err(e) => Err(self.io(path, e.into())),
+        }
     }
 
     /// Open the directory at `path` inside the destination, descending one component at a
@@ -544,10 +712,18 @@ impl Extraction<'_> {
     ///
     /// `O_PATH`, because this asks for a handle to traverse from and nothing more. Opening a
     /// directory for reading needs the read bit, and by the time a second name for an inode
-    /// appears the first name's directory has been finished and carries the mode the image
-    /// records — which a real tree is free to write without read permission. Traversing it
-    /// needs only search, which is exactly what `O_PATH` asks for and what `linkat` accepts
-    /// of the handle it is given.
+    /// appears the first name's directory has usually been finished and carries the mode the
+    /// image records — which a real tree is free to write without read permission. `O_PATH`
+    /// needs no permission on the directory it names, so a mode without the read bit is no
+    /// obstacle to holding a handle to it.
+    ///
+    /// It is no help with the *search* bit, though, which is a separate question: resolving a
+    /// name through a directory asks for search on it at the moment of the lookup, whatever
+    /// the handle it started from was opened with, and `linkat` asks the same of the
+    /// directory holding the name it links from. That is why a directory a mode would leave
+    /// unsearchable keeps [`BUILDING`] until the walk is over — see
+    /// [`finish_directory`](Self::finish_directory) — so that every directory this descends
+    /// through, and the one it links out of, is one it can search.
     fn open_dir(&self, path: &[u8], blame: &[u8]) -> Result<OwnedFd, HostError> {
         let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut fd = rustix::fs::openat(&self.sink.root, c".", flags, Mode::empty())
@@ -563,14 +739,35 @@ impl Extraction<'_> {
         Ok(fd)
     }
 
-    /// Apply ownership, mode, and times to something already open.
+    /// Apply ownership, mode, extended attributes, and times to something already open.
     ///
-    /// Ownership first: setting an owner clears the set-user and set-group bits, so a mode
+    /// The order is forced from both ends, and every one of the four calls has to sit where
+    /// it does.
+    ///
+    /// *Ownership first.* Setting an owner clears the set-user and set-group bits, so a mode
     /// applied before it would not survive.
-    fn finish_fd(&mut self, fd: &OwnedFd, inode: &Inode, path: &[u8]) -> Result<(), HostError> {
-        self.chown_fd(fd, inode, path)?;
-        rustix::fs::fchmod(fd, mode_of(inode)).map_err(|e| self.io(path, e.into()))?;
-        rustix::fs::futimens(fd, &times_of(inode)).map_err(|e| self.io(path, e.into()))
+    ///
+    /// *Attributes after the mode, not before ownership.* Changing an owner also strips
+    /// `security.capability`: the kernel sets `ATTR_KILL_PRIV` on every `chown` of a
+    /// non-directory, whether or not the ids actually change, and that is what removes the
+    /// attribute. So an attribute written before the `chown` is written and then destroyed,
+    /// and this sink would report the extraction faithful. Changing a mode does not do this —
+    /// only the mode and change time are touched — but it does rewrite the group entry of a
+    /// POSIX access ACL, which is itself an extended attribute, so the attributes must follow
+    /// the mode as well. Between the two is the only place both hold.
+    ///
+    /// *Times last*, because every call above them changes one.
+    fn finish_fd(
+        &mut self,
+        fd: &OwnedFd,
+        meta: &Metadata,
+        xattrs: &[Xattr],
+        path: &[u8],
+    ) -> Result<(), HostError> {
+        self.chown_fd(fd, meta, path)?;
+        rustix::fs::fchmod(fd, mode_of(meta)).map_err(|e| self.io(path, e.into()))?;
+        self.set_xattrs_on_fd(fd, xattrs, path)?;
+        rustix::fs::futimens(fd, &times_of(meta)).map_err(|e| self.io(path, e.into()))
     }
 
     /// The same for a name in the current directory, which is what everything that cannot be
@@ -581,7 +778,8 @@ impl Extraction<'_> {
     fn finish_name(
         &mut self,
         name: &[u8],
-        inode: &Inode,
+        meta: &Metadata,
+        xattrs: &[Xattr],
         path: &[u8],
         symlink: bool,
     ) -> Result<(), HostError> {
@@ -590,15 +788,16 @@ impl Extraction<'_> {
         } else {
             AtFlags::empty()
         };
-        self.chown_at(name, inode, path, flags)?;
+        self.chown_at(name, meta, path, flags)?;
         if !symlink {
             // No `SYMLINK_NOFOLLOW` here, and none is needed: Linux has no `fchmodat` that
             // takes it — the call fails outright — and the name being changed is one this
             // run created a moment ago, which is not a symbolic link.
-            rustix::fs::chmodat(self.dir(), name, mode_of(inode), AtFlags::empty())
+            rustix::fs::chmodat(self.dir(), name, mode_of(meta), AtFlags::empty())
                 .map_err(|e| self.io(path, e.into()))?;
         }
-        rustix::fs::utimensat(self.dir(), name, &times_of(inode), flags)
+        self.set_xattrs_by_name(name, xattrs, path)?;
+        rustix::fs::utimensat(self.dir(), name, &times_of(meta), flags)
             .map_err(|e| self.io(path, e.into()))
     }
 
@@ -606,18 +805,18 @@ impl Extraction<'_> {
     fn chown_at(
         &mut self,
         name: &[u8],
-        inode: &Inode,
+        meta: &Metadata,
         path: &[u8],
         flags: AtFlags,
     ) -> Result<(), HostError> {
-        let (uid, gid) = owner_of(inode, path)?;
+        let (uid, gid) = owner_of(meta, path)?;
         let result = rustix::fs::chownat(self.dir(), name, Some(uid), Some(gid), flags);
         self.took_ownership(result, path)
     }
 
     /// The same for something already open, which is every regular file and directory.
-    fn chown_fd(&mut self, fd: &OwnedFd, inode: &Inode, path: &[u8]) -> Result<(), HostError> {
-        let (uid, gid) = owner_of(inode, path)?;
+    fn chown_fd(&mut self, fd: &OwnedFd, meta: &Metadata, path: &[u8]) -> Result<(), HostError> {
+        let (uid, gid) = owner_of(meta, path)?;
         let result = rustix::fs::fchown(fd, Some(uid), Some(gid));
         self.took_ownership(result, path)
     }
@@ -668,14 +867,13 @@ impl Extraction<'_> {
         }
         let at_dir = fd_path(self.dir(), name);
         for xattr in xattrs {
-            let value = xattr_value(xattr, path)?;
             let result = rustix::fs::lsetxattr(
                 &at_dir,
                 &xattr.name[..],
-                &value,
+                &xattr.value,
                 rustix::fs::XattrFlags::empty(),
             );
-            self.took_xattr(result, path)?;
+            self.took_xattr(result, path, &xattr.name, false)?;
         }
         Ok(())
     }
@@ -688,10 +886,13 @@ impl Extraction<'_> {
         path: &[u8],
     ) -> Result<(), HostError> {
         for xattr in xattrs {
-            let value = xattr_value(xattr, path)?;
-            let result =
-                rustix::fs::fsetxattr(fd, &xattr.name[..], &value, rustix::fs::XattrFlags::empty());
-            self.took_xattr(result, path)?;
+            let result = rustix::fs::fsetxattr(
+                fd,
+                &xattr.name[..],
+                &xattr.value,
+                rustix::fs::XattrFlags::empty(),
+            );
+            self.took_xattr(result, path, &xattr.name, true)?;
         }
         Ok(())
     }
@@ -703,21 +904,53 @@ impl Extraction<'_> {
     /// process's: a root filesystem carries `security.capability` on the binaries that hold
     /// one and `security.selinux` throughout when it is labelled, so an unprivileged
     /// extraction meets a refusal here on trees that are otherwise entirely reproducible.
-    fn took_xattr(&mut self, result: rustix::io::Result<()>, path: &[u8]) -> Result<(), HostError> {
+    ///
+    /// Two refusals arrive as the same errno and are not that. The kernel restricts a
+    /// `user.*` attribute to a regular file or a directory, and a default POSIX ACL to a
+    /// directory, by the *type* of what they are set on rather than by who is setting it —
+    /// so on a symbolic link or a device node they fail identically for root. Reported as a
+    /// missing privilege they would name a namespace the attribute is not in and prescribe a
+    /// privilege that would not help, so they are told apart here: `opened` is false exactly
+    /// for the kinds the rule applies to, since it is those that cannot be opened.
+    fn took_xattr(
+        &mut self,
+        result: rustix::io::Result<()>,
+        path: &[u8],
+        name: &[u8],
+        opened: bool,
+    ) -> Result<(), HostError> {
         match result {
             Ok(()) => Ok(()),
             Err(e) if forbidden(e) => {
+                let by_kind = !opened
+                    && (name.starts_with(b"user.") || name == crate::acl::Acl::DEFAULT_NAME);
                 if !self.sink.skip_privileged {
-                    return Err(HostError::Unprivileged {
-                        path: path.to_vec(),
-                        what: "an extended attribute in the security or trusted namespace \
-                               needs privilege to set",
+                    return Err(if by_kind {
+                        HostError::UnsupportedAttribute {
+                            path: path.to_vec(),
+                            name: name.to_vec(),
+                        }
+                    } else {
+                        HostError::Unprivileged {
+                            path: path.to_vec(),
+                            what: "an extended attribute in the security or trusted namespace \
+                                   needs privilege to set",
+                        }
                     });
                 }
                 self.report.xattrs_dropped = true;
                 Ok(())
             }
             Err(e) => Err(self.io(path, e.into())),
+        }
+    }
+
+    /// Record a path this run left out, up to the ceiling the report holds itself to.
+    fn note_skipped(&mut self, path: &[u8]) {
+        if self.report.skipped.len() < ExtractReport::MAX_SKIPPED {
+            self.report.skipped.push(path.to_vec());
+        } else {
+            self.report.more_skipped = true;
         }
     }
 
@@ -733,6 +966,26 @@ impl Extraction<'_> {
 /// Whether a failure is the host declining for want of a privilege.
 fn forbidden(e: rustix::io::Errno) -> bool {
     e == rustix::io::Errno::PERM || e == rustix::io::Errno::ACCESS
+}
+
+/// Whether the directory `fd` refers to holds nothing.
+///
+/// Listed through the handle rather than through the name it was opened by, so the directory
+/// found empty is the one the sink goes on to write into. Every directory holds `.` and `..`
+/// and neither is something in it.
+///
+/// Reading a directory stream from a handle asks for search permission on the directory,
+/// which is what every write through that handle asks for as well — so this requires nothing
+/// of a destination that the extraction does not already require.
+fn is_empty_dir(fd: &OwnedFd) -> rustix::io::Result<bool> {
+    for entry in rustix::fs::Dir::read_from(fd)? {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A path's parent and its final component, with the component checked to be one a directory
@@ -815,8 +1068,8 @@ fn under_root(root: &Path, path: &[u8]) -> PathBuf {
 }
 
 /// The permission and set-user/group/sticky bits of a recorded mode.
-fn mode_of(inode: &Inode) -> Mode {
-    Mode::from_bits_retain(u32::from(inode.mode & 0o7777))
+fn mode_of(meta: &Metadata) -> Mode {
+    Mode::from_bits_retain(u32::from(meta.mode & 0o7777))
 }
 
 /// The owner a recorded inode names, or `None` for one no host id can be set to.
@@ -824,31 +1077,32 @@ fn mode_of(inode: &Inode) -> Mode {
 /// A `chown` takes `-1` to mean "leave this one alone", so an id of all ones is not an id at
 /// all — there is no call that sets it. An image recording one is refused rather than given
 /// an owner it does not name.
-fn owner_of(inode: &Inode, path: &[u8]) -> Result<(Uid, Gid), HostError> {
-    if inode.uid == u32::MAX || inode.gid == u32::MAX {
+fn owner_of(meta: &Metadata, path: &[u8]) -> Result<(Uid, Gid), HostError> {
+    if meta.uid == u32::MAX || meta.gid == u32::MAX {
         return Err(HostError::UnrepresentableOwner {
             path: path.to_vec(),
-            uid: inode.uid,
-            gid: inode.gid,
+            uid: meta.uid,
+            gid: meta.gid,
         });
     }
-    Ok((Uid::from_raw(inode.uid), Gid::from_raw(inode.gid)))
+    Ok((Uid::from_raw(meta.uid), Gid::from_raw(meta.gid)))
 }
 
 /// The two times a host lets a caller set. An inode's change time is the kernel's own, and no
 /// extraction can carry it.
-fn times_of(inode: &Inode) -> Timestamps {
+fn times_of(meta: &Metadata) -> Timestamps {
     Timestamps {
-        last_access: timespec(inode.atime),
-        last_modification: timespec(inode.mtime),
+        last_access: timespec(meta.atime),
+        last_modification: timespec(meta.mtime),
     }
 }
 
 /// One recorded time as the host takes it.
 ///
-/// An inode's fraction is a thirty-bit field, so a filesystem this crate did not write can
-/// name more nanoseconds than a second holds — which `utimensat` refuses outright. The excess
-/// is carried into the seconds, so the time set is the instant the two fields describe.
+/// A filesystem's stored fraction need not divide a second — ext4's is a thirty-bit field —
+/// so an image this crate did not write can name more nanoseconds than a second holds, which
+/// `utimensat` refuses outright. The excess is carried into the seconds, so the time set is
+/// the instant the two fields describe.
 fn timespec(t: Timestamp) -> Timespec {
     let carry = i64::from(t.nanos / Timestamp::NANOS_PER_SEC);
     let nanos = t.nanos % Timestamp::NANOS_PER_SEC;
@@ -860,34 +1114,9 @@ fn timespec(t: Timestamp) -> Timespec {
     }
 }
 
-/// The value an extended attribute takes on the host.
-///
-/// A POSIX ACL is stored on disk in ext's compact form, which is not the form the `setxattr`
-/// boundary speaks, so it is decoded and written back out in the version-2 form — exactly the
-/// inverse of what a walk does on the way in. Every other attribute is bytes, and travels as
-/// bytes.
-fn xattr_value(xattr: &Xattr, path: &[u8]) -> Result<Vec<u8>, HostError> {
-    if xattr.name == Acl::ACCESS_NAME || xattr.name == Acl::DEFAULT_NAME {
-        let acl = Acl::decode(&xattr.value).map_err(|source| HostError::Acl {
-            path: display(path).to_path_buf(),
-            source,
-        })?;
-        return Ok(acl.encode_xattr_v2());
-    }
-    Ok(xattr.value.clone())
-}
-
-impl From<ReadError> for HostError {
-    fn from(source: ReadError) -> Self {
+impl From<TreeError> for HostError {
+    fn from(source: TreeError) -> Self {
         Self::Read { source }
-    }
-}
-
-/// Attach a path to an I/O failure, so every message names what could not be written.
-fn io_at(path: &Path) -> impl Fn(std::io::Error) -> HostError + '_ {
-    move |source| HostError::Io {
-        path: path.to_path_buf(),
-        source,
     }
 }
 

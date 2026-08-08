@@ -29,6 +29,23 @@ pub enum AllocError {
         /// Free blocks available.
         available: u64,
     },
+    /// The used-block bitmap does not fit in memory on this platform: one bit per block
+    /// of the whole filesystem, and the byte count exceeds what a `usize` addresses.
+    ///
+    /// A 32-bit target reaches this at 2^35 blocks — 128 TiB at a 4 KiB block — which is a
+    /// size the planner accepts and a streaming write can produce, so the two do not agree
+    /// on every platform and this is where they are held to saying so. Silently truncating
+    /// the vector would make every block past the truncation read as used, and the run would
+    /// end as a bogus out-of-space or as a panic reaching for a group's bitmap.
+    #[error(
+        "a used-block bitmap of {bytes} bytes exceeds what this platform addresses in \
+         memory: the filesystem has too many blocks to allocate for on this target"
+    )]
+    #[non_exhaustive]
+    BitmapTooLargeInMemory {
+        /// The bitmap's size in bytes.
+        bytes: u64,
+    },
 }
 
 /// A bit-packed used-block bitmap and a first-fit allocator over it.
@@ -64,12 +81,21 @@ impl Allocator {
     /// and descriptor copies, reserved descriptor blocks, and the flex-packed
     /// bitmaps and inode tables — already marked used, plus the final group's
     /// bitmap padding. What remains free is the space for file data.
-    #[must_use]
-    pub fn new(layout: &Layout) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::BitmapTooLargeInMemory`] where one bit per block does not fit a
+    /// `usize`, which a 32-bit target reaches at 128 TiB and a 64-bit one never does.
+    pub fn new(layout: &Layout) -> Result<Self, AllocError> {
         let bytes_per_group = (layout.blocks_per_group / 8) as usize;
         let capacity_bits = u64::from(layout.group_count) * u64::from(layout.blocks_per_group);
+        let capacity_bytes = capacity_bits / 8;
+        let len =
+            usize::try_from(capacity_bytes).map_err(|_| AllocError::BitmapTooLargeInMemory {
+                bytes: capacity_bytes,
+            })?;
         let mut alloc = Self {
-            bits: vec![0u8; (capacity_bits / 8) as usize],
+            bits: vec![0u8; len],
             total_blocks: layout.total_blocks,
             blocks_per_group: layout.blocks_per_group,
             bytes_per_group,
@@ -87,7 +113,7 @@ impl Allocator {
         for r in layout.metadata_regions() {
             alloc.mark_used(r);
         }
-        alloc
+        Ok(alloc)
     }
 
     /// Mark the blocks in `range` used.
@@ -263,6 +289,8 @@ impl Allocator {
 /// byte is one `count_ones`; a partial final byte is masked to its low `n % 8` bits so
 /// nothing past position `n` is counted. `n` must not exceed `bits.len() * 8`.
 fn used_in_prefix(bits: &[u8], n: u64) -> u64 {
+    // `n` is bounded by the bitmap's own bit count, which the constructor already held to a
+    // `usize`, so this narrowing cannot lose anything the slice below would then index past.
     let whole = (n / 8) as usize;
     let mut used: u64 = bits[..whole]
         .iter()
@@ -308,7 +336,7 @@ mod tests {
             .expect("plan");
         assert_eq!(l.first_data_block, 1);
 
-        let alloc = Allocator::new(&l);
+        let alloc = Allocator::new(&l).expect("a bitmap that fits in memory");
         assert!(alloc.is_used(1), "the superblock is block 1");
         assert_eq!(
             alloc.group_bitmap(0).expect("group 0")[0] & 1,
@@ -326,7 +354,7 @@ mod tests {
     #[test]
     fn metadata_is_marked_used_from_the_layout() {
         let l = layout(64);
-        let a = Allocator::new(&l);
+        let a = Allocator::new(&l).expect("a bitmap that fits in memory");
         // Superblock, GDT, and reserved GDT: blocks 0..=4 used.
         for b in 0..=4 {
             assert!(a.is_used(b), "block {b} (super/gdt/rgdt) should be used");
@@ -348,7 +376,7 @@ mod tests {
     #[test]
     fn allocate_returns_contiguous_run_when_possible() {
         let l = layout(64);
-        let mut a = Allocator::new(&l);
+        let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
         let ranges = a.allocate(4).unwrap();
         assert_eq!(ranges.len(), 1, "free space is contiguous here");
         assert_eq!(ranges[0].len, 4);
@@ -363,7 +391,7 @@ mod tests {
         // Free a small pocket, then a reserved block, then more free space, and ask
         // for more than the pocket holds: the allocation must straddle the window.
         let l = layout(64);
-        let mut a = Allocator::new(&l);
+        let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
         // Mark everything used, then open two pockets separated by a used block: a
         // request larger than either pocket must span both.
         for b in 0..l.total_blocks {
@@ -386,7 +414,7 @@ mod tests {
     #[test]
     fn allocate_contiguous_takes_one_run_and_skips_short_gaps() {
         let l = layout(64);
-        let mut a = Allocator::new(&l);
+        let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
         // Open a short pocket then a long free run; a request longer than the pocket
         // must land wholly in the long run, as one range.
         for b in 0..l.total_blocks {
@@ -416,7 +444,7 @@ mod tests {
     #[test]
     fn allocate_contiguous_returns_none_when_no_run_is_long_enough() {
         let l = layout(64);
-        let mut a = Allocator::new(&l);
+        let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
         for b in 0..l.total_blocks {
             a.set(b);
         }
@@ -429,7 +457,7 @@ mod tests {
     #[test]
     fn out_of_space_leaves_the_bitmap_untouched() {
         let l = layout(64);
-        let mut a = Allocator::new(&l);
+        let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
         let free_before = a.free_count();
         let err = a.allocate(free_before + 1).unwrap_err();
         assert!(matches!(err, AllocError::OutOfSpace { .. }));
@@ -439,7 +467,7 @@ mod tests {
     #[test]
     fn group_bitmap_slices_align_to_groups() {
         let l = layout(512);
-        let a = Allocator::new(&l);
+        let a = Allocator::new(&l).expect("a bitmap that fits in memory");
         // Each group's bitmap is one block-bitmap's worth of bytes.
         let g0 = a.group_bitmap(0).expect("group 0");
         assert_eq!(g0.len(), (l.blocks_per_group / 8) as usize);
@@ -451,7 +479,7 @@ mod tests {
     fn padding_tail_of_final_group_is_marked_used() {
         // 200 MiB: final group holds 18432 of 32768 blocks; the rest are padding.
         let l = layout(200);
-        let a = Allocator::new(&l);
+        let a = Allocator::new(&l).expect("a bitmap that fits in memory");
         let last_start = u64::from(l.blocks_per_group);
         assert!(a.is_used(last_start + 18432), "first padding block");
         assert!(a.is_used(last_start + 32767), "last padding block");
@@ -462,7 +490,7 @@ mod tests {
     #[test]
     fn free_counts_are_consistent_between_whole_and_per_group() {
         let l = layout(512);
-        let a = Allocator::new(&l);
+        let a = Allocator::new(&l).expect("a bitmap that fits in memory");
         let per_group: u64 = (0..l.group_count)
             .map(|g| u64::from(a.group_free_count(g)))
             .sum();
@@ -477,7 +505,7 @@ mod tests {
         // used set more than the freshly-formatted metadata.
         for mib in [64u64, 512] {
             let l = layout(mib);
-            let mut a = Allocator::new(&l);
+            let mut a = Allocator::new(&l).expect("a bitmap that fits in memory");
             a.allocate(1000).expect("room for a scattered run");
             let scan = |lo: u64, hi: u64| (lo..hi).filter(|&b| !a.is_used(b)).count() as u64;
 
@@ -497,5 +525,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_bitmap_larger_than_this_platform_addresses_is_refused_rather_than_truncated() {
+        // One bit per block of the whole filesystem, so the vector's length is a `u64`
+        // narrowed to a `usize`. On a 32-bit target that narrowing loses at 2^35 blocks —
+        // 128 TiB at a 4 KiB block, which the planner accepts and `format_to` can stream —
+        // and at exactly 2^35 it produces a vector of no length at all. Every block would
+        // then read as used, and the run would end as a bogus out-of-space or as a panic
+        // reaching for a group's bitmap.
+        //
+        // On a 64-bit target the narrowing is lossless and no layout reaches it, which is
+        // why this asserts the *behaviour under the bound* rather than the refusal: what
+        // must hold on both is that a bitmap either fits and is right, or is refused.
+        let l = layout(64);
+        let alloc = Allocator::new(&l).expect("a bitmap that fits in memory");
+        let bits = u64::from(l.group_count) * u64::from(l.blocks_per_group);
+        assert_eq!(
+            alloc.bits.len() as u64,
+            bits / 8,
+            "the bitmap describes every block the groups cover"
+        );
     }
 }
