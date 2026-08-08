@@ -1,0 +1,33 @@
+# The tests each tier must actually have run, checked by ci/preflight.sh.
+#
+# A tier that starts, selects nothing, and exits zero prints as a pass. That is not a
+# hypothetical: a PATH missing the one directory dosfstools installs into made the workspace
+# tier and the relatime tier select no tests at all, and preflight reported twenty of twenty
+# passed while nothing had been tested. An exit status says the tests that ran were fine. A
+# floor says tests ran.
+#
+# These are floors, not pins. They sit just under what the tree runs today, so adding tests
+# never fails a gate and losing a tier's worth of them always does. Raise one deliberately
+# when it stops being a floor — a number that moves in a diff is read beside the change that
+# moved it, and a number that has to fall is the finding.
+#
+# Counted as `passed + failed` across every `test result:` line the tier printed, which
+# includes doctests and excludes what a filter left out.
+#
+# format: <key>|<floor>
+
+# cargo test --workspace --all-features --profile ci --no-fail-fast  (1007 today)
+workspace|1000
+
+# the same command inside a relatime mount namespace, less the namespace artifacts
+# preflight skips there  (1006 today)
+relatime|1000
+
+# cargo test -p ferrosys --no-default-features --lib  (49 today)
+base-lib|45
+
+# cargo test -p ferrosys --no-default-features --features fat --lib  (255 today)
+fat-only|250
+
+# cargo test -p ferrosys --no-default-features --features fat,dir --lib  (274 today)
+fat-dir|270

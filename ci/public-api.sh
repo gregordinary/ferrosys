@@ -32,9 +32,27 @@ out="${CARGO_TARGET_DIR:-$root/target}/public-api"
 bless=0
 [ "${1:-}" = "--bless" ] && bless=1
 
-# The two configurations whose surfaces are pinned separately. `--all-features` is the
-# whole crate; `--no-default-features` is the family-agnostic root, whose narrowness is
-# a deliberate property rather than an accident of what happens to be gated.
+# The five configurations whose surfaces are pinned separately. `--all-features` is the
+# whole crate; `--no-default-features` is the family-agnostic root, whose narrowness is a
+# deliberate property rather than an accident of what happens to be gated; `default` is
+# what `cargo add ferrosys` gives and so the surface most consumers pin against, and it is
+# the only one that would notice an item quietly requiring a feature beyond the family it
+# belongs to — present under `--all-features` and absent from every build without that
+# feature; `fat` is a build carrying a family that is not the default one, where an item
+# gated on the wrong family feature vanishes without any other configuration noticing; and
+# `fat-dir` is that family with a source and a sink and still no ext, which is where an
+# extraction surface quietly pinned to one family would show up as a type nobody can name.
+config_flags() {
+    case "$1" in
+        all-features) echo "--all-features" ;;
+        no-default-features) echo "--no-default-features" ;;
+        default) echo "" ;;
+        fat) echo "--no-default-features --features fat" ;;
+        fat-dir) echo "--no-default-features --features fat,dir" ;;
+        *) echo "unknown configuration: $1" >&2; exit 1 ;;
+    esac
+}
+
 render() {
     local snapshot="$1"
     shift
@@ -44,11 +62,13 @@ render() {
 }
 
 status=0
-for config in all-features no-default-features; do
+for config in all-features no-default-features default fat fat-dir; do
     committed="$root/ci/public-api-$config.txt"
     actual="$out/public-api-$config.txt"
     mkdir -p "$out"
-    render "$actual" "--$config"
+    # Word splitting is what turns the flag string into separate arguments.
+    # shellcheck disable=SC2046
+    render "$actual" $(config_flags "$config")
 
     if [ "$bless" = 1 ]; then
         cp "$actual" "$committed"

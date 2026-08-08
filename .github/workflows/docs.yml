@@ -26,6 +26,14 @@ env:
 
 jobs:
   build:
+    # Pages is GitHub's, and so are the actions that publish to it: `configure-pages`,
+    # `upload-pages-artifact`, and `deploy-pages` exist on no other forge and are mirrored by
+    # no other forge. On a self-hosted Forgejo the first of them fails to resolve at all, so
+    # every push produced a red run for a site that instance was never going to serve.
+    # Skipping is the honest answer — the site has one publisher, and this names it.
+    #
+    # `deploy` needs this job, so it skips with it.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +44,15 @@ jobs:
       - name: Install mdbook
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+          # The host architecture decides the asset, and one with no build named here fails
+          # rather than guessing. Kept identical to the `book` job in ci.yml: the same
+          # download in two workflows is the same rule, and it is wrong in both or neither.
+          case "$(uname -m)" in
+            x86_64)  triple="x86_64-unknown-linux-gnu" ;;
+            aarch64) triple="aarch64-unknown-linux-musl" ;;
+            *) echo "::error::no mdbook build named for $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz" \
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 

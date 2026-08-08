@@ -30,6 +30,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The two gates above and the rustdoc gate below all build `--all-features`, which is
+      # the one configuration in which nothing a consumer can turn off is off. A reference
+      # that names a gated item from code gated differently passes all three and fails for
+      # the consumer who selected the narrower build. This lints the configurations where
+      # something is missing, including the default one `cargo add ferrosys` gives.
+      - name: Library lints clean in every configuration it offers
+        run: ci/lint-features.sh
+
       # The host-tool validation gates (e2fsck, the dumpe2fs differential oracle,
       # the resize2fs matrix) treat e2fsprogs as ground truth, and its geometry
       # defaults and e2fsck strictness are version- and build-dependent. Pin the exact
@@ -50,9 +58,72 @@ jobs:
           echo "$prefix/sbin" >> "$GITHUB_PATH"
           echo "MKE2FS_CONFIG=$PWD/ci/mke2fs.conf" >> "$GITHUB_ENV"
           # Assert every tool a gate uses reports the pinned version, not mke2fs alone.
+          #
+          # Captured rather than piped into `grep`. Every `run:` step here is a bash with
+          # `-o pipefail`, and `resize2fs -V` prints its version and then exits 1 for want
+          # of a device to resize. Piped, the pipeline's status would be the tool's rather
+          # than the match's, and that one tool would read as a mismatch however exactly
+          # right its banner is. `ci/preflight.sh` probes the same tools the same way.
           for t in mke2fs e2fsck dumpe2fs resize2fs debugfs; do
-            "$prefix/sbin/$t" -V 2>&1 | grep -qF "$t 1.47.0 " \
-              || { echo "::error::e2fsprogs pin mismatch for $t"; exit 1; }
+            banner="$("$prefix/sbin/$t" -V 2>&1 || true)"
+            case "$banner" in
+              *"$t 1.47.0 "*) ;;
+              *) echo "::error::e2fsprogs pin mismatch for $t"; exit 1 ;;
+            esac
+          done
+
+      # The FAT oracle tier, pinned for the same reason and in the same way. `fsck.fat`
+      # decides whether a FAT image is acceptable and `mkfs.fat --invariant` is the
+      # baseline a FAT image is compared against byte for byte, so a rolling package
+      # would let a distro rebuild re-baseline both. mtools is what populates and reads
+      # a FAT image without a mount -- the second implementation that says what is
+      # actually in one -- and reads the pinned ci/mtools.conf, so the runner's own
+      # mtools configuration cannot reach it.
+      - name: Cache pinned dosfstools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/dosfstools
+          key: dosfstools-${{ hashFiles('ci/build-dosfstools.sh') }}
+
+      - name: Cache pinned mtools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/mtools
+          key: mtools-${{ hashFiles('ci/build-mtools.sh') }}
+
+      - name: Build dosfstools and mtools, put them on PATH, assert the versions
+        run: |
+          bash ci/build-dosfstools.sh
+          bash ci/build-mtools.sh
+          # Derive each prefix from its script, so a version lives in one place.
+          dos="$(bash ci/build-dosfstools.sh --print-prefix)"
+          mt="$(bash ci/build-mtools.sh --print-prefix)"
+          echo "$dos/sbin" >> "$GITHUB_PATH"
+          echo "$mt/bin" >> "$GITHUB_PATH"
+          echo "MTOOLSRC=$PWD/ci/mtools.conf" >> "$GITHUB_ENV"
+          # No two dosfstools binaries agree on how to be asked their version: only
+          # fatlabel has a flag, mkfs.fat ends its help with the banner, and fsck.fat
+          # prints one only once it starts a check, so it is given a device it fails on.
+          #
+          # Captured rather than piped, for the reason given above the e2fsprogs loop:
+          # `fsck.fat` is the other probe that exits non-zero by design, and under
+          # `-o pipefail` a pipeline would report the tool's status instead of the match's.
+          assert_banner() {
+            local label="$1" want="$2"; shift 2
+            local banner; banner="$("$@" 2>&1 || true)"
+            case "$banner" in
+              *"$want"*) ;;
+              *) echo "::error::$label pin mismatch for $want"; exit 1 ;;
+            esac
+          }
+          assert_banner dosfstools "mkfs.fat 4.2 (" "$dos/sbin/mkfs.fat" --help
+          assert_banner dosfstools "fsck.fat 4.2 (" "$dos/sbin/fsck.fat" -n /dev/null
+          assert_banner dosfstools "fatlabel 4.2 (" "$dos/sbin/fatlabel" --version
+          # Every mtools name is one binary reading its own argv[0], so they answer
+          # alike -- but a partial install is still a partial install, and each name a
+          # gate calls has to be there.
+          for t in mcopy mdir minfo mtype; do
+            assert_banner mtools "$t (GNU mtools) 4.0.49" "$mt/bin/$t" --version
           done
 
       # The archive round-trip gate cross-checks a surviving xattr with `getfattr`
@@ -90,6 +161,21 @@ jobs:
       - name: Base library builds and passes its tests without the archive source
         run: cargo test -p ferrosys --no-default-features --lib
 
+      # A family that is not the default one, alone. The CLI names every family, so every
+      # other build here has `ext` on, and an item gated on `ext` where it meant "any
+      # family" is invisible in all of them — it compiles, and it simply is not there in
+      # the one configuration a FAT-only consumer selects. This is that configuration.
+      - name: Library builds and passes its tests with FAT as the only family
+        run: cargo test -p ferrosys --no-default-features --features fat --lib
+
+      # The same family with a source and a sink over it, and still no ext. A tree goes into
+      # a FAT volume and comes back out, through types that belong to no family — so an
+      # extraction surface quietly tied to one is a build failure here rather than a type a
+      # consumer cannot name. The configuration exists at all only because none of `tar`,
+      # `dir`, and `serde` enables a family.
+      - name: Library builds and passes its tests with a family and no ext
+        run: cargo test -p ferrosys --no-default-features --features fat,dir --lib
+
       # The fuzz package sets its own `[workspace]`, so `cargo test --workspace` never
       # compiles it: a target that stopped matching the reader's API would rot silently
       # and the never-panic contract would go unfuzzed without anything failing. Type-check
@@ -102,10 +188,14 @@ jobs:
       # one part of the fuzzing setup with no compiler to catch its drift. `inspect`
       # exits 0 or 4 (a bad image is still a described image); anything else — an
       # operational failure, a usage error, a panic — means the seed is unreadable.
+      #
+      # `inspect` renders ext images, so the `reader_*` directories go through it. Every
+      # seed of every family, these included, is also opened and walked in process by
+      # `tests/seam.rs`, which needs no command and knows no family.
       - name: Fuzz seeds are still readable images
         run: |
           cargo build -p ferrosys-cli
-          for seed in crates/ferrosys/fuzz/seeds/*/*.img; do
+          for seed in crates/ferrosys/fuzz/seeds/reader_*/*.img; do
             # `inspect` exits 4 on a readable-but-unsound image, which this gate
             # accepts. The step runs under `set -e`, so capture the status through
             # `|| status=$?` -- a bare call that returned 4 would abort the step
@@ -151,8 +241,13 @@ jobs:
       # Pinned; bump deliberately, and update the digest with it. This step puts a binary
       # on PATH whose verdict decides whether the dependency graph is acceptable, so what
       # it runs is asserted rather than taken on trust from a redirect.
+      #
+      # One digest per architecture the gate can run on. A hosted runner is x86_64 and a
+      # self-hosted one need not be, and a single pinned digest is not a portability
+      # inconvenience there but a gate that cannot run at all on the other machine.
       CARGO_DENY_VERSION: "0.20.2"
-      CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+      CARGO_DENY_SHA256_X86_64: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+      CARGO_DENY_SHA256_AARCH64: "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d"
     steps:
       - uses: actions/checkout@v4
 
@@ -162,10 +257,22 @@ jobs:
       - name: Install cargo-deny
         run: |
           mkdir -p "$HOME/.local/bin"
-          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          # An architecture with no pinned digest fails rather than falling back to one
+          # that would not verify: a gate that could not run is a failure, not a pass.
+          case "$(uname -m)" in
+            x86_64)
+              triple="x86_64-unknown-linux-musl"
+              digest="$CARGO_DENY_SHA256_X86_64" ;;
+            aarch64)
+              triple="aarch64-unknown-linux-musl"
+              digest="$CARGO_DENY_SHA256_AARCH64" ;;
+            *)
+              echo "::error::no cargo-deny digest pinned for $(uname -m)"; exit 1 ;;
+          esac
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-${triple}.tar.gz"
           curl -fsSL -o "$tarball" \
             "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
-          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum -c - \
+          echo "${digest}  ${tarball}" | sha256sum -c - \
             || { echo "::error::cargo-deny tarball digest mismatch"; exit 1; }
           tar -xzf "$tarball" --strip-components=1 -C "$HOME/.local/bin" \
             --wildcards '*/cargo-deny'
@@ -292,13 +399,24 @@ jobs:
       - name: Install mdbook
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+          # As with cargo-deny in the `deny` job: the host architecture decides the asset,
+          # and one with no build named here fails rather than guessing. The two are not
+          # the same triple — mdBook publishes gnu for x86_64 and musl for aarch64.
+          case "$(uname -m)" in
+            x86_64)  triple="x86_64-unknown-linux-gnu" ;;
+            aarch64) triple="aarch64-unknown-linux-musl" ;;
+            *) echo "::error::no mdbook build named for $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz" \
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # The guide's Rust code blocks link against the crate, so build it first.
+      # The guide's Rust code blocks link against the crate, so build it first. Every
+      # family the guide has examples for is named here: a family the crate it links
+      # against does not carry makes its examples fail to compile, and marking them
+      # uncompiled instead would let them rot.
       - name: Build crate
-        run: cargo build
+        run: cargo build --features fat
 
       - name: Build book
         run: mdbook build book

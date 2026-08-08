@@ -31,6 +31,8 @@ cd "$root" || exit 1
 NIGHTLY="nightly-2026-07-09"
 MSRV="1.88.0"
 E2FSPROGS="1.47.0"
+DOSFSTOOLS="4.2"
+MTOOLS="4.0.49"
 UUID="f0e17055-0000-4000-8000-000000000000"
 FAKE_TIME="1700000000"
 
@@ -41,12 +43,14 @@ CROSS_TARGETS=(
     "i686-unknown-linux-gnu|--all-targets"
 )
 
-# The two gates the host-policy run cannot judge. Mounting a filesystem needs a user
-# namespace, and inside one this process is root: a reserved extended attribute behaves
-# differently for a root that no outside id maps to, and GNU tar attempts a `chown` it
-# cannot make. Both are covered by the ordinary test gate, which runs unprivileged.
+# The gate the host-policy run cannot judge. Mounting a filesystem needs a user namespace,
+# and inside one this process is root — so GNU tar attempts a `chown` it cannot make. It is
+# covered by the ordinary test gate, which runs unprivileged.
+#
+# Keep this list as short as the reason for each entry is real. A test skipped here is a
+# test the only privileged run never sees, and the privileged path is exactly where the
+# attribute and ownership gates have something to say.
 NAMESPACE_ARTIFACTS=(
-    "a_reserved_attribute_is_refused_or_recorded_rather_than_lost_in_silence"
     "gnu_tar_reads_the_archive_we_write"
 )
 
@@ -93,7 +97,109 @@ skip() {
     skipped+=("$1 — $2")
 }
 
+# The tests a tier must actually have run, from ci/test-floors.txt.
+#
+# "A gate that could not run is a failure" covers the gate that declined to start. It does
+# not cover the one that started, selected nothing, and exited zero — which is what a PATH
+# missing the directory an oracle installs into produces, and it prints as a pass. A floor
+# is the difference between a tier that was invited and a tier that ran.
+#
+# The numbers are raised deliberately, the way the API snapshot is blessed: one that moves
+# in a diff is read beside the change that moved it, and one that falls is the finding.
+test_floor() {
+    awk -F'|' -v k="$1" '
+        /^[^#]/ && $1 == k { print $2 + 0; found = 1 }
+        END { exit !found }
+    ' "$root/ci/test-floors.txt"
+}
+
+# Run a test tier, and hold it to its floor as well as to its exit status.
+gate_tests() {
+    local label="$1" key="$2"; shift 2
+    local floor
+    if ! floor="$(test_floor "$key")"; then
+        printf '  %-44s FAILED  (no floor recorded for "%s")\n' "$label" "$key"
+        failed+=("$label")
+        return
+    fi
+    printf '  %-44s ' "$label"
+    local log; log="$(mktemp)"
+    if ! "$@" >"$log" 2>&1; then
+        printf 'FAILED\n'
+        failed+=("$label")
+        sed 's/^/      | /' "$log" | tail -40
+        rm -f "$log"
+        return
+    fi
+    # Every summary line the run printed, counting what passed and what failed rather than
+    # what was filtered out: the question is how many tests this tier executed.
+    local ran
+    ran="$(awk '/^test result:/ { n += $4 + $6 } END { print n + 0 }' "$log")"
+    rm -f "$log"
+    if [ "$ran" -lt "$floor" ]; then
+        printf 'FAILED  (ran %s tests, floor is %s)\n' "$ran" "$floor"
+        failed+=("$label — ran $ran tests against a floor of $floor")
+        return
+    fi
+    printf 'ok  (%s tests)\n' "$ran"
+    passed+=("$label")
+}
+
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# The foreign implementations the suite treats as ground truth, and how each says which
+# version it is. There is no flag the three suites agree on — `e2fsprogs` answers `-V`,
+# only `fatlabel` has `--version` among the dosfstools three, `mkfs.fat` ends its help
+# with its banner, `fsck.fat` prints one only once it starts a check and so is pointed
+# at a device it fails on, and every mtools name is one binary answering alike. Each
+# entry is `name|marker|args`, where the marker is what the banner must contain.
+HOST_TOOLS=(
+    "e2fsck|e2fsck $E2FSPROGS |-V"
+    "mke2fs|mke2fs $E2FSPROGS |-V"
+    "dumpe2fs|dumpe2fs $E2FSPROGS |-V"
+    "resize2fs|resize2fs $E2FSPROGS |-V"
+    "debugfs|debugfs $E2FSPROGS |-V"
+    "mkfs.fat|mkfs.fat $DOSFSTOOLS (|--help"
+    "fsck.fat|fsck.fat $DOSFSTOOLS (|-n /dev/null"
+    "fatlabel|fatlabel $DOSFSTOOLS (|--version"
+    "mcopy|mcopy (GNU mtools) $MTOOLS|--version"
+    "mdir|mdir (GNU mtools) $MTOOLS|--version"
+    "minfo|minfo (GNU mtools) $MTOOLS|--version"
+    "mtype|mtype (GNU mtools) $MTOOLS|--version"
+)
+
+# Why the host-tool suite cannot run, or nothing and success when it can. The suite
+# itself asserts rather than skips under FERROSYS_REQUIRE_HOST_TOOLS, so running it
+# without one of these does not report a gap — it reports a failure that reads like a
+# broken gate. This is what turns that into the honest answer.
+missing_host_tool() {
+    local entry name marker args banner
+    for entry in "${HOST_TOOLS[@]}"; do
+        name="${entry%%|*}"
+        marker="${entry#*|}" ; marker="${marker%%|*}"
+        args="${entry##*|}"
+        if ! have "$name"; then
+            echo "$name not on PATH"
+            return 1
+        fi
+        # Captured rather than piped into `grep`, because `pipefail` is on and two of
+        # these probes exit non-zero by design: the pipeline's status would be the
+        # tool's, not the match's, and every such tool would read as a mismatch.
+        # Unquoted on purpose: `fsck.fat`'s probe is two arguments.
+        # shellcheck disable=SC2086
+        banner="$("$name" $args 2>&1 || true)"
+        case "$banner" in
+            *"$marker"*) ;;
+            *) echo "the $name on PATH does not report the version the gates pin"
+               return 1 ;;
+        esac
+    done
+    if ! have getfattr; then
+        echo "getfattr not on PATH — install attr"
+        return 1
+    fi
+    return 0
+}
 
 # Every `run:` step in the workflow, and how this script covers it. A step named there
 # and absent here, or named here and gone from there, fails: the mirror rots silently
@@ -114,11 +220,16 @@ NOT_APPLICABLE = {
     "Install attr for the getfattr xattr gate": "getfattr is required on PATH",
     "Build e2fsprogs, put it on PATH, pin its config, assert the version":
         "the version already on PATH is asserted rather than built",
+    "Build dosfstools and mtools, put them on PATH, assert the versions":
+        "the versions already on PATH are asserted rather than built",
     "Build crate": "the book gate builds what it links against",
 }
 MIRRORED = {
     "Format", "Clippy", "Test",
+    "Library lints clean in every configuration it offers",
     "Base library builds and passes its tests without the archive source",
+    "Library builds and passes its tests with FAT as the only family",
+    "Library builds and passes its tests with a family and no ext",
     "Fuzz targets still type-check",
     "Fuzz seeds are still readable images",
     "Fuzz archive seed still parses, and reproduces from its generator",
@@ -200,8 +311,10 @@ if [ "$list_only" = 1 ]; then
     cat <<EOF
 gates preflight runs, mirroring .github/workflows/ci.yml:
 
-  check       fmt, clippy, the workspace suite, the base library without the archive
-              source, three fuzz gates, and rustdoc over private items
+  check       fmt, clippy, the library linted in every configuration it offers, the
+              workspace suite, the base library without the archive source, the library
+              with FAT as its only family, three fuzz gates, and rustdoc over private
+              items
   deps        cargo deny over this workspace and the fuzz package: advisories,
               licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
@@ -229,28 +342,34 @@ export RUSTFLAGS="-D warnings"
 
 gate "fmt" cargo fmt --all --check
 gate "clippy" cargo clippy --all-targets --all-features -- -D warnings
+gate "lib lints clean in every configuration" ci/lint-features.sh
 
-if ! have e2fsck; then
-    skip "test (workspace, host tools)" "e2fsprogs not on PATH"
-elif ! e2fsck -V 2>&1 | grep -q "$E2FSPROGS"; then
-    skip "test (workspace, host tools)" "e2fsprogs on PATH is not $E2FSPROGS"
-elif ! have getfattr; then
-    skip "test (workspace, host tools)" "getfattr not on PATH — install attr"
+if ! host_tools_reason="$(missing_host_tool)"; then
+    skip "test (workspace, host tools)" "$host_tools_reason"
 else
-    gate "test (workspace, host tools)" \
+    gate_tests "test (workspace, host tools)" workspace \
         cargo test --workspace --all-features --profile ci --no-fail-fast
 fi
 
-gate "base lib without the archive source" cargo test -p ferrosys --no-default-features --lib
+gate_tests "base lib without the archive source" base-lib \
+    cargo test -p ferrosys --no-default-features --lib
+gate_tests "lib with FAT as the only family" fat-only \
+    cargo test -p ferrosys --no-default-features --features fat --lib
+gate_tests "lib with a family, a source, and a sink, and no ext" fat-dir \
+    cargo test -p ferrosys --no-default-features --features fat,dir --lib
 gate "fuzz targets type-check" \
     cargo check --manifest-path crates/ferrosys/fuzz/Cargo.toml --all-targets
 
 # `inspect` exits 4 on a readable-but-unsound image, which this accepts; anything else is
 # a seed that fuzzes nothing.
+#
+# `inspect` renders ext images, so the `reader_*` directories go through it. Every seed of
+# every family, these included, is also opened and walked in process by `tests/seam.rs`,
+# which needs no command and knows no family.
 gate "fuzz seeds are readable images" bash -c '
     set -e
     cargo build -q -p ferrosys-cli
-    for seed in crates/ferrosys/fuzz/seeds/*/*.img; do
+    for seed in crates/ferrosys/fuzz/seeds/reader_*/*.img; do
         status=0
         "$CARGO_TARGET_DIR/debug/ferrosys" inspect "$seed" >/dev/null 2>&1 || status=$?
         case $status in
@@ -343,8 +462,11 @@ else
     rm -f "$book_target"/debug/deps/libferrosys-*.rlib \
           "$book_target"/debug/deps/libferrosys-*.rmeta
 
+    # Every family the guide has examples for is named here: a family the crate it links
+    # against does not carry makes its examples fail to compile, and marking them
+    # uncompiled instead would let them rot.
     gate "book: build the crate it links against" \
-        env CARGO_TARGET_DIR="$book_target" cargo build
+        env CARGO_TARGET_DIR="$book_target" cargo build --features fat
     gate "book: mdbook build" mdbook build book
     gate "book: guide examples against the crate" \
         mdbook test book -L "$book_target/debug/deps"
@@ -354,10 +476,11 @@ echo
 echo "host policy (a filesystem that records access times)"
 if ! can_unshare; then
     skip "relatime run" "no private mount namespace available here"
-elif ! have e2fsck; then
-    skip "relatime run" "e2fsprogs not on PATH"
+elif ! relatime_reason="$(missing_host_tool)"; then
+    skip "relatime run" "$relatime_reason"
 else
-    gate "relatime run (2 namespace artifacts skipped)" host_policy_run
+    gate_tests "relatime run (${#NAMESPACE_ARTIFACTS[@]} namespace artifact skipped)" \
+        relatime host_policy_run
 fi
 
 echo
