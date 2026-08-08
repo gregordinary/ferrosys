@@ -1,8 +1,9 @@
 # The `ferrosys` command line
 
 The `ferrosys-cli` crate ships one binary, `ferrosys`, which writes ext2, ext3, and ext4
-filesystems, reports on them, reads their contents back out, and changes what they are
-known by. It is the library's surface for anyone not writing Rust.
+filesystems and FAT12, FAT16, and FAT32 volumes, reports on them, reads their contents back
+out, and changes what an ext filesystem is known by. It is the library's surface for anyone
+not writing Rust.
 
 ```console
 $ ferrosys format  --size SIZE --uuid HEX --time SECS [options] OUT.img
@@ -11,6 +12,10 @@ $ ferrosys extract [options] IMAGE (--to-tar F|- | --to-dir DIR | --cat PATH | -
 $ ferrosys detect  [options] IMAGE
 $ ferrosys identity [options] IMAGE
 ```
+
+The library is modular — a program that wants one filesystem compiles one — and this binary
+is the deliberate exception: it carries every family, so `detect` and `inspect` identify an
+image whatever it turns out to hold. `format -t` is where you say which one to write.
 
 Install it from the workspace:
 
@@ -24,9 +29,10 @@ Everything an image's bytes depend on is an input you supply, so two runs given 
 inputs write the same image, byte for byte. Reproducibility is the only mode the tool
 has; it is always on.
 
-That has one consequence worth stating plainly: `--uuid` is required and `--time` is
-required. The tool takes its UUID as an input, so pipe one in from a tool that mints them
-— of whatever version you like — and pass the time explicitly or set `SOURCE_DATE_EPOCH`:
+That has one consequence worth stating plainly: an identity is required and `--time` is
+required. Each family names its own identity — `--uuid` for ext, `--volume-id` for a FAT —
+and the tool mints neither, so pipe one in from a tool that does and pass the time
+explicitly or set `SOURCE_DATE_EPOCH`:
 
 ```console
 $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 rootfs.img
@@ -51,7 +57,7 @@ filesystem could be formed at all:
 | ---- | -------------------------------------------------------------------- |
 | `0`  | The command did what it was asked, and any filesystem it read is sound. |
 | `4`  | A filesystem was read, and it is bad.                                  |
-| `8`  | The command could not be carried out: the host got in the way, or the bytes are not an ext filesystem at all. |
+| `8`  | The command could not be carried out: the host got in the way, the bytes are not a filesystem at all, or an option named a concept the image's family does not have. |
 | `16` | The command line could not be understood.                              |
 
 ## `format`
@@ -75,7 +81,9 @@ the rules for a merge.
 each member is read as its file is placed, so peak memory is the largest single member,
 not the archive. `--from-tar -` reads the standard input, which cannot be sought back over
 and so is held whole — that is the one case where a large archive needs the memory to
-match. A compressed archive is named as such rather than reported as malformed tar:
+match, and the one that carries a size cap. A stream past four gibibytes is refused, and
+naming the archive as a file is both the way past it and the cheaper route. A compressed
+archive is named as such rather than reported as malformed tar:
 
 ```console
 $ gunzip -c rootfs.tar.gz | ferrosys format ... --from-tar - rootfs.img
@@ -111,11 +119,14 @@ $ ferrosys format --size auto --from-dir staging \
 ```
 
 It finds the smallest filesystem that holds the contents by planning candidate sizes and
-placing the contents into each — the same placement a format performs, over a destination
-that keeps nothing — so the size it settles on is one that formats, and one block less does
-not. Nothing is written while it searches, so a size that cannot be found leaves the
-destination untouched like any other planning failure. Pair it with `--dry-run` to learn
-the number without writing anything at all.
+placing the contents into each — so the size it settles on is one that formats, and one
+allocation unit less does not. Nothing is written while it searches, so a size that cannot be
+found leaves the destination untouched like any other planning failure. Pair it with
+`--dry-run` to learn the number without writing anything at all.
+
+It works for every family, and each measures itself in its own unit: an ext filesystem is
+searched a block at a time and a FAT volume a sector at a time, because a FAT volume's
+cluster size is derived from its size rather than given.
 
 The smallest filesystem holding something is one with nothing left in it, which is right
 for an image that will only be read and useless for one that will be written to.
@@ -128,11 +139,16 @@ $ ferrosys format --size auto --slack 64M --from-dir staging \
       --uuid "$(uuidgen)" --time 1700000000 rootfs.img
 ```
 
-The share is of the finished filesystem, so `--slack 20%` is what `df` reports as 80%
-used; the super-user reservation (`--reserved-percent`) is separate accounting over the
-same blocks, so an unprivileged writer sees 15% of it at the 5% default. `--slack` belongs
-to `--size auto` and is a usage error over a size that was named outright, which has no
-room to find.
+The share is of the finished filesystem, measured in whatever its own free counter counts —
+blocks for ext, clusters for FAT — so `--slack 20%` is what `df` reports as 80% used. On ext
+the super-user reservation (`--reserved-percent`) is separate accounting over the same
+blocks, so an unprivileged writer sees 15% of it at the 5% default. `--slack` belongs to
+`--size auto` and is a usage error over a size that was named outright, which has no room to
+find.
+
+On FAT a share can leave a volume unchanged where a byte figure does not: FAT32 needs 65525
+clusters whatever it holds, so a small tree already lands on a volume that is almost entirely
+free and only `--slack 200M` and the like ask for more than the floor already gives.
 
 On a small image the floor is often the journal rather than the contents — a log costs
 about 4 MiB whatever goes in the filesystem — so `--size auto -t ext2` is what fits a
@@ -154,13 +170,20 @@ at all; `--atomic` covers the other end, writing to a sibling temporary file and
 it over the destination once the image is whole, so a failure part-way through the write is
 not visible either. Note what `--atomic` costs: the destination becomes a *new* file, so
 its mode comes from this process's umask and any ownership, ACLs, or extra hard links the
-old file carried do not survive the rename. Without it the image is written in place.
+old file carried do not survive the rename. Without it the image is written in place. The
+two do not combine: `--dry-run` opens no destination, so there is nothing left for `--atomic`
+to decide, and a flag that decides nothing reads as one that worked.
 
-### Choosing a base filesystem
+### Choosing a filesystem
 
-`-t` (or `--type`) selects which of the ext family to write — `ext2`, `ext3`, or `ext4`
-(the default). It seeds the whole feature set from that profile's baseline; the `-O` list
-and the geometry options layer on top, exactly as they do for `mke2fs -t`:
+`-t` (or `--type`) selects which filesystem to write: `ext2`, `ext3`, `ext4` (the default),
+`fat12`, `fat16`, or `fat32`. It names the family as well as the variant, and each family
+takes its own identity and its own options — an option belonging to the other one is refused
+by name rather than passed over, so a line that named both has said two things that cannot
+both be honoured and is told so.
+
+Within the ext family it seeds the whole feature set from that profile's baseline; the `-O`
+list and the geometry options layer on top, exactly as they do for `mke2fs -t`:
 
 ```console
 $ ferrosys format --size 256M --uuid "$(uuidgen)" --time 1700000000 -t ext2 rootfs.img
@@ -238,7 +261,7 @@ reservation is reproducible to the block.
 
 ```console
 $ ferrosys format --size 64M --uuid "$(uuidgen)" --time 1 --json fs.img
-{"schema":1,"uuid":"f0e17055-...","volume_name":"","created":1,"profile":"ext4",...}
+{"schema":2,"uuid":"f0e17055-...","volume_name":"","created":1,"profile":"ext4",...}
 ```
 
 Every JSON document this tool writes opens with the same `"schema"` field: the shape is a
@@ -247,6 +270,82 @@ The receipt also carries `free_blocks` and `free_inodes`, read back from the fil
 that was just written — a format's overhead is otherwise invisible, and on a small image
 it is most of it. On a `--dry-run`, where no filesystem was written to have them, both are
 `null` and `"written"` is `false`.
+
+### Writing a FAT volume
+
+An EFI System Partition is FAT and has no alternative, so it is the case this family exists
+for:
+
+```console
+$ ferrosys format -t fat32 --size 512M --volume-id "$(od -An -N4 -tx1 /dev/urandom | tr -d ' ')" \
+      --time 1700000000 --label ESP --owner 0:0 \
+      --accept-loss change-time,time-precision --from-dir esp-staging esp.img
+```
+
+`--volume-id` is this family's identity: a 32-bit serial number, taken as eight hex digits
+in either the bare form or the dashed one every tool prints (`1A2B-3C4D`). It is a separate
+option from `--uuid` rather than four bytes cut from one, because a value silently narrowed
+is a value you did not choose.
+
+The type is what the geometry must *derive to*, not what gets written down. Nothing in a
+FAT volume records which of the three it is — every driver counts the clusters and compares
+against two thresholds — so `-t fat32` on a size that cannot reach a FAT32 cluster count is
+refused rather than written as a FAT16 wearing a FAT32 label.
+
+`--label` goes through this family's own rules: eleven bytes, upper-cased, in the OEM
+character set. A label the field cannot hold is refused rather than truncated, as on the ext
+side. So is `--time`: a FAT directory entry represents 1980-01-01 through
+2107-12-31 at a two-second granularity, and an instant outside that is refused rather than
+written as a plausible-looking one inside it.
+
+#### What a FAT volume cannot carry, and why the build stops
+
+A FAT directory entry holds a name, one attribute byte, three coarse timestamps, a first
+cluster, and a length. There is no field for an owner, a group, permission bits, a symbolic
+link, a second name for a file, a device number, or an extended attribute. So a build that
+would drop any of those **fails and names the entry and the property**, and `--accept-loss`
+is how you say which may go:
+
+```console
+$ ferrosys format -t fat32 --size 512M --volume-id 1A2B3C4D --time 1 \
+      --from-dir staging esp.img
+ferrosys: /EFI: a FAT volume cannot carry the ownership of this entry
+```
+
+Refusing is the default because the alternative is worse than inconvenient. A root
+filesystem written to FAT with silent mode loss is a security bug wearing a convenience
+feature's clothes, and no report after the fact makes that acceptable.
+
+A property counts as lost when the *value* does not survive — not when the format has no
+field for it. That distinction is what keeps the acknowledgement meaningful. A read of a FAT
+image fills an owner and a mode in from `--assume-owner` and `--assume-modes`, which default
+to root and `0644`/`0755`, so a root-owned tree of conventionally moded files goes in and
+comes back unchanged and loses nothing by them.
+
+Two losses a tree walked off a host always takes:
+
+- `change-time`, because the format records no change time on anything.
+- `time-precision`, because it stores a write time to two seconds and an access time to the
+  day.
+
+So the line above is the realistic minimum for `--from-dir`. Properties are named one by
+one on purpose: a caller who accepted losing permission bits must not thereby have accepted
+every symbolic link in the tree disappearing, which is the surprise the option exists to
+prevent. `--accept-loss all` is the deliberate exception, and it covers a property a later
+version names as well.
+
+Set `--assume-owner` and `--assume-modes` to whatever the extraction will use, so the two
+ends of a round trip agree about what survived. What the build did cost is the last thing
+the summary prints, in the same words `--accept-loss` reads:
+
+```console
+DIRECTION  PROPERTY             ENTRIES
+dropped    time-precision       4
+dropped    change-time          4
+```
+
+A build that lost nothing says `nothing dropped or synthesized` rather than printing an
+empty table, so silence never has to be interpreted.
 
 ### A small partition
 
@@ -270,21 +369,67 @@ was reserved and what is left free, so the cost of any combination is one comman
 
 ```console
 $ ferrosys inspect rootfs.img
+Filesystem family:          ext
+Filesystem variant:         ext4
+Filesystem size:            67108864
+Allocation unit:            4096
+Filesystem identifier:      f0e17055-0000-4000-8000-000000000000
+
 Filesystem UUID:            f0e17055-0000-4000-8000-000000000000
 Filesystem magic number:    0xEF53
 Filesystem features:        has_journal ext_attr resize_inode dir_index orphan_file ...
-Filesystem profile:         ext4
 Inode count:                16384
 Block count:                16384
 ...
 
-no anomalies
+no findings
 ```
+
+Every report opens with the same five lines, whatever the image holds: which family, which
+variant of it, how large it is, what it allocates in, and what identifies it. Everything
+after them is that family's own — an ext image describes itself in superblock fields and a
+FAT volume in its parameter block — so a tool that only wants to know what an image is and
+whether it is sound reads the head and stops:
+
+```console
+$ ferrosys inspect esp.img
+Filesystem family:          fat
+Filesystem variant:         fat32
+Filesystem size:            67108864
+Allocation unit:            512
+Filesystem identifier:      1A2B-3C4D
+
+Volume label:               ESP
+Volume serial number:       1A2B-3C4D
+Type string:                FAT32
+OEM name:                   ferrosys
+Bytes per cluster:          512
+Allocation tables:          2
+Sectors per table:          1009
+Clusters:                   129022
+...
+
+no findings
+```
+
+The FAT body reports the volume's own claim about its type beside the count the head's
+variant was derived from. No driver reads that string — the type follows from the cluster
+count and from nothing else — so a volume whose string disagrees with its geometry is read
+by its geometry, and this is the one place the disagreement is visible.
+
+An option belonging to one family is refused for another rather than passed over.
+`--groups` reports the block-group descriptors of an ext filesystem; a FAT volume has one
+flat cluster heap, so asking for them there is a question with no answer and is told so. A
+report that quietly omitted the section would read as a volume with no groups in it, which
+is a different claim.
 
 The whole image is scanned by default: every group descriptor, bitmap, inode, extent
 tree, and directory block, with each metadata checksum recomputed. That is what makes a
 bad image *bad* (exit 4) rather than merely described. `--quick` reports the superblock
-alone and reaches no verdict.
+alone and reaches no verdict — so it cannot be combined with `--fail-on`, which is a verdict
+on the scan `--quick` skips. The two together would be a CI gate that looks armed and exits
+0 on a filesystem whose bytes are destroyed, so they are refused rather than accepted with
+one of them inert.
 
 `--fail-on` moves the line at which the scan's findings make the filesystem bad. It
 defaults to `integrity`: a filesystem is bad when its own bytes contradict each other — a
@@ -292,32 +437,60 @@ checksum that does not match what it covers — or when a structure the reader m
 cannot be.
 
 The threshold below it, `conformance`, means something else, and is worth knowing about
-before you reach for it: it faults a filesystem that is *valid ext4 but not the form this
-tool writes*. A filesystem `mke2fs` made is exactly that, and it is not thereby broken —
-so `conformance` is a check on this tool's own output, an opt-in self-check, and not what
-`inspect` does by default. `--fail-on structural` faults only an image whose structures
+before you reach for it: it faults a filesystem that is *valid for its format but not the
+form this tool writes*. A filesystem `mke2fs` or `mkfs.fat` made is exactly that, and it is
+not thereby broken — so `conformance` is a check on this tool's own output, an opt-in
+self-check, and not what `inspect` does by default.
+
+The four severities mean the same thing for every family. The categories a finding falls
+into do not, and are each family's own: a superblock and a boot sector are not one subsystem
+under two names. `--fail-on structural` faults only an image whose structures
 cannot be followed at all; `--fail-on never` reports every finding and exits 0 regardless,
 which is what to use when you want the report and not the judgement.
+
+`--groups` is bounded the same way and for the same reason. A superblock's group count is
+its own claim, and a crafted one reaches four billion; the listing stops at a million groups
+and says how many of the claimed total it showed, rather than growing to a count no image
+behind it could hold. The JSON report carries the same fact as `"groups_complete"`.
 
 A scan reads an image it has no reason to trust, so what it collects is bounded: it stops
 at ten thousand findings and says so, in the table, in the `"truncated"` field of the JSON
 report, and as a SARIF notification. A truncated report is a floor — the image holds at
 least these findings, and the rest of it went unread — so the verdict it reaches reads
-"at least *n* anomalies". Ten thousand findings is far past what a filesystem needs to be
+"at least *n* findings". Ten thousand findings is far past what a filesystem needs to be
 called bad.
 
 `--groups` adds every block group's descriptor. `--json` reports the same data as a JSON
-document carrying a `"schema"` field, the feature names split by word, the ext2/ext3/ext4
-profile those words classify to, the unknown feature bits (reported whether or not there
+document, shaped as the same envelope the table is — a head that means the same thing
+whatever the image holds, then a body named for the family:
+
+```console
+$ ferrosys inspect --json rootfs.img
+{"schema":2,"family":"ext","variant":"ext4","size":67108864,"allocation_unit":4096,
+ "identifier":"f0e17055-...","findings":{"schema":2,"clean":true,"count":0,
+ "truncated":false,"findings":[]},"ext":{"superblock":{...},"features":{...}}}
+```
+
+The head is five fields and the findings. The body under `"ext"` carries the superblock,
+the feature names split by word, the unknown feature bits (reported whether or not there
 are any, so an image carrying a feature the tool does not know can never read as one it
-understood), and the scan's findings.
+understood), and with `--groups` every group descriptor. A consumer that reads only the
+head never learns what a block group is; one that wants ext4's geometry reads the body. A
+later filesystem family adds a body beside `"ext"` rather than reshaping anything above it.
+
+Every finding carries its severity, the family that found it, that family's own word for
+the subsystem, the byte offset when there is one, and that family's own coordinates —
+`{"group":3,"inode":12,"block":40}` for an ext image, and whatever addresses a finding in
+some other format for one of those.
 
 `--sarif` reports the scan's findings — and those alone, not the superblock description —
 as a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log, so a static-analysis or
-forensic pipeline can consume them as it would any other tool's. Each anomaly becomes one
+forensic pipeline can consume them as it would any other tool's. Each finding becomes one
 result: its severity maps to the SARIF level (`structural` and `integrity` are `error`,
-`conformance` is `warning`, `cosmetic` is `note`), and the exact severity together with
-the block, group, or inode it sits at travels in the result's `properties`. Because it
+`conformance` is `warning`, `cosmetic` is `note`), and the exact severity together with the
+family, the subsystem, the byte offset, and the coordinates it sits at travels in the
+result's `properties`. A rule is named `family/subsystem`, so two formats that both call
+something a `directory` do not merge into one rule. Because it
 reports scan findings, `--sarif` runs the scan and so cannot be combined with `--quick`,
 and it selects a different output format from `--json`:
 
@@ -386,12 +559,13 @@ POSIX ACLs. Two things no host lets a caller set, so the tree carries the time i
 written for them alone: an inode's **change time** and its **creation time**. Access and
 modification times are set exactly, to the nanosecond.
 
-Three parts of a tree need privileges — a device node needs `CAP_MKNOD`, setting a
-recorded owner needs `CAP_CHOWN`, and an extended attribute in the `security` or
-`trusted` namespace is the host's to write — so an unprivileged run stops at the first of
-them and names it. That is the right answer for a tree meant to be faithful: a rootfs
-quietly missing `/dev/null` is a rootfs that boots differently, and one whose `ping` lost
-its `security.capability` is one that no longer runs unprivileged. `--skip-privileged` is
+Parts of a tree need privileges — a device node needs `CAP_MKNOD`, setting a recorded
+owner needs `CAP_CHOWN`, an extended attribute in the `security` or `trusted` namespace
+is the host's to write, and a destination filesystem with no notion of a second name for
+a node refuses a hard link — so an unprivileged run stops at the first of them and names
+it. That is the right answer for a tree meant to be faithful: a rootfs quietly missing
+`/dev/null` is a rootfs that boots differently, and one whose `ping` lost its
+`security.capability` is one that no longer runs unprivileged. `--skip-privileged` is
 the opt-in for a run that wants what it can have, and what it left out is named on the
 standard error rather than assumed:
 
@@ -412,18 +586,72 @@ A file's contents are written as the filesystem reports them, and a hole reads a
 so a sparse file lands in the destination fully allocated. A tree holding one occupies
 more space on the host than it does in the image.
 
+A directory's mode is applied once its contents are in place, so one the image records as
+read-only still receives them. One recorded *without owner-search permission* waits until
+the whole run is done: a second name for a hard-linked file is written by traversing to the
+first, and a directory that cannot be searched cannot be traversed — so applying such a mode
+early is what would make an ordinary user's extraction of an ordinary image fail part-way.
+
 The image is untrusted input, and a name in it is not a path to resolve. Every directory
 is created and then *opened*, and everything beneath it is created through that open
 handle by its single-component name — so a name holding a separator, a `..`, or a NUL is
-refused rather than followed, and nothing lands outside the destination. No path through
-the destination tree is walked a second time, so nothing swapped into it while a run is in
-flight can redirect a write. Symbolic links are written exactly as the image records them,
-absolute targets and all, which is safe precisely because nothing here ever follows one.
+refused rather than followed, and nothing lands outside the destination. The reader refuses
+such a name too, where it resolves it, so both `--to-dir` and `--to-tar` are safe against
+one and neither depends on the other's check. No path through the destination tree is
+walked a second time, so nothing swapped into it while a run is in flight can redirect a
+write. Symbolic links are written exactly as the image records them, absolute targets and
+all, which is safe precisely because nothing here ever follows one.
 
 There is no `--atomic` for a tree: no rename publishes a whole tree at once, and inventing
 one would promise something the run cannot do. The empty destination is what stands in its
 place — a failure part-way leaves a partial tree in a directory that held nothing, rather
 than mixed into one that did.
+
+### How strictly the image is held to its format
+
+Extraction is the one command whose output is the image's contents, so what it makes of a
+filesystem it does not fully understand matters more here than anywhere else. An image
+carrying a feature this reader does not follow can be interpreted best-effort, and the
+result looks complete without being it.
+
+So the strict read is tried first, always. `--strict` makes its refusal the answer. Without
+it, the read falls back to a lenient one — which is what makes a damaged or unfamiliar image
+recoverable at all — and names on the standard error the deviation it decided to interpret
+through:
+
+```console
+$ ferrosys extract odd.img --to-dir unpacked
+ferrosys: reading odd.img leniently: unsupported incompat features: 0x400
+ferrosys: what it holds is interpreted best-effort; --strict refuses instead
+```
+
+A run that says nothing read an image it could hold to its format entirely.
+
+### What a filesystem does not record
+
+`--assume-owner U:G` and `--assume-modes F:D` say what to record where the filesystem being
+read has no field for it. They change nothing about an ext image: ext records an owner, a
+mode, and three times on every entry, so what comes out is what was stored.
+
+They exist because a FAT volume does not. A format with no notion of an owner still has
+to become host files with *some* owner, and something has to decide which — every driver
+that mounts such a format has `uid=`, `gid=`, `fmask=`, and `dmask=` mount options for
+exactly this reason. Here the same decision is a flag, and its default is the conservative
+one: owned by root, `0644` for a file and `0755` for a directory, never anything more
+permissive. A tree that landed world-writable because nothing was named would be a security
+bug made out of a format limitation.
+
+Whatever was assumed is reported on the standard error beside what the host refused, so an
+extraction says which parts of the tree came from the image and which were policy:
+
+```console
+Assumed:                ownership (1282 entries)
+Assumed:                permissions (1282 entries)
+Assumed:                change-time (1282 entries)
+```
+
+The properties are named in the same words `format --accept-loss` reads, so a property an
+extraction reports can be typed straight back into the build that would preserve it.
 
 **One file's bytes**, and nothing else on the standard output:
 
@@ -449,6 +677,14 @@ lrwxrwxrwx   1      0      0         17 2023-11-14T22:13:20Z /etc/mtab -> /proc/
 number — which is what tells one file with two names from two files with the same
 contents — its extended attributes, and any POSIX ACL decoded into readable entries.
 
+A field the family has no notion of is **absent** rather than null or zero. A FAT entry
+carries no `inode` and no `links`, because the format has neither inode numbers nor a second
+name for a node, and a one there would be this tool answering a question the format never
+asked. What it does carry is a `synthesized` list naming the properties the report filled in
+rather than read — always present, empty or not, so "the image recorded everything" and
+"this document did not say" stay distinguishable. In the table the link-count column reads
+`-` for such a family, which keeps the columns where a reader expects them.
+
 **One path's metadata**, which is the answer to "what is `/usr/bin/ping`, exactly" without
 listing a hundred thousand other lines:
 
@@ -469,16 +705,47 @@ Created:                2023-11-14T22:13:20Z (0 ns)
 Xattr security.capability: \x01\x00\x00\x02\x00 \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
 ```
 
-It reports the type, the mode both ways, ownership, link count, size, all four times, a
-device node's numbers, a symlink's target, and every extended attribute — with a stored
-POSIX ACL decoded rather than shown as bytes. A path naming a symlink describes the link
-itself, not its target. `--json` reports the same as a document.
+It reports the type, the mode both ways, ownership, size, times, and — where the family
+records them — the inode number, the link count, a device node's numbers, a symlink's
+target, and every extended attribute, with a stored POSIX ACL decoded rather than shown as
+bytes. A path naming a symlink describes the link itself, not its target. `--json` reports
+the same as a document.
+
+On a family that records fewer of them the report is shorter, and it says what it assumed:
+
+```console
+$ ferrosys extract esp.img --stat /EFI/BOOT/BOOTX64.EFI
+Path:                   /EFI/BOOT/BOOTX64.EFI
+Type:                   file
+Mode:                   0644 (-rw-r--r--)
+Owner:                  0:0
+Size:                   76672
+Accessed:               2023-11-14T00:00:00Z (0 ns)
+Modified:               2023-11-14T22:13:20Z (0 ns)
+Changed:                2023-11-14T22:13:20Z (0 ns)
+Created:                2023-11-14T22:13:20Z (640000000 ns)
+Assumed:                ownership, permissions, change-time
+```
+
+Three things to read out of that. There is no `Inode:` and no `Links:` line, because the
+format has neither. The access time is midnight, because FAT records a date and no time of
+day for it. And the change time equals the modification time, because the format records no
+change time at all and the closest thing it has stands in — which is what the `Assumed:`
+line is there to say.
 
 An attribute's value is bytes, and it is rendered the way a name is: printable characters
 as themselves, everything else as a `\xNN` escape, with the backslash escaping itself so
-the rendering names exactly one value. To read the bytes rather than look at them, take
-`--json`: a value that is not text carries a `value_hex` field beside it holding the bytes
-exactly, and the field's presence is itself the signal that the value is not text.
+the rendering names exactly one value. A bidirectional formatting character is escaped too,
+as `\u{202e}` — it is not a control character, and left alone it reorders the rest of the
+line, so `photo\u{202e}gnp.exe` would display as `photo exe.png`. To read the bytes rather
+than look at them, take `--json`: a value that is not text carries a `value_hex` field
+beside it holding the bytes exactly, and the field's presence is itself the signal that the
+value is not text.
+
+A JSON document escapes both classes as well, as the `\uXXXX` escape the grammar defines —
+so a parser reads back the character the name held, and nothing between the document and
+the parser acts on it. The same rule covers every name a document carries: a path, a
+symlink target, an attribute name, a volume label.
 
 In a JSON document the `mode` field is the permission bits as a **decimal** number, since
 JSON has no octal literal — `509` is `0o775` — and `mode_octal` beside it carries the usual
@@ -487,15 +754,28 @@ spelling.
 ### Reading an image you do not trust
 
 A file's size is the image's own claim about it, and a sparse file legitimately dwarfs the
-filesystem holding it, so nothing structural bounds what `--cat` would allocate.
-`--max-file-bytes N` is the bound to set on an image that has not earned trust:
+filesystem holding it, so nothing structural bounds what a read of one would write. An
+inode claiming sixteen tebibytes and mapping nothing costs an extraction sixteen tebibytes
+of zeros — from an image of a hundred kilobytes, since a hole reads back as zeros and
+occupies nothing.
+
+So `extract` caps it whether or not you ask. The default is **sixteen times the length of
+the filesystem being read**, which no ordinary file approaches and no crafted one survives.
+`--max-file-bytes N` names a different cap, for an image that holds a file legitimately
+sparser than that:
 
 ```console
 $ ferrosys extract suspect.img --cat /etc/passwd --max-file-bytes 64M
+$ ferrosys extract sparse.img --to-dir out --max-file-bytes 512G
 ```
 
+There is no spelling for "no cap", and none is needed: the cap is a size, so a run that
+means to read a file of some size names that size.
+
 Over the cap the read is an **error**, not a short file. A truncated file that looked
-whole would be the worse outcome: a pipeline would carry it forward and never know.
+whole would be the worse outcome: a pipeline would carry it forward and never know. Where
+the cap that stopped a read was the default rather than one you named, the command says so
+on the standard error and says what raises it.
 
 ## `detect`
 
@@ -504,13 +784,25 @@ $ ferrosys detect rootfs.img
 ext4
 $ ferrosys detect --offset 1M disk.img
 ext2
+$ ferrosys detect esp.img
+fat32
 ```
 
-One word on the standard output — `ext2`, `ext3`, `ext4`, or `unrecognized` — so it reads
-well in a shell test, and `--json` for a document. `--offset` points it at a partition
-inside a whole-disk image or a region a carver located. A fifth answer, `unknown`, is what
-a tool prints when the library classifies a family that build has no name for: something
-recognized the image, so `unrecognized` would be the wrong word for it.
+One word on the standard output — `ext2`, `ext3`, `ext4`, `fat12`, `fat16`, `fat32`, or
+`unrecognized` — so it reads well in a shell test, and `--json` for a document. It is the
+same word `format -t` takes, so what `detect` says about an image is what you would type to
+write another like it. `--offset` points it at a partition inside a whole-disk image or a
+region a carver located. One further answer, `unknown`, is what a tool prints when the
+library classifies a family that build has no name for: something recognized the image, so
+`unrecognized` would be the wrong word for it.
+
+The families are tried in order of how distinctive their magic is. ext, and any family with
+a multi-byte magic at a fixed offset, are classified first. FAT is classified last and never
+by its boot signature, because `0xAA55` at the end of sector 0 appears on every bootable
+sector ever written — including the master boot record of a disk whose *partition* holds an
+ext4 filesystem. A FAT volume is claimed only when the whole parameter block is internally
+consistent, which is what keeps a healthy filesystem of another family from being
+misidentified as this one.
 
 This asks what an image *is*, not whether it is sound: an image with a quirk `inspect`
 would refuse still classifies here. An unrecognized image exits 8, since there is no
@@ -523,7 +815,7 @@ $ ferrosys identity --uuid "$(uuidgen)" --label rootfs rootfs.img
 3 superblock copies written, journal superblock updated
 ```
 
-Changes what an existing filesystem is known by: its UUID, its volume label, or the seed
+Changes what an existing ext filesystem is known by: its UUID, its volume label, or the seed
 its metadata checksums derive from. It is the one command that writes to an image it did
 not create, and the only one whose destination already holds something worth keeping.
 

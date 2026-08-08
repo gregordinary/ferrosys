@@ -4,6 +4,14 @@
 over ordinary byte streams, in safe Rust (`#![forbid(unsafe_code)]`). It is self-contained,
 pure Rust and runs anywhere Rust runs.
 
+It also writes and reads FAT12, FAT16, and FAT32 volumes, behind the off-by-default `fat`
+feature — the family the EFI System Partition is, and the one the rest of this page's
+guarantees read differently against, since it has no field for a permission bit, an owner,
+or a link. Which of the three a volume is follows from its cluster count and from nothing
+else, so the geometry is the format's real contract; the output is byte-reproducible on
+the same terms as the ext writer's, and the reader is held to the same never-panic contract
+on any input. The rest of this page is the ext family.
+
 A formatter writes an image from a description of its contents — directories,
 files, symlinks, hard links, device / FIFO / socket nodes, extended attributes,
 and POSIX ACLs, each with its ownership, modes, and access / change / modification
