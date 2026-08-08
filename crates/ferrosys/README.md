@@ -36,9 +36,32 @@ let contents = reader.read_dir(&root).expect("read root");
 assert!(contents.iter().any(|e| e.name == b"etc"));
 ```
 
+The same tree vocabulary writes a FAT volume, under the `fat` feature — an EFI system
+partition here, and the type follows from the cluster count rather than being asked for:
+
+```rust
+# #[cfg(feature = "fat")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use ferrosys::fat::{FatType, FormatOptions, Timestamp, VolumeLabel, format};
+use ferrosys::{Metadata, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .directory(b"/EFI".to_vec(), Metadata::new(0o755, time))
+    .file(b"/EFI/BOOTX64.EFI".to_vec(), b"MZ", Metadata::new(0o644, time));
+
+let options = FormatOptions::new(0x1234_abcd, time).label(VolumeLabel::new("ESP")?);
+let image = format(source, 64 << 20, options)?;
+assert_eq!(image.layout().fat_type, FatType::Fat16);
+# Ok(())
+# }
+# #[cfg(not(feature = "fat"))]
+# fn main() {}
+```
+
 ## What it does
 
-The ext family, which is the fuller of the two:
+The ext family:
 
 - **Resize-safe geometry** — superblock and group-descriptor backups and reserved GDT
   blocks, sized by a grow reservation (none, a target size, or the format maximum), so
@@ -92,7 +115,7 @@ The ext family, which is the fuller of the two:
   costs a working set rather than its size.
 - **64-bit addressing** — block numbers beyond 2^32, for filesystems past 16 TiB.
 
-And the FAT family:
+The FAT family:
 
 - **The type is derived, never chosen** — nothing in a FAT image records which of the
   three it is, so every driver counts the clusters and compares against two thresholds.
