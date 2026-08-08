@@ -33,15 +33,21 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // The scan and every rendering, as `inspect` produces them: the report is rendered
-    // whatever the scan found. Each projection walks the anomaly list independently and
-    // escapes image-derived text into its own dialect, so all three are driven.
+    // whatever the scan found. The projection into the shared frame is driven too, since
+    // it is what converts image-derived block numbers into byte offsets and is therefore
+    // reachable by arithmetic a crafted image controls.
     let report = reader.scan();
-    let _ = report.to_json();
-    let _ = report.to_table();
+    let projected = report.to_report();
+    // Each rendering walks the findings independently and escapes image-derived text into
+    // its own dialect, so all three are driven.
+    let _ = projected.to_json();
+    let _ = projected.to_table();
     // Both `--sarif` shapes: with the artifact URI the CLI always supplies, and without,
     // which takes the branch that emits a result carrying no `locations` at all.
-    let _ = report.to_sarif(Some("fuzz.img"));
-    let _ = report.to_sarif(None);
+    let _ = projected.to_sarif(Some("fuzz.img"));
+    let _ = projected.to_sarif(None);
+    let _ = projected.worst_severity();
+    let _ = projected.findings();
     let _ = report.worst_severity();
     let _ = report.anomalies();
     let _ = reader.feature();

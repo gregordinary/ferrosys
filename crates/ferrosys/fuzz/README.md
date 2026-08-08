@@ -1,8 +1,8 @@
 # Fuzzing
 
 libFuzzer targets over the two surfaces that read input this crate did not produce: an
-image handed to the reader, and an archive handed to the tar source. Both assert the
-same contract — every malformed input is a returned error, never a crash, an
+image handed to a family's reader, and an archive handed to the tar source. Both assert
+the same contract — every malformed input is a returned error, never a crash, an
 out-of-range read, or an allocation sized from a number the input claims.
 
 ## Run
@@ -12,6 +12,7 @@ Requires a nightly toolchain and [`cargo-fuzz`](https://github.com/rust-fuzz/car
 ```sh
 cargo install cargo-fuzz
 cargo +nightly fuzz run reader_scan corpus/reader_scan seeds/reader_scan
+cargo +nightly fuzz run fat_reader corpus/fat_reader seeds/fat_reader
 cargo +nightly fuzz run archive_parse corpus/archive_parse seeds/archive_parse
 ```
 
@@ -21,9 +22,12 @@ corpus and adds every interesting input it discovers there. The committed seeds 
 second, so they are read as starting points and stay untouched — a run starts from real
 filesystems and real archives rather than from random bytes.
 
-Seeding matters most for the archive target. A tar header carries a checksum over its own
-bytes, so random input almost never frames a single member: without a real archive to
-mutate, a run would exercise the block reader and nothing past it.
+Seeding matters for every target and is close to load-bearing for two of them. A tar
+header carries a checksum over its own bytes, so random input almost never frames a single
+member. A FAT volume carries no magic at all and is recognized by its whole parameter block
+agreeing with itself — a sector size, a cluster size, a table size, and a sector count that
+are jointly possible — which random bytes reach about as often. Without a real filesystem or
+archive to mutate, either run would exercise the header check and nothing past it.
 
 ## Seeds
 
@@ -48,6 +52,18 @@ occupy once checked out.
   directory, a symlink, and a file large enough to reach the single-indirect block, so
   the classic direct/indirect block map and its walk are represented rather than only
   the extent path. This is the block-mapped family's counterpart to `ext4-populated`.
+- `fat12-populated`, `fat16-populated` — one tree at each of the two narrow entry widths.
+  FAT12 packs three bytes to two entries, so an entry may straddle a sector boundary and
+  the packing is a read path of its own. Each holds a name that is already its own short
+  name, a lower-case one, two that shorten alike so the second takes a numeric tail, a file
+  spanning several clusters, and one owning no cluster at all.
+- `fat12-4k-sectors` — the same tree at a 4096-byte sector with one table rather than two,
+  so the sector-size arithmetic and the single-table volume are both represented.
+- `fat32-undersized` — the 32-bit entry width, on a volume below the cluster minimum FAT32
+  defines. Every mainstream driver reads such a volume as FAT32 because a zero 16-bit table
+  size is what they test before counting anything, so it reaches the whole FAT32 path — the
+  information sector, the backup boot sector, the root as a cluster chain — at a fraction of
+  the 33 MiB a conformant FAT32 needs.
 - `inspect-huge-group-count` — `ext4-min` with `s_blocks_count` set to `2^64 - 1`,
   the crafted superblock the `reader_inspect` target exists to guard: the group count
   it implies must not size an allocation.
@@ -100,6 +116,13 @@ PY
 
 - `reader_scan` — `Reader::open` and `open_with`, then `walk`, `verify_checksums`,
   `scan`, and every per-inode read the walk reaches, over the fuzzer's bytes.
+- `fat_reader` — `Reader::open` and `open_with` over the FAT family, then `walk`,
+  `verify_tables`, `info_sector`, `volume_label`, `chain`, and every per-node read the walk
+  reaches, plus a lenient `scan` and its three rendered projections. Driven strictly at the
+  start of the source, leniently for the scan, and once more with a code page named and a
+  nonzero base offset — three configurations because they take different branches: a strict
+  read stops at the first deviation, a scan follows every chain and every directory entry,
+  and a named code page is what turns a short name's bytes into characters.
 - `reader_inspect` — the `inspect` command's sequence: list every group descriptor
   (grown from the descriptors that exist, never pre-sized from the claimed count),
   scan, and render the report as JSON, as a table, and as SARIF. Guards the
@@ -113,11 +136,15 @@ PY
 
 A deterministic subset of this — degenerate geometry, truncations, and bit-flips of
 a valid image — also runs on stable as the `reader_never_panics_on_mangled_images`
-unit test, and the archive counterpart as `a_mangled_archive_never_panics`, so the
-never-panic contract is guarded on every `cargo test`.
+unit test, its FAT counterpart as `the_reader_never_panics_on_mangled_images`, and the
+archive one as `a_mangled_archive_never_panics`, so the never-panic contract is guarded on
+every `cargo test`.
 
 This package sets its own `[workspace]`, so the crate's build never compiles it and a
 target could otherwise rot unnoticed. CI type-checks it on every run, and checks the seeds
 too — every image still opens, the archive still parses and formats, and its generator
 still reproduces it byte for byte — since a seed is the one part of this setup with no
-compiler to catch its drift.
+compiler to catch its drift. The image half of that check is
+`every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family` in
+`tests/seam.rs`, which opens each one through `ferrosys::open` and walks it: written in the
+crate's family-agnostic vocabulary, so one case covers every family's seeds.

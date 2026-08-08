@@ -13,7 +13,8 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use ferrosys::ext::{ArchiveSource, Source};
+use ferrosys::{ArchiveSource};
+use ferrosys::ext::{Source};
 use libfuzzer_sys::fuzz_target;
 
 /// The scratch file the seeking parser is pointed at, reused across iterations so a run

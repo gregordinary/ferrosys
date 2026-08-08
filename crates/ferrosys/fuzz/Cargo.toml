@@ -13,8 +13,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 # `tar` for the archive target: the parser reads untrusted input, so it is fuzzed
-# alongside the reader rather than left to the crate's own tests.
-ferrosys = { path = "..", features = ["tar"] }
+# alongside the readers rather than left to the crate's own tests. `fat` for the FAT
+# reader target, which is not in the default feature set.
+ferrosys = { path = "..", features = ["tar", "fat"] }
 
 [[bin]]
 name = "reader_scan"
@@ -26,6 +27,13 @@ bench = false
 [[bin]]
 name = "reader_inspect"
 path = "fuzz_targets/reader_inspect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_reader"
+path = "fuzz_targets/fat_reader.rs"
 test = false
 doc = false
 bench = false

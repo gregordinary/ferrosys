@@ -13,7 +13,9 @@ The archive carries one of each shape the parser resolves, so a mutation lands s
 that matters: a `g` global header, PAX timestamps and ownership, a binary `SCHILY.xattr.*`
 value (whose NUL bytes are what makes a length-delimited record parser necessary), a text
 `SCHILY.acl.*` record, a symlink, a hard link, a character device, a name past the header's
-100-byte field, and a body spanning several blocks.
+100-byte field, a body spanning several blocks, and a PAX time carrying a full nine-digit
+fraction — the last so the fractional branch of the time parser is on a path a mutation can
+reach, rather than behind a structure random bytes would have to invent.
 """
 
 import io
@@ -90,6 +92,20 @@ def build():
         entry(tf, long_name, tarfile.REGTYPE, size=4, data=b"leaf")
         # A body spanning several blocks, so the framing skips more than one.
         entry(tf, "etc/multiblock", tarfile.REGTYPE, size=2600, data=bytes(2600))
+        # Sub-second times, so the fraction branch of the time parser is reached. Nine
+        # digits on one and fewer on another, which are the two ends of its padding.
+        entry(
+            tf,
+            "etc/fractional",
+            tarfile.REGTYPE,
+            size=5,
+            data=b"frac\n",
+            pax={
+                "mtime": "1700000000.123456789",
+                "atime": "1600000000.5",
+                "ctime": "1650000000.000000001",
+            },
+        )
     return buf.getvalue()
 
 
