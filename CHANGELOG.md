@@ -7,7 +7,50 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [Unreleased]
+## [0.4.0] - 2026-08-08
+
+A second filesystem family, and the surface that makes room for it. ferrosys formats and
+reads FAT12, FAT16, and FAT32 beside ext2, ext3, and ext4, and a family is something a
+build takes or leaves. Every ext image this crate writes is the same bytes it was.
+
+The crate's surface splits in two: what is true of a filesystem whatever family it is now
+lives at the crate root, and the ext family lives behind `ferrosys::ext` as one family among
+others. Nothing about an ext image changes — the same bytes, the same geometry, the same
+verdicts — but the paths a caller names, the shape of an emitted document, and the sinks'
+signatures all move.
+
+To migrate: `ferrosys::ext::ondisk::Timestamp` becomes `ferrosys::ext::Timestamp` (or
+`ferrosys::Timestamp`, which is the same type); `Timestamp::encode`/`decode`/`EPOCH_MIN`/
+`EPOCH_MAX`/`is_representable` become `ext::ondisk::encode_time`/`decode_time`/
+`TIME_SECS_MIN`/`TIME_SECS_MAX`/`time_is_representable`; `Limits::max_anomalies` becomes
+`Limits::max_findings`; `ScanReport::to_json`/`to_sarif`/`to_table` become
+`ScanReport::to_report()` followed by the same three on the `FindingReport` it returns;
+and `ArchiveSink::write_tree`/`DirectorySink::write_tree` take anything implementing
+`FsTree` and report what a source filesystem could not supply.
+
+The two ends of a tree move with it: `ferrosys::ext::ArchiveSource`, `ArchiveSink`,
+`ArchiveError`, `DirectorySource`, `DirectorySink`, `ExtractReport`, and `HostError` become
+`ferrosys::ArchiveSource` and the rest, reached at the root and nowhere else — a source feeds
+whichever family is being written and a sink drains whichever one was opened, so neither
+belongs under a family. `Acl`, `AclEntry`, `AclError`, and `AclQualifier` become
+`ferrosys::Acl` and are reached flat under `ext` as well, like the rest of the vocabulary a
+`SourceEntry` carries; `ext::acl::{READ, WRITE, EXEC}` become `Acl::READ`/`WRITE`/`EXEC`;
+`Acl::encode`/`Acl::decode` now produce and parse the version-2 `posix_acl_xattr` form every
+boundary speaks, and ext4's compact on-disk form is `ext::ondisk::encode_acl`/`decode_acl`;
+and `ext::Slack` becomes `ferrosys::Slack`.
+
+**A `system.posix_acl_*` attribute is the version-2 form everywhere this crate carries one**
+— in a `SourceEntry` going in, and in the `Attributes` a read hands back. Each family
+narrows it to whatever it stores and widens it again on the way out, so a caller that built
+one with `Acl::encode` and a caller that read one back now see the same bytes. What ext
+writes to disk is the compact form it always was, so an image built from an `ArchiveSource`
+or a `DirectorySource` is byte for byte the one 0.3.1 wrote. An entry a caller assembled by
+hand is where this is a fix rather than a relocation, and it is listed as one below.
+
+`tar`, `dir`, and `serde` no longer enable `ext`. A build can now carry a family, a source,
+and a sink without the default family — `--no-default-features --features fat,dir` formats a
+FAT volume from a directory tree on this machine and extracts one back, with no ext code
+compiled.
 
 ### Added
 
@@ -50,6 +93,121 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   name is one no ext4 directory can hold — the sibling of the FAT variant of the same name,
   and of `DirEntryNoSuchInode` for the other field of the same record. See the fix below.
 
+- **`format --size auto` and `--slack` for FAT.** The smallest volume that holds a tree,
+  found the same way ext's is: a candidate is planned and the tree allocated into it, and
+  what that leaves free judges the candidate — so the answer is a size that formats, with the
+  sector below it proven not to. `fat::FormatPlan::fit` is the library entry point and
+  `free_clusters` reports what the volume has left, which is also a new line in the summary
+  and a new `free_clusters` field in the JSON receipt.
+- **A family-agnostic crate root.** `Source`, `SourceEntry`, `EntryKind`, `Metadata`,
+  `FileContent`, `FileRange`, `TreeBuilder`, `LayeredSource`, `Xattr`, and `Timestamp`
+  describe a directory tree, which is not any one filesystem's concept, so they live at the
+  root and every family consumes them unchanged. `ferrosys::ext` re-exports all of them, so
+  a caller formatting an ext image still names one namespace.
+- **`open` and `FsReader`** — detect an image and get the matching family's reader back,
+  whole. The result is a `#[non_exhaustive]` enum of concrete readers rather than a common
+  interface: the families' readers are genuinely not interchangeable, so a trait wide enough
+  to be useful would be a lie about the narrowest of them. `OpenOptions`, `ReadPolicy`, and
+  `Limits` say where to look, how strictly, and within what bounds.
+- **`FsTree`** — the one behavioural trait the families share, and the extraction surface:
+  walk the names, stat one, stream a file's bytes, resolve a link. Four operations, kept to
+  what `ArchiveSink` and `DirectorySink` actually call. It is not a general filesystem
+  interface and is not meant to become one — a question only one family can answer stays on
+  that family's concrete reader.
+- **`Finding`, `FindingReport`, `Severity`, and `Family`** — the frame every family's
+  findings project into, carrying the severity, the family, that family's own word for the
+  subsystem, the byte offset, and that family's own named coordinates. Rendering — JSON,
+  SARIF, a table, a `--fail-on` threshold — is written once against this, so there is one
+  document shape and one severity scale however many families a build carries. ext's
+  `Anomaly` taxonomy stays exactly as it was and projects into it through
+  `Anomaly::to_finding` and `ScanReport::to_report`.
+- **`FidelityReport`, `Property`, `Direction`, and `Synthesis`** — what a format could not
+  hold and what a read had to invent, both directions in one report. `ArchiveSink` and
+  `DirectorySink` return one, and it is faithful for an ext image, which records every
+  property a host file needs. `Synthesis` is what a read fills a missing field from, with
+  conservative documented defaults — owned by root, `0644` and `0755` — because a tree
+  extracted from a format with no permission bits must not land world-writable because
+  nothing was named.
+- **`extract --assume-owner U:G` and `--assume-modes F:D`** surface those inputs on the
+  command line, and what was assumed is reported on the standard error beside what the host
+  refused.
+- **The FAT family**, behind the off-by-default `fat` feature: `ferrosys::fat`, a formatter
+  and a reader for FAT12, FAT16, and FAT32. One implementation parameterized by the type,
+  because the three are one lineage sharing a boot sector, a directory format, and a cluster
+  heap, and differ only in the width of a file allocation table entry and in where the root
+  directory sits.
+
+  Which of the three a volume is follows from its cluster count and from nothing else — no
+  image records it — so `plan_layout` takes what the derivation must arrive at rather than
+  what to write down, and reports what it reached. Output is byte-reproducible: every value
+  a formatter conventionally draws from the clock or from randomness is an input, dates
+  convert in UTC, and entries are sorted by path before anything is placed, so a directory's
+  order, each short name, and every cluster are functions of the tree.
+
+  A FAT volume has no field for an owner, a permission bit, a symbolic link, a second name
+  for a file, a device number, or an extended attribute, so a build that would lose one
+  fails until the caller has named it in an `AcceptedLoss`. A property counts as lost when
+  the value a read gets back is not the value that was stated, which is narrower than the
+  format lacking a field: a root-owned tree of `0644` files and `0755` directories goes in
+  and comes back unchanged, and reports itself faithful.
+- **`fat::Reader`** reads any conformant FAT volume, whatever wrote it: cluster chains
+  followed at all three entry widths, long names reassembled and tied to their short entry
+  by checksum, and the Windows NT case flags honoured on reading though never written. Its
+  `scan` is the whole-volume pass — the parameter block against itself, every copy of the
+  allocation table against the first, the information sector, every directory entry, and
+  every chain, including the clusters that are allocated and reached by nothing. FAT carries
+  no checksums, so the table's copies disagreeing is what integrity means here. A strict read
+  accepts every volume this crate's own writer produces, which is the line the severities are
+  drawn against.
+- **`fat::ShortNameCharset`** — how the bytes of a short name above ASCII are read. Nothing
+  in a FAT volume records its code page, and the page was a property of the machine and the
+  moment each name was created rather than of the volume, so it is never guessed: `Verbatim`,
+  the default, hands the bytes back untouched. Five single-byte pages are built in — 437,
+  850, 852, 865, and 866 — and `Custom` reaches any other. Naming one is also what makes an
+  uninterpretable byte a cosmetic remark rather than a conformance deviation a strict read
+  stops at.
+
+- **The `ferrosys` binary carries every family.** The library is modular so a program that
+  wants one filesystem compiles one; the binary is the deliberate exception, because someone
+  running `detect` or `inspect` on an unknown image wants it identified whatever it turns out
+  to be. `detect` names a FAT volume by its type, `inspect` describes one through the same
+  family-tagged envelope an ext image gets, and `extract` reads one back out — as an archive,
+  as a directory tree, as one file's bytes, as a listing, or as one path's metadata.
+- **`format -t fat12|fat16|fat32`** writes a FAT volume, from an empty one or from a tar
+  archive or directory tree. It takes this family's own identity, `--volume-id`, as eight hex
+  digits in the bare form or the dashed one every tool prints; a 32-bit serial is a separate
+  option rather than four bytes cut from a UUID, because a value silently narrowed is a value
+  the caller did not choose. `--label` goes through the FAT rules — eleven upper-cased bytes —
+  and a label the field cannot hold is refused rather than truncated.
+
+  `--accept-loss` is what a FAT format has that an ext one does not: a comma-separated list
+  of the properties the build may lose, or `all`. Without it a build that would drop anything
+  fails and names the entry and the property. A tree walked off a host always loses two —
+  `change-time`, which the format has no field for, and `time-precision`, since it records a
+  write time to two seconds and an access time to the day — and loses nothing else if it is
+  root-owned with `0644` files and `0755` directories, which is exactly what a read fills in.
+  `--assume-owner` and `--assume-modes` set that point of comparison, so both ends of a round
+  trip agree about what survived.
+- **An option belonging to one family is refused for another, by name.** `--journal` on a
+  FAT format and `--groups` on a FAT image are questions with no answer, and a run handed a
+  result silently missing what it asked for would never know. `-t` is read before any of them
+  is judged, so its position on the line does not matter.
+- **`fat::FormatPlan::volume_bytes`** — the size the destination becomes, which is the size
+  the format was asked for. It is not always the filesystem's own size: where the planner
+  shortens a FAT12 filesystem out of the disputed cluster range, the sectors it gives up
+  stay in the destination and lie past the filesystem's end.
+- **`fat::FormatError::MediaDescriptorUndefined`** and
+  **`fat::FormatError::DirectoryOverflowsItsClusters`** — see *Fixed*.
+- **`fat::ondisk::FsInfo::TRAIL_OFFSET`** — where the information sector's trailing
+  signature sits, so a caller checking the field names the offset once.
+- **`HostError::UnstableXattrs`** — a path whose extended attributes changed faster than
+  they could be read. Reading one means asking the kernel for its size and then for that
+  many bytes, and a value that grew in between is asked for again; a path that keeps
+  changing across every attempt is a tree being edited while it is walked. It carries the
+  path, the attribute whose value would not settle or `None` when it was the list of names
+  itself, and how many times the read was attempted, so a caller can tell a tree to settle
+  and walk again apart from a fault it can do nothing about.
+
 ### Changed
 
 - **`Allocator::new` returns a `Result`.** A used-block bitmap that does not fit a `usize` is
@@ -64,6 +222,67 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   scenario `Limits::max_file_bytes` exists for was its out-of-the-box behaviour.
   `--max-file-bytes` names a different cap for an image holding a legitimately sparser file,
   and a run stopped by the default says on the standard error where the cap came from.
+
+- **`inspect`'s table, JSON, and SARIF output is a family-tagged envelope.** A head that
+  means the same thing whatever the image holds — family, variant, size, allocation unit,
+  identifier, and the findings — then a body named for the family, which for an ext image
+  is the superblock, the feature words, and the group descriptors it carried before. Every
+  field an ext report carried is still there, relocated rather than lost: the profile is
+  the head's `variant`, and the scan is the head's `findings`. The emitted schema version
+  moves to `2` in both the tool's documents and the library's findings document, and a
+  later family adds a body rather than reshaping the envelope.
+- **`Timestamp` is a wall-clock instant and nothing more**, at the crate root. How an
+  instant reaches the disk is the family's business, so ext4's split across the seconds and
+  "extra" fields moves into `ext::ondisk` beside every other ext encoding.
+- **Detection tries families in a stated order.** A family whose images carry a distinctive
+  multi-byte magic at a fixed offset is classified first; one whose magic is weak enough to
+  collide, or that has none, is classified only by checking a whole header for internal
+  consistency, and runs after every family in the first tier.
+- **`ArchiveError::Read` and `HostError::Read` carry a `TreeError`** — the shared
+  classification of a read failure — rather than ext's own `ReadError`. A caller that needs
+  the family's typed error opens that family's reader directly.
+- **`Limits::max_anomalies` is `Limits::max_findings`**, and `ScanReport::MAX_ANOMALIES` is
+  `FindingReport::MAX_FINDINGS`.
+- **`detect`'s JSON names the sub-classification `variant`,** the word `inspect`'s head uses
+  for the same thing. One tool answering "which family, and which of it" under two
+  vocabularies is a consumer's problem for no gain.
+- **`extract --list` and `--stat` report a field the family has no notion of by omitting it.**
+  A FAT entry carries no `inode` and no `links`; a zero or a one there would be the tool
+  answering a question the format never asked. Both documents gain a `synthesized` list —
+  always present, empty or not — naming what the report filled in rather than read, in the
+  same words `--accept-loss` takes. An ext entry is unchanged but for that empty list.
+- **`format --json` leads with `family` and `variant`,** so a receipt says which filesystem
+  was written from the same two fields whichever one was asked for. The ext receipt's
+  `profile` field is the head's `variant`.
+- **Every `as_str` is a `const fn`**, so the name of a severity, a category, a property, a
+  direction, or a family is available in a constant. They all compute the same way — one
+  match arm per variant, returning a literal — and now all say so.
+- **`Limits::max_walk_entries` bounds a single read as well as a whole-tree walk.** Where a
+  family gathers one structure into a list — a FAT directory's entries, or a cluster chain
+  collected by `fat::Reader::chain` — the caller's cap governs that list too, so an image far
+  larger than the memory reading it is bounded at each read rather than only across the tree.
+  Reaching it is a `WalkTooLarge` rather than a shortened list.
+- **A FAT directory is read a region at a time and never held whole.** What one
+  `fat::Reader::read_dir` allocates is the entries it produces plus a single cluster,
+  whatever the directory's chain does.
+- **`fat::format` and `fat::format_to` produce exactly the size they were asked for.**
+  Where the planner shortens the *filesystem* out of the disputed FAT12/FAT16 cluster range,
+  the destination keeps the sectors it gave up and they lie past the filesystem's end, which
+  is what the slack at the end of a partition looks like. The boot sector's `total_sectors`
+  is what says where the filesystem stops, so no driver reads into them.
+- **The guards between a FAT plan and the bytes it becomes hold in every build.** A
+  directory's capacity, a table batch's placement, a file's declared length, the ascending
+  order the table writer binary-searches, and every boot-sector field the format narrows
+  were debug assertions and are now unconditional. Each guards a failure the finished bytes
+  cannot show — a later write covers an earlier overflow, and a truncation is silent by
+  construction — so checking them only in a debug build checked them nowhere a consumer runs.
+
+### Removed
+
+- **`ScanReport::to_json`, `to_sarif`, and `to_table`**, and `Anomaly::to_json`. Rendering
+  belongs to the shared frame, where it is written once: `ScanReport::to_report()` projects
+  into a `FindingReport` and the same three methods are there. `ext::read::SCAN_SCHEMA_VERSION`
+  is `FINDINGS_SCHEMA_VERSION` at the root for the same reason.
 
 ### Fixed
 
@@ -301,233 +520,6 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   bound, so the two could read different bytes for one entry — a wrong or missing
   `TableMismatch`. Both now take the same rule from one place, with the same ceiling on the
   entry and checked arithmetic on the sector.
-
-## [0.4.0] - 2026-08-05
-
-A second filesystem family, and the surface that makes room for it. ferrosys formats and
-reads FAT12, FAT16, and FAT32 beside ext2, ext3, and ext4, and a family is something a
-build takes or leaves. Every ext image this crate writes is the same bytes it was.
-
-The crate's surface splits in two: what is true of a filesystem whatever family it is now
-lives at the crate root, and the ext family lives behind `ferrosys::ext` as one family among
-others. Nothing about an ext image changes — the same bytes, the same geometry, the same
-verdicts — but the paths a caller names, the shape of an emitted document, and the sinks'
-signatures all move.
-
-To migrate: `ferrosys::ext::ondisk::Timestamp` becomes `ferrosys::ext::Timestamp` (or
-`ferrosys::Timestamp`, which is the same type); `Timestamp::encode`/`decode`/`EPOCH_MIN`/
-`EPOCH_MAX`/`is_representable` become `ext::ondisk::encode_time`/`decode_time`/
-`TIME_SECS_MIN`/`TIME_SECS_MAX`/`time_is_representable`; `Limits::max_anomalies` becomes
-`Limits::max_findings`; `ScanReport::to_json`/`to_sarif`/`to_table` become
-`ScanReport::to_report()` followed by the same three on the `FindingReport` it returns;
-and `ArchiveSink::write_tree`/`DirectorySink::write_tree` take anything implementing
-`FsTree` and report what a source filesystem could not supply.
-
-The two ends of a tree move with it: `ferrosys::ext::ArchiveSource`, `ArchiveSink`,
-`ArchiveError`, `DirectorySource`, `DirectorySink`, `ExtractReport`, and `HostError` become
-`ferrosys::ArchiveSource` and the rest, reached at the root and nowhere else — a source feeds
-whichever family is being written and a sink drains whichever one was opened, so neither
-belongs under a family. `Acl`, `AclEntry`, `AclError`, and `AclQualifier` become
-`ferrosys::Acl` and are reached flat under `ext` as well, like the rest of the vocabulary a
-`SourceEntry` carries; `ext::acl::{READ, WRITE, EXEC}` become `Acl::READ`/`WRITE`/`EXEC`;
-`Acl::encode`/`Acl::decode` now produce and parse the version-2 `posix_acl_xattr` form every
-boundary speaks, and ext4's compact on-disk form is `ext::ondisk::encode_acl`/`decode_acl`;
-and `ext::Slack` becomes `ferrosys::Slack`.
-
-**A `system.posix_acl_*` attribute is the version-2 form everywhere this crate carries one**
-— in a `SourceEntry` going in, and in the `Attributes` a read hands back. Each family
-narrows it to whatever it stores and widens it again on the way out, so a caller that built
-one with `Acl::encode` and a caller that read one back now see the same bytes. What ext
-writes to disk is the compact form it always was, so an image built from an `ArchiveSource`
-or a `DirectorySource` is byte for byte the one 0.3.1 wrote. An entry a caller assembled by
-hand is where this is a fix rather than a relocation, and it is listed as one below.
-
-`tar`, `dir`, and `serde` no longer enable `ext`. A build can now carry a family, a source,
-and a sink without the default family — `--no-default-features --features fat,dir` formats a
-FAT volume from a directory tree on this machine and extracts one back, with no ext code
-compiled.
-
-### Added
-
-- **`format --size auto` and `--slack` for FAT.** The smallest volume that holds a tree,
-  found the same way ext's is: a candidate is planned and the tree allocated into it, and
-  what that leaves free judges the candidate — so the answer is a size that formats, with the
-  sector below it proven not to. `fat::FormatPlan::fit` is the library entry point and
-  `free_clusters` reports what the volume has left, which is also a new line in the summary
-  and a new `free_clusters` field in the JSON receipt.
-- **A family-agnostic crate root.** `Source`, `SourceEntry`, `EntryKind`, `Metadata`,
-  `FileContent`, `FileRange`, `TreeBuilder`, `LayeredSource`, `Xattr`, and `Timestamp`
-  describe a directory tree, which is not any one filesystem's concept, so they live at the
-  root and every family consumes them unchanged. `ferrosys::ext` re-exports all of them, so
-  a caller formatting an ext image still names one namespace.
-- **`open` and `FsReader`** — detect an image and get the matching family's reader back,
-  whole. The result is a `#[non_exhaustive]` enum of concrete readers rather than a common
-  interface: the families' readers are genuinely not interchangeable, so a trait wide enough
-  to be useful would be a lie about the narrowest of them. `OpenOptions`, `ReadPolicy`, and
-  `Limits` say where to look, how strictly, and within what bounds.
-- **`FsTree`** — the one behavioural trait the families share, and the extraction surface:
-  walk the names, stat one, stream a file's bytes, resolve a link. Four operations, kept to
-  what `ArchiveSink` and `DirectorySink` actually call. It is not a general filesystem
-  interface and is not meant to become one — a question only one family can answer stays on
-  that family's concrete reader.
-- **`Finding`, `FindingReport`, `Severity`, and `Family`** — the frame every family's
-  findings project into, carrying the severity, the family, that family's own word for the
-  subsystem, the byte offset, and that family's own named coordinates. Rendering — JSON,
-  SARIF, a table, a `--fail-on` threshold — is written once against this, so there is one
-  document shape and one severity scale however many families a build carries. ext's
-  `Anomaly` taxonomy stays exactly as it was and projects into it through
-  `Anomaly::to_finding` and `ScanReport::to_report`.
-- **`FidelityReport`, `Property`, `Direction`, and `Synthesis`** — what a format could not
-  hold and what a read had to invent, both directions in one report. `ArchiveSink` and
-  `DirectorySink` return one, and it is faithful for an ext image, which records every
-  property a host file needs. `Synthesis` is what a read fills a missing field from, with
-  conservative documented defaults — owned by root, `0644` and `0755` — because a tree
-  extracted from a format with no permission bits must not land world-writable because
-  nothing was named.
-- **`extract --assume-owner U:G` and `--assume-modes F:D`** surface those inputs on the
-  command line, and what was assumed is reported on the standard error beside what the host
-  refused.
-- **The FAT family**, behind the off-by-default `fat` feature: `ferrosys::fat`, a formatter
-  and a reader for FAT12, FAT16, and FAT32. One implementation parameterized by the type,
-  because the three are one lineage sharing a boot sector, a directory format, and a cluster
-  heap, and differ only in the width of a file allocation table entry and in where the root
-  directory sits.
-
-  Which of the three a volume is follows from its cluster count and from nothing else — no
-  image records it — so `plan_layout` takes what the derivation must arrive at rather than
-  what to write down, and reports what it reached. Output is byte-reproducible: every value
-  a formatter conventionally draws from the clock or from randomness is an input, dates
-  convert in UTC, and entries are sorted by path before anything is placed, so a directory's
-  order, each short name, and every cluster are functions of the tree.
-
-  A FAT volume has no field for an owner, a permission bit, a symbolic link, a second name
-  for a file, a device number, or an extended attribute, so a build that would lose one
-  fails until the caller has named it in an `AcceptedLoss`. A property counts as lost when
-  the value a read gets back is not the value that was stated, which is narrower than the
-  format lacking a field: a root-owned tree of `0644` files and `0755` directories goes in
-  and comes back unchanged, and reports itself faithful.
-- **`fat::Reader`** reads any conformant FAT volume, whatever wrote it: cluster chains
-  followed at all three entry widths, long names reassembled and tied to their short entry
-  by checksum, and the Windows NT case flags honoured on reading though never written. Its
-  `scan` is the whole-volume pass — the parameter block against itself, every copy of the
-  allocation table against the first, the information sector, every directory entry, and
-  every chain, including the clusters that are allocated and reached by nothing. FAT carries
-  no checksums, so the table's copies disagreeing is what integrity means here. A strict read
-  accepts every volume this crate's own writer produces, which is the line the severities are
-  drawn against.
-- **`fat::ShortNameCharset`** — how the bytes of a short name above ASCII are read. Nothing
-  in a FAT volume records its code page, and the page was a property of the machine and the
-  moment each name was created rather than of the volume, so it is never guessed: `Verbatim`,
-  the default, hands the bytes back untouched. Five single-byte pages are built in — 437,
-  850, 852, 865, and 866 — and `Custom` reaches any other. Naming one is also what makes an
-  uninterpretable byte a cosmetic remark rather than a conformance deviation a strict read
-  stops at.
-
-- **The `ferrosys` binary carries every family.** The library is modular so a program that
-  wants one filesystem compiles one; the binary is the deliberate exception, because someone
-  running `detect` or `inspect` on an unknown image wants it identified whatever it turns out
-  to be. `detect` names a FAT volume by its type, `inspect` describes one through the same
-  family-tagged envelope an ext image gets, and `extract` reads one back out — as an archive,
-  as a directory tree, as one file's bytes, as a listing, or as one path's metadata.
-- **`format -t fat12|fat16|fat32`** writes a FAT volume, from an empty one or from a tar
-  archive or directory tree. It takes this family's own identity, `--volume-id`, as eight hex
-  digits in the bare form or the dashed one every tool prints; a 32-bit serial is a separate
-  option rather than four bytes cut from a UUID, because a value silently narrowed is a value
-  the caller did not choose. `--label` goes through the FAT rules — eleven upper-cased bytes —
-  and a label the field cannot hold is refused rather than truncated.
-
-  `--accept-loss` is what a FAT format has that an ext one does not: a comma-separated list
-  of the properties the build may lose, or `all`. Without it a build that would drop anything
-  fails and names the entry and the property. A tree walked off a host always loses two —
-  `change-time`, which the format has no field for, and `time-precision`, since it records a
-  write time to two seconds and an access time to the day — and loses nothing else if it is
-  root-owned with `0644` files and `0755` directories, which is exactly what a read fills in.
-  `--assume-owner` and `--assume-modes` set that point of comparison, so both ends of a round
-  trip agree about what survived.
-- **An option belonging to one family is refused for another, by name.** `--journal` on a
-  FAT format and `--groups` on a FAT image are questions with no answer, and a run handed a
-  result silently missing what it asked for would never know. `-t` is read before any of them
-  is judged, so its position on the line does not matter.
-- **`fat::FormatPlan::volume_bytes`** — the size the destination becomes, which is the size
-  the format was asked for. It is not always the filesystem's own size: where the planner
-  shortens a FAT12 filesystem out of the disputed cluster range, the sectors it gives up
-  stay in the destination and lie past the filesystem's end.
-- **`fat::FormatError::MediaDescriptorUndefined`** and
-  **`fat::FormatError::DirectoryOverflowsItsClusters`** — see *Fixed*.
-- **`fat::ondisk::FsInfo::TRAIL_OFFSET`** — where the information sector's trailing
-  signature sits, so a caller checking the field names the offset once.
-- **`HostError::UnstableXattrs`** — a path whose extended attributes changed faster than
-  they could be read. Reading one means asking the kernel for its size and then for that
-  many bytes, and a value that grew in between is asked for again; a path that keeps
-  changing across every attempt is a tree being edited while it is walked. It carries the
-  path, the attribute whose value would not settle or `None` when it was the list of names
-  itself, and how many times the read was attempted, so a caller can tell a tree to settle
-  and walk again apart from a fault it can do nothing about.
-
-### Changed
-
-- **`inspect`'s table, JSON, and SARIF output is a family-tagged envelope.** A head that
-  means the same thing whatever the image holds — family, variant, size, allocation unit,
-  identifier, and the findings — then a body named for the family, which for an ext image
-  is the superblock, the feature words, and the group descriptors it carried before. Every
-  field an ext report carried is still there, relocated rather than lost: the profile is
-  the head's `variant`, and the scan is the head's `findings`. The emitted schema version
-  moves to `2` in both the tool's documents and the library's findings document, and a
-  later family adds a body rather than reshaping the envelope.
-- **`Timestamp` is a wall-clock instant and nothing more**, at the crate root. How an
-  instant reaches the disk is the family's business, so ext4's split across the seconds and
-  "extra" fields moves into `ext::ondisk` beside every other ext encoding.
-- **Detection tries families in a stated order.** A family whose images carry a distinctive
-  multi-byte magic at a fixed offset is classified first; one whose magic is weak enough to
-  collide, or that has none, is classified only by checking a whole header for internal
-  consistency, and runs after every family in the first tier.
-- **`ArchiveError::Read` and `HostError::Read` carry a `TreeError`** — the shared
-  classification of a read failure — rather than ext's own `ReadError`. A caller that needs
-  the family's typed error opens that family's reader directly.
-- **`Limits::max_anomalies` is `Limits::max_findings`**, and `ScanReport::MAX_ANOMALIES` is
-  `FindingReport::MAX_FINDINGS`.
-- **`detect`'s JSON names the sub-classification `variant`,** the word `inspect`'s head uses
-  for the same thing. One tool answering "which family, and which of it" under two
-  vocabularies is a consumer's problem for no gain.
-- **`extract --list` and `--stat` report a field the family has no notion of by omitting it.**
-  A FAT entry carries no `inode` and no `links`; a zero or a one there would be the tool
-  answering a question the format never asked. Both documents gain a `synthesized` list —
-  always present, empty or not — naming what the report filled in rather than read, in the
-  same words `--accept-loss` takes. An ext entry is unchanged but for that empty list.
-- **`format --json` leads with `family` and `variant`,** so a receipt says which filesystem
-  was written from the same two fields whichever one was asked for. The ext receipt's
-  `profile` field is the head's `variant`.
-- **Every `as_str` is a `const fn`**, so the name of a severity, a category, a property, a
-  direction, or a family is available in a constant. They all compute the same way — one
-  match arm per variant, returning a literal — and now all say so.
-- **`Limits::max_walk_entries` bounds a single read as well as a whole-tree walk.** Where a
-  family gathers one structure into a list — a FAT directory's entries, or a cluster chain
-  collected by `fat::Reader::chain` — the caller's cap governs that list too, so an image far
-  larger than the memory reading it is bounded at each read rather than only across the tree.
-  Reaching it is a `WalkTooLarge` rather than a shortened list.
-- **A FAT directory is read a region at a time and never held whole.** What one
-  `fat::Reader::read_dir` allocates is the entries it produces plus a single cluster,
-  whatever the directory's chain does.
-- **`fat::format` and `fat::format_to` produce exactly the size they were asked for.**
-  Where the planner shortens the *filesystem* out of the disputed FAT12/FAT16 cluster range,
-  the destination keeps the sectors it gave up and they lie past the filesystem's end, which
-  is what the slack at the end of a partition looks like. The boot sector's `total_sectors`
-  is what says where the filesystem stops, so no driver reads into them.
-- **The guards between a FAT plan and the bytes it becomes hold in every build.** A
-  directory's capacity, a table batch's placement, a file's declared length, the ascending
-  order the table writer binary-searches, and every boot-sector field the format narrows
-  were debug assertions and are now unconditional. Each guards a failure the finished bytes
-  cannot show — a later write covers an earlier overflow, and a truncation is silent by
-  construction — so checking them only in a debug build checked them nowhere a consumer runs.
-
-### Removed
-
-- **`ScanReport::to_json`, `to_sarif`, and `to_table`**, and `Anomaly::to_json`. Rendering
-  belongs to the shared frame, where it is written once: `ScanReport::to_report()` projects
-  into a `FindingReport` and the same three methods are there. `ext::read::SCAN_SCHEMA_VERSION`
-  is `FINDINGS_SCHEMA_VERSION` at the root for the same reason.
-
-### Fixed
 
 - **`cargo doc` failed on the crate in every build that was not `--all-features`.** Four doc
   links named an item behind `fat`, behind `tar`, or behind a family in general from a
