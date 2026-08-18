@@ -165,6 +165,116 @@ impl Checksummer for Crc32c {
     }
 }
 
+// -- the per-object recipes -------------------------------------------------------------
+//
+// The seam above standardizes the primitive and the on/off decision. What each object folds
+// into it before its own bytes — the seed, the identity words, which field participates as
+// zero — is the format, and it is stated here once rather than once per direction. A writer
+// stamping an object and a reader verifying one call the same function, so a recipe cannot be
+// corrected on one side alone.
+//
+// Two recipes are deliberately not here, and each says why at its site: the superblock's,
+// which is seeded from `!0` rather than through this seam and so lives with the record's
+// layout in `ondisk::superblock`; and a hash-tree index block's, where the writer folds a
+// tail it wrote and the reader folds the tail it found, which is a real difference and not a
+// transcription.
+
+/// The seed every metadata object belonging to one inode continues from: the filesystem seed
+/// folded with the inode's number and its generation.
+///
+/// An extent node's tail, a directory block's tail, and an orphan block's all chain from
+/// this, which is what makes a block moved between two inodes fail its checksum rather than
+/// verify under its new owner.
+pub(crate) fn inode_seed(csum: &dyn Checksummer, ino: u32, generation: u32) -> u32 {
+    let c = csum.crc32c(csum.base_seed(), &ino.to_le_bytes());
+    csum.crc32c(c, &generation.to_le_bytes())
+}
+
+/// The 16-bit crc32c a group descriptor carries in `bg_checksum`: the filesystem seed folded
+/// with the group number, then the descriptor's own bytes.
+///
+/// `bytes` is the descriptor as it sits on disk *with `bg_checksum` zeroed* — the field
+/// participates in its own checksum as two zero bytes, and every other byte participates as
+/// it is, including any this crate does not model.
+pub(crate) fn group_descriptor(csum: &dyn Checksummer, group: u32, bytes: &[u8]) -> u16 {
+    let c = csum.crc32c(csum.base_seed(), &group.to_le_bytes());
+    (csum.crc32c(c, bytes) & 0xffff) as u16
+}
+
+/// The crc32c an inode carries: the filesystem seed folded with the inode's number and
+/// generation, then the inode's own bytes with its checksum fields zeroed.
+///
+/// `has_hi` is whether the inode is large enough for `i_checksum_hi`. Without it the result
+/// is sixteen bits wide — the kernel's `calculated &= 0xFFFF` — because there is no high half
+/// stored to compare a full-width value against. `mke2fs` leaves the reserved inodes in
+/// exactly that state, so on any filesystem it formatted, checking them at full width rejects
+/// seven healthy inodes.
+pub(crate) fn inode(
+    csum: &dyn Checksummer,
+    number: u32,
+    generation: u32,
+    bytes: &[u8],
+    has_hi: bool,
+) -> u32 {
+    let c = csum.crc32c(inode_seed(csum, number, generation), bytes);
+    if has_hi { c } else { c & 0xffff }
+}
+
+/// The crc32c a block or inode bitmap carries: the filesystem seed folded with the bytes the
+/// kernel counts as covered.
+///
+/// How many bytes those are is [`block_bitmap_len`] and [`inode_bitmap_len`]; the two differ,
+/// and getting either wrong produces a checksum no checker accepts.
+pub(crate) fn bitmap(csum: &dyn Checksummer, covered: &[u8]) -> u32 {
+    csum.crc32c(csum.base_seed(), covered)
+}
+
+/// The bytes of a block bitmap its checksum covers, as `ext4_block_bitmap_csum_set` measures
+/// them: one bit per block, exactly, because a group's block count is always a multiple of
+/// eight.
+pub(crate) const fn block_bitmap_len(blocks_per_group: u32) -> usize {
+    (blocks_per_group / 8) as usize
+}
+
+/// The bytes of an inode bitmap its checksum covers, as `ext4_inode_bitmap_csum_set` measures
+/// them: one bit per inode, **rounded up**, so a count that is not a multiple of eight still
+/// has its final partial byte covered.
+///
+/// The planner and `mke2fs` both round the inode count down to a multiple of eight, so this
+/// and the exact form agree on every image either writes. The kernel's is used so that they
+/// also agree on one that does not.
+pub(crate) const fn inode_bitmap_len(inodes_per_group: u32) -> usize {
+    inodes_per_group.div_ceil(8) as usize
+}
+
+/// The crc32c an orphan-file block's tail carries: the file's identity, then the block's own
+/// number, then its entry array.
+///
+/// The block number is in the chain because the file is an array of identical zeroed entry
+/// blocks — without it every block of a fresh orphan file would carry the same checksum, and
+/// one copied over another would verify.
+pub(crate) fn orphan_block(
+    csum: &dyn Checksummer,
+    ino: u32,
+    generation: u32,
+    block: u64,
+    entries: &[u8],
+) -> u32 {
+    let c = csum.crc32c(inode_seed(csum, ino, generation), &block.to_le_bytes());
+    csum.crc32c(c, entries)
+}
+
+/// The crc32c an external attribute block carries in `h_checksum`: the filesystem seed folded
+/// with the block number as a little-endian 64-bit value, then the whole block.
+///
+/// `bytes` is the block as it sits on disk *with `h_checksum` zeroed*. The block number rather
+/// than the owning inode is what identifies it, because one attribute block may be shared by
+/// several inodes.
+pub(crate) fn xattr_block(csum: &dyn Checksummer, block: u64, bytes: &[u8]) -> u32 {
+    let c = csum.crc32c(csum.base_seed(), &block.to_le_bytes());
+    csum.crc32c(c, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +331,51 @@ mod tests {
         let uuid = [0u8; 16];
         let c: &dyn Checksummer = &Crc32c::new(&uuid);
         assert_eq!(c.scheme(), CsumScheme::Crc32c);
+    }
+
+    #[test]
+    fn a_recipe_binds_an_object_to_the_identity_it_was_written_under() {
+        // The property every chain above exists for, checked on the two that carry the most
+        // identity: the same bytes under a different owner, generation, group, or block are a
+        // different checksum. Without it a metadata block moved or copied inside an image
+        // would verify in its new place.
+        let c = Crc32c::new(&[0u8; 16]);
+        let bytes = b"the object's own bytes";
+
+        assert_ne!(inode_seed(&c, 12, 7), inode_seed(&c, 13, 7));
+        assert_ne!(inode_seed(&c, 12, 7), inode_seed(&c, 12, 8));
+        assert_ne!(
+            orphan_block(&c, 12, 7, 100, bytes),
+            orphan_block(&c, 12, 7, 101, bytes)
+        );
+        assert_ne!(
+            group_descriptor(&c, 0, bytes),
+            group_descriptor(&c, 1, bytes)
+        );
+        assert_ne!(xattr_block(&c, 100, bytes), xattr_block(&c, 101, bytes));
+
+        // An inode without the high half of its checksum field answers sixteen bits wide,
+        // because there is no high half stored to compare a wider value against.
+        assert_eq!(inode(&c, 12, 7, bytes, false) >> 16, 0);
+        assert_eq!(
+            inode(&c, 12, 7, bytes, false),
+            inode(&c, 12, 7, bytes, true) & 0xffff
+        );
+
+        // With checksums off every recipe answers zero, because the primitive does.
+        let off = NullCsum;
+        assert_eq!(inode(&off, 12, 7, bytes, true), 0);
+        assert_eq!(group_descriptor(&off, 0, bytes), 0);
+        assert_eq!(orphan_block(&off, 12, 7, 100, bytes), 0);
+    }
+
+    #[test]
+    fn a_bitmap_is_covered_the_way_the_kernel_measures_it() {
+        // The block bitmap divides exactly; the inode bitmap rounds up, so a count that is
+        // not a multiple of eight still has its final partial byte covered.
+        assert_eq!(block_bitmap_len(32_768), 4096);
+        assert_eq!(inode_bitmap_len(8192), 1024);
+        assert_eq!(inode_bitmap_len(8185), 1024);
+        assert_eq!(inode_bitmap_len(8193), 1025);
     }
 }

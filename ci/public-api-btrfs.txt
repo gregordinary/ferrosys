@@ -1,0 +1,2009 @@
+#[non_exhaustive] pub enum ferrosys::AclError
+#[non_exhaustive] pub enum ferrosys::DetectError
+#[non_exhaustive] pub enum ferrosys::Direction
+#[non_exhaustive] pub enum ferrosys::EntryKind
+#[non_exhaustive] pub enum ferrosys::Family
+#[non_exhaustive] pub enum ferrosys::FileContent
+#[non_exhaustive] pub enum ferrosys::Filesystem
+#[non_exhaustive] pub enum ferrosys::FsReader<R>
+#[non_exhaustive] pub enum ferrosys::NodeKind
+#[non_exhaustive] pub enum ferrosys::OpenError
+#[non_exhaustive] pub enum ferrosys::Property
+#[non_exhaustive] pub enum ferrosys::TreeError
+#[non_exhaustive] pub enum ferrosys::btrfs::Category
+#[non_exhaustive] pub enum ferrosys::btrfs::FormatError
+#[non_exhaustive] pub enum ferrosys::btrfs::GeometryError
+#[non_exhaustive] pub enum ferrosys::btrfs::LabelError
+#[non_exhaustive] pub enum ferrosys::btrfs::Mirror
+#[non_exhaustive] pub enum ferrosys::btrfs::ModelError
+#[non_exhaustive] pub enum ferrosys::btrfs::NodeSize
+#[non_exhaustive] pub enum ferrosys::btrfs::Pool
+#[non_exhaustive] pub enum ferrosys::btrfs::Profile
+#[non_exhaustive] pub enum ferrosys::btrfs::ReadError
+#[non_exhaustive] pub enum ferrosys::btrfs::SectorSize
+#[non_exhaustive] pub enum ferrosys::btrfs::ondisk::Compression
+#[non_exhaustive] pub enum ferrosys::btrfs::ondisk::DirEntryType
+#[non_exhaustive] pub enum ferrosys::btrfs::ondisk::ExtentKind
+#[non_exhaustive] pub enum ferrosys::btrfs::ondisk::ParseError
+#[non_exhaustive] pub ferrosys::AclError::Duplicate
+#[non_exhaustive] pub ferrosys::AclError::InvalidPerm
+#[non_exhaustive] pub ferrosys::AclError::Malformed
+#[non_exhaustive] pub ferrosys::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::AclError::UndefinedId
+#[non_exhaustive] pub ferrosys::DetectError::Io
+#[non_exhaustive] pub ferrosys::OpenError::Refused
+#[non_exhaustive] pub ferrosys::TreeError::Io
+#[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
+#[non_exhaustive] pub ferrosys::TreeError::Malformed
+#[non_exhaustive] pub ferrosys::TreeError::Unsupported
+#[non_exhaustive] pub ferrosys::btrfs::FormatError::DataExhausted
+#[non_exhaustive] pub ferrosys::btrfs::FormatError::ImageTooLargeInMemory
+#[non_exhaustive] pub ferrosys::btrfs::FormatError::RecordTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::ChunkMapTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::ContentTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::FeatureIncoherent
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::FeatureUnsupported
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::NodeSizeUnsupported
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::SectorSizeUnsupported
+#[non_exhaustive] pub ferrosys::btrfs::GeometryError::VolumeTooSmall
+#[non_exhaustive] pub ferrosys::btrfs::LabelError::NulByte
+#[non_exhaustive] pub ferrosys::btrfs::LabelError::TooLong
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::Duplicate
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkCycle
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkTargetIsDirectory
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkTargetMissing
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::InvalidComponent
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::LinkCarriesXattrs
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::ModeCarriesFileType
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::NameTooLong
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::ParentMissing
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::ParentNotDir
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::RecordTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::RootNotDirectory
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeDuplicate
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeNotADirectory
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadBootstrap
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadChecksum
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadChunk
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadCompressedExtent
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadDirEntry
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadExtent
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadGeometry
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadItem
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadRootItem
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadSuperblock
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadTreeBlock
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadTreeLevel
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::BadXattr
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::ChunkOverlap
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::DataChecksum
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::FileTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::HostileName
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::Io
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MirrorDisagreement
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MisplacedSuperblock
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MissingDataChecksum
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MissingInode
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MissingTree
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::MultiDevice
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::NotADirectory
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::NotASymlink
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::NotFound
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::PathTooLong
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::SymlinkLoop
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::TooManyEntries
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::TreeCycle
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnmappedLogical
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedChecksum
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedCompression
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedEncoding
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedFeatures
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedProfile
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::WalkTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::BadMagic
+#[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::TooShort
+#[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Civil
+#[non_exhaustive] pub struct ferrosys::DetectOptions
+#[non_exhaustive] pub struct ferrosys::FidelityRecord
+#[non_exhaustive] pub struct ferrosys::Finding
+#[non_exhaustive] pub struct ferrosys::Limits
+#[non_exhaustive] pub struct ferrosys::OpenOptions
+#[non_exhaustive] pub struct ferrosys::Synthesis
+#[non_exhaustive] pub struct ferrosys::TreeEntry<N>
+#[non_exhaustive] pub struct ferrosys::btrfs::Anomaly
+#[non_exhaustive] pub struct ferrosys::btrfs::BtrfsLayout
+#[non_exhaustive] pub struct ferrosys::btrfs::Content
+#[non_exhaustive] pub struct ferrosys::btrfs::Entry
+#[non_exhaustive] pub struct ferrosys::btrfs::FormatOptions
+#[non_exhaustive] pub struct ferrosys::btrfs::Limits
+#[non_exhaustive] pub struct ferrosys::btrfs::OpenOptions
+#[non_exhaustive] pub struct ferrosys::btrfs::PlanRequest
+#[non_exhaustive] pub struct ferrosys::btrfs::Reservation
+#[non_exhaustive] pub struct ferrosys::btrfs::ReservationExceeded
+#[non_exhaustive] pub struct ferrosys::btrfs::Slack
+#[non_exhaustive] pub struct ferrosys::btrfs::Subvolume
+#[non_exhaustive] pub struct ferrosys::btrfs::SubvolumeRequest
+#[non_exhaustive] pub struct ferrosys::btrfs::WalkEntry
+#[non_exhaustive] pub struct ferrosys::btrfs::ondisk::FileExtentItem
+#[non_exhaustive] pub struct ferrosys::btrfs::ondisk::InodeItem
+#[non_exhaustive] pub struct ferrosys::btrfs::ondisk::RootItem
+#[non_exhaustive] pub struct ferrosys::btrfs::ondisk::SuperBlock
+impl BitOr for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl BitOr for ferrosys::btrfs::ondisk::CompatFlags
+impl BitOr for ferrosys::btrfs::ondisk::CompatRoFlags
+impl BitOr for ferrosys::btrfs::ondisk::ExtentFlags
+impl BitOr for ferrosys::btrfs::ondisk::IncompatFlags
+impl BitOr for ferrosys::btrfs::ondisk::InodeFlags
+impl BitOr for ferrosys::btrfs::ondisk::RootFlags
+impl BitOr for ferrosys::btrfs::ondisk::SuperFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::CompatFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::CompatRoFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::ExtentFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::IncompatFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::InodeFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::RootFlags
+impl BitOrAssign for ferrosys::btrfs::ondisk::SuperFlags
+impl Clone for ferrosys::AcceptedLoss
+impl Clone for ferrosys::Acl
+impl Clone for ferrosys::AclEntry
+impl Clone for ferrosys::AclError
+impl Clone for ferrosys::AclQualifier
+impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Civil
+impl Clone for ferrosys::DetectError
+impl Clone for ferrosys::DetectOptions
+impl Clone for ferrosys::Direction
+impl Clone for ferrosys::EntryKind
+impl Clone for ferrosys::Family
+impl Clone for ferrosys::FidelityRecord
+impl Clone for ferrosys::FidelityReport
+impl Clone for ferrosys::FileContent
+impl Clone for ferrosys::FileRange
+impl Clone for ferrosys::Filesystem
+impl Clone for ferrosys::Finding
+impl Clone for ferrosys::FindingReport
+impl Clone for ferrosys::LayeredSource
+impl Clone for ferrosys::Limits
+impl Clone for ferrosys::Metadata
+impl Clone for ferrosys::NodeKind
+impl Clone for ferrosys::OpenError
+impl Clone for ferrosys::OpenOptions
+impl Clone for ferrosys::Property
+impl Clone for ferrosys::ReadPolicy
+impl Clone for ferrosys::ScanReport
+impl Clone for ferrosys::Severity
+impl Clone for ferrosys::SourceEntry
+impl Clone for ferrosys::Synthesis
+impl Clone for ferrosys::Timestamp
+impl Clone for ferrosys::TreeBuilder
+impl Clone for ferrosys::TreeEntry
+impl Clone for ferrosys::TreeError
+impl Clone for ferrosys::Xattr
+impl Clone for ferrosys::btrfs::Anomaly
+impl Clone for ferrosys::btrfs::BtrfsLayout
+impl Clone for ferrosys::btrfs::Category
+impl Clone for ferrosys::btrfs::ChunkMap
+impl Clone for ferrosys::btrfs::Content
+impl Clone for ferrosys::btrfs::Entry
+impl Clone for ferrosys::btrfs::FormatOptions
+impl Clone for ferrosys::btrfs::GeometryError
+impl Clone for ferrosys::btrfs::LabelError
+impl Clone for ferrosys::btrfs::Limits
+impl Clone for ferrosys::btrfs::Located
+impl Clone for ferrosys::btrfs::MappedChunk
+impl Clone for ferrosys::btrfs::Mirror
+impl Clone for ferrosys::btrfs::ModelError
+impl Clone for ferrosys::btrfs::Node
+impl Clone for ferrosys::btrfs::NodeSize
+impl Clone for ferrosys::btrfs::OpenOptions
+impl Clone for ferrosys::btrfs::PlanRequest
+impl Clone for ferrosys::btrfs::Pool
+impl Clone for ferrosys::btrfs::Profile
+impl Clone for ferrosys::btrfs::ReadPolicy
+impl Clone for ferrosys::btrfs::Reservation
+impl Clone for ferrosys::btrfs::ReservationExceeded
+impl Clone for ferrosys::btrfs::SectorSize
+impl Clone for ferrosys::btrfs::Slack
+impl Clone for ferrosys::btrfs::Subvolume
+impl Clone for ferrosys::btrfs::SubvolumeRequest
+impl Clone for ferrosys::btrfs::Timestamp
+impl Clone for ferrosys::btrfs::TreeBlock
+impl Clone for ferrosys::btrfs::TreeRoot
+impl Clone for ferrosys::btrfs::VolumeLabel
+impl Clone for ferrosys::btrfs::WalkEntry
+impl Clone for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl Clone for ferrosys::btrfs::ondisk::BlockGroupItem
+impl Clone for ferrosys::btrfs::ondisk::ChecksumType
+impl Clone for ferrosys::btrfs::ondisk::Chunk
+impl Clone for ferrosys::btrfs::ondisk::CompatFlags
+impl Clone for ferrosys::btrfs::ondisk::CompatRoFlags
+impl Clone for ferrosys::btrfs::ondisk::Compression
+impl Clone for ferrosys::btrfs::ondisk::DevExtent
+impl Clone for ferrosys::btrfs::ondisk::DevItem
+impl Clone for ferrosys::btrfs::ondisk::DevStats
+impl Clone for ferrosys::btrfs::ondisk::DirEntryType
+impl Clone for ferrosys::btrfs::ondisk::DirItem
+impl Clone for ferrosys::btrfs::ondisk::DiskKey
+impl Clone for ferrosys::btrfs::ondisk::ExtentDataRef
+impl Clone for ferrosys::btrfs::ondisk::ExtentFlags
+impl Clone for ferrosys::btrfs::ondisk::ExtentItem
+impl Clone for ferrosys::btrfs::ondisk::ExtentKind
+impl Clone for ferrosys::btrfs::ondisk::FileExtentItem
+impl Clone for ferrosys::btrfs::ondisk::FreeSpaceInfo
+impl Clone for ferrosys::btrfs::ondisk::Header
+impl Clone for ferrosys::btrfs::ondisk::IncompatFlags
+impl Clone for ferrosys::btrfs::ondisk::InlineRef
+impl Clone for ferrosys::btrfs::ondisk::InodeExtref
+impl Clone for ferrosys::btrfs::ondisk::InodeFlags
+impl Clone for ferrosys::btrfs::ondisk::InodeItem
+impl Clone for ferrosys::btrfs::ondisk::InodeRef
+impl Clone for ferrosys::btrfs::ondisk::Item
+impl Clone for ferrosys::btrfs::ondisk::ItemType
+impl Clone for ferrosys::btrfs::ondisk::KeyPtr
+impl Clone for ferrosys::btrfs::ondisk::ParseError
+impl Clone for ferrosys::btrfs::ondisk::RootBackup
+impl Clone for ferrosys::btrfs::ondisk::RootFlags
+impl Clone for ferrosys::btrfs::ondisk::RootItem
+impl Clone for ferrosys::btrfs::ondisk::RootRef
+impl Clone for ferrosys::btrfs::ondisk::Stripe
+impl Clone for ferrosys::btrfs::ondisk::SuperBlock
+impl Clone for ferrosys::btrfs::ondisk::SuperFlags
+impl Copy for ferrosys::AcceptedLoss
+impl Copy for ferrosys::AclEntry
+impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Civil
+impl Copy for ferrosys::DetectOptions
+impl Copy for ferrosys::Direction
+impl Copy for ferrosys::Family
+impl Copy for ferrosys::Filesystem
+impl Copy for ferrosys::Limits
+impl Copy for ferrosys::Metadata
+impl Copy for ferrosys::NodeKind
+impl Copy for ferrosys::OpenOptions
+impl Copy for ferrosys::Property
+impl Copy for ferrosys::ReadPolicy
+impl Copy for ferrosys::Severity
+impl Copy for ferrosys::Synthesis
+impl Copy for ferrosys::Timestamp
+impl Copy for ferrosys::btrfs::Category
+impl Copy for ferrosys::btrfs::Content
+impl Copy for ferrosys::btrfs::LabelError
+impl Copy for ferrosys::btrfs::Limits
+impl Copy for ferrosys::btrfs::Mirror
+impl Copy for ferrosys::btrfs::Node
+impl Copy for ferrosys::btrfs::NodeSize
+impl Copy for ferrosys::btrfs::OpenOptions
+impl Copy for ferrosys::btrfs::PlanRequest
+impl Copy for ferrosys::btrfs::Pool
+impl Copy for ferrosys::btrfs::Profile
+impl Copy for ferrosys::btrfs::ReadPolicy
+impl Copy for ferrosys::btrfs::Reservation
+impl Copy for ferrosys::btrfs::ReservationExceeded
+impl Copy for ferrosys::btrfs::SectorSize
+impl Copy for ferrosys::btrfs::Slack
+impl Copy for ferrosys::btrfs::Timestamp
+impl Copy for ferrosys::btrfs::TreeRoot
+impl Copy for ferrosys::btrfs::VolumeLabel
+impl Copy for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl Copy for ferrosys::btrfs::ondisk::BlockGroupItem
+impl Copy for ferrosys::btrfs::ondisk::ChecksumType
+impl Copy for ferrosys::btrfs::ondisk::Chunk
+impl Copy for ferrosys::btrfs::ondisk::CompatFlags
+impl Copy for ferrosys::btrfs::ondisk::CompatRoFlags
+impl Copy for ferrosys::btrfs::ondisk::Compression
+impl Copy for ferrosys::btrfs::ondisk::DevExtent
+impl Copy for ferrosys::btrfs::ondisk::DevItem
+impl Copy for ferrosys::btrfs::ondisk::DevStats
+impl Copy for ferrosys::btrfs::ondisk::DirEntryType
+impl Copy for ferrosys::btrfs::ondisk::DirItem
+impl Copy for ferrosys::btrfs::ondisk::DiskKey
+impl Copy for ferrosys::btrfs::ondisk::ExtentDataRef
+impl Copy for ferrosys::btrfs::ondisk::ExtentFlags
+impl Copy for ferrosys::btrfs::ondisk::ExtentItem
+impl Copy for ferrosys::btrfs::ondisk::ExtentKind
+impl Copy for ferrosys::btrfs::ondisk::FileExtentItem
+impl Copy for ferrosys::btrfs::ondisk::FreeSpaceInfo
+impl Copy for ferrosys::btrfs::ondisk::Header
+impl Copy for ferrosys::btrfs::ondisk::IncompatFlags
+impl Copy for ferrosys::btrfs::ondisk::InlineRef
+impl Copy for ferrosys::btrfs::ondisk::InodeExtref
+impl Copy for ferrosys::btrfs::ondisk::InodeFlags
+impl Copy for ferrosys::btrfs::ondisk::InodeItem
+impl Copy for ferrosys::btrfs::ondisk::InodeRef
+impl Copy for ferrosys::btrfs::ondisk::Item
+impl Copy for ferrosys::btrfs::ondisk::ItemType
+impl Copy for ferrosys::btrfs::ondisk::KeyPtr
+impl Copy for ferrosys::btrfs::ondisk::ParseError
+impl Copy for ferrosys::btrfs::ondisk::RootBackup
+impl Copy for ferrosys::btrfs::ondisk::RootFlags
+impl Copy for ferrosys::btrfs::ondisk::RootItem
+impl Copy for ferrosys::btrfs::ondisk::RootRef
+impl Copy for ferrosys::btrfs::ondisk::Stripe
+impl Copy for ferrosys::btrfs::ondisk::SuperFlags
+impl Debug for ferrosys::AcceptedLoss
+impl Debug for ferrosys::Acl
+impl Debug for ferrosys::AclEntry
+impl Debug for ferrosys::AclError
+impl Debug for ferrosys::AclQualifier
+impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Civil
+impl Debug for ferrosys::DetectError
+impl Debug for ferrosys::DetectOptions
+impl Debug for ferrosys::Direction
+impl Debug for ferrosys::EntryKind
+impl Debug for ferrosys::Family
+impl Debug for ferrosys::FidelityRecord
+impl Debug for ferrosys::FidelityReport
+impl Debug for ferrosys::FileContent
+impl Debug for ferrosys::FileRange
+impl Debug for ferrosys::Filesystem
+impl Debug for ferrosys::Finding
+impl Debug for ferrosys::FindingReport
+impl Debug for ferrosys::LayeredSource
+impl Debug for ferrosys::Limits
+impl Debug for ferrosys::Metadata
+impl Debug for ferrosys::NodeKind
+impl Debug for ferrosys::OpenError
+impl Debug for ferrosys::OpenOptions
+impl Debug for ferrosys::Property
+impl Debug for ferrosys::ReadPolicy
+impl Debug for ferrosys::ScanReport
+impl Debug for ferrosys::Severity
+impl Debug for ferrosys::SourceEntry
+impl Debug for ferrosys::Synthesis
+impl Debug for ferrosys::Timestamp
+impl Debug for ferrosys::TreeBuilder
+impl Debug for ferrosys::TreeEntry
+impl Debug for ferrosys::TreeError
+impl Debug for ferrosys::Xattr
+impl Debug for ferrosys::btrfs::Anomaly
+impl Debug for ferrosys::btrfs::BtrfsLayout
+impl Debug for ferrosys::btrfs::Category
+impl Debug for ferrosys::btrfs::ChunkMap
+impl Debug for ferrosys::btrfs::Content
+impl Debug for ferrosys::btrfs::Entry
+impl Debug for ferrosys::btrfs::FormatError
+impl Debug for ferrosys::btrfs::FormatOptions
+impl Debug for ferrosys::btrfs::GeometryError
+impl Debug for ferrosys::btrfs::LabelError
+impl Debug for ferrosys::btrfs::Limits
+impl Debug for ferrosys::btrfs::Located
+impl Debug for ferrosys::btrfs::MappedChunk
+impl Debug for ferrosys::btrfs::Mirror
+impl Debug for ferrosys::btrfs::ModelError
+impl Debug for ferrosys::btrfs::Node
+impl Debug for ferrosys::btrfs::NodeSize
+impl Debug for ferrosys::btrfs::OpenOptions
+impl Debug for ferrosys::btrfs::PlanRequest
+impl Debug for ferrosys::btrfs::Pool
+impl Debug for ferrosys::btrfs::Profile
+impl Debug for ferrosys::btrfs::ReadError
+impl Debug for ferrosys::btrfs::ReadPolicy
+impl Debug for ferrosys::btrfs::Reservation
+impl Debug for ferrosys::btrfs::ReservationExceeded
+impl Debug for ferrosys::btrfs::SectorSize
+impl Debug for ferrosys::btrfs::Slack
+impl Debug for ferrosys::btrfs::Subvolume
+impl Debug for ferrosys::btrfs::SubvolumeRequest
+impl Debug for ferrosys::btrfs::Timestamp
+impl Debug for ferrosys::btrfs::TreeBlock
+impl Debug for ferrosys::btrfs::TreeRoot
+impl Debug for ferrosys::btrfs::VolumeLabel
+impl Debug for ferrosys::btrfs::WalkEntry
+impl Debug for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl Debug for ferrosys::btrfs::ondisk::BlockGroupItem
+impl Debug for ferrosys::btrfs::ondisk::ChecksumType
+impl Debug for ferrosys::btrfs::ondisk::Chunk
+impl Debug for ferrosys::btrfs::ondisk::CompatFlags
+impl Debug for ferrosys::btrfs::ondisk::CompatRoFlags
+impl Debug for ferrosys::btrfs::ondisk::Compression
+impl Debug for ferrosys::btrfs::ondisk::DevExtent
+impl Debug for ferrosys::btrfs::ondisk::DevItem
+impl Debug for ferrosys::btrfs::ondisk::DevStats
+impl Debug for ferrosys::btrfs::ondisk::DirEntryType
+impl Debug for ferrosys::btrfs::ondisk::DirItem
+impl Debug for ferrosys::btrfs::ondisk::DiskKey
+impl Debug for ferrosys::btrfs::ondisk::ExtentDataRef
+impl Debug for ferrosys::btrfs::ondisk::ExtentFlags
+impl Debug for ferrosys::btrfs::ondisk::ExtentItem
+impl Debug for ferrosys::btrfs::ondisk::ExtentKind
+impl Debug for ferrosys::btrfs::ondisk::FileExtentItem
+impl Debug for ferrosys::btrfs::ondisk::FreeSpaceInfo
+impl Debug for ferrosys::btrfs::ondisk::Header
+impl Debug for ferrosys::btrfs::ondisk::IncompatFlags
+impl Debug for ferrosys::btrfs::ondisk::InlineRef
+impl Debug for ferrosys::btrfs::ondisk::InodeExtref
+impl Debug for ferrosys::btrfs::ondisk::InodeFlags
+impl Debug for ferrosys::btrfs::ondisk::InodeItem
+impl Debug for ferrosys::btrfs::ondisk::InodeRef
+impl Debug for ferrosys::btrfs::ondisk::Item
+impl Debug for ferrosys::btrfs::ondisk::ItemType
+impl Debug for ferrosys::btrfs::ondisk::KeyPtr
+impl Debug for ferrosys::btrfs::ondisk::ParseError
+impl Debug for ferrosys::btrfs::ondisk::RootBackup
+impl Debug for ferrosys::btrfs::ondisk::RootFlags
+impl Debug for ferrosys::btrfs::ondisk::RootItem
+impl Debug for ferrosys::btrfs::ondisk::RootRef
+impl Debug for ferrosys::btrfs::ondisk::Stripe
+impl Debug for ferrosys::btrfs::ondisk::SuperBlock
+impl Debug for ferrosys::btrfs::ondisk::SuperFlags
+impl Default for ferrosys::AcceptedLoss
+impl Default for ferrosys::DetectOptions
+impl Default for ferrosys::FidelityReport
+impl Default for ferrosys::FindingReport
+impl Default for ferrosys::LayeredSource
+impl Default for ferrosys::Limits
+impl Default for ferrosys::OpenOptions
+impl Default for ferrosys::ReadPolicy
+impl Default for ferrosys::ScanReport
+impl Default for ferrosys::Synthesis
+impl Default for ferrosys::Timestamp
+impl Default for ferrosys::TreeBuilder
+impl Default for ferrosys::btrfs::ChunkMap
+impl Default for ferrosys::btrfs::Content
+impl Default for ferrosys::btrfs::Limits
+impl Default for ferrosys::btrfs::NodeSize
+impl Default for ferrosys::btrfs::OpenOptions
+impl Default for ferrosys::btrfs::Profile
+impl Default for ferrosys::btrfs::ReadPolicy
+impl Default for ferrosys::btrfs::SectorSize
+impl Default for ferrosys::btrfs::Timestamp
+impl Default for ferrosys::btrfs::VolumeLabel
+impl Default for ferrosys::btrfs::ondisk::DevStats
+impl Default for ferrosys::btrfs::ondisk::RootBackup
+impl Deviation for ferrosys::btrfs::Anomaly
+impl Display for ferrosys::AclError
+impl Display for ferrosys::Civil
+impl Display for ferrosys::DetectError
+impl Display for ferrosys::OpenError
+impl Display for ferrosys::TreeError
+impl Display for ferrosys::btrfs::FormatError
+impl Display for ferrosys::btrfs::GeometryError
+impl Display for ferrosys::btrfs::LabelError
+impl Display for ferrosys::btrfs::ModelError
+impl Display for ferrosys::btrfs::ReadError
+impl Display for ferrosys::btrfs::ReservationExceeded
+impl Display for ferrosys::btrfs::ondisk::ParseError
+impl Eq for ferrosys::AcceptedLoss
+impl Eq for ferrosys::Acl
+impl Eq for ferrosys::AclEntry
+impl Eq for ferrosys::AclError
+impl Eq for ferrosys::AclQualifier
+impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Civil
+impl Eq for ferrosys::DetectError
+impl Eq for ferrosys::DetectOptions
+impl Eq for ferrosys::Direction
+impl Eq for ferrosys::EntryKind
+impl Eq for ferrosys::Family
+impl Eq for ferrosys::FidelityRecord
+impl Eq for ferrosys::FidelityReport
+impl Eq for ferrosys::FileContent
+impl Eq for ferrosys::FileRange
+impl Eq for ferrosys::Filesystem
+impl Eq for ferrosys::Finding
+impl Eq for ferrosys::FindingReport
+impl Eq for ferrosys::Limits
+impl Eq for ferrosys::Metadata
+impl Eq for ferrosys::NodeKind
+impl Eq for ferrosys::OpenError
+impl Eq for ferrosys::OpenOptions
+impl Eq for ferrosys::Property
+impl Eq for ferrosys::ReadPolicy
+impl Eq for ferrosys::ScanReport
+impl Eq for ferrosys::Severity
+impl Eq for ferrosys::SourceEntry
+impl Eq for ferrosys::Synthesis
+impl Eq for ferrosys::Timestamp
+impl Eq for ferrosys::TreeEntry
+impl Eq for ferrosys::TreeError
+impl Eq for ferrosys::Xattr
+impl Eq for ferrosys::btrfs::Anomaly
+impl Eq for ferrosys::btrfs::BtrfsLayout
+impl Eq for ferrosys::btrfs::Category
+impl Eq for ferrosys::btrfs::Content
+impl Eq for ferrosys::btrfs::Entry
+impl Eq for ferrosys::btrfs::FormatOptions
+impl Eq for ferrosys::btrfs::GeometryError
+impl Eq for ferrosys::btrfs::LabelError
+impl Eq for ferrosys::btrfs::Limits
+impl Eq for ferrosys::btrfs::Located
+impl Eq for ferrosys::btrfs::MappedChunk
+impl Eq for ferrosys::btrfs::Mirror
+impl Eq for ferrosys::btrfs::ModelError
+impl Eq for ferrosys::btrfs::Node
+impl Eq for ferrosys::btrfs::NodeSize
+impl Eq for ferrosys::btrfs::OpenOptions
+impl Eq for ferrosys::btrfs::PlanRequest
+impl Eq for ferrosys::btrfs::Pool
+impl Eq for ferrosys::btrfs::Profile
+impl Eq for ferrosys::btrfs::ReadPolicy
+impl Eq for ferrosys::btrfs::Reservation
+impl Eq for ferrosys::btrfs::ReservationExceeded
+impl Eq for ferrosys::btrfs::SectorSize
+impl Eq for ferrosys::btrfs::Slack
+impl Eq for ferrosys::btrfs::Subvolume
+impl Eq for ferrosys::btrfs::SubvolumeRequest
+impl Eq for ferrosys::btrfs::Timestamp
+impl Eq for ferrosys::btrfs::TreeBlock
+impl Eq for ferrosys::btrfs::TreeRoot
+impl Eq for ferrosys::btrfs::VolumeLabel
+impl Eq for ferrosys::btrfs::WalkEntry
+impl Eq for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl Eq for ferrosys::btrfs::ondisk::BlockGroupItem
+impl Eq for ferrosys::btrfs::ondisk::ChecksumType
+impl Eq for ferrosys::btrfs::ondisk::Chunk
+impl Eq for ferrosys::btrfs::ondisk::CompatFlags
+impl Eq for ferrosys::btrfs::ondisk::CompatRoFlags
+impl Eq for ferrosys::btrfs::ondisk::Compression
+impl Eq for ferrosys::btrfs::ondisk::DevExtent
+impl Eq for ferrosys::btrfs::ondisk::DevItem
+impl Eq for ferrosys::btrfs::ondisk::DevStats
+impl Eq for ferrosys::btrfs::ondisk::DirEntryType
+impl Eq for ferrosys::btrfs::ondisk::DirItem
+impl Eq for ferrosys::btrfs::ondisk::DiskKey
+impl Eq for ferrosys::btrfs::ondisk::ExtentDataRef
+impl Eq for ferrosys::btrfs::ondisk::ExtentFlags
+impl Eq for ferrosys::btrfs::ondisk::ExtentItem
+impl Eq for ferrosys::btrfs::ondisk::ExtentKind
+impl Eq for ferrosys::btrfs::ondisk::FileExtentItem
+impl Eq for ferrosys::btrfs::ondisk::FreeSpaceInfo
+impl Eq for ferrosys::btrfs::ondisk::Header
+impl Eq for ferrosys::btrfs::ondisk::IncompatFlags
+impl Eq for ferrosys::btrfs::ondisk::InlineRef
+impl Eq for ferrosys::btrfs::ondisk::InodeExtref
+impl Eq for ferrosys::btrfs::ondisk::InodeFlags
+impl Eq for ferrosys::btrfs::ondisk::InodeItem
+impl Eq for ferrosys::btrfs::ondisk::InodeRef
+impl Eq for ferrosys::btrfs::ondisk::Item
+impl Eq for ferrosys::btrfs::ondisk::ItemType
+impl Eq for ferrosys::btrfs::ondisk::KeyPtr
+impl Eq for ferrosys::btrfs::ondisk::ParseError
+impl Eq for ferrosys::btrfs::ondisk::RootBackup
+impl Eq for ferrosys::btrfs::ondisk::RootFlags
+impl Eq for ferrosys::btrfs::ondisk::RootItem
+impl Eq for ferrosys::btrfs::ondisk::RootRef
+impl Eq for ferrosys::btrfs::ondisk::Stripe
+impl Eq for ferrosys::btrfs::ondisk::SuperBlock
+impl Eq for ferrosys::btrfs::ondisk::SuperFlags
+impl Error for ferrosys::AclError
+impl Error for ferrosys::DetectError
+impl Error for ferrosys::OpenError
+impl Error for ferrosys::TreeError
+impl Error for ferrosys::btrfs::FormatError
+impl Error for ferrosys::btrfs::GeometryError
+impl Error for ferrosys::btrfs::LabelError
+impl Error for ferrosys::btrfs::ModelError
+impl Error for ferrosys::btrfs::ReadError
+impl Error for ferrosys::btrfs::ReservationExceeded
+impl Error for ferrosys::btrfs::ondisk::ParseError
+impl From<&[u8; N]> for ferrosys::FileContent
+impl From<&[u8]> for ferrosys::FileContent
+impl From<&str> for ferrosys::FileContent
+impl From<DetectError> for ferrosys::DetectError
+impl From<DetectError> for ferrosys::OpenError
+impl From<Error> for ferrosys::DetectError
+impl From<Error> for ferrosys::btrfs::FormatError
+impl From<Error> for ferrosys::btrfs::ReadError
+impl From<FileRange> for ferrosys::FileContent
+impl From<FileRange> for ferrosys::FileRange
+impl From<GeometryError> for ferrosys::btrfs::FormatError
+impl From<GeometryError> for ferrosys::btrfs::GeometryError
+impl From<ModelError> for ferrosys::btrfs::FormatError
+impl From<ModelError> for ferrosys::btrfs::ModelError
+impl From<ParseError> for ferrosys::btrfs::ReadError
+impl From<ParseError> for ferrosys::btrfs::ondisk::ParseError
+impl From<ReadError> for ferrosys::TreeError
+impl From<ReadError> for ferrosys::btrfs::ReadError
+impl From<ReservationExceeded> for ferrosys::btrfs::FormatError
+impl From<ReservationExceeded> for ferrosys::btrfs::ReservationExceeded
+impl From<String> for ferrosys::FileContent
+impl From<Vec<u8>> for ferrosys::FileContent
+impl FsTree for ferrosys::btrfs::Reader
+impl Hash for ferrosys::AcceptedLoss
+impl Hash for ferrosys::Direction
+impl Hash for ferrosys::Family
+impl Hash for ferrosys::Filesystem
+impl Hash for ferrosys::Property
+impl Hash for ferrosys::btrfs::ondisk::DiskKey
+impl Hash for ferrosys::btrfs::ondisk::ItemType
+impl NamedChoice for ferrosys::Severity
+impl NamedChoice for ferrosys::btrfs::Profile
+impl Ord for ferrosys::Severity
+impl Ord for ferrosys::btrfs::ondisk::DiskKey
+impl Ord for ferrosys::btrfs::ondisk::ItemType
+impl Packed for ferrosys::btrfs::ondisk::DirItem
+impl Packed for ferrosys::btrfs::ondisk::InodeExtref
+impl Packed for ferrosys::btrfs::ondisk::InodeRef
+impl Packed for ferrosys::btrfs::ondisk::RootRef
+impl PartialEq for ferrosys::AcceptedLoss
+impl PartialEq for ferrosys::Acl
+impl PartialEq for ferrosys::AclEntry
+impl PartialEq for ferrosys::AclError
+impl PartialEq for ferrosys::AclQualifier
+impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Civil
+impl PartialEq for ferrosys::DetectError
+impl PartialEq for ferrosys::DetectOptions
+impl PartialEq for ferrosys::Direction
+impl PartialEq for ferrosys::EntryKind
+impl PartialEq for ferrosys::Family
+impl PartialEq for ferrosys::FidelityRecord
+impl PartialEq for ferrosys::FidelityReport
+impl PartialEq for ferrosys::FileContent
+impl PartialEq for ferrosys::FileRange
+impl PartialEq for ferrosys::Filesystem
+impl PartialEq for ferrosys::Finding
+impl PartialEq for ferrosys::FindingReport
+impl PartialEq for ferrosys::Limits
+impl PartialEq for ferrosys::Metadata
+impl PartialEq for ferrosys::NodeKind
+impl PartialEq for ferrosys::OpenError
+impl PartialEq for ferrosys::OpenOptions
+impl PartialEq for ferrosys::Property
+impl PartialEq for ferrosys::ReadPolicy
+impl PartialEq for ferrosys::ScanReport
+impl PartialEq for ferrosys::Severity
+impl PartialEq for ferrosys::SourceEntry
+impl PartialEq for ferrosys::Synthesis
+impl PartialEq for ferrosys::Timestamp
+impl PartialEq for ferrosys::TreeEntry
+impl PartialEq for ferrosys::TreeError
+impl PartialEq for ferrosys::Xattr
+impl PartialEq for ferrosys::btrfs::Anomaly
+impl PartialEq for ferrosys::btrfs::BtrfsLayout
+impl PartialEq for ferrosys::btrfs::Category
+impl PartialEq for ferrosys::btrfs::Content
+impl PartialEq for ferrosys::btrfs::Entry
+impl PartialEq for ferrosys::btrfs::FormatOptions
+impl PartialEq for ferrosys::btrfs::GeometryError
+impl PartialEq for ferrosys::btrfs::LabelError
+impl PartialEq for ferrosys::btrfs::Limits
+impl PartialEq for ferrosys::btrfs::Located
+impl PartialEq for ferrosys::btrfs::MappedChunk
+impl PartialEq for ferrosys::btrfs::Mirror
+impl PartialEq for ferrosys::btrfs::ModelError
+impl PartialEq for ferrosys::btrfs::Node
+impl PartialEq for ferrosys::btrfs::NodeSize
+impl PartialEq for ferrosys::btrfs::OpenOptions
+impl PartialEq for ferrosys::btrfs::PlanRequest
+impl PartialEq for ferrosys::btrfs::Pool
+impl PartialEq for ferrosys::btrfs::Profile
+impl PartialEq for ferrosys::btrfs::ReadPolicy
+impl PartialEq for ferrosys::btrfs::Reservation
+impl PartialEq for ferrosys::btrfs::ReservationExceeded
+impl PartialEq for ferrosys::btrfs::SectorSize
+impl PartialEq for ferrosys::btrfs::Slack
+impl PartialEq for ferrosys::btrfs::Subvolume
+impl PartialEq for ferrosys::btrfs::SubvolumeRequest
+impl PartialEq for ferrosys::btrfs::Timestamp
+impl PartialEq for ferrosys::btrfs::TreeBlock
+impl PartialEq for ferrosys::btrfs::TreeRoot
+impl PartialEq for ferrosys::btrfs::VolumeLabel
+impl PartialEq for ferrosys::btrfs::WalkEntry
+impl PartialEq for ferrosys::btrfs::ondisk::BlockGroupFlags
+impl PartialEq for ferrosys::btrfs::ondisk::BlockGroupItem
+impl PartialEq for ferrosys::btrfs::ondisk::ChecksumType
+impl PartialEq for ferrosys::btrfs::ondisk::Chunk
+impl PartialEq for ferrosys::btrfs::ondisk::CompatFlags
+impl PartialEq for ferrosys::btrfs::ondisk::CompatRoFlags
+impl PartialEq for ferrosys::btrfs::ondisk::Compression
+impl PartialEq for ferrosys::btrfs::ondisk::DevExtent
+impl PartialEq for ferrosys::btrfs::ondisk::DevItem
+impl PartialEq for ferrosys::btrfs::ondisk::DevStats
+impl PartialEq for ferrosys::btrfs::ondisk::DirEntryType
+impl PartialEq for ferrosys::btrfs::ondisk::DirItem
+impl PartialEq for ferrosys::btrfs::ondisk::DiskKey
+impl PartialEq for ferrosys::btrfs::ondisk::ExtentDataRef
+impl PartialEq for ferrosys::btrfs::ondisk::ExtentFlags
+impl PartialEq for ferrosys::btrfs::ondisk::ExtentItem
+impl PartialEq for ferrosys::btrfs::ondisk::ExtentKind
+impl PartialEq for ferrosys::btrfs::ondisk::FileExtentItem
+impl PartialEq for ferrosys::btrfs::ondisk::FreeSpaceInfo
+impl PartialEq for ferrosys::btrfs::ondisk::Header
+impl PartialEq for ferrosys::btrfs::ondisk::IncompatFlags
+impl PartialEq for ferrosys::btrfs::ondisk::InlineRef
+impl PartialEq for ferrosys::btrfs::ondisk::InodeExtref
+impl PartialEq for ferrosys::btrfs::ondisk::InodeFlags
+impl PartialEq for ferrosys::btrfs::ondisk::InodeItem
+impl PartialEq for ferrosys::btrfs::ondisk::InodeRef
+impl PartialEq for ferrosys::btrfs::ondisk::Item
+impl PartialEq for ferrosys::btrfs::ondisk::ItemType
+impl PartialEq for ferrosys::btrfs::ondisk::KeyPtr
+impl PartialEq for ferrosys::btrfs::ondisk::ParseError
+impl PartialEq for ferrosys::btrfs::ondisk::RootBackup
+impl PartialEq for ferrosys::btrfs::ondisk::RootFlags
+impl PartialEq for ferrosys::btrfs::ondisk::RootItem
+impl PartialEq for ferrosys::btrfs::ondisk::RootRef
+impl PartialEq for ferrosys::btrfs::ondisk::Stripe
+impl PartialEq for ferrosys::btrfs::ondisk::SuperBlock
+impl PartialEq for ferrosys::btrfs::ondisk::SuperFlags
+impl PartialOrd for ferrosys::Severity
+impl PartialOrd for ferrosys::btrfs::ondisk::DiskKey
+impl PartialOrd for ferrosys::btrfs::ondisk::ItemType
+impl Source for ferrosys::LayeredSource
+impl Source for ferrosys::TreeBuilder
+pub const ferrosys::AcceptedLoss::ALL: Self
+pub const ferrosys::AcceptedLoss::NONE: Self
+pub const ferrosys::Acl::ACCESS_NAME: &'static [u8]
+pub const ferrosys::Acl::DEFAULT_NAME: &'static [u8]
+pub const ferrosys::Acl::EXEC: u16
+pub const ferrosys::Acl::READ: u16
+pub const ferrosys::Acl::WRITE: u16
+pub const ferrosys::FINDINGS_SCHEMA_VERSION: u32
+pub const ferrosys::FidelityReport::MAX_RECORDS: usize
+pub const ferrosys::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::MAX_SYMLINK_HOPS: u32
+pub const ferrosys::NamedChoice::NAMES: &'static [Self]
+pub const ferrosys::Severity::NAMES: &'static [Self]
+pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
+pub const ferrosys::btrfs::BOOTSTRAP_SYSTEM_CHUNK: u64
+pub const ferrosys::btrfs::Content::EMPTY: Self
+pub const ferrosys::btrfs::DEFAULT_COMPAT_RO: super::ondisk::CompatRoFlags
+pub const ferrosys::btrfs::DEFAULT_DATA_PROFILE: Profile
+pub const ferrosys::btrfs::DEFAULT_INCOMPAT: super::ondisk::IncompatFlags
+pub const ferrosys::btrfs::DEFAULT_METADATA_PROFILE: Profile
+pub const ferrosys::btrfs::DEFAULT_NODE_SIZE: u32
+pub const ferrosys::btrfs::DEFAULT_SECTOR_SIZE: u32
+pub const ferrosys::btrfs::DEVICE_ID: u64
+pub const ferrosys::btrfs::GENERATION: u64
+pub const ferrosys::btrfs::LARGE_VOLUME: u64
+pub const ferrosys::btrfs::MAX_EXTENT_BYTES: u64
+pub const ferrosys::btrfs::MAX_NAME_LEN: usize
+pub const ferrosys::btrfs::Profile::NAMES: &'static [Self]
+pub const ferrosys::btrfs::RESERVED_HEAD: u64
+pub const ferrosys::btrfs::STRIPE_LEN: u64
+pub const ferrosys::btrfs::SUPPORTED_INCOMPAT: super::ondisk::IncompatFlags
+pub const ferrosys::btrfs::Timestamp::NANOS_PER_SEC: u32
+pub const ferrosys::btrfs::VOLUME_SHARE: u64
+pub const ferrosys::btrfs::VolumeLabel::MAX_BYTES: usize
+pub const ferrosys::btrfs::VolumeLabel::UNNAMED: Self
+pub const ferrosys::btrfs::WRITABLE_COMPAT_RO: super::ondisk::CompatRoFlags
+pub const ferrosys::btrfs::WRITABLE_INCOMPAT: super::ondisk::IncompatFlags
+pub const ferrosys::btrfs::ondisk::BACKREF_REV_MIXED: u8
+pub const ferrosys::btrfs::ondisk::BACKREF_REV_SHIFT: u32
+pub const ferrosys::btrfs::ondisk::BACKUP_ROOTS_OFFSET: usize
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::DATA: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::DUP: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::METADATA: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::METADATA_REMAP: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::PROFILE_MASK: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID0: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID10: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID1: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID1C3: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID1C4: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID5: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::RAID6: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::REMAPPED: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::SYSTEM: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupFlags::TYPE_MASK: Self
+pub const ferrosys::btrfs::ondisk::BlockGroupItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::CHECKSUM_COVERED_FROM: usize
+pub const ferrosys::btrfs::ondisk::CSUM_FIELD_LEN: usize
+pub const ferrosys::btrfs::ondisk::ChecksumType::BLAKE2B: Self
+pub const ferrosys::btrfs::ondisk::ChecksumType::CRC32C: Self
+pub const ferrosys::btrfs::ondisk::ChecksumType::SHA256: Self
+pub const ferrosys::btrfs::ondisk::ChecksumType::XXHASH64: Self
+pub const ferrosys::btrfs::ondisk::Chunk::SIZE: usize
+pub const ferrosys::btrfs::ondisk::CompatFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::CompatRoFlags::BLOCK_GROUP_TREE: Self
+pub const ferrosys::btrfs::ondisk::CompatRoFlags::FREE_SPACE_TREE: Self
+pub const ferrosys::btrfs::ondisk::CompatRoFlags::FREE_SPACE_TREE_VALID: Self
+pub const ferrosys::btrfs::ondisk::CompatRoFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::CompatRoFlags::VERITY: Self
+pub const ferrosys::btrfs::ondisk::DevExtent::SIZE: usize
+pub const ferrosys::btrfs::ondisk::DevItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::DevStats::DEV_STATS: u64
+pub const ferrosys::btrfs::ondisk::DevStats::SIZE: usize
+pub const ferrosys::btrfs::ondisk::DirItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::DiskKey::MIN: Self
+pub const ferrosys::btrfs::ondisk::DiskKey::SIZE: usize
+pub const ferrosys::btrfs::ondisk::ExtentDataRef::SIZE: usize
+pub const ferrosys::btrfs::ondisk::ExtentFlags::DATA: Self
+pub const ferrosys::btrfs::ondisk::ExtentFlags::FULL_BACKREF: Self
+pub const ferrosys::btrfs::ondisk::ExtentFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::ExtentFlags::TREE_BLOCK: Self
+pub const ferrosys::btrfs::ondisk::ExtentItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::FileExtentItem::INLINE_DATA_START: usize
+pub const ferrosys::btrfs::ondisk::FileExtentItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::FreeSpaceInfo::SIZE: usize
+pub const ferrosys::btrfs::ondisk::FreeSpaceInfo::USING_BITMAPS: u32
+pub const ferrosys::btrfs::ondisk::HEADER_FLAG_RELOC: u64
+pub const ferrosys::btrfs::ondisk::HEADER_FLAG_WRITTEN: u64
+pub const ferrosys::btrfs::ondisk::Header::SIZE: usize
+pub const ferrosys::btrfs::ondisk::IncompatFlags::BIG_METADATA: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::COMPRESS_LZO: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::COMPRESS_ZSTD: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::DEFAULT_SUBVOL: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::ENCRYPT: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::EXTENDED_IREF: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::EXTENT_TREE_V2: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::METADATA_UUID: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::MIXED_BACKREF: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::MIXED_GROUPS: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::NO_HOLES: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::RAID1C34: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::RAID56: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::RAID_STRIPE_TREE: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::REMAP_TREE: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::SIMPLE_QUOTA: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::SKINNY_METADATA: Self
+pub const ferrosys::btrfs::ondisk::IncompatFlags::ZONED: Self
+pub const ferrosys::btrfs::ondisk::InlineRef::SIZE: usize
+pub const ferrosys::btrfs::ondisk::InodeExtref::SIZE: usize
+pub const ferrosys::btrfs::ondisk::InodeFlags::APPEND: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::COMPRESS: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::DIRSYNC: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::IMMUTABLE: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NOATIME: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NOCOMPRESS: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NODATACOW: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NODATASUM: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NODUMP: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::PREALLOC: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::READONLY: Self
+pub const ferrosys::btrfs::ondisk::InodeFlags::SYNC: Self
+pub const ferrosys::btrfs::ondisk::InodeItem::MINOR_BITS: u32
+pub const ferrosys::btrfs::ondisk::InodeItem::MINOR_MASK: u32
+pub const ferrosys::btrfs::ondisk::InodeItem::MODE_TYPE_MASK: u32
+pub const ferrosys::btrfs::ondisk::InodeItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::InodeRef::SIZE: usize
+pub const ferrosys::btrfs::ondisk::Item::SIZE: usize
+pub const ferrosys::btrfs::ondisk::ItemType::BLOCK_GROUP_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::CHUNK_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DEV_EXTENT: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DEV_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DEV_REPLACE: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DIR_INDEX: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DIR_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DIR_LOG_INDEX: Self
+pub const ferrosys::btrfs::ondisk::ItemType::DIR_LOG_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::EXTENT_CSUM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::EXTENT_DATA: Self
+pub const ferrosys::btrfs::ondisk::ItemType::EXTENT_DATA_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::EXTENT_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::EXTENT_OWNER_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::FREE_SPACE_BITMAP: Self
+pub const ferrosys::btrfs::ondisk::ItemType::FREE_SPACE_EXTENT: Self
+pub const ferrosys::btrfs::ondisk::ItemType::FREE_SPACE_INFO: Self
+pub const ferrosys::btrfs::ondisk::ItemType::FSCRYPT_CTX: Self
+pub const ferrosys::btrfs::ondisk::ItemType::FSCRYPT_INODE_CTX: Self
+pub const ferrosys::btrfs::ondisk::ItemType::INODE_EXTREF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::INODE_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::INODE_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::METADATA_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::ORPHAN_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::PERSISTENT_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::QGROUP_INFO: Self
+pub const ferrosys::btrfs::ondisk::ItemType::QGROUP_LIMIT: Self
+pub const ferrosys::btrfs::ondisk::ItemType::QGROUP_RELATION: Self
+pub const ferrosys::btrfs::ondisk::ItemType::QGROUP_STATUS: Self
+pub const ferrosys::btrfs::ondisk::ItemType::RAID_STRIPE: Self
+pub const ferrosys::btrfs::ondisk::ItemType::ROOT_BACKREF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::ROOT_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::ROOT_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::SHARED_BLOCK_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::SHARED_DATA_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::STRING_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::TEMPORARY_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::TREE_BLOCK_REF: Self
+pub const ferrosys::btrfs::ondisk::ItemType::UUID_RECEIVED_SUBVOL: Self
+pub const ferrosys::btrfs::ondisk::ItemType::UUID_SUBVOL: Self
+pub const ferrosys::btrfs::ondisk::ItemType::VERITY_DESC_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::VERITY_MERKLE_ITEM: Self
+pub const ferrosys::btrfs::ondisk::ItemType::XATTR_ITEM: Self
+pub const ferrosys::btrfs::ondisk::KeyPtr::SIZE: usize
+pub const ferrosys::btrfs::ondisk::LABEL_SIZE: usize
+pub const ferrosys::btrfs::ondisk::LEAF_LEVEL: u8
+pub const ferrosys::btrfs::ondisk::MAGIC: [u8; 8]
+pub const ferrosys::btrfs::ondisk::MAX_BLOCK_SIZE: u32
+pub const ferrosys::btrfs::ondisk::MAX_LEVEL: u8
+pub const ferrosys::btrfs::ondisk::MIN_BLOCK_SIZE: u32
+pub const ferrosys::btrfs::ondisk::MIRRORS: [u64; 3]
+pub const ferrosys::btrfs::ondisk::NUM_BACKUP_ROOTS: usize
+pub const ferrosys::btrfs::ondisk::Packed::HEAD: usize
+pub const ferrosys::btrfs::ondisk::Packed::STRUCTURE: &'static str
+pub const ferrosys::btrfs::ondisk::RootBackup::SIZE: usize
+pub const ferrosys::btrfs::ondisk::RootFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::RootFlags::SUBVOL_DEAD: Self
+pub const ferrosys::btrfs::ondisk::RootFlags::SUBVOL_RDONLY: Self
+pub const ferrosys::btrfs::ondisk::RootItem::INODE_LEN: usize
+pub const ferrosys::btrfs::ondisk::RootItem::SIZE: usize
+pub const ferrosys::btrfs::ondisk::RootRef::SIZE: usize
+pub const ferrosys::btrfs::ondisk::SUPER_INFO_SIZE: usize
+pub const ferrosys::btrfs::ondisk::SYS_CHUNK_ARRAY_SIZE: usize
+pub const ferrosys::btrfs::ondisk::Stripe::SIZE: usize
+pub const ferrosys::btrfs::ondisk::SuperBlock::BYTENR_OFFSET: usize
+pub const ferrosys::btrfs::ondisk::SuperBlock::CHECKSUM_OFFSET: usize
+pub const ferrosys::btrfs::ondisk::SuperBlock::GENERATION_OFFSET: usize
+pub const ferrosys::btrfs::ondisk::SuperBlock::MAGIC_OFFSET: usize
+pub const ferrosys::btrfs::ondisk::SuperBlock::SIZE: usize
+pub const ferrosys::btrfs::ondisk::SuperFlags::CHANGING_BG_TREE: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::CHANGING_DATA_CSUM: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::CHANGING_FSID: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::CHANGING_FSID_V2: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::CHANGING_META_CSUM: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::ERROR: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::METADUMP: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::METADUMP_V2: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::NONE: Self
+pub const ferrosys::btrfs::ondisk::SuperFlags::SEEDING: Self
+pub const ferrosys::btrfs::ondisk::TIMESPEC_SIZE: usize
+pub const ferrosys::btrfs::ondisk::objectid::BLOCK_GROUP_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::CHUNK_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::CSUM_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::DATA_RELOC_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::DEV_ITEMS: u64
+pub const ferrosys::btrfs::ondisk::objectid::DEV_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::EXTENT_CSUM: u64
+pub const ferrosys::btrfs::ondisk::objectid::EXTENT_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::FIRST_CHUNK_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::FIRST_FREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::FREE_SPACE: u64
+pub const ferrosys::btrfs::ondisk::objectid::FREE_SPACE_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::FS_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::LAST_FREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::QUOTA_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::RAID_STRIPE_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::REMAP_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::ROOT_TREE: u64
+pub const ferrosys::btrfs::ondisk::objectid::ROOT_TREE_DIR: u64
+pub const ferrosys::btrfs::ondisk::objectid::TREE_RELOC: u64
+pub const ferrosys::btrfs::ondisk::objectid::UUID_TREE: u64
+pub const fn ferrosys::AcceptedLoss::and(self, property: Property) -> Self
+pub const fn ferrosys::AcceptedLoss::contains(self, property: Property) -> bool
+pub const fn ferrosys::AcceptedLoss::is_empty(self) -> bool
+pub const fn ferrosys::AcceptedLoss::without(self, property: Property) -> Self
+pub const fn ferrosys::Civil::at_secs(secs: i64) -> Self
+pub const fn ferrosys::Civil::to_secs(self) -> i64
+pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::DetectOptions::new() -> Self
+pub const fn ferrosys::Direction::as_str(self) -> &'static str
+pub const fn ferrosys::Family::as_str(self) -> &'static str
+pub const fn ferrosys::FileRange::is_empty(&self) -> bool
+pub const fn ferrosys::FileRange::len(&self) -> u64
+pub const fn ferrosys::FileRange::offset(&self) -> u64
+pub const fn ferrosys::Limits::max_file_bytes(self, max: u64) -> Self
+pub const fn ferrosys::Limits::max_findings(self, max: usize) -> Self
+pub const fn ferrosys::Limits::max_walk_entries(self, max: usize) -> Self
+pub const fn ferrosys::Limits::new() -> Self
+pub const fn ferrosys::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::OpenOptions::limits(self, limits: Limits) -> Self
+pub const fn ferrosys::OpenOptions::new() -> Self
+pub const fn ferrosys::OpenOptions::policy(self, policy: ReadPolicy) -> Self
+pub const fn ferrosys::Property::as_str(self) -> &'static str
+pub const fn ferrosys::Severity::as_str(self) -> &'static str
+pub const fn ferrosys::Synthesis::modes(self, file_mode: u16, dir_mode: u16) -> Self
+pub const fn ferrosys::Synthesis::new() -> Self
+pub const fn ferrosys::Synthesis::owner(self, uid: u32, gid: u32) -> Self
+pub const fn ferrosys::Timestamp::civil(self) -> Civil
+pub const fn ferrosys::Timestamp::from_secs(secs: i64) -> Self
+pub const fn ferrosys::btrfs::Category::as_str(self) -> &'static str
+pub const fn ferrosys::btrfs::Entry::is_subvolume(&self) -> bool
+pub const fn ferrosys::btrfs::FormatOptions::new(fsid: [u8; 16], time: Timestamp) -> Self
+pub const fn ferrosys::btrfs::FormatPlan::volume_bytes(&self) -> u64
+pub const fn ferrosys::btrfs::Limits::max_file_bytes(self, max: u64) -> Self
+pub const fn ferrosys::btrfs::Limits::max_findings(self, max: usize) -> Self
+pub const fn ferrosys::btrfs::Limits::max_walk_entries(self, max: usize) -> Self
+pub const fn ferrosys::btrfs::Limits::new() -> Self
+pub const fn ferrosys::btrfs::MappedChunk::logical_end(&self) -> u64
+pub const fn ferrosys::btrfs::Mirror::generation(self) -> Option<u64>
+pub const fn ferrosys::btrfs::Node::is_dir(&self) -> bool
+pub const fn ferrosys::btrfs::Node::is_file(&self) -> bool
+pub const fn ferrosys::btrfs::Node::is_symlink(&self) -> bool
+pub const fn ferrosys::btrfs::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::btrfs::OpenOptions::limits(self, limits: Limits) -> Self
+pub const fn ferrosys::btrfs::OpenOptions::new() -> Self
+pub const fn ferrosys::btrfs::OpenOptions::policy(self, policy: ReadPolicy) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::content(self, content: Content) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::data_profile(self, profile: Profile) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::features(self, incompat: IncompatFlags, compat_ro: CompatRoFlags) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::metadata_profile(self, profile: Profile) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::new(volume_bytes: u64) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::node_size(self, size: NodeSize) -> Self
+pub const fn ferrosys::btrfs::PlanRequest::sector_size(self, size: SectorSize) -> Self
+pub const fn ferrosys::btrfs::Pool::name(self) -> &'static str
+pub const fn ferrosys::btrfs::Profile::as_str(self) -> &'static str
+pub const fn ferrosys::btrfs::Profile::copies(self) -> u64
+pub const fn ferrosys::btrfs::Profile::flag(self) -> BlockGroupFlags
+pub const fn ferrosys::btrfs::Reservation::account(&self, metadata_blocks_used: u64, system_blocks_used: u64) -> Result<Slack, ReservationExceeded>
+pub const fn ferrosys::btrfs::Reservation::metadata_bytes(&self) -> u64
+pub const fn ferrosys::btrfs::Reservation::system_bytes(&self) -> u64
+pub const fn ferrosys::btrfs::Timestamp::civil(self) -> Civil
+pub const fn ferrosys::btrfs::Timestamp::from_secs(secs: i64) -> Self
+pub const fn ferrosys::btrfs::chunk_length(kind: super::ondisk::BlockGroupFlags, profile: Profile, volume_bytes: u64) -> u64
+pub const fn ferrosys::btrfs::minimum_volume_bytes(metadata: Profile, data: Profile) -> u64
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::is_mirrored(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::is_striped(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::profile_name(self) -> Option<&'static str>
+pub const fn ferrosys::btrfs::ondisk::BlockGroupFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::ChecksumType::digest_len(self) -> Option<usize>
+pub const fn ferrosys::btrfs::ondisk::ChecksumType::from_value(value: u16) -> Self
+pub const fn ferrosys::btrfs::ondisk::ChecksumType::name(self) -> Option<&'static str>
+pub const fn ferrosys::btrfs::ondisk::ChecksumType::value(self) -> u16
+pub const fn ferrosys::btrfs::ondisk::Chunk::encoded_len(&self) -> usize
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::unknown_bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::CompatFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::unknown_bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::CompatRoFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::Compression::from_u8(value: u8) -> Self
+pub const fn ferrosys::btrfs::ondisk::Compression::name(self) -> Option<&'static str>
+pub const fn ferrosys::btrfs::ondisk::Compression::to_u8(self) -> u8
+pub const fn ferrosys::btrfs::ondisk::DirEntryType::from_u8(value: u8) -> Self
+pub const fn ferrosys::btrfs::ondisk::DirEntryType::to_u8(self) -> u8
+pub const fn ferrosys::btrfs::ondisk::DiskKey::first_of(objectid: u64, kind: ItemType) -> Self
+pub const fn ferrosys::btrfs::ondisk::DiskKey::new(objectid: u64, kind: ItemType, offset: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::ExtentFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::ExtentFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::ExtentFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::ExtentFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::ExtentFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::ExtentKind::from_u8(value: u8) -> Self
+pub const fn ferrosys::btrfs::ondisk::ExtentKind::is_inline(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::ExtentKind::to_u8(self) -> u8
+pub const fn ferrosys::btrfs::ondisk::FileExtentItem::is_hole(&self) -> bool
+pub const fn ferrosys::btrfs::ondisk::Header::backref_rev(self) -> u8
+pub const fn ferrosys::btrfs::ondisk::Header::is_leaf(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::unknown_bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::IncompatFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::InodeFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::InodeFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::InodeFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::InodeFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::InodeFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::InodeItem::device(&self) -> (u32, u32)
+pub const fn ferrosys::btrfs::ondisk::InodeItem::encode_device(major: u32, minor: u32) -> u64
+pub const fn ferrosys::btrfs::ondisk::InodeItem::mode_type(&self) -> u32
+pub const fn ferrosys::btrfs::ondisk::ItemType::from_value(value: u8) -> Self
+pub const fn ferrosys::btrfs::ondisk::ItemType::name(self) -> Option<&'static str>
+pub const fn ferrosys::btrfs::ondisk::ItemType::value(self) -> u8
+pub const fn ferrosys::btrfs::ondisk::RootBackup::offset_of(slot: usize) -> Option<usize>
+pub const fn ferrosys::btrfs::ondisk::RootFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::RootFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::RootFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::RootFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::RootFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::SuperFlags::bits(self) -> u64
+pub const fn ferrosys::btrfs::ondisk::SuperFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::btrfs::ondisk::SuperFlags::from_bits(bits: u64) -> Self
+pub const fn ferrosys::btrfs::ondisk::SuperFlags::is_empty(self) -> bool
+pub const fn ferrosys::btrfs::ondisk::SuperFlags::without(self, other: Self) -> Self
+pub const fn ferrosys::btrfs::ondisk::holds_mirror(device_bytes: u64, at: u64) -> bool
+pub const fn ferrosys::btrfs::ondisk::objectid::name(objectid: u64) -> Option<&'static str>
+pub enum ferrosys::AclQualifier
+pub enum ferrosys::ReadPolicy
+pub enum ferrosys::Severity
+pub enum ferrosys::btrfs::ReadPolicy
+pub ferrosys::AclEntry::perm: u16
+pub ferrosys::AclEntry::who: AclQualifier
+pub ferrosys::AclError::Duplicate::tag: &'static str
+pub ferrosys::AclError::InvalidPerm::perm: u16
+pub ferrosys::AclError::Malformed::reason: &'static str
+pub ferrosys::AclError::MaskRequired
+pub ferrosys::AclError::MissingRequired::tag: &'static str
+pub ferrosys::AclError::UndefinedId::tag: &'static str
+pub ferrosys::AclQualifier::Group(u32)
+pub ferrosys::AclQualifier::GroupObj
+pub ferrosys::AclQualifier::Mask
+pub ferrosys::AclQualifier::Other
+pub ferrosys::AclQualifier::User(u32)
+pub ferrosys::AclQualifier::UserObj
+pub ferrosys::Attributes::meta: crate::source::Metadata
+pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
+pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Civil::day: u32
+pub ferrosys::Civil::hour: u32
+pub ferrosys::Civil::minute: u32
+pub ferrosys::Civil::month: u32
+pub ferrosys::Civil::second: u32
+pub ferrosys::Civil::year: i64
+pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
+pub ferrosys::DetectError::Io::message: String
+pub ferrosys::DetectError::Unrecognized
+pub ferrosys::DetectOptions::base: u64
+pub ferrosys::Direction::Dropped
+pub ferrosys::Direction::Synthesized
+pub ferrosys::EntryKind::BlockDevice
+pub ferrosys::EntryKind::BlockDevice::major: u32
+pub ferrosys::EntryKind::BlockDevice::minor: u32
+pub ferrosys::EntryKind::CharDevice
+pub ferrosys::EntryKind::CharDevice::major: u32
+pub ferrosys::EntryKind::CharDevice::minor: u32
+pub ferrosys::EntryKind::Directory
+pub ferrosys::EntryKind::Fifo
+pub ferrosys::EntryKind::File(FileContent)
+pub ferrosys::EntryKind::HardLink
+pub ferrosys::EntryKind::HardLink::target: Vec<u8>
+pub ferrosys::EntryKind::Socket
+pub ferrosys::EntryKind::Symlink(Vec<u8>)
+pub ferrosys::Family::Btrfs
+pub ferrosys::FidelityRecord::direction: Direction
+pub ferrosys::FidelityRecord::path: Vec<u8>
+pub ferrosys::FidelityRecord::property: Property
+pub ferrosys::FileContent::Owned(Vec<u8>)
+pub ferrosys::FileContent::Range(FileRange)
+pub ferrosys::Filesystem::Btrfs
+pub ferrosys::Finding::category: std::borrow::Cow<'static, str>
+pub ferrosys::Finding::coordinates: Vec<Coordinate>
+pub ferrosys::Finding::detail: String
+pub ferrosys::Finding::family: Family
+pub ferrosys::Finding::offset: Option<u64>
+pub ferrosys::Finding::severity: Severity
+pub ferrosys::FsReader::Btrfs(crate::btrfs::Reader<R>)
+pub ferrosys::Limits::max_file_bytes: u64
+pub ferrosys::Limits::max_findings: usize
+pub ferrosys::Limits::max_walk_entries: usize
+pub ferrosys::Metadata::atime: crate::time::Timestamp
+pub ferrosys::Metadata::ctime: crate::time::Timestamp
+pub ferrosys::Metadata::gid: u32
+pub ferrosys::Metadata::mode: u16
+pub ferrosys::Metadata::mtime: crate::time::Timestamp
+pub ferrosys::Metadata::uid: u32
+pub ferrosys::NodeKind::BlockDevice
+pub ferrosys::NodeKind::BlockDevice::major: u32
+pub ferrosys::NodeKind::BlockDevice::minor: u32
+pub ferrosys::NodeKind::CharDevice
+pub ferrosys::NodeKind::CharDevice::major: u32
+pub ferrosys::NodeKind::CharDevice::minor: u32
+pub ferrosys::NodeKind::Directory
+pub ferrosys::NodeKind::Fifo
+pub ferrosys::NodeKind::File
+pub ferrosys::NodeKind::File::size: u64
+pub ferrosys::NodeKind::Socket
+pub ferrosys::NodeKind::Symlink
+pub ferrosys::OpenError::Detect(crate::detect::DetectError)
+pub ferrosys::OpenError::Refused::family: crate::finding::Family
+pub ferrosys::OpenError::Refused::message: String
+pub ferrosys::OpenOptions::base: u64
+pub ferrosys::OpenOptions::limits: Limits
+pub ferrosys::OpenOptions::policy: ReadPolicy
+pub ferrosys::Property::AccessTime
+pub ferrosys::Property::ChangeTime
+pub ferrosys::Property::ExtendedAttributes
+pub ferrosys::Property::Kind
+pub ferrosys::Property::ModificationTime
+pub ferrosys::Property::Name
+pub ferrosys::Property::Ownership
+pub ferrosys::Property::Permissions
+pub ferrosys::Property::SpecialBits
+pub ferrosys::Property::TimePrecision
+pub ferrosys::ReadPolicy::Lenient
+pub ferrosys::ReadPolicy::Strict
+pub ferrosys::Severity::Conformance
+pub ferrosys::Severity::Cosmetic
+pub ferrosys::Severity::Integrity
+pub ferrosys::Severity::Structural
+pub ferrosys::SourceEntry::kind: EntryKind
+pub ferrosys::SourceEntry::meta: Metadata
+pub ferrosys::SourceEntry::path: Vec<u8>
+pub ferrosys::SourceEntry::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Synthesis::dir_mode: u16
+pub ferrosys::Synthesis::file_mode: u16
+pub ferrosys::Synthesis::gid: u32
+pub ferrosys::Synthesis::uid: u32
+pub ferrosys::Timestamp::nanos: u32
+pub ferrosys::Timestamp::secs: i64
+pub ferrosys::TreeEntry::kind: NodeKind
+pub ferrosys::TreeEntry::node: N
+pub ferrosys::TreeEntry::path: Vec<u8>
+pub ferrosys::TreeEntry::shared: Option<u64>
+pub ferrosys::TreeError::Io::kind: std::io::ErrorKind
+pub ferrosys::TreeError::Io::message: String
+pub ferrosys::TreeError::LimitExceeded::detail: String
+pub ferrosys::TreeError::LimitExceeded::family: crate::finding::Family
+pub ferrosys::TreeError::Malformed::detail: String
+pub ferrosys::TreeError::Malformed::family: crate::finding::Family
+pub ferrosys::TreeError::Unsupported::detail: String
+pub ferrosys::TreeError::Unsupported::family: crate::finding::Family
+pub ferrosys::Xattr::name: Vec<u8>
+pub ferrosys::Xattr::value: Vec<u8>
+pub ferrosys::btrfs::Anomaly::category: Category
+pub ferrosys::btrfs::Anomaly::detail: String
+pub ferrosys::btrfs::Anomaly::logical: Option<u64>
+pub ferrosys::btrfs::Anomaly::severity: crate::finding::Severity
+pub ferrosys::btrfs::Anomaly::tree: Option<u64>
+pub ferrosys::btrfs::BtrfsLayout::chunks: Vec<super::MappedChunk>
+pub ferrosys::btrfs::BtrfsLayout::compat_ro_flags: super::ondisk::CompatRoFlags
+pub ferrosys::btrfs::BtrfsLayout::incompat_flags: super::ondisk::IncompatFlags
+pub ferrosys::btrfs::BtrfsLayout::node_size: u32
+pub ferrosys::btrfs::BtrfsLayout::reservation: Reservation
+pub ferrosys::btrfs::BtrfsLayout::sector_size: u32
+pub ferrosys::btrfs::BtrfsLayout::superblock_mirrors: Vec<u64>
+pub ferrosys::btrfs::BtrfsLayout::volume_bytes: u64
+pub ferrosys::btrfs::Category::ChunkMap
+pub ferrosys::btrfs::Category::Data
+pub ferrosys::btrfs::Category::Item
+pub ferrosys::btrfs::Category::Superblock
+pub ferrosys::btrfs::Category::Tree
+pub ferrosys::btrfs::Content::data_bytes: u64
+pub ferrosys::btrfs::Content::data_extents: u64
+pub ferrosys::btrfs::Content::directories: u64
+pub ferrosys::btrfs::Content::files: u64
+pub ferrosys::btrfs::Content::longest_name: u32
+pub ferrosys::btrfs::Content::longest_value: u64
+pub ferrosys::btrfs::Content::names: u64
+pub ferrosys::btrfs::Content::subvolumes: u64
+pub ferrosys::btrfs::Content::xattrs: u64
+pub ferrosys::btrfs::Entry::index: u64
+pub ferrosys::btrfs::Entry::kind: super::ondisk::DirEntryType
+pub ferrosys::btrfs::Entry::location: super::ondisk::DiskKey
+pub ferrosys::btrfs::Entry::name: Vec<u8>
+pub ferrosys::btrfs::FormatError::DataExhausted::planned: u64
+pub ferrosys::btrfs::FormatError::Geometry(super::geometry::GeometryError)
+pub ferrosys::btrfs::FormatError::ImageTooLargeInMemory::bytes: u64
+pub ferrosys::btrfs::FormatError::Io(std::io::Error)
+pub ferrosys::btrfs::FormatError::LayoutUnsettled
+pub ferrosys::btrfs::FormatError::Model(super::model::ModelError)
+pub ferrosys::btrfs::FormatError::RecordTooLarge::bytes: usize
+pub ferrosys::btrfs::FormatError::RecordTooLarge::capacity: usize
+pub ferrosys::btrfs::FormatError::Reservation(super::geometry::ReservationExceeded)
+pub ferrosys::btrfs::FormatOptions::chunk_tree_uuid: [u8; 16]
+pub ferrosys::btrfs::FormatOptions::default_subvolume: Option<Vec<u8>>
+pub ferrosys::btrfs::FormatOptions::device_uuid: [u8; 16]
+pub ferrosys::btrfs::FormatOptions::fsid: [u8; 16]
+pub ferrosys::btrfs::FormatOptions::label: VolumeLabel
+pub ferrosys::btrfs::FormatOptions::metadata_uuid: Option<[u8; 16]>
+pub ferrosys::btrfs::FormatOptions::plan: super::geometry::PlanRequest
+pub ferrosys::btrfs::FormatOptions::subvolume_uuid: [u8; 16]
+pub ferrosys::btrfs::FormatOptions::subvolumes: Vec<super::model::SubvolumeRequest>
+pub ferrosys::btrfs::FormatOptions::time: crate::Timestamp
+pub ferrosys::btrfs::GeometryError::ChunkMapTooLarge::available_blocks: u64
+pub ferrosys::btrfs::GeometryError::ChunkMapTooLarge::chunks: u64
+pub ferrosys::btrfs::GeometryError::ChunkMapTooLarge::needed_blocks: u64
+pub ferrosys::btrfs::GeometryError::ContentTooLarge::needed: u64
+pub ferrosys::btrfs::GeometryError::ContentTooLarge::volume_bytes: u64
+pub ferrosys::btrfs::GeometryError::FeatureIncoherent::feature: &'static str
+pub ferrosys::btrfs::GeometryError::FeatureIncoherent::requires: &'static str
+pub ferrosys::btrfs::GeometryError::FeatureUnsupported::bits: u64
+pub ferrosys::btrfs::GeometryError::FeatureUnsupported::names: String
+pub ferrosys::btrfs::GeometryError::NodeSizeUnsupported::bytes: u32
+pub ferrosys::btrfs::GeometryError::NodeSizeUnsupported::sector_size: u32
+pub ferrosys::btrfs::GeometryError::SectorSizeUnsupported::bytes: u32
+pub ferrosys::btrfs::GeometryError::VolumeTooSmall::minimum: u64
+pub ferrosys::btrfs::GeometryError::VolumeTooSmall::volume_bytes: u64
+pub ferrosys::btrfs::LabelError::NulByte::at: usize
+pub ferrosys::btrfs::LabelError::TooLong::bytes: usize
+pub ferrosys::btrfs::LabelError::TooLong::limit: usize
+pub ferrosys::btrfs::Limits::max_file_bytes: u64
+pub ferrosys::btrfs::Limits::max_findings: usize
+pub ferrosys::btrfs::Limits::max_walk_entries: usize
+pub ferrosys::btrfs::Located::data: Vec<u8>
+pub ferrosys::btrfs::Located::key: super::ondisk::DiskKey
+pub ferrosys::btrfs::MappedChunk::copies: Vec<u64>
+pub ferrosys::btrfs::MappedChunk::flags: super::ondisk::BlockGroupFlags
+pub ferrosys::btrfs::MappedChunk::length: u64
+pub ferrosys::btrfs::MappedChunk::logical: u64
+pub ferrosys::btrfs::Mirror::Absent
+pub ferrosys::btrfs::Mirror::Damaged
+pub ferrosys::btrfs::Mirror::Misplaced
+pub ferrosys::btrfs::Mirror::Misplaced::bytenr: u64
+pub ferrosys::btrfs::Mirror::OutsideDevice
+pub ferrosys::btrfs::Mirror::Present
+pub ferrosys::btrfs::Mirror::Present::generation: u64
+pub ferrosys::btrfs::Mirror::Truncated
+pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::Duplicate::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume::target: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkCycle::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkTargetIsDirectory::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkTargetIsDirectory::target: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkTargetMissing::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::HardlinkTargetMissing::target: Vec<u8>
+pub ferrosys::btrfs::ModelError::InvalidComponent::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::LinkCarriesXattrs::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::ModeCarriesFileType::mode: u16
+pub ferrosys::btrfs::ModelError::ModeCarriesFileType::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::NameTooLong::bytes: usize
+pub ferrosys::btrfs::ModelError::NameTooLong::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::ParentMissing::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::ParentNotDir::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::RecordTooLarge::bytes: usize
+pub ferrosys::btrfs::ModelError::RecordTooLarge::capacity: usize
+pub ferrosys::btrfs::ModelError::RecordTooLarge::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::RecordTooLarge::what: &'static str
+pub ferrosys::btrfs::ModelError::RootNotDirectory::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::SubvolumeAtRoot
+pub ferrosys::btrfs::ModelError::SubvolumeDuplicate::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::SubvolumeNotADirectory::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::first: Vec<u8>
+pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::second: Vec<u8>
+pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::uuid: [u8; 16]
+pub ferrosys::btrfs::Node::inode: u64
+pub ferrosys::btrfs::Node::item: super::ondisk::InodeItem
+pub ferrosys::btrfs::Node::tree: u64
+pub ferrosys::btrfs::NodeSize::Auto
+pub ferrosys::btrfs::NodeSize::Bytes(u32)
+pub ferrosys::btrfs::OpenOptions::base: u64
+pub ferrosys::btrfs::OpenOptions::limits: Limits
+pub ferrosys::btrfs::OpenOptions::policy: ReadPolicy
+pub ferrosys::btrfs::PlanRequest::compat_ro_flags: super::ondisk::CompatRoFlags
+pub ferrosys::btrfs::PlanRequest::content: Content
+pub ferrosys::btrfs::PlanRequest::data_profile: Profile
+pub ferrosys::btrfs::PlanRequest::incompat_flags: super::ondisk::IncompatFlags
+pub ferrosys::btrfs::PlanRequest::metadata_profile: Profile
+pub ferrosys::btrfs::PlanRequest::node_size: NodeSize
+pub ferrosys::btrfs::PlanRequest::sector_size: SectorSize
+pub ferrosys::btrfs::PlanRequest::volume_bytes: u64
+pub ferrosys::btrfs::Pool::Metadata
+pub ferrosys::btrfs::Pool::System
+pub ferrosys::btrfs::Profile::Dup
+pub ferrosys::btrfs::Profile::Single
+pub ferrosys::btrfs::ReadError::BadBootstrap::at: usize
+pub ferrosys::btrfs::ReadError::BadBootstrap::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadChecksum::at: u64
+pub ferrosys::btrfs::ReadError::BadChecksum::object: &'static str
+pub ferrosys::btrfs::ReadError::BadChunk::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadChunk::logical: u64
+pub ferrosys::btrfs::ReadError::BadCompressedExtent::at: u64
+pub ferrosys::btrfs::ReadError::BadCompressedExtent::fault: String
+pub ferrosys::btrfs::ReadError::BadCompressedExtent::inode: u64
+pub ferrosys::btrfs::ReadError::BadCompressedExtent::tree: u64
+pub ferrosys::btrfs::ReadError::BadDirEntry::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadDirEntry::inode: u64
+pub ferrosys::btrfs::ReadError::BadDirEntry::kind: u8
+pub ferrosys::btrfs::ReadError::BadDirEntry::tree: u64
+pub ferrosys::btrfs::ReadError::BadExtent::at: u64
+pub ferrosys::btrfs::ReadError::BadExtent::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadExtent::inode: u64
+pub ferrosys::btrfs::ReadError::BadExtent::tree: u64
+pub ferrosys::btrfs::ReadError::BadGeometry::field: &'static str
+pub ferrosys::btrfs::ReadError::BadGeometry::value: u64
+pub ferrosys::btrfs::ReadError::BadItem::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadItem::index: usize
+pub ferrosys::btrfs::ReadError::BadItem::logical: u64
+pub ferrosys::btrfs::ReadError::BadRootItem::objectid: u64
+pub ferrosys::btrfs::ReadError::BadRootItem::source: super::ondisk::ParseError
+pub ferrosys::btrfs::ReadError::BadSuperblock::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadTreeBlock::fault: &'static str
+pub ferrosys::btrfs::ReadError::BadTreeBlock::logical: u64
+pub ferrosys::btrfs::ReadError::BadTreeLevel::level: u8
+pub ferrosys::btrfs::ReadError::BadTreeLevel::logical: u64
+pub ferrosys::btrfs::ReadError::BadTreeLevel::parent: u8
+pub ferrosys::btrfs::ReadError::BadXattr::inode: u64
+pub ferrosys::btrfs::ReadError::BadXattr::tree: u64
+pub ferrosys::btrfs::ReadError::ChunkOverlap::logical: u64
+pub ferrosys::btrfs::ReadError::DataChecksum::logical: u64
+pub ferrosys::btrfs::ReadError::FileTooLarge::cap: u64
+pub ferrosys::btrfs::ReadError::FileTooLarge::inode: u64
+pub ferrosys::btrfs::ReadError::FileTooLarge::size: u64
+pub ferrosys::btrfs::ReadError::FileTooLarge::tree: u64
+pub ferrosys::btrfs::ReadError::HostileName::name: Vec<u8>
+pub ferrosys::btrfs::ReadError::Io::kind: std::io::ErrorKind
+pub ferrosys::btrfs::ReadError::Io::message: String
+pub ferrosys::btrfs::ReadError::MirrorDisagreement::at: u64
+pub ferrosys::btrfs::ReadError::MirrorDisagreement::fault: &'static str
+pub ferrosys::btrfs::ReadError::MirrorDisagreement::mirror: usize
+pub ferrosys::btrfs::ReadError::MisplacedSuperblock::bytenr: u64
+pub ferrosys::btrfs::ReadError::MisplacedSuperblock::expected: u64
+pub ferrosys::btrfs::ReadError::MissingDataChecksum::logical: u64
+pub ferrosys::btrfs::ReadError::MissingInode::inode: u64
+pub ferrosys::btrfs::ReadError::MissingInode::tree: u64
+pub ferrosys::btrfs::ReadError::MissingTree::objectid: u64
+pub ferrosys::btrfs::ReadError::MultiDevice::num_devices: u64
+pub ferrosys::btrfs::ReadError::NotADirectory::path: Vec<u8>
+pub ferrosys::btrfs::ReadError::NotASymlink::inode: u64
+pub ferrosys::btrfs::ReadError::NotASymlink::tree: u64
+pub ferrosys::btrfs::ReadError::NotBtrfs
+pub ferrosys::btrfs::ReadError::NotFound::path: Vec<u8>
+pub ferrosys::btrfs::ReadError::Parse(super::ondisk::ParseError)
+pub ferrosys::btrfs::ReadError::PathTooLong::path: Vec<u8>
+pub ferrosys::btrfs::ReadError::SymlinkLoop::path: Vec<u8>
+pub ferrosys::btrfs::ReadError::TooManyEntries::limit: usize
+pub ferrosys::btrfs::ReadError::TooManyEntries::objectid: u64
+pub ferrosys::btrfs::ReadError::TreeCycle::logical: u64
+pub ferrosys::btrfs::ReadError::UnmappedLogical::len: u64
+pub ferrosys::btrfs::ReadError::UnmappedLogical::logical: u64
+pub ferrosys::btrfs::ReadError::UnsupportedChecksum::csum_type: u16
+pub ferrosys::btrfs::ReadError::UnsupportedCompression::compression: u8
+pub ferrosys::btrfs::ReadError::UnsupportedCompression::inode: u64
+pub ferrosys::btrfs::ReadError::UnsupportedCompression::tree: u64
+pub ferrosys::btrfs::ReadError::UnsupportedEncoding::encryption: u8
+pub ferrosys::btrfs::ReadError::UnsupportedEncoding::inode: u64
+pub ferrosys::btrfs::ReadError::UnsupportedEncoding::other: u16
+pub ferrosys::btrfs::ReadError::UnsupportedEncoding::tree: u64
+pub ferrosys::btrfs::ReadError::UnsupportedFeatures::bits: u64
+pub ferrosys::btrfs::ReadError::UnsupportedFeatures::names: String
+pub ferrosys::btrfs::ReadError::UnsupportedProfile::flags: u64
+pub ferrosys::btrfs::ReadError::UnsupportedProfile::logical: u64
+pub ferrosys::btrfs::ReadError::WalkTooLarge::limit: usize
+pub ferrosys::btrfs::ReadPolicy::Lenient
+pub ferrosys::btrfs::ReadPolicy::Strict
+pub ferrosys::btrfs::Reservation::metadata_blocks: u64
+pub ferrosys::btrfs::Reservation::node_size: u32
+pub ferrosys::btrfs::Reservation::system_blocks: u64
+pub ferrosys::btrfs::ReservationExceeded::pool: Pool
+pub ferrosys::btrfs::ReservationExceeded::reserved: u64
+pub ferrosys::btrfs::ReservationExceeded::used: u64
+pub ferrosys::btrfs::SectorSize::Auto
+pub ferrosys::btrfs::SectorSize::Bytes(u32)
+pub ferrosys::btrfs::Slack::metadata_blocks: u64
+pub ferrosys::btrfs::Slack::system_blocks: u64
+pub ferrosys::btrfs::Subvolume::id: u64
+pub ferrosys::btrfs::Subvolume::name: Vec<u8>
+pub ferrosys::btrfs::Subvolume::otime: crate::time::Timestamp
+pub ferrosys::btrfs::Subvolume::parent: Option<u64>
+pub ferrosys::btrfs::Subvolume::parent_dir: u64
+pub ferrosys::btrfs::Subvolume::parent_uuid: [u8; 16]
+pub ferrosys::btrfs::Subvolume::read_only: bool
+pub ferrosys::btrfs::Subvolume::root: super::volume::TreeRoot
+pub ferrosys::btrfs::Subvolume::root_dir: u64
+pub ferrosys::btrfs::Subvolume::uuid: [u8; 16]
+pub ferrosys::btrfs::SubvolumeRequest::path: Vec<u8>
+pub ferrosys::btrfs::SubvolumeRequest::read_only: bool
+pub ferrosys::btrfs::SubvolumeRequest::uuid: [u8; 16]
+pub ferrosys::btrfs::Timestamp::nanos: u32
+pub ferrosys::btrfs::Timestamp::secs: i64
+pub ferrosys::btrfs::TreeRoot::bytenr: u64
+pub ferrosys::btrfs::TreeRoot::generation: u64
+pub ferrosys::btrfs::TreeRoot::level: u8
+pub ferrosys::btrfs::TreeRoot::objectid: u64
+pub ferrosys::btrfs::WalkEntry::node: Node
+pub ferrosys::btrfs::WalkEntry::path: Vec<u8>
+pub ferrosys::btrfs::ondisk::BlockGroupItem::chunk_objectid: u64
+pub ferrosys::btrfs::ondisk::BlockGroupItem::flags: super::BlockGroupFlags
+pub ferrosys::btrfs::ondisk::BlockGroupItem::used: u64
+pub ferrosys::btrfs::ondisk::Chunk::io_align: u32
+pub ferrosys::btrfs::ondisk::Chunk::io_width: u32
+pub ferrosys::btrfs::ondisk::Chunk::length: u64
+pub ferrosys::btrfs::ondisk::Chunk::num_stripes: u16
+pub ferrosys::btrfs::ondisk::Chunk::owner: u64
+pub ferrosys::btrfs::ondisk::Chunk::sector_size: u32
+pub ferrosys::btrfs::ondisk::Chunk::stripe_len: u64
+pub ferrosys::btrfs::ondisk::Chunk::sub_stripes: u16
+pub ferrosys::btrfs::ondisk::Chunk::ty: BlockGroupFlags
+pub ferrosys::btrfs::ondisk::Compression::Lzo
+pub ferrosys::btrfs::ondisk::Compression::None
+pub ferrosys::btrfs::ondisk::Compression::Unknown(u8)
+pub ferrosys::btrfs::ondisk::Compression::Zlib
+pub ferrosys::btrfs::ondisk::Compression::Zstd
+pub ferrosys::btrfs::ondisk::DevExtent::chunk_objectid: u64
+pub ferrosys::btrfs::ondisk::DevExtent::chunk_offset: u64
+pub ferrosys::btrfs::ondisk::DevExtent::chunk_tree: u64
+pub ferrosys::btrfs::ondisk::DevExtent::chunk_tree_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::DevExtent::length: u64
+pub ferrosys::btrfs::ondisk::DevItem::bandwidth: u8
+pub ferrosys::btrfs::ondisk::DevItem::bytes_used: u64
+pub ferrosys::btrfs::ondisk::DevItem::dev_group: u32
+pub ferrosys::btrfs::ondisk::DevItem::devid: u64
+pub ferrosys::btrfs::ondisk::DevItem::fsid: [u8; 16]
+pub ferrosys::btrfs::ondisk::DevItem::generation: u64
+pub ferrosys::btrfs::ondisk::DevItem::io_align: u32
+pub ferrosys::btrfs::ondisk::DevItem::io_width: u32
+pub ferrosys::btrfs::ondisk::DevItem::sector_size: u32
+pub ferrosys::btrfs::ondisk::DevItem::seek_speed: u8
+pub ferrosys::btrfs::ondisk::DevItem::start_offset: u64
+pub ferrosys::btrfs::ondisk::DevItem::total_bytes: u64
+pub ferrosys::btrfs::ondisk::DevItem::ty: u64
+pub ferrosys::btrfs::ondisk::DevItem::uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::DevStats::corruption_errs: u64
+pub ferrosys::btrfs::ondisk::DevStats::flush_errs: u64
+pub ferrosys::btrfs::ondisk::DevStats::generation_errs: u64
+pub ferrosys::btrfs::ondisk::DevStats::read_errs: u64
+pub ferrosys::btrfs::ondisk::DevStats::write_errs: u64
+pub ferrosys::btrfs::ondisk::DirEntryType::BlockDev
+pub ferrosys::btrfs::ondisk::DirEntryType::CharDev
+pub ferrosys::btrfs::ondisk::DirEntryType::Dir
+pub ferrosys::btrfs::ondisk::DirEntryType::Fifo
+pub ferrosys::btrfs::ondisk::DirEntryType::RegFile
+pub ferrosys::btrfs::ondisk::DirEntryType::Socket
+pub ferrosys::btrfs::ondisk::DirEntryType::Symlink
+pub ferrosys::btrfs::ondisk::DirEntryType::Unknown
+pub ferrosys::btrfs::ondisk::DirEntryType::Xattr
+pub ferrosys::btrfs::ondisk::DirItem::data_len: u16
+pub ferrosys::btrfs::ondisk::DirItem::kind: DirEntryType
+pub ferrosys::btrfs::ondisk::DirItem::location: super::DiskKey
+pub ferrosys::btrfs::ondisk::DirItem::name_len: u16
+pub ferrosys::btrfs::ondisk::DirItem::transid: u64
+pub ferrosys::btrfs::ondisk::DiskKey::kind: ItemType
+pub ferrosys::btrfs::ondisk::DiskKey::objectid: u64
+pub ferrosys::btrfs::ondisk::DiskKey::offset: u64
+pub ferrosys::btrfs::ondisk::ExtentDataRef::count: u32
+pub ferrosys::btrfs::ondisk::ExtentDataRef::objectid: u64
+pub ferrosys::btrfs::ondisk::ExtentDataRef::offset: u64
+pub ferrosys::btrfs::ondisk::ExtentDataRef::root: u64
+pub ferrosys::btrfs::ondisk::ExtentItem::flags: ExtentFlags
+pub ferrosys::btrfs::ondisk::ExtentItem::generation: u64
+pub ferrosys::btrfs::ondisk::ExtentItem::refs: u64
+pub ferrosys::btrfs::ondisk::ExtentKind::Inline
+pub ferrosys::btrfs::ondisk::ExtentKind::Prealloc
+pub ferrosys::btrfs::ondisk::ExtentKind::Regular
+pub ferrosys::btrfs::ondisk::ExtentKind::Unknown(u8)
+pub ferrosys::btrfs::ondisk::FileExtentItem::compression: Compression
+pub ferrosys::btrfs::ondisk::FileExtentItem::disk_bytenr: u64
+pub ferrosys::btrfs::ondisk::FileExtentItem::disk_num_bytes: u64
+pub ferrosys::btrfs::ondisk::FileExtentItem::encryption: u8
+pub ferrosys::btrfs::ondisk::FileExtentItem::generation: u64
+pub ferrosys::btrfs::ondisk::FileExtentItem::kind: ExtentKind
+pub ferrosys::btrfs::ondisk::FileExtentItem::num_bytes: u64
+pub ferrosys::btrfs::ondisk::FileExtentItem::offset: u64
+pub ferrosys::btrfs::ondisk::FileExtentItem::other_encoding: u16
+pub ferrosys::btrfs::ondisk::FileExtentItem::ram_bytes: u64
+pub ferrosys::btrfs::ondisk::FreeSpaceInfo::extent_count: u32
+pub ferrosys::btrfs::ondisk::FreeSpaceInfo::flags: u32
+pub ferrosys::btrfs::ondisk::Header::bytenr: u64
+pub ferrosys::btrfs::ondisk::Header::chunk_tree_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::Header::csum: [u8; 32]
+pub ferrosys::btrfs::ondisk::Header::flags: u64
+pub ferrosys::btrfs::ondisk::Header::fsid: [u8; 16]
+pub ferrosys::btrfs::ondisk::Header::generation: u64
+pub ferrosys::btrfs::ondisk::Header::level: u8
+pub ferrosys::btrfs::ondisk::Header::nritems: u32
+pub ferrosys::btrfs::ondisk::Header::owner: u64
+pub ferrosys::btrfs::ondisk::InlineRef::kind: super::ItemType
+pub ferrosys::btrfs::ondisk::InlineRef::offset: u64
+pub ferrosys::btrfs::ondisk::InodeExtref::index: u64
+pub ferrosys::btrfs::ondisk::InodeExtref::name_len: u16
+pub ferrosys::btrfs::ondisk::InodeExtref::parent_objectid: u64
+pub ferrosys::btrfs::ondisk::InodeItem::atime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::InodeItem::block_group: u64
+pub ferrosys::btrfs::ondisk::InodeItem::ctime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::InodeItem::flags: InodeFlags
+pub ferrosys::btrfs::ondisk::InodeItem::generation: u64
+pub ferrosys::btrfs::ondisk::InodeItem::gid: u32
+pub ferrosys::btrfs::ondisk::InodeItem::mode: u32
+pub ferrosys::btrfs::ondisk::InodeItem::mtime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::InodeItem::nbytes: u64
+pub ferrosys::btrfs::ondisk::InodeItem::nlink: u32
+pub ferrosys::btrfs::ondisk::InodeItem::otime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::InodeItem::rdev: u64
+pub ferrosys::btrfs::ondisk::InodeItem::sequence: u64
+pub ferrosys::btrfs::ondisk::InodeItem::size: u64
+pub ferrosys::btrfs::ondisk::InodeItem::transid: u64
+pub ferrosys::btrfs::ondisk::InodeItem::uid: u32
+pub ferrosys::btrfs::ondisk::InodeRef::index: u64
+pub ferrosys::btrfs::ondisk::InodeRef::name_len: u16
+pub ferrosys::btrfs::ondisk::Item::key: super::DiskKey
+pub ferrosys::btrfs::ondisk::Item::offset: u32
+pub ferrosys::btrfs::ondisk::Item::size: u32
+pub ferrosys::btrfs::ondisk::KeyPtr::blockptr: u64
+pub ferrosys::btrfs::ondisk::KeyPtr::generation: u64
+pub ferrosys::btrfs::ondisk::KeyPtr::key: super::DiskKey
+pub ferrosys::btrfs::ondisk::ParseError::BadMagic::found: [u8; 8]
+pub ferrosys::btrfs::ondisk::ParseError::BadMagic::structure: &'static str
+pub ferrosys::btrfs::ondisk::ParseError::TooShort::got: usize
+pub ferrosys::btrfs::ondisk::ParseError::TooShort::need: usize
+pub ferrosys::btrfs::ondisk::ParseError::TooShort::structure: &'static str
+pub ferrosys::btrfs::ondisk::RootBackup::bytes_used: u64
+pub ferrosys::btrfs::ondisk::RootBackup::chunk_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::chunk_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::chunk_root_level: u8
+pub ferrosys::btrfs::ondisk::RootBackup::csum_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::csum_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::csum_root_level: u8
+pub ferrosys::btrfs::ondisk::RootBackup::dev_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::dev_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::dev_root_level: u8
+pub ferrosys::btrfs::ondisk::RootBackup::extent_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::extent_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::extent_root_level: u8
+pub ferrosys::btrfs::ondisk::RootBackup::fs_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::fs_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::fs_root_level: u8
+pub ferrosys::btrfs::ondisk::RootBackup::num_devices: u64
+pub ferrosys::btrfs::ondisk::RootBackup::total_bytes: u64
+pub ferrosys::btrfs::ondisk::RootBackup::tree_root: u64
+pub ferrosys::btrfs::ondisk::RootBackup::tree_root_gen: u64
+pub ferrosys::btrfs::ondisk::RootBackup::tree_root_level: u8
+pub ferrosys::btrfs::ondisk::RootItem::byte_limit: u64
+pub ferrosys::btrfs::ondisk::RootItem::bytenr: u64
+pub ferrosys::btrfs::ondisk::RootItem::bytes_used: u64
+pub ferrosys::btrfs::ondisk::RootItem::ctime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::RootItem::ctransid: u64
+pub ferrosys::btrfs::ondisk::RootItem::drop_level: u8
+pub ferrosys::btrfs::ondisk::RootItem::drop_progress: super::DiskKey
+pub ferrosys::btrfs::ondisk::RootItem::flags: RootFlags
+pub ferrosys::btrfs::ondisk::RootItem::generation: u64
+pub ferrosys::btrfs::ondisk::RootItem::generation_v2: u64
+pub ferrosys::btrfs::ondisk::RootItem::last_snapshot: u64
+pub ferrosys::btrfs::ondisk::RootItem::level: u8
+pub ferrosys::btrfs::ondisk::RootItem::otime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::RootItem::otransid: u64
+pub ferrosys::btrfs::ondisk::RootItem::parent_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::RootItem::received_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::RootItem::refs: u32
+pub ferrosys::btrfs::ondisk::RootItem::root_dirid: u64
+pub ferrosys::btrfs::ondisk::RootItem::rtime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::RootItem::rtransid: u64
+pub ferrosys::btrfs::ondisk::RootItem::stime: crate::Timestamp
+pub ferrosys::btrfs::ondisk::RootItem::stransid: u64
+pub ferrosys::btrfs::ondisk::RootItem::uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::RootRef::dirid: u64
+pub ferrosys::btrfs::ondisk::RootRef::name_len: u16
+pub ferrosys::btrfs::ondisk::RootRef::sequence: u64
+pub ferrosys::btrfs::ondisk::Stripe::dev_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::Stripe::devid: u64
+pub ferrosys::btrfs::ondisk::Stripe::offset: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::bytenr: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::bytes_used: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::cache_generation: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::chunk_root: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::chunk_root_generation: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::chunk_root_level: u8
+pub ferrosys::btrfs::ondisk::SuperBlock::compat_flags: CompatFlags
+pub ferrosys::btrfs::ondisk::SuperBlock::compat_ro_flags: CompatRoFlags
+pub ferrosys::btrfs::ondisk::SuperBlock::csum: [u8; 32]
+pub ferrosys::btrfs::ondisk::SuperBlock::csum_type: super::ChecksumType
+pub ferrosys::btrfs::ondisk::SuperBlock::dev_item: super::DevItem
+pub ferrosys::btrfs::ondisk::SuperBlock::flags: SuperFlags
+pub ferrosys::btrfs::ondisk::SuperBlock::fsid: [u8; 16]
+pub ferrosys::btrfs::ondisk::SuperBlock::generation: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::incompat_flags: IncompatFlags
+pub ferrosys::btrfs::ondisk::SuperBlock::label: [u8; 256]
+pub ferrosys::btrfs::ondisk::SuperBlock::log_root: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::log_root_level: u8
+pub ferrosys::btrfs::ondisk::SuperBlock::magic: [u8; 8]
+pub ferrosys::btrfs::ondisk::SuperBlock::metadata_uuid: [u8; 16]
+pub ferrosys::btrfs::ondisk::SuperBlock::nodesize: u32
+pub ferrosys::btrfs::ondisk::SuperBlock::nr_global_roots: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::num_devices: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::remap_root: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::remap_root_generation: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::remap_root_level: u8
+pub ferrosys::btrfs::ondisk::SuperBlock::root: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::root_dir_objectid: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::root_level: u8
+pub ferrosys::btrfs::ondisk::SuperBlock::sectorsize: u32
+pub ferrosys::btrfs::ondisk::SuperBlock::stripesize: u32
+pub ferrosys::btrfs::ondisk::SuperBlock::sys_chunk_array: [u8; 2048]
+pub ferrosys::btrfs::ondisk::SuperBlock::sys_chunk_array_size: u32
+pub ferrosys::btrfs::ondisk::SuperBlock::total_bytes: u64
+pub ferrosys::btrfs::ondisk::SuperBlock::uuid_tree_generation: u64
+pub fn ferrosys::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
+pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
+pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
+pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
+pub fn ferrosys::Deviation::to_finding(&self, unit: u32) -> Finding /* required */
+pub fn ferrosys::FidelityReport::count(&self, direction: Direction, property: Property) -> u64
+pub fn ferrosys::FidelityReport::is_faithful(&self) -> bool
+pub fn ferrosys::FidelityReport::is_truncated(&self) -> bool
+pub fn ferrosys::FidelityReport::new() -> Self
+pub fn ferrosys::FidelityReport::record(&mut self, direction: Direction, path: &[u8], property: Property)
+pub fn ferrosys::FidelityReport::records(&self) -> &[FidelityRecord]
+pub fn ferrosys::FidelityReport::summary(&self) -> Vec<(Direction, Property, u64)>
+pub fn ferrosys::FidelityReport::to_table(&self) -> String
+pub fn ferrosys::FileContent::is_empty(&self) -> bool
+pub fn ferrosys::FileContent::len(&self) -> u64
+pub fn ferrosys::FileContent::read(&self) -> std::io::Result<Cow<'_, [u8]>>
+pub fn ferrosys::FileRange::at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::FileRange::path(&self) -> &Path
+pub fn ferrosys::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::FindingReport::findings(&self) -> &[Finding]
+pub fn ferrosys::FindingReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::FindingReport::is_clean(&self) -> bool
+pub fn ferrosys::FindingReport::is_truncated(&self) -> bool
+pub fn ferrosys::FindingReport::new(findings: Vec<Finding>, truncated: bool, cap: usize) -> Self
+pub fn ferrosys::FindingReport::to_json(&self) -> String
+pub fn ferrosys::FindingReport::to_sarif(&self, artifact_uri: Option<&str>) -> String
+pub fn ferrosys::FindingReport::to_table(&self) -> String
+pub fn ferrosys::FindingReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::FsReader::family(&self) -> crate::finding::Family
+pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
+pub fn ferrosys::FsTree::family(&self) -> Family /* required */
+pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
+pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
+pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
+pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
+pub fn ferrosys::LayeredSource::is_empty(&self) -> bool
+pub fn ferrosys::LayeredSource::layer(self, source: impl Source) -> Self
+pub fn ferrosys::LayeredSource::len(&self) -> usize
+pub fn ferrosys::LayeredSource::new() -> Self
+pub fn ferrosys::Metadata::new(mode: u16, mtime: Timestamp) -> Self
+pub fn ferrosys::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
+pub fn ferrosys::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::NamedChoice::as_str(self) -> &'static str /* required */
+pub fn ferrosys::NamedChoice::from_name(name: &str) -> Option<Self> /* required */
+pub fn ferrosys::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ScanReport::anomalies(&self) -> &[A]
+pub fn ferrosys::ScanReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
+pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::fifo(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::file(self, path: impl Into<Vec<u8>>, contents: impl Into<FileContent>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::hardlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::new() -> Self
+pub fn ferrosys::TreeBuilder::root(self, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::socket(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
+pub fn ferrosys::TreeEntry::new(path: Vec<u8>, kind: NodeKind, node: N) -> Self
+pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
+pub fn ferrosys::btrfs::BtrfsLayout::chunks_of(&self, kind: BlockGroupFlags) -> impl Iterator<Item = &MappedChunk>
+pub fn ferrosys::btrfs::BtrfsLayout::device_bytes_used(&self) -> u64
+pub fn ferrosys::btrfs::BtrfsLayout::logical_end(&self) -> u64
+pub fn ferrosys::btrfs::ChunkMap::chunk_at(&self, logical: u64) -> Option<&MappedChunk>
+pub fn ferrosys::btrfs::ChunkMap::chunks(&self) -> &[MappedChunk]
+pub fn ferrosys::btrfs::ChunkMap::from_bootstrap(array: &[u8], devid: u64, device_bytes: u64) -> Result<Self, ReadError>
+pub fn ferrosys::btrfs::ChunkMap::insert(&mut self, key: &DiskKey, chunk: &Chunk, record: &[u8], devid: u64, device_bytes: u64) -> Result<(), ReadError>
+pub fn ferrosys::btrfs::ChunkMap::is_empty(&self) -> bool
+pub fn ferrosys::btrfs::ChunkMap::len(&self) -> usize
+pub fn ferrosys::btrfs::ChunkMap::new() -> Self
+pub fn ferrosys::btrfs::ChunkMap::translate(&self, logical: u64, len: u64) -> Result<u64, ReadError>
+pub fn ferrosys::btrfs::FormatOptions::chunk_tree_uuid(self, uuid: [u8; 16]) -> Self
+pub fn ferrosys::btrfs::FormatOptions::default_subvolume(self, path: impl Into<Vec<u8>>) -> Self
+pub fn ferrosys::btrfs::FormatOptions::device_uuid(self, uuid: [u8; 16]) -> Self
+pub fn ferrosys::btrfs::FormatOptions::label(self, label: VolumeLabel) -> Self
+pub fn ferrosys::btrfs::FormatOptions::metadata_uuid(self, uuid: Option<[u8; 16]>) -> Self
+pub fn ferrosys::btrfs::FormatOptions::plan(self, plan: PlanRequest) -> Self
+pub fn ferrosys::btrfs::FormatOptions::subvolume(self, request: SubvolumeRequest) -> Self
+pub fn ferrosys::btrfs::FormatOptions::subvolume_uuid(self, uuid: [u8; 16]) -> Self
+pub fn ferrosys::btrfs::FormatPlan::fidelity(&self) -> &FidelityReport
+pub fn ferrosys::btrfs::FormatPlan::layout(&self) -> &BtrfsLayout
+pub fn ferrosys::btrfs::FormatPlan::new(source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<Self, FormatError>
+pub fn ferrosys::btrfs::FormatPlan::write_to(&self, sink: impl Write + Seek) -> Result<Slack, FormatError>
+pub fn ferrosys::btrfs::Image::as_bytes(&self) -> &[u8]
+pub fn ferrosys::btrfs::Image::fidelity(&self) -> &FidelityReport
+pub fn ferrosys::btrfs::Image::into_bytes(self) -> Vec<u8>
+pub fn ferrosys::btrfs::Image::layout(&self) -> &BtrfsLayout
+pub fn ferrosys::btrfs::Image::slack(&self) -> Slack
+pub fn ferrosys::btrfs::Image::write_to(&self, w: impl Write) -> std::io::Result<()>
+pub fn ferrosys::btrfs::Profile::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::btrfs::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::btrfs::Reader::default_subvolume(&self) -> u64
+pub fn ferrosys::btrfs::Reader::find_entry(&mut self, dir: &Node, name: &[u8]) -> Result<Option<Entry>, ReadError>
+pub fn ferrosys::btrfs::Reader::inode(&mut self, tree: u64, inode: u64) -> Result<Node, ReadError>
+pub fn ferrosys::btrfs::Reader::into_volume(self) -> Volume<R>
+pub fn ferrosys::btrfs::Reader::limits(&self) -> Limits
+pub fn ferrosys::btrfs::Reader::link_target(&mut self, node: &Node) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::btrfs::Reader::lookup(&mut self, path: &[u8]) -> Result<Node, ReadError>
+pub fn ferrosys::btrfs::Reader::lookup_no_follow(&mut self, path: &[u8]) -> Result<Node, ReadError>
+pub fn ferrosys::btrfs::Reader::open(src: R) -> Result<Self, ReadError>
+pub fn ferrosys::btrfs::Reader::open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError>
+pub fn ferrosys::btrfs::Reader::policy(&self) -> ReadPolicy
+pub fn ferrosys::btrfs::Reader::read_data(&mut self, node: &Node) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::btrfs::Reader::read_data_to(&mut self, node: &Node, out: impl Write) -> Result<u64, ReadError>
+pub fn ferrosys::btrfs::Reader::read_dir(&mut self, node: &Node) -> Result<Vec<Entry>, ReadError>
+pub fn ferrosys::btrfs::Reader::read_into(&mut self, node: &Node, offset: u64, buf: &mut [u8]) -> Result<usize, ReadError>
+pub fn ferrosys::btrfs::Reader::root(&mut self) -> Result<Node, ReadError>
+pub fn ferrosys::btrfs::Reader::scan(&mut self) -> ScanReport
+pub fn ferrosys::btrfs::Reader::step(&mut self, dir: &Node, entry: &Entry) -> Result<Node, ReadError>
+pub fn ferrosys::btrfs::Reader::subvolumes(&self) -> &[Subvolume]
+pub fn ferrosys::btrfs::Reader::top_level(&self) -> &Subvolume
+pub fn ferrosys::btrfs::Reader::verify_data(&mut self, node: &Node) -> Result<(), ReadError>
+pub fn ferrosys::btrfs::Reader::volume(&self) -> &Volume<R>
+pub fn ferrosys::btrfs::Reader::volume_mut(&mut self) -> &mut Volume<R>
+pub fn ferrosys::btrfs::Reader::walk(&mut self) -> Result<Vec<WalkEntry>, ReadError>
+pub fn ferrosys::btrfs::Reader::walk_with<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<ReadError>, F: FnMut(&mut Self, WalkEntry) -> Result<(), E>
+pub fn ferrosys::btrfs::Reader::xattrs(&mut self, node: &Node) -> Result<Vec<Xattr>, ReadError>
+pub fn ferrosys::btrfs::SubvolumeRequest::new(path: impl Into<Vec<u8>>, uuid: [u8; 16]) -> Self
+pub fn ferrosys::btrfs::SubvolumeRequest::read_only(self, read_only: bool) -> Self
+pub fn ferrosys::btrfs::Tree::count_items(&mut self) -> Result<u64, ReadError>
+pub fn ferrosys::btrfs::Tree::find_at_or_before(&mut self, key: DiskKey) -> Result<Option<Located>, ReadError>
+pub fn ferrosys::btrfs::Tree::find_exact(&mut self, key: DiskKey) -> Result<Option<Located>, ReadError>
+pub fn ferrosys::btrfs::Tree::find_first(&mut self, key: DiskKey) -> Result<Option<Located>, ReadError>
+pub fn ferrosys::btrfs::Tree::for_each_block<F>(&mut self, visit: F) -> Result<(), ReadError> where F: FnMut(&TreeBlock) -> bool
+pub fn ferrosys::btrfs::Tree::for_each_item<F>(&mut self, visit: F) -> Result<(), ReadError> where F: FnMut(&DiskKey, &[u8]) -> bool
+pub fn ferrosys::btrfs::Tree::for_each_item_from<F>(&mut self, from: DiskKey, visit: F) -> Result<(), ReadError> where F: FnMut(&DiskKey, &[u8]) -> bool
+pub fn ferrosys::btrfs::Tree::root(&self) -> TreeRoot
+pub fn ferrosys::btrfs::TreeBlock::bytes(&self) -> &[u8]
+pub fn ferrosys::btrfs::TreeBlock::check_leaf_packing(&self) -> Result<(), ReadError>
+pub fn ferrosys::btrfs::TreeBlock::count(&self) -> Result<usize, ReadError>
+pub fn ferrosys::btrfs::TreeBlock::header(&self) -> &Header
+pub fn ferrosys::btrfs::TreeBlock::item(&self, index: usize) -> Result<ondisk::Item, ReadError>
+pub fn ferrosys::btrfs::TreeBlock::item_data(&self, index: usize) -> Result<&[u8], ReadError>
+pub fn ferrosys::btrfs::TreeBlock::key_ptr(&self, index: usize) -> Result<ondisk::KeyPtr, ReadError>
+pub fn ferrosys::btrfs::Volume::chunk_map(&self) -> &ChunkMap
+pub fn ferrosys::btrfs::Volume::chunk_tree(&self) -> TreeRoot
+pub fn ferrosys::btrfs::Volume::limits(&self) -> Limits
+pub fn ferrosys::btrfs::Volume::mirrors(&self) -> &[Mirror; 3]
+pub fn ferrosys::btrfs::Volume::node_size(&self) -> u32
+pub fn ferrosys::btrfs::Volume::open(src: R) -> Result<Self, ReadError>
+pub fn ferrosys::btrfs::Volume::open_with(src: R, options: OpenOptions) -> Result<Self, ReadError>
+pub fn ferrosys::btrfs::Volume::policy(&self) -> ReadPolicy
+pub fn ferrosys::btrfs::Volume::read_at(&mut self, logical: u64, buf: &mut [u8]) -> Result<(), ReadError>
+pub fn ferrosys::btrfs::Volume::read_block(&mut self, logical: u64) -> Result<TreeBlock, ReadError>
+pub fn ferrosys::btrfs::Volume::root_tree(&self) -> TreeRoot
+pub fn ferrosys::btrfs::Volume::superblock(&self) -> &SuperBlock
+pub fn ferrosys::btrfs::Volume::tree(&mut self, root: TreeRoot) -> Tree<'_, R>
+pub fn ferrosys::btrfs::Volume::tree_roots(&mut self) -> Result<Vec<TreeRoot>, ReadError>
+pub fn ferrosys::btrfs::VolumeLabel::as_bytes(&self) -> &[u8]
+pub fn ferrosys::btrfs::VolumeLabel::from_bytes(name: &[u8]) -> Result<Self, LabelError>
+pub fn ferrosys::btrfs::VolumeLabel::new(name: &str) -> Result<Self, LabelError>
+pub fn ferrosys::btrfs::block_sizes(request: &PlanRequest) -> Result<(u32, u32), GeometryError>
+pub fn ferrosys::btrfs::format(source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<Image, FormatError>
+pub fn ferrosys::btrfs::format_to<W: Write + Seek>(sink: W, source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<super::geometry::BtrfsLayout, FormatError>
+pub fn ferrosys::btrfs::ondisk::BlockGroupItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::BlockGroupItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::Chunk::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::Chunk::stripe_at(&self, buf: &[u8], index: u16) -> Result<Stripe, ParseError>
+pub fn ferrosys::btrfs::ondisk::Chunk::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::CompatFlags::describe(self, out: &mut String)
+pub fn ferrosys::btrfs::ondisk::CompatFlags::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::btrfs::ondisk::CompatFlags::names(self) -> Vec<&'static str>
+pub fn ferrosys::btrfs::ondisk::CompatRoFlags::describe(self, out: &mut String)
+pub fn ferrosys::btrfs::ondisk::CompatRoFlags::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::btrfs::ondisk::CompatRoFlags::names(self) -> Vec<&'static str>
+pub fn ferrosys::btrfs::ondisk::DevExtent::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::DevExtent::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::DevItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::DevItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::DevStats::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::DevStats::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::DirItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::DirItem::split<'a>(&self, tail: &'a [u8]) -> (&'a [u8], &'a [u8])
+pub fn ferrosys::btrfs::ondisk::DirItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::DiskKey::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::DiskKey::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::ExtentDataRef::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::ExtentDataRef::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::ExtentItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::ExtentItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::FileExtentItem::inline_data<'a>(&self, data: &'a [u8]) -> Result<&'a [u8], ParseError>
+pub fn ferrosys::btrfs::ondisk::FileExtentItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::FileExtentItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::FreeSpaceInfo::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::FreeSpaceInfo::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::Header::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::Header::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::IncompatFlags::describe(self, out: &mut String)
+pub fn ferrosys::btrfs::ondisk::IncompatFlags::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::btrfs::ondisk::IncompatFlags::names(self) -> Vec<&'static str>
+pub fn ferrosys::btrfs::ondisk::InlineRef::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::InlineRef::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::InodeExtref::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::InodeExtref::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::InodeItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::InodeItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::InodeRef::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::InodeRef::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::Item::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::Item::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::KeyPtr::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::KeyPtr::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::Packed::encoded_len(&self) -> usize /* required */
+pub fn ferrosys::btrfs::ondisk::Packed::read_head(buf: &[u8]) -> Result<Self, ParseError> /* required */
+pub fn ferrosys::btrfs::ondisk::RootBackup::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::RootBackup::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::RootItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::RootItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::RootRef::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::RootRef::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::Stripe::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::Stripe::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::SuperBlock::label_bytes(&self) -> &[u8]
+pub fn ferrosys::btrfs::ondisk::SuperBlock::metadata_id(&self) -> [u8; 16]
+pub fn ferrosys::btrfs::ondisk::SuperBlock::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::btrfs::ondisk::SuperBlock::sys_chunk_bytes(&self) -> Option<&[u8]>
+pub fn ferrosys::btrfs::ondisk::SuperBlock::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::checksum(object: &[u8]) -> u32
+pub fn ferrosys::btrfs::ondisk::crc32c_over(bytes: &[u8]) -> u32
+pub fn ferrosys::btrfs::ondisk::extref_hash(parent_objectid: u64, name: &[u8]) -> u64
+pub fn ferrosys::btrfs::ondisk::for_each_packed<T: Packed, F>(data: &[u8], visit: F) -> Result<(), super::ParseError> where F: FnMut(&T, &[u8]) -> bool
+pub fn ferrosys::btrfs::ondisk::name_hash(name: &[u8]) -> u64
+pub fn ferrosys::btrfs::ondisk::padding_is_clear(object: &[u8], digest_len: usize) -> bool
+pub fn ferrosys::btrfs::ondisk::read_timespec(buf: &[u8], off: usize) -> crate::Timestamp
+pub fn ferrosys::btrfs::ondisk::seal(object: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::stored_crc32c(object: &[u8]) -> u32
+pub fn ferrosys::btrfs::ondisk::uuid_key(uuid: [u8; 16]) -> (u64, u64)
+pub fn ferrosys::btrfs::ondisk::write_timespec(buf: &mut [u8], off: usize, time: crate::Timestamp)
+pub fn ferrosys::btrfs::plan_layout(request: &PlanRequest) -> Result<BtrfsLayout, GeometryError>
+pub fn ferrosys::btrfs::tree_name(objectid: u64) -> String
+pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
+pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
+pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>
+pub fn ferrosys::hex(bytes: &[u8]) -> String
+pub fn ferrosys::json::Array::end(self)
+pub fn ferrosys::json::Array::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Array::obj(&mut self) -> Object<'_>
+pub fn ferrosys::json::Object::arr(&mut self, key: &str) -> Array<'_>
+pub fn ferrosys::json::Object::bool(&mut self, key: &str, value: bool)
+pub fn ferrosys::json::Object::bytes(&mut self, key: &str, value: &[u8])
+pub fn ferrosys::json::Object::end(self)
+pub fn ferrosys::json::Object::i64(&mut self, key: &str, value: i64)
+pub fn ferrosys::json::Object::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Object::obj(&mut self, key: &str) -> Object<'_>
+pub fn ferrosys::json::Object::raw(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::str(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::strings(&mut self, key: &str, values: &[&str])
+pub fn ferrosys::json::Object::u64(&mut self, key: &str, value: u64)
+pub fn ferrosys::json::Object::u64s(&mut self, key: &str, values: &[u64])
+pub fn ferrosys::open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError>
+pub fn ferrosys::open_with<R: Read + Seek>(src: R, options: &crate::policy::OpenOptions) -> Result<FsReader<R>, OpenError>
+pub fn ferrosys::printable(bytes: &[u8]) -> String
+pub fn ferrosys::push_json_string(out: &mut String, s: &str)
+pub mod ferrosys
+pub mod ferrosys::btrfs
+pub mod ferrosys::btrfs::ondisk
+pub mod ferrosys::btrfs::ondisk::objectid
+pub mod ferrosys::json
+pub struct ferrosys::AcceptedLoss(/* private */)
+pub struct ferrosys::Acl { /* private fields */ }
+pub struct ferrosys::AclEntry
+pub struct ferrosys::FidelityReport { /* private fields */ }
+pub struct ferrosys::FileRange { /* private fields */ }
+pub struct ferrosys::FindingReport { /* private fields */ }
+pub struct ferrosys::LayeredSource { /* private fields */ }
+pub struct ferrosys::Metadata
+pub struct ferrosys::ScanReport<A> { /* private fields */ }
+pub struct ferrosys::SourceEntry
+pub struct ferrosys::Timestamp
+pub struct ferrosys::TreeBuilder { /* private fields */ }
+pub struct ferrosys::Xattr
+pub struct ferrosys::btrfs::ChunkMap { /* private fields */ }
+pub struct ferrosys::btrfs::FormatPlan { /* private fields */ }
+pub struct ferrosys::btrfs::Image { /* private fields */ }
+pub struct ferrosys::btrfs::Located
+pub struct ferrosys::btrfs::MappedChunk
+pub struct ferrosys::btrfs::Node
+pub struct ferrosys::btrfs::Reader<R> { /* private fields */ }
+pub struct ferrosys::btrfs::Timestamp
+pub struct ferrosys::btrfs::Tree<'a, R> { /* private fields */ }
+pub struct ferrosys::btrfs::TreeBlock { /* private fields */ }
+pub struct ferrosys::btrfs::TreeRoot
+pub struct ferrosys::btrfs::Volume<R> { /* private fields */ }
+pub struct ferrosys::btrfs::VolumeLabel(/* private */)
+pub struct ferrosys::btrfs::ondisk::BlockGroupFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::BlockGroupItem
+pub struct ferrosys::btrfs::ondisk::ChecksumType(/* private */)
+pub struct ferrosys::btrfs::ondisk::Chunk
+pub struct ferrosys::btrfs::ondisk::CompatFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::CompatRoFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::DevExtent
+pub struct ferrosys::btrfs::ondisk::DevItem
+pub struct ferrosys::btrfs::ondisk::DevStats
+pub struct ferrosys::btrfs::ondisk::DirItem
+pub struct ferrosys::btrfs::ondisk::DiskKey
+pub struct ferrosys::btrfs::ondisk::ExtentDataRef
+pub struct ferrosys::btrfs::ondisk::ExtentFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::ExtentItem
+pub struct ferrosys::btrfs::ondisk::FreeSpaceInfo
+pub struct ferrosys::btrfs::ondisk::Header
+pub struct ferrosys::btrfs::ondisk::IncompatFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::InlineRef
+pub struct ferrosys::btrfs::ondisk::InodeExtref
+pub struct ferrosys::btrfs::ondisk::InodeFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::InodeRef
+pub struct ferrosys::btrfs::ondisk::Item
+pub struct ferrosys::btrfs::ondisk::ItemType(/* private */)
+pub struct ferrosys::btrfs::ondisk::KeyPtr
+pub struct ferrosys::btrfs::ondisk::RootBackup
+pub struct ferrosys::btrfs::ondisk::RootFlags(/* private */)
+pub struct ferrosys::btrfs::ondisk::RootRef
+pub struct ferrosys::btrfs::ondisk::Stripe
+pub struct ferrosys::btrfs::ondisk::SuperFlags(/* private */)
+pub struct ferrosys::json::Array<'a> { /* private fields */ }
+pub struct ferrosys::json::Object<'a> { /* private fields */ }
+pub trait ferrosys::Deviation
+pub trait ferrosys::FsTree
+pub trait ferrosys::NamedChoice: Copy + Sized + 'static
+pub trait ferrosys::Source
+pub trait ferrosys::btrfs::ondisk::Packed: Sized
+pub type ferrosys::Coordinate = (std::borrow::Cow<'static, str>, u64)
+pub type ferrosys::FsTree::Node
+pub type ferrosys::btrfs::ScanReport = crate::ScanReport<Anomaly>

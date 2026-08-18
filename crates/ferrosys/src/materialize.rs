@@ -26,8 +26,10 @@ use std::io::{Seek, Write};
 
 use crate::alloc::{AllocError, Allocator};
 use crate::crc32c::crc32c;
+use crate::csum as recipe;
 use crate::csum::{Checksummer, Crc32c, CsumScheme, NullCsum};
 use crate::dir::{DirBlock, DirBlockKind, DirError, DirLayout, HtreeDir, LinearDir};
+use crate::escape::hex;
 use crate::extent::{
     ExtentError, build_leaves, build_tree, node_capacity, plan_tree, tail_offset, write_node,
 };
@@ -37,6 +39,7 @@ use crate::geometry::{
     ReservedRatio, plan_layout,
 };
 use crate::hash::{HashSignedness, HashVersion};
+use crate::io::ByteSink;
 use crate::journal::{self, JournalSize};
 use crate::model::{
     Content, FIRST_USER_INO, FsModel, LOST_FOUND_INO, ModelConfig, ModelError, ModelInode,
@@ -44,11 +47,11 @@ use crate::model::{
 };
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, DIR_TAIL_LEN, DX_ENTRY_LEN, DX_TAIL_LEN,
-    DirEntry, GroupDescriptor, Inode, InodeFlags, ParseError, SuperBlock, encode_block,
-    encode_device, encode_inline, extra_isize_for, get_u16, orphan_entries_len, orphan_tail_bytes,
-    put_u16, put_u32, split_for_storage, write_dir_tail, write_dx_tail,
+    DirEntry, GroupDescriptor, Inode, InodeFlags, ParseError, SuperBlock, XATTR_CHECKSUM_OFFSET,
+    encode_block, encode_device, encode_inline, extra_isize_for, get_u16, get_u32,
+    orphan_entries_len, orphan_tail_bytes, put_u16, put_u32, split_for_storage,
+    superblock_checksum, write_dir_tail, write_dx_tail,
 };
-use crate::sink::ByteSink;
 use crate::sizing::Slack;
 use crate::source::Source;
 use crate::time::Timestamp;
@@ -135,6 +138,16 @@ pub enum ErrorBehavior {
     /// Panic the kernel (`s_errors = 3`), halting the machine on any filesystem error.
     Panic,
 }
+
+// The names `mke2fs -e` takes, in the order it documents them. A report that *describes*
+// an image spells these differently on purpose — `dumpe2fs` writes `Remount read-only`, and
+// a description of an image reads as that tool's output rather than as an argument — so the
+// spelling here is the one that can be typed back into a format.
+crate::naming::named_choice!(ErrorBehavior {
+    ErrorBehavior::Continue => "continue",
+    ErrorBehavior::RemountReadOnly => "remount-ro",
+    ErrorBehavior::Panic => "panic",
+});
 
 impl ErrorBehavior {
     /// The on-disk `s_errors` value this policy is stored as.
@@ -928,16 +941,6 @@ pub(crate) fn free_after_placing(
     Ok(writer.alloc.free_count())
 }
 
-/// Render bytes as lower-case hex, the form the pin document gives a UUID, a hash seed,
-/// and a volume label: exact whatever the bytes are, and one fixed width.
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
-}
-
 /// A timestamp as `seconds.nanoseconds`, so the sub-second half a source can carry is part
 /// of the contract rather than rounded out of it.
 fn pin_time(t: Timestamp) -> String {
@@ -1522,7 +1525,7 @@ impl<'a, S: Sink> Writer<'a, S> {
                 let bytes: Vec<Vec<u8>> = blocks.into_iter().map(|b| b.bytes).collect();
                 self.place_blocks(minode.number, &mut inode, bytes.iter())?;
                 if indexed {
-                    inode.flags = inode.flags | InodeFlags::INDEX;
+                    inode.flags |= InodeFlags::INDEX;
                 }
             }
             Content::File(content) => {
@@ -1599,16 +1602,22 @@ impl<'a, S: Sink> Writer<'a, S> {
             let mut block = encode_block(&spilled, self.block_size, signed);
             let phys = self.alloc.allocate_one()?;
             if self.csum.scheme().writes_object_checksums() {
-                // The xattr block checksum (`h_checksum` at offset 16, zero in the
-                // encoded block) covers the whole block, seeded from the filesystem
-                // seed and the block number as a little-endian 64-bit value.
-                let mut c = self.csum.crc32c(self.csum.base_seed(), &phys.to_le_bytes());
-                c = self.csum.crc32c(c, &block);
-                put_u32(&mut block, 16, c);
+                // `h_checksum` is zero in the encoded block, which is how it participates
+                // in its own checksum.
+                let c = recipe::xattr_block(&*self.csum, phys, &block);
+                put_u32(&mut block, XATTR_CHECKSUM_OFFSET, c);
             }
             self.write_block(phys, &block)?;
             inode.file_acl = phys;
-            inode.blocks += self.sectors_per_block();
+            // Through the same gate every other charge takes. This is the one charge
+            // added after the contents were totalled, and adding it unchecked is how a
+            // count within one block of the cap would serialize a wrapped low half
+            // beside a high half the feature words deny.
+            self.charge_sectors(
+                inode,
+                inode.blocks + self.sectors_per_block(),
+                "extended attributes",
+            )?;
         }
         Ok(())
     }
@@ -1812,9 +1821,11 @@ impl<'a, S: Sink> Writer<'a, S> {
             return;
         }
         let tail = tail_offset(self.block_size);
-        let mut c = self.csum.crc32c(self.csum.base_seed(), &ino.to_le_bytes());
-        c = self.csum.crc32c(c, &0u32.to_le_bytes());
-        c = self.csum.crc32c(c, &buf[..tail]);
+        // Generation zero: this crate writes no inode with a generation, so the identity a
+        // node is bound to is its owner's number alone.
+        let c = self
+            .csum
+            .crc32c(recipe::inode_seed(&*self.csum, ino, 0), &buf[..tail]);
         put_u32(buf, tail, c);
     }
 
@@ -1853,16 +1864,20 @@ impl<'a, S: Sink> Writer<'a, S> {
         if !self.csum.scheme().writes_object_checksums() {
             return;
         }
-        let seed = self.csum.base_seed();
+        // Generation zero, as for an extent node above.
+        let seed = recipe::inode_seed(&*self.csum, dir_ino, 0);
         for block in blocks {
-            let mut c = self.csum.crc32c(seed, &dir_ino.to_le_bytes());
-            c = self.csum.crc32c(c, &0u32.to_le_bytes());
+            let mut c = seed;
             match block.kind {
                 DirBlockKind::Entries => {
                     let covered = self.block_size - DIR_TAIL_LEN;
                     c = self.csum.crc32c(c, &block.bytes[..covered]);
                     put_u32(&mut block.bytes, self.block_size - 4, c);
                 }
+                // Not one of `csum`'s shared recipes, and deliberately: what is folded here
+                // is a tail this writer is about to write, whose reserved word it knows to be
+                // zero, where the reader folds the tail it *found* so that an index block a
+                // foreign tool wrote still verifies. One function could not be both.
                 DirBlockKind::Index {
                     count_offset,
                     limit,
@@ -1949,12 +1964,9 @@ impl<'a, S: Sink> Writer<'a, S> {
         // from block to block even though their contents are identical.
         let entries_len = orphan_entries_len(self.block_size);
         let entries = vec![0u8; entries_len];
-        let seed = self.csum.base_seed();
         for block in ranges.iter().flat_map(|r| r.start..r.start + r.len) {
-            let mut c = self.csum.crc32c(seed, &ORPHAN_INO.to_le_bytes());
-            c = self.csum.crc32c(c, &inode.generation.to_le_bytes());
-            c = self.csum.crc32c(c, &block.to_le_bytes());
-            c = self.csum.crc32c(c, &entries);
+            let c =
+                recipe::orphan_block(&*self.csum, ORPHAN_INO, inode.generation, block, &entries);
             let offset = block * u64::from(self.layout.block_size) + entries_len as u64;
             self.write_at(offset, &orphan_tail_bytes(c))?;
         }
@@ -2021,7 +2033,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         // high and low halves of the size.
         let mut backup = [0u32; 17];
         for (i, word) in inode.block.chunks_exact(4).enumerate() {
-            backup[i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            backup[i] = get_u32(word, 0);
         }
         backup[15] = (inode.size >> 32) as u32;
         backup[16] = inode.size as u32;
@@ -2100,7 +2112,6 @@ impl<'a, S: Sink> Writer<'a, S> {
         let inode_size = self.feature.inode_size;
         let isize = inode_size as usize;
         let writes_checksums = self.csum.scheme().writes_object_checksums();
-        let seed = self.csum.base_seed();
         // Held aside so each write may borrow the sink mutably; the inodes go back
         // afterwards, because the superblock's accounting still reads them.
         let inodes = std::mem::take(&mut self.inodes);
@@ -2131,11 +2142,10 @@ impl<'a, S: Sink> Writer<'a, S> {
                 // Writing it regardless would land two bytes of checksum in whatever
                 // occupies 0x82 on an inode that has no extended area — for a 128-byte
                 // inode, past its end and into the next one.
-                let mut c = self.csum.crc32c(seed, &number.to_le_bytes());
-                c = self.csum.crc32c(c, &inode.generation.to_le_bytes());
-                c = self.csum.crc32c(c, &bytes);
+                let has_hi = Inode::has_checksum_hi(inode_size, inode.extra_isize);
+                let c = recipe::inode(&*self.csum, number, inode.generation, &bytes, has_hi);
                 put_u16(&mut bytes, Inode::CHECKSUM_LO_OFFSET, (c & 0xffff) as u16);
-                if Inode::has_checksum_hi(inode_size, inode.extra_isize) {
+                if has_hi {
                     put_u16(&mut bytes, Inode::CHECKSUM_HI_OFFSET, (c >> 16) as u16);
                 }
             }
@@ -2162,7 +2172,6 @@ impl<'a, S: Sink> Writer<'a, S> {
 
         let uninit_bg = self.csum.scheme().uninit_bg_semantics();
         let last_group = self.layout.group_count - 1;
-        let seed = self.csum.base_seed();
         // The bytes of each bitmap the checksum covers, as the kernel measures them:
         // `ext4_block_bitmap_csum_set` takes `clusters_per_group / 8`, which is exact
         // because a group's block count is always a multiple of eight, while
@@ -2171,8 +2180,8 @@ impl<'a, S: Sink> Writer<'a, S> {
         // covered. The planner and `mke2fs` both round the inode count down to a multiple
         // of eight, so the two forms agree on every image either writes; the kernel's is
         // used so they also agree on one that does not.
-        let bb_len = (self.layout.blocks_per_group / 8) as usize;
-        let ib_len = ipg.div_ceil(8) as usize;
+        let bb_len = recipe::block_bitmap_len(self.layout.blocks_per_group);
+        let ib_len = recipe::inode_bitmap_len(ipg);
 
         for g in 0..self.layout.group_count {
             let gl = &self.layout.groups[g as usize];
@@ -2209,12 +2218,12 @@ impl<'a, S: Sink> Writer<'a, S> {
             let block_bitmap_csum = if block_uninit {
                 0
             } else {
-                self.csum.crc32c(seed, &bbmp[..bb_len])
+                recipe::bitmap(&*self.csum, &bbmp[..bb_len])
             };
             let inode_bitmap_csum = if inode_uninit {
                 0
             } else {
-                self.csum.crc32c(seed, &ibmp[..ib_len])
+                recipe::bitmap(&*self.csum, &ibmp[..ib_len])
             };
 
             // `bg_flags` is meaningful only under metadata_csum / uninit_bg: `BG_INODE_ZEROED`
@@ -2293,11 +2302,7 @@ impl<'a, S: Sink> Writer<'a, S> {
             .expect("descriptor buffer holds a full descriptor");
         // `desc.checksum` is zero here, so the two bg_checksum bytes in `buf` already
         // hold the zeros ext4 folds in place of the field.
-        let mut c = self
-            .csum
-            .crc32c(self.csum.base_seed(), &group.to_le_bytes());
-        c = self.csum.crc32c(c, &buf[..desc_size]);
-        (c & 0xffff) as u16
+        recipe::group_descriptor(&*self.csum, group, &buf[..desc_size])
     }
 
     /// Build one group's inode bitmap: a used bit per in-use inode, and set padding
@@ -2353,13 +2358,18 @@ impl<'a, S: Sink> Writer<'a, S> {
         Ok(())
     }
 
-    /// Write the superblock crc32c (`s_checksum`) into a serialized superblock. The
-    /// checksum covers the record up to its own field and, unlike every other
-    /// metadata object, ext4 seeds it from `!0` rather than the filesystem seed. With
-    /// checksums off the seam returns zero, leaving the field zero.
+    /// Write the superblock crc32c (`s_checksum`) into a serialized superblock.
+    ///
+    /// The recipe is [`superblock_checksum`], which the reader and a re-identification also
+    /// call — the one place the seed and the covered span are stated. What is decided here is
+    /// only whether the field is written at all: with checksums off it stays the zero the
+    /// serialization left, which is what a checker expects when the feature bit is clear.
     fn finalize_sb_csum(&self, bytes: &mut [u8; SuperBlock::SIZE]) {
-        let c = self.csum.crc32c(!0, &bytes[..SuperBlock::SIZE - 4]);
-        put_u32(bytes, SuperBlock::SIZE - 4, c);
+        if !self.csum.scheme().writes_object_checksums() {
+            return;
+        }
+        let c = superblock_checksum(bytes);
+        put_u32(bytes, SuperBlock::CHECKSUM_OFFSET, c);
     }
 
     /// Assemble the superblock from the layout, feature set, and settled counts.

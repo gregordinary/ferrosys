@@ -43,6 +43,12 @@ pub enum FsReader<R> {
     /// A FAT12, FAT16, or FAT32 volume.
     #[cfg(feature = "fat")]
     Fat(crate::fat::Reader<R>),
+    /// An exFAT volume.
+    #[cfg(feature = "exfat")]
+    ExFat(crate::exfat::Reader<R>),
+    /// A btrfs filesystem.
+    #[cfg(feature = "btrfs")]
+    Btrfs(crate::btrfs::Reader<R>),
 }
 
 impl<R> FsReader<R> {
@@ -56,6 +62,10 @@ impl<R> FsReader<R> {
             FsReader::Ext(_) => crate::finding::Family::Ext,
             #[cfg(feature = "fat")]
             FsReader::Fat(_) => crate::finding::Family::Fat,
+            #[cfg(feature = "exfat")]
+            FsReader::ExFat(_) => crate::finding::Family::ExFat,
+            #[cfg(feature = "btrfs")]
+            FsReader::Btrfs(_) => crate::finding::Family::Btrfs,
         }
     }
 }
@@ -112,6 +122,12 @@ pub fn open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError> {
 /// own knob is at its default here — a FAT volume's short names are read as the bytes they
 /// are, interpreting no code page. A caller who needs one opens `fat::Reader` directly.
 ///
+/// A family that has no knob of its own takes these directly and mints nothing; a family
+/// that has one *holds* these rather than restating them, so what is passed across below is
+/// the value itself either way. An input added here therefore reaches every family without a
+/// second edit, where copying field by field would leave a new one silently at its default
+/// in whichever family was forgotten.
+///
 /// # Errors
 ///
 /// [`OpenError::Detect`] when the source cannot be read or no compiled-in family recognizes
@@ -127,10 +143,7 @@ pub fn open_with<R: Read + Seek>(
     match crate::detect_with(&mut src, &detect)? {
         #[cfg(feature = "ext")]
         crate::Filesystem::Ext(_) => {
-            let ext = crate::read::OpenOptions::new()
-                .base(options.base)
-                .policy(options.policy)
-                .limits(options.limits);
+            let ext = crate::read::OpenOptions::new().common(*options);
             crate::read::Reader::open_with(src, &ext)
                 .map(FsReader::Ext)
                 .map_err(|e| OpenError::Refused {
@@ -140,10 +153,7 @@ pub fn open_with<R: Read + Seek>(
         }
         #[cfg(feature = "fat")]
         crate::Filesystem::Fat(_) => {
-            let fat = crate::fat::OpenOptions::new()
-                .base(options.base)
-                .policy(options.policy)
-                .limits(options.limits);
+            let fat = crate::fat::OpenOptions::new().common(*options);
             crate::fat::Reader::open_with(src, &fat)
                 .map(FsReader::Fat)
                 .map_err(|e| OpenError::Refused {
@@ -151,17 +161,35 @@ pub fn open_with<R: Read + Seek>(
                     message: e.to_string(),
                 })
         }
+        #[cfg(feature = "exfat")]
+        crate::Filesystem::ExFat => crate::exfat::Reader::open_with(src, options)
+            .map(FsReader::ExFat)
+            .map_err(|e| OpenError::Refused {
+                family: crate::finding::Family::ExFat,
+                message: e.to_string(),
+            }),
+        #[cfg(feature = "btrfs")]
+        crate::Filesystem::Btrfs => crate::btrfs::Reader::open_with(src, options)
+            .map(FsReader::Btrfs)
+            .map_err(|e| OpenError::Refused {
+                family: crate::finding::Family::Btrfs,
+                message: e.to_string(),
+            }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat"))]
     use crate::time::Timestamp;
     use crate::tree::{FsTree, TreeError};
     use std::io::Cursor;
 
-    /// The instant every fixture stamps with, so nothing here depends on a clock.
+    /// The instant every formatted fixture stamps with, so nothing here depends on a clock.
+    /// Compiled where a family with a formatter is: the newest family has none, and its
+    /// fixture is assembled byte by byte rather than stamped.
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat"))]
     const TIME: Timestamp = Timestamp::from_secs(1_426_325_212);
 
     /// One image per compiled-in family, as `(what it is, the bytes)`.
@@ -186,6 +214,30 @@ mod tests {
             let options = FormatOptions::new(0x1234_abcd, TIME);
             let image = format(TreeBuilder::new(), 8 << 20, options).expect("format a FAT image");
             out.push((crate::finding::Family::Fat, image.into_bytes()));
+        }
+        #[cfg(feature = "exfat")]
+        {
+            use crate::exfat::{FormatOptions, format};
+            use crate::source::{Metadata, TreeBuilder};
+            // The one fixture whose instant reaches a tree rather than a `FormatOptions`: an
+            // empty exFAT volume records no time anywhere, so this family's format takes
+            // none, and stamping an entry is what makes the fixture depend on no clock.
+            let source =
+                TreeBuilder::new().file(b"/READY.TXT".to_vec(), b"", Metadata::new(0o644, TIME));
+            let image = format(source, 8 << 20, FormatOptions::new(0x1234_abcd))
+                .expect("format an exFAT image");
+            out.push((crate::finding::Family::ExFat, image.into_bytes()));
+        }
+        #[cfg(feature = "btrfs")]
+        {
+            // The one family with no formatter to build a fixture with, so the fixture is the
+            // filesystem its own gates are written against — assembled byte by byte rather
+            // than formatted. It is a real image either way, which is what this seam needs.
+            use std::io::Read;
+            let mut src = crate::btrfs::forge::Forge::populated().source();
+            let mut bytes = Vec::new();
+            src.read_to_end(&mut bytes).expect("the forged device");
+            out.push((crate::finding::Family::Btrfs, bytes));
         }
         assert!(
             !out.is_empty(),
@@ -222,6 +274,10 @@ mod tests {
                 FsReader::Ext(mut r) => paths(&mut r),
                 #[cfg(feature = "fat")]
                 FsReader::Fat(mut r) => paths(&mut r),
+                #[cfg(feature = "exfat")]
+                FsReader::ExFat(mut r) => paths(&mut r),
+                #[cfg(feature = "btrfs")]
+                FsReader::Btrfs(mut r) => paths(&mut r),
             };
             // What every family promises a walk, and all a caller that has not matched can
             // rely on: the root comes first under the empty path, and no name repeats.

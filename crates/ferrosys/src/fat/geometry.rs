@@ -117,17 +117,14 @@ pub enum FatType {
     Fat32,
 }
 
-impl FatType {
-    /// The lowercase name of the type, for a rendered report.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            FatType::Fat12 => "fat12",
-            FatType::Fat16 => "fat16",
-            FatType::Fat32 => "fat32",
-        }
-    }
+// The three names a report prints and a `-t` value takes, in ascending entry width.
+crate::naming::named_choice!(FatType {
+    FatType::Fat12 => "fat12",
+    FatType::Fat16 => "fat16",
+    FatType::Fat32 => "fat32",
+});
 
+impl FatType {
     /// Bits in one file allocation table entry.
     #[must_use]
     pub const fn entry_bits(self) -> u32 {

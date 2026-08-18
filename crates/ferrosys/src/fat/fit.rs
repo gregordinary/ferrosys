@@ -470,18 +470,31 @@ mod tests {
 
     #[test]
     fn a_type_the_tree_outgrows_is_refused_by_name() {
-        // FAT12 addresses 4084 clusters, so a tree past that has no FAT12 volume however
-        // large. It comes back as that refusal rather than as a size that could not be found,
-        // and it comes back without climbing to the top of the sector range to discover it.
-        let options =
-            opts().plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat12)));
-        let err = fit(tree(500, 200_000), options, Slack::None).expect_err("no FAT12 holds it");
+        // FAT12 addresses 4084 clusters of at most 32 KiB, so a tree past 127 MiB or so has
+        // no FAT12 volume however large. It comes back as that refusal rather than as a size
+        // that could not be found, and without climbing to the top of the sector range to
+        // discover it.
+        let fat12 =
+            || opts().plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat12)));
+        let err = fit(tree(500, 400_000), fat12(), Slack::None).expect_err("no FAT12 holds it");
         assert!(
             matches!(
                 err,
                 FormatError::Geometry(GeometryError::ClustersAboveMaximum { .. })
             ),
             "{err}"
+        );
+
+        // A tree the type holds only at its largest clusters is found, not stepped over: the
+        // sizes that work sit in a window narrower than one of the climb's doublings, and an
+        // upward-closed refusal above the window bounds the search rather than ending it.
+        let fitted = fit(tree(500, 200_000), fat12(), Slack::None)
+            .expect("a hundred megabytes fits FAT12 at 32 KiB clusters");
+        assert_eq!(fitted.layout.fat_type, FatType::Fat12);
+        assert!(
+            fitted.layout.clusters <= 4084,
+            "{} clusters is past FAT12",
+            fitted.layout.clusters
         );
     }
 

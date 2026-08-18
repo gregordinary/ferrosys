@@ -12,12 +12,14 @@
 #[non_exhaustive] pub ferrosys::AclError::InvalidPerm
 #[non_exhaustive] pub ferrosys::AclError::Malformed
 #[non_exhaustive] pub ferrosys::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::AclError::UndefinedId
 #[non_exhaustive] pub ferrosys::DetectError::Io
 #[non_exhaustive] pub ferrosys::TreeError::Io
 #[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
 #[non_exhaustive] pub ferrosys::TreeError::Malformed
 #[non_exhaustive] pub ferrosys::TreeError::Unsupported
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::DetectOptions
 #[non_exhaustive] pub struct ferrosys::FidelityRecord
 #[non_exhaustive] pub struct ferrosys::Finding
@@ -31,6 +33,7 @@ impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Civil
 impl Clone for ferrosys::DetectError
 impl Clone for ferrosys::DetectOptions
 impl Clone for ferrosys::Direction
@@ -50,6 +53,7 @@ impl Clone for ferrosys::NodeKind
 impl Clone for ferrosys::OpenOptions
 impl Clone for ferrosys::Property
 impl Clone for ferrosys::ReadPolicy
+impl Clone for ferrosys::ScanReport
 impl Clone for ferrosys::Severity
 impl Clone for ferrosys::SourceEntry
 impl Clone for ferrosys::Synthesis
@@ -61,6 +65,7 @@ impl Clone for ferrosys::Xattr
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
 impl Copy for ferrosys::Family
@@ -80,6 +85,7 @@ impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Civil
 impl Debug for ferrosys::DetectError
 impl Debug for ferrosys::DetectOptions
 impl Debug for ferrosys::Direction
@@ -99,6 +105,7 @@ impl Debug for ferrosys::NodeKind
 impl Debug for ferrosys::OpenOptions
 impl Debug for ferrosys::Property
 impl Debug for ferrosys::ReadPolicy
+impl Debug for ferrosys::ScanReport
 impl Debug for ferrosys::Severity
 impl Debug for ferrosys::SourceEntry
 impl Debug for ferrosys::Synthesis
@@ -115,10 +122,12 @@ impl Default for ferrosys::LayeredSource
 impl Default for ferrosys::Limits
 impl Default for ferrosys::OpenOptions
 impl Default for ferrosys::ReadPolicy
+impl Default for ferrosys::ScanReport
 impl Default for ferrosys::Synthesis
 impl Default for ferrosys::Timestamp
 impl Default for ferrosys::TreeBuilder
 impl Display for ferrosys::AclError
+impl Display for ferrosys::Civil
 impl Display for ferrosys::DetectError
 impl Display for ferrosys::TreeError
 impl Eq for ferrosys::AcceptedLoss
@@ -127,6 +136,7 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Civil
 impl Eq for ferrosys::DetectError
 impl Eq for ferrosys::DetectOptions
 impl Eq for ferrosys::Direction
@@ -145,6 +155,7 @@ impl Eq for ferrosys::NodeKind
 impl Eq for ferrosys::OpenOptions
 impl Eq for ferrosys::Property
 impl Eq for ferrosys::ReadPolicy
+impl Eq for ferrosys::ScanReport
 impl Eq for ferrosys::Severity
 impl Eq for ferrosys::SourceEntry
 impl Eq for ferrosys::Synthesis
@@ -158,6 +169,7 @@ impl Error for ferrosys::TreeError
 impl From<&[u8; N]> for ferrosys::FileContent
 impl From<&[u8]> for ferrosys::FileContent
 impl From<&str> for ferrosys::FileContent
+impl From<Error> for ferrosys::DetectError
 impl From<FileRange> for ferrosys::FileContent
 impl From<FileRange> for ferrosys::FileRange
 impl From<String> for ferrosys::FileContent
@@ -167,6 +179,7 @@ impl Hash for ferrosys::Direction
 impl Hash for ferrosys::Family
 impl Hash for ferrosys::Filesystem
 impl Hash for ferrosys::Property
+impl NamedChoice for ferrosys::Severity
 impl Ord for ferrosys::Severity
 impl PartialEq for ferrosys::AcceptedLoss
 impl PartialEq for ferrosys::Acl
@@ -174,6 +187,7 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::DetectError
 impl PartialEq for ferrosys::DetectOptions
 impl PartialEq for ferrosys::Direction
@@ -192,6 +206,7 @@ impl PartialEq for ferrosys::NodeKind
 impl PartialEq for ferrosys::OpenOptions
 impl PartialEq for ferrosys::Property
 impl PartialEq for ferrosys::ReadPolicy
+impl PartialEq for ferrosys::ScanReport
 impl PartialEq for ferrosys::Severity
 impl PartialEq for ferrosys::SourceEntry
 impl PartialEq for ferrosys::Synthesis
@@ -212,11 +227,15 @@ pub const ferrosys::Acl::WRITE: u16
 pub const ferrosys::FINDINGS_SCHEMA_VERSION: u32
 pub const ferrosys::FidelityReport::MAX_RECORDS: usize
 pub const ferrosys::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::NamedChoice::NAMES: &'static [Self]
+pub const ferrosys::Severity::NAMES: &'static [Self]
 pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
 pub const fn ferrosys::AcceptedLoss::and(self, property: Property) -> Self
 pub const fn ferrosys::AcceptedLoss::contains(self, property: Property) -> bool
 pub const fn ferrosys::AcceptedLoss::is_empty(self) -> bool
 pub const fn ferrosys::AcceptedLoss::without(self, property: Property) -> Self
+pub const fn ferrosys::Civil::at_secs(secs: i64) -> Self
+pub const fn ferrosys::Civil::to_secs(self) -> i64
 pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
 pub const fn ferrosys::DetectOptions::new() -> Self
 pub const fn ferrosys::Direction::as_str(self) -> &'static str
@@ -237,6 +256,7 @@ pub const fn ferrosys::Severity::as_str(self) -> &'static str
 pub const fn ferrosys::Synthesis::modes(self, file_mode: u16, dir_mode: u16) -> Self
 pub const fn ferrosys::Synthesis::new() -> Self
 pub const fn ferrosys::Synthesis::owner(self, uid: u32, gid: u32) -> Self
+pub const fn ferrosys::Timestamp::civil(self) -> Civil
 pub const fn ferrosys::Timestamp::from_secs(secs: i64) -> Self
 pub enum ferrosys::AclQualifier
 pub enum ferrosys::ReadPolicy
@@ -248,6 +268,7 @@ pub ferrosys::AclError::InvalidPerm::perm: u16
 pub ferrosys::AclError::Malformed::reason: &'static str
 pub ferrosys::AclError::MaskRequired
 pub ferrosys::AclError::MissingRequired::tag: &'static str
+pub ferrosys::AclError::UndefinedId::tag: &'static str
 pub ferrosys::AclQualifier::Group(u32)
 pub ferrosys::AclQualifier::GroupObj
 pub ferrosys::AclQualifier::Mask
@@ -257,6 +278,12 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Civil::day: u32
+pub ferrosys::Civil::hour: u32
+pub ferrosys::Civil::minute: u32
+pub ferrosys::Civil::month: u32
+pub ferrosys::Civil::second: u32
+pub ferrosys::Civil::year: i64
 pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
 pub ferrosys::DetectError::Io::message: String
 pub ferrosys::DetectError::Unrecognized
@@ -356,6 +383,8 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
+pub fn ferrosys::Deviation::to_finding(&self, unit: u32) -> Finding /* required */
 pub fn ferrosys::FidelityReport::count(&self, direction: Direction, property: Property) -> u64
 pub fn ferrosys::FidelityReport::is_faithful(&self) -> bool
 pub fn ferrosys::FidelityReport::is_truncated(&self) -> bool
@@ -380,8 +409,10 @@ pub fn ferrosys::FindingReport::to_json(&self) -> String
 pub fn ferrosys::FindingReport::to_sarif(&self, artifact_uri: Option<&str>) -> String
 pub fn ferrosys::FindingReport::to_table(&self) -> String
 pub fn ferrosys::FindingReport::worst_severity(&self) -> Option<Severity>
-pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> /* required */
+pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
+pub fn ferrosys::FsTree::family(&self) -> Family /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
@@ -392,7 +423,16 @@ pub fn ferrosys::LayeredSource::new() -> Self
 pub fn ferrosys::Metadata::new(mode: u16, mtime: Timestamp) -> Self
 pub fn ferrosys::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
 pub fn ferrosys::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::NamedChoice::as_str(self) -> &'static str /* required */
+pub fn ferrosys::NamedChoice::from_name(name: &str) -> Option<Self> /* required */
 pub fn ferrosys::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ScanReport::anomalies(&self) -> &[A]
+pub fn ferrosys::ScanReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
+pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
 pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
@@ -410,9 +450,26 @@ pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
 pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
 pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
 pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>
+pub fn ferrosys::hex(bytes: &[u8]) -> String
+pub fn ferrosys::json::Array::end(self)
+pub fn ferrosys::json::Array::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Array::obj(&mut self) -> Object<'_>
+pub fn ferrosys::json::Object::arr(&mut self, key: &str) -> Array<'_>
+pub fn ferrosys::json::Object::bool(&mut self, key: &str, value: bool)
+pub fn ferrosys::json::Object::bytes(&mut self, key: &str, value: &[u8])
+pub fn ferrosys::json::Object::end(self)
+pub fn ferrosys::json::Object::i64(&mut self, key: &str, value: i64)
+pub fn ferrosys::json::Object::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Object::obj(&mut self, key: &str) -> Object<'_>
+pub fn ferrosys::json::Object::raw(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::str(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::strings(&mut self, key: &str, values: &[&str])
+pub fn ferrosys::json::Object::u64(&mut self, key: &str, value: u64)
+pub fn ferrosys::json::Object::u64s(&mut self, key: &str, values: &[u64])
 pub fn ferrosys::printable(bytes: &[u8]) -> String
 pub fn ferrosys::push_json_string(out: &mut String, s: &str)
 pub mod ferrosys
+pub mod ferrosys::json
 pub struct ferrosys::AcceptedLoss(/* private */)
 pub struct ferrosys::Acl { /* private fields */ }
 pub struct ferrosys::AclEntry
@@ -421,11 +478,16 @@ pub struct ferrosys::FileRange { /* private fields */ }
 pub struct ferrosys::FindingReport { /* private fields */ }
 pub struct ferrosys::LayeredSource { /* private fields */ }
 pub struct ferrosys::Metadata
+pub struct ferrosys::ScanReport<A> { /* private fields */ }
 pub struct ferrosys::SourceEntry
 pub struct ferrosys::Timestamp
 pub struct ferrosys::TreeBuilder { /* private fields */ }
 pub struct ferrosys::Xattr
+pub struct ferrosys::json::Array<'a> { /* private fields */ }
+pub struct ferrosys::json::Object<'a> { /* private fields */ }
+pub trait ferrosys::Deviation
 pub trait ferrosys::FsTree
+pub trait ferrosys::NamedChoice: Copy + Sized + 'static
 pub trait ferrosys::Source
 pub type ferrosys::Coordinate = (std::borrow::Cow<'static, str>, u64)
 pub type ferrosys::FsTree::Node

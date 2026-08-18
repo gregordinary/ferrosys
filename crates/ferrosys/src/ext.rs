@@ -117,20 +117,24 @@ pub mod ondisk {
         TIME_SECS_MIN, decode_acl, decode_time, dx_limit, dx_tail_offset, encode_acl, encode_time,
         extra_isize_for, min_rec_len, orphan_entries_len, orphan_tail_bytes, read_dx_countlimit,
         read_dx_entries, read_dx_root_info, read_orphan_tail, rec_len_from_disk, rec_len_to_disk,
-        time_is_representable, write_dir_tail, write_dx_entries, write_dx_node_header,
-        write_dx_root_header, write_dx_tail,
+        superblock_checksum, time_is_representable, unpadded, write_dir_tail, write_dx_entries,
+        write_dx_node_header, write_dx_root_header, write_dx_tail,
     };
 }
 /// The bounds a read is held to.
+///
+/// The symlink-hop budget is not here: resolution is the crate's shared seam, its budget
+/// governs every family alike, and one concept goes by one path —
+/// [`ferrosys::MAX_SYMLINK_HOPS`](crate::MAX_SYMLINK_HOPS).
 pub mod read {
-    pub use crate::read::{MAX_SYMLINK_HOPS, MIN_DIRENT_LEN};
+    pub use crate::read::MIN_DIRENT_LEN;
 }
 
 // The flat entry points and types, the crate's filesystem surface under one namespace.
 //
 // Constants are not lifted here. Every value naming a bound, a threshold, a magic word, or
 // a schema version is reached through the layer module that defines it —
-// `ext::read::MAX_SYMLINK_HOPS`, `ext::read::MIN_DIRENT_LEN`,
+// `ext::read::MIN_DIRENT_LEN`,
 // `ext::feature::LARGE_FILE_MIN_SIZE`, `ext::journal::JBD2_MAGIC` — because a constant is a
 // detail of the layer whose contract it states, and the layers hold nearly forty of them:
 // lifting one is a decision about all of them. Free functions are lifted only where they
@@ -146,7 +150,9 @@ pub use crate::geometry::{
     ReservedRatio, plan_layout,
 };
 pub use crate::hash::{DirHash, HashSignedness, HashVersion};
-pub use crate::identity::{IdentityChange, IdentityError, IdentityReport, rewrite_identity};
+pub use crate::identity::{
+    IdentityChange, IdentityError, IdentityReport, rewrite_identity, rewrite_identity_at,
+};
 pub use crate::journal::{JournalParams, JournalSize, JournalSuperblock};
 pub use crate::materialize::{
     ErrorBehavior, FormatError, FormatOptions, FormatPlan, Image, format, format_to,

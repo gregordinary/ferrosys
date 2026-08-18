@@ -37,6 +37,16 @@ pub enum DirError {
         /// The block size.
         block_size: usize,
     },
+    /// The reserved checksum tail is at least as large as the block it closes, leaving no
+    /// room for an entry.
+    #[error("a {tail_len}-byte checksum tail leaves a {block_size}-byte block no room")]
+    #[non_exhaustive]
+    TailExceedsBlock {
+        /// Bytes reserved for the tail.
+        tail_len: usize,
+        /// The block size.
+        block_size: usize,
+    },
     /// A directory's entries did not begin with `"."` and `".."`.
     #[error("directory entries must begin with \".\" and \"..\"")]
     MissingDotEntries,
@@ -203,6 +213,15 @@ impl DirLayout for LinearDir {
         entries: &[DirEntry],
         block_size: usize,
     ) -> Result<Vec<DirBlock>, DirError> {
+        // The field is public, so the pair is a caller's to get wrong: a tail at least the
+        // block's size leaves no room for the entries every directory holds, and the
+        // arithmetic below would wrap rather than say so.
+        if self.tail_len >= block_size {
+            return Err(DirError::TailExceedsBlock {
+                tail_len: self.tail_len,
+                block_size,
+            });
+        }
         let usable = block_size - self.tail_len;
         let mut blocks: Vec<DirBlock> = Vec::new();
         let mut cur: Vec<&DirEntry> = Vec::new();

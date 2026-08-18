@@ -39,26 +39,14 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::bytes::{get_u16, get_u32, get_u32_be, put_arr, put_u32, put_u32_be};
 use crate::crc32c::crc32c;
 use crate::feature::Incompat;
 use crate::geometry::sparse_super_has_copy;
+use crate::io::{offset_of, read_exact_at};
 use crate::journal;
-use crate::ondisk::SuperBlock;
-use crate::read::{ReadError, Reader};
-
-/// Byte offsets of the fields this module writes, within a superblock copy.
-mod offset {
-    /// `s_feature_incompat`.
-    pub const FEATURE_INCOMPAT: usize = 0x60;
-    /// `s_uuid`.
-    pub const UUID: usize = 0x68;
-    /// `s_volume_name`.
-    pub const VOLUME_NAME: usize = 0x78;
-    /// `s_checksum_seed`.
-    pub const CHECKSUM_SEED: usize = 0x270;
-    /// `s_checksum`, the last word of the record.
-    pub const CHECKSUM: usize = 0x3fc;
-}
+use crate::ondisk::{SuperBlock, superblock_checksum};
+use crate::read::{OpenOptions, ReadError, Reader};
 
 /// What to change about an image's identity. Every field left unset is left alone.
 ///
@@ -275,11 +263,29 @@ pub fn rewrite_identity<F: Read + Write + Seek>(
     image: &mut F,
     change: &IdentityChange,
 ) -> Result<IdentityReport, IdentityError> {
+    rewrite_identity_at(image, change, 0)
+}
+
+/// [`rewrite_identity`], for a filesystem `base` bytes into `image` — a partition inside a
+/// whole-disk image, or a region a carver located. The same offset every reader takes
+/// through [`OpenOptions::base`](crate::OpenOptions::base), reaching the one verb that
+/// writes.
+///
+/// # Errors
+///
+/// As [`rewrite_identity`].
+pub fn rewrite_identity_at<F: Read + Write + Seek>(
+    image: &mut F,
+    change: &IdentityChange,
+    base: u64,
+) -> Result<IdentityReport, IdentityError> {
     // Everything that can refuse happens here, over a reader borrowing the handle. Only
-    // once the whole set of copies is read and patched does a byte go back.
-    let plan = plan_rewrite(image, change)?;
+    // once the whole set of copies is read and patched does a byte go back. The plan's
+    // offsets are the filesystem's own, so the base is applied at each I/O and nowhere
+    // else.
+    let plan = plan_rewrite(image, change, base)?;
     for (offset, bytes) in &plan.writes {
-        image.seek(SeekFrom::Start(*offset))?;
+        image.seek(SeekFrom::Start(base + *offset))?;
         image.write_all(bytes)?;
     }
     image.flush()?;
@@ -297,10 +303,11 @@ struct Rewrite {
 fn plan_rewrite<F: Read + Write + Seek>(
     image: &mut F,
     change: &IdentityChange,
+    base: u64,
 ) -> Result<Rewrite, IdentityError> {
     // The reader borrows the handle rather than taking it, so the same descriptor writes
     // the copies afterwards.
-    let mut reader = Reader::open(&mut *image)?;
+    let mut reader = Reader::open_with(&mut *image, &OpenOptions::new().base(base))?;
     let feature = reader.feature();
     let sb = reader.superblock().clone();
     let group_count = reader.group_count();
@@ -321,7 +328,7 @@ fn plan_rewrite<F: Read + Write + Seek>(
     // and neither field is validated against the file when the filesystem is opened — so
     // without this the loop would build an entry per *claimed* group, and compute every
     // offset, before the first read could refuse one.
-    let source_blocks = image.seek(SeekFrom::End(0))? / block_size;
+    let source_blocks = image.seek(SeekFrom::End(0))?.saturating_sub(base) / block_size;
 
     // The primary is 1024 bytes into the image whatever the block size; a backup begins at
     // its group's first block.
@@ -331,10 +338,11 @@ fn plan_rewrite<F: Read + Write + Seek>(
         // number that leaves the range or leaves the image ends the loop whether or not that
         // particular group carries a copy, so nothing is computed past the first group the
         // image cannot hold.
-        let block = match u64::from(group)
-            .checked_mul(u64::from(sb.blocks_per_group))
-            .and_then(|b| b.checked_add(u64::from(sb.first_data_block)))
-        {
+        let block = match offset_of(
+            u64::from(sb.first_data_block),
+            u64::from(group),
+            u64::from(sb.blocks_per_group),
+        ) {
             Some(block) if block < source_blocks => block,
             _ => {
                 return Err(IdentityError::BackupPastEnd {
@@ -346,16 +354,24 @@ fn plan_rewrite<F: Read + Write + Seek>(
         if feature.is_sparse_super() && !sparse_super_has_copy(group) {
             continue;
         }
-        copies.push((group, block * block_size));
+        // The block is under `source_blocks`, which is the image's own length divided by
+        // this same block size, so the byte offset is inside the image and the checked form
+        // cannot answer `None` here. It is the checked form all the same: nothing in this
+        // function should depend on a bound another line applies.
+        let offset = offset_of(0, block, block_size).ok_or(IdentityError::BackupPastEnd {
+            group,
+            blocks: source_blocks,
+        })?;
+        copies.push((group, offset));
     }
 
     let superblocks = u32::try_from(copies.len()).unwrap_or(u32::MAX);
     let mut writes = Vec::with_capacity(copies.len() + 1);
     for (group, offset) in copies {
-        let mut bytes = read_exact_at(image, offset, SuperBlock::SIZE)?;
+        let mut bytes = read_exact_at(image, base + offset, SuperBlock::SIZE)?;
         // Every copy must be a superblock before any is written, so a damaged backup is a
         // refusal rather than an image whose copies disagree about their filesystem.
-        if u16::from_le_bytes([bytes[0x38], bytes[0x39]]) != crate::ondisk::SUPERBLOCK_MAGIC {
+        if get_u16(&bytes, SuperBlock::MAGIC_OFFSET) != crate::ondisk::SUPERBLOCK_MAGIC {
             return Err(IdentityError::BackupNotASuperblock {
                 group,
                 block: offset / block_size,
@@ -379,8 +395,15 @@ fn plan_rewrite<F: Read + Write + Seek>(
     // else and not here would leave the journal describing a different filesystem.
     let journal_written = match (journal_block, change.uuid) {
         (Some(block), Some(uuid)) => {
-            let offset = block * block_size;
-            let mut bytes = read_exact_at(image, offset, journal::SUPERBLOCK_SIZE)?;
+            // The block came from the log's own extent tree, which the reader bounded
+            // against the filesystem; the checked form states that here rather than
+            // trusting it, since a byte offset that wrapped would patch the wrong bytes
+            // and write a correct checksum over them.
+            let offset = offset_of(0, block, block_size).ok_or(IdentityError::BackupPastEnd {
+                group: 0,
+                blocks: source_blocks,
+            })?;
+            let mut bytes = read_exact_at(image, base + offset, journal::SUPERBLOCK_SIZE)?;
             patch_journal(&mut bytes, uuid)?;
             writes.push((offset, bytes));
             true
@@ -432,29 +455,26 @@ fn decide_checksum_seed(
 /// Overwrite the identity fields in one superblock copy's own bytes, then its checksum.
 fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksummed: bool) {
     if let Some(uuid) = change.uuid {
-        bytes[offset::UUID..offset::UUID + 16].copy_from_slice(&uuid);
+        put_arr(bytes, SuperBlock::UUID_OFFSET, &uuid);
     }
     if let Some(label) = change.volume_name {
-        bytes[offset::VOLUME_NAME..offset::VOLUME_NAME + 16].copy_from_slice(&label);
+        put_arr(bytes, SuperBlock::VOLUME_NAME_OFFSET, &label);
     }
     if let Some(seed) = seed {
-        bytes[offset::CHECKSUM_SEED..offset::CHECKSUM_SEED + 4]
-            .copy_from_slice(&seed.to_le_bytes());
-        let incompat = u32::from_le_bytes([
-            bytes[offset::FEATURE_INCOMPAT],
-            bytes[offset::FEATURE_INCOMPAT + 1],
-            bytes[offset::FEATURE_INCOMPAT + 2],
-            bytes[offset::FEATURE_INCOMPAT + 3],
-        ]) | Incompat::CSUM_SEED.bits();
-        bytes[offset::FEATURE_INCOMPAT..offset::FEATURE_INCOMPAT + 4]
-            .copy_from_slice(&incompat.to_le_bytes());
+        put_u32(bytes, SuperBlock::CHECKSUM_SEED_OFFSET, seed);
+        let incompat =
+            get_u32(bytes, SuperBlock::FEATURE_INCOMPAT_OFFSET) | Incompat::CSUM_SEED.bits();
+        put_u32(bytes, SuperBlock::FEATURE_INCOMPAT_OFFSET, incompat);
     }
     if checksummed {
-        // The superblock's own crc32c covers the record up to its checksum field and,
-        // unlike every other metadata object, is seeded from `!0` rather than from the
-        // filesystem seed — so it is recomputed here whatever the UUID did.
-        let c = crc32c(!0, &bytes[..offset::CHECKSUM]);
-        bytes[offset::CHECKSUM..offset::CHECKSUM + 4].copy_from_slice(&c.to_le_bytes());
+        // The record's checksum covers the identity fields written above, so it is
+        // recomputed here whatever the UUID did. The recipe is the writer's and the
+        // reader's, called rather than restated.
+        put_u32(
+            bytes,
+            SuperBlock::CHECKSUM_OFFSET,
+            superblock_checksum(bytes),
+        );
     }
 }
 
@@ -477,37 +497,29 @@ fn patch_journal(bytes: &mut [u8], uuid: [u8; 16]) -> Result<(), IdentityError> 
                 checksum_type: kind,
             });
         }
-        let found = u32::from_be_bytes([
-            bytes[journal::offset::CHECKSUM],
-            bytes[journal::offset::CHECKSUM + 1],
-            bytes[journal::offset::CHECKSUM + 2],
-            bytes[journal::offset::CHECKSUM + 3],
-        ]);
+        let found = get_u32_be(bytes, journal::offset::CHECKSUM);
         let computed = journal::superblock_checksum(bytes);
         if found != computed {
             return Err(IdentityError::JournalChecksumMismatch { found, computed });
         }
     }
-    bytes[journal::offset::UUID..journal::offset::UUID + 16].copy_from_slice(&uuid);
+    put_arr(bytes, journal::offset::UUID, &uuid);
     if checksummed {
         // Big-endian, as every other word of this record is: the jbd2 superblock is the one
         // structure in the format whose byte order is not ext's.
-        let c = journal::superblock_checksum(bytes);
-        bytes[journal::offset::CHECKSUM..journal::offset::CHECKSUM + 4]
-            .copy_from_slice(&c.to_be_bytes());
+        put_u32_be(
+            bytes,
+            journal::offset::CHECKSUM,
+            journal::superblock_checksum(bytes),
+        );
     }
     Ok(())
 }
 
 /// Refuse a superblock copy whose stored checksum does not match its contents.
 fn verify_checksum(bytes: &[u8], group: u32) -> Result<(), IdentityError> {
-    let found = u32::from_le_bytes([
-        bytes[offset::CHECKSUM],
-        bytes[offset::CHECKSUM + 1],
-        bytes[offset::CHECKSUM + 2],
-        bytes[offset::CHECKSUM + 3],
-    ]);
-    let computed = crc32c(!0, &bytes[..offset::CHECKSUM]);
+    let found = get_u32(bytes, SuperBlock::CHECKSUM_OFFSET);
+    let computed = superblock_checksum(bytes);
     if found != computed {
         return Err(IdentityError::SuperblockChecksumMismatch {
             group,
@@ -516,18 +528,6 @@ fn verify_checksum(bytes: &[u8], group: u32) -> Result<(), IdentityError> {
         });
     }
     Ok(())
-}
-
-/// Read exactly `len` bytes from `offset`.
-fn read_exact_at<F: Read + Seek>(
-    image: &mut F,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<u8>, IdentityError> {
-    image.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; len];
-    image.read_exact(&mut buf)?;
-    Ok(buf)
 }
 
 #[cfg(test)]

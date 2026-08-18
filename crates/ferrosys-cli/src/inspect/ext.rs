@@ -8,13 +8,12 @@ use std::fmt::Write as _;
 use std::fs::File;
 
 use ferrosys::ext::ondisk::{
-    BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, GroupDescriptor, SuperBlock,
+    BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, GroupDescriptor, SuperBlock, unpadded,
 };
 use ferrosys::ext::{FeatureSet, HashSignedness, HashVersion, Incompat, Reader};
 
 use crate::args::InspectArgs;
 use crate::inspect::{Dialect, Head, Report};
-use crate::json::hex;
 use crate::{Error, render};
 
 /// Describe the ext filesystem `reader` is open over.
@@ -70,7 +69,7 @@ pub fn report(
 
     let head = Head {
         family: "ext",
-        variant: profile.name(),
+        variant: profile.as_str(),
         // The filesystem's own extent. Saturating because both operands come from an image
         // read leniently, so a crafted block count must not wrap into a small number that
         // reads as a plausible size.
@@ -114,12 +113,6 @@ fn flex_bg_size(sb: &SuperBlock, feature: FeatureSet) -> Option<u32> {
     }
 }
 
-/// A NUL-padded on-disk string, as the bytes before the first NUL.
-fn cstr(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 /// The name of the directory hash a superblock records, or the raw value when it names
 /// no hash this tool knows.
 fn hash_name(sb: &SuperBlock) -> String {
@@ -130,12 +123,12 @@ fn hash_name(sb: &SuperBlock) -> String {
 }
 
 /// Whether a name's bytes are hashed as signed or unsigned, as `s_flags` records it.
+///
+/// The library reads the flag and names the answer, as it does for the sibling hash version
+/// above: what this report says an image does is then what a read of that image does, and
+/// the word it prints is the word `--hash-signedness` accepts.
 fn hash_signedness(sb: &SuperBlock) -> &'static str {
-    if sb.flags & HashSignedness::SIGNED_FLAG != 0 {
-        "signed"
-    } else {
-        "unsigned"
-    }
+    HashSignedness::from_flags(sb.flags).as_str()
 }
 
 /// The descriptor flags one group carries, by name.
@@ -170,12 +163,10 @@ fn table(
     groups: &[(u32, GroupDescriptor)],
     complete: bool,
 ) -> String {
-    let mut s = String::new();
-    let mut line = |k: &str, v: String| {
-        let _ = writeln!(s, "{k:<28}{v}");
-    };
+    let mut rows = render::Rows::report();
+    let mut line = |k: &str, v: String| rows.row(k, v);
 
-    let volume = cstr(&sb.volume_name);
+    let volume = unpadded(&sb.volume_name);
     line(
         "Filesystem volume name:",
         if volume.is_empty() {
@@ -286,10 +277,11 @@ fn table(
     );
     line("Last write time:", render::iso8601(i64::from(sb.wtime)));
 
+    // The descriptor listing is a column-headed table of its own rather than a run of
+    // label-and-value rows, so it is built as text and carried into the report whole.
     if !groups.is_empty() {
-        s.push('\n');
-        s.push_str(
-            "GROUP    BLOCK BITMAP  INODE BITMAP  INODE TABLE  FREE BLOCKS  \
+        let mut s = String::from(
+            "\nGROUP    BLOCK BITMAP  INODE BITMAP  INODE TABLE  FREE BLOCKS  \
              FREE INODES   DIRS  UNUSED  FLAGS\n",
         );
         for (number, d) in groups {
@@ -314,8 +306,9 @@ fn table(
                 groups.len()
             );
         }
+        rows.text(&s);
     }
-    s
+    rows.finish()
 }
 
 /// The description a machine reads: the object the envelope splices under `"ext"`.
@@ -327,10 +320,10 @@ fn json(
     complete: bool,
 ) -> String {
     let mut out = String::new();
-    let mut ext = crate::json::Obj::new(&mut out);
+    let mut ext = crate::json::Object::new(&mut out);
 
     let mut s = ext.obj("superblock");
-    s.bytes("volume_name", cstr(&sb.volume_name));
+    s.bytes("volume_name", unpadded(&sb.volume_name));
     s.str("uuid", &render::uuid(&sb.uuid));
     s.u64("magic", u64::from(sb.magic));
     s.bool("clean", sb.state & 1 != 0);
@@ -363,7 +356,7 @@ fn json(
     s.u64("orphan_file_inode", u64::from(sb.orphan_file_inum));
     s.str("directory_hash", &hash_name(sb));
     s.str("directory_hash_signedness", hash_signedness(sb));
-    s.str("directory_hash_seed", &hex(&sb.hash_seed));
+    s.str("directory_hash_seed", &render::hex(&sb.hash_seed));
     s.u64("checksum_type", u64::from(sb.checksum_type));
     s.u64("checksum_seed", u64::from(sb.checksum_seed));
     // Times are seconds since the epoch: an integer a consumer can compare, rather than a

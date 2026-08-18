@@ -1338,7 +1338,7 @@ mod differential {
         // the root directory's own cluster, so a driver has to scan past it. This crate
         // writes the first cluster it did not hand out, which is what the field is for.
         //
-        // Pinned in both directions, as F11's rounding divergence is: a release of the
+        // Pinned in both directions, as the rounding divergence above is: a release of the
         // baseline that started writing the accurate value fails this rather than quietly
         // widening what the byte gate covers.
         if !available("mkfs.fat") {

@@ -356,11 +356,6 @@ fn verify_cksum(block: &[u8; BLOCK]) -> Result<(), ArchiveError> {
     Ok(())
 }
 
-/// Parse an `x` or `g` header body into its records.
-///
-/// Each record is `LEN KEY=VALUE\n`, where `LEN` counts the whole record. The
-/// length is what ends a record, so a value carrying a newline — or any other byte
-/// — is read intact. Trailing NUL padding some producers append is accepted.
 /// Whether a PAX keyword is one this parser reads off a member.
 ///
 /// The list is exactly what the per-member record resolution dispatches on, and it is what
@@ -375,6 +370,11 @@ fn applies_per_member(key: &[u8]) -> bool {
         || key.starts_with(b"GNU.sparse.")
 }
 
+/// Parse an `x` or `g` header body into its records.
+///
+/// Each record is `LEN KEY=VALUE\n`, where `LEN` counts the whole record. The
+/// length is what ends a record, so a value carrying a newline — or any other byte
+/// — is read intact. Trailing NUL padding some producers append is accepted.
 fn parse_records(body: &[u8]) -> Result<Vec<PaxRecord>, ArchiveError> {
     let malformed = || ArchiveError::Malformed {
         reason: "malformed PAX extended header",

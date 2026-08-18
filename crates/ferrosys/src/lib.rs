@@ -20,7 +20,7 @@
 // The bullet belongs to the builds that have the item: with no family compiled in there is
 // nothing an image could be opened as, so `open` and `FsReader` are not there to link.
 #![cfg_attr(
-    any(feature = "ext", feature = "fat"),
+    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"),
     doc = " - [`open`](fn@open) detects and hands back the matching family's reader, as an \
 [`FsReader`] — an enum of concrete readers rather than a common interface, so a caller that \
 has matched its way to one has that family's whole surface."
@@ -77,6 +77,30 @@ no other family has — \
 [`ShortNameCharset`](fat::ShortNameCharset), since nothing in a FAT volume records the code \
 page its short names are written in and this crate does not guess one."
 )]
+#![cfg_attr(
+    feature = "exfat",
+    doc = "\n The [`exfat`] module implements the exFAT family — the \
+[`format`](exfat::format) writer, the [`plan_layout`](exfat::plan_layout) geometry planner, \
+and the byte-exact on-disk structures under [`exfat::ondisk`]. It shares a name with FAT and \
+no bytes: a different boot region, a different directory entry format, a different name \
+encoding, and an allocation bitmap FAT has no equivalent of. Three of its structures carry a \
+checksum and a fourth carries a hash, and every one is recomputed rather than copied. Its \
+images are byte-reproducible, and cost one input to be so — the volume serial number, since \
+an empty exFAT volume records no time anywhere."
+)]
+#![cfg_attr(
+    feature = "btrfs",
+    doc = "\n The [`btrfs`] module implements the btrfs family, over the two layers the format \
+has. A [`Volume`](btrfs::Volume) opens one over any `Read + Seek` source and gives the lower \
+one: the superblock and every mirror of it the device holds, the chunk map that turns a \
+logical address into a place on the device, and a [`Tree`](btrfs::Tree) over any of the \
+filesystem's B-trees — searched by the key tuple, iterated in key order, with every block's \
+checksum verified as it is read. A [`Reader`](btrfs::Reader) is the filesystem view built on \
+that, and [`FormatPlan`](btrfs::FormatPlan) writes one, subvolumes included. Reading a file \
+whose bytes are compressed takes the decoder for its algorithm; verifying one takes none, the \
+checksums covering the bytes on the volume. The byte-exact on-disk structures are under \
+[`btrfs::ondisk`]."
+)]
 //!
 //! # Features
 //!
@@ -91,12 +115,26 @@ page its short names are written in and this crate does not guess one."
 //! build that pulls this crate with a family turns that family on for everyone in it —
 //! including the answers [`detect`](fn@detect) then gives.
 //!
-//! Four more features are off by default, so a build that wants none of them depends only
+//! Nine more features are off by default, so a build that wants none of them depends only
 //! on `thiserror`. Each stands alone and none implies a family — the two ends of a tree are
 //! the root's vocabulary, so a source feeds whichever family is being written and a sink
-//! drains whichever one was opened:
+//! drains whichever one was opened, and a decoder undoes an encoding whichever family
+//! stored a run of bytes in it:
 //!
 //! - **`fat`** adds the FAT12/FAT16/FAT32 family. It has no dependencies of its own.
+//! - **`exfat`** adds the exFAT family, which shares a name with the one above and none of
+//!   its structures. It has no dependencies of its own.
+//! - **`btrfs`** adds the btrfs family, over a format built out of B-trees and a logical
+//!   address space. It has no dependencies of its own.
+//! - **`zlib`**, **`lzo`** and **`zstd`** each add a decoder, so that a file whose extents
+//!   are stored in that encoding reads as the file rather than as a refusal naming the
+//!   algorithm. btrfs is the family here that stores runs that way, and a decoder reaches
+//!   bytes only through a family that stores some — name one beside `btrfs`, as
+//!   `--features btrfs,zstd`; alone it compiles its dependency and decodes nothing, since
+//!   no reachable read stores runs that way. `lzo` takes no dependency, its decoder being
+//!   in this crate; the other two depend on `miniz_oxide` and `ruzstd`. None of them is
+//!   needed to *verify* a filesystem: the checksums it records cover the bytes it stored,
+//!   so a compressed extent is checked without being expanded.
 //! - **`tar`** adds the tar/PAX archive source and sink: a filesystem built from an
 //!   archive, and one written back out as one. It depends on `tar`.
 //! - **`dir`** adds the host-directory source and sink: a filesystem built by walking a
@@ -128,19 +166,30 @@ struct Readme;
 mod crc32c;
 pub use crc32c::crc32c;
 
+// Undoing the encodings a filesystem stores a run of bytes in fewer of them. Here beside
+// `crc32c` and for the same reason: an encoding is a property of a run of bytes rather than
+// of the format around it, and the same three algorithms appear in more than one filesystem.
+// How a format frames them stays with the format. Compiled where a family that stores runs
+// this way is; the three decoders inside it are each a feature of their own, so a build with
+// that family and none of them still names the encoding it is declining.
+#[cfg(feature = "btrfs")]
+mod compress;
+
 // The little-endian byte accessors every family's on-disk layer serializes through. Two
 // families compute them identically with nothing interpreted, which is what makes them a
-// shared primitive rather than a shared seam. Compiled where a family is: with none there
-// is no on-disk structure to serialize.
-#[cfg(any(feature = "ext", feature = "fat"))]
+// shared primitive rather than a shared seam. Not compiled behind a family: the POSIX ACL
+// boundary form is a fixed little-endian record that the family-agnostic substrate parses,
+// so a build carrying no family still reads fields out of a buffer.
 mod bytes;
 
-// Where a materializer's bytes go. Deciding what a byte is belongs to the family; putting
-// it at an offset in a seekable destination is the same operation for every one of them,
-// so the destination is here and the layout logic stays with the family. Compiled where a
-// family is: with none there is nothing to materialize.
-#[cfg(any(feature = "ext", feature = "fat"))]
-mod sink;
+// The byte boundary, in both directions. Deciding what a byte is, and finding the structure
+// that holds it, belong to the family; seeking to an offset and moving exactly that many
+// bytes is the same operation for every one of them, and so is the checked arithmetic that
+// names the offset. Both are here and the layout logic stays with the family. This also
+// holds what an i/o failure records and the conversion every error type carrying one is
+// written by, which is why the module is not compiled behind a family: `DetectError` carries
+// one in every build.
+mod io;
 
 // Rendering bytes that came off an image, an archive, or a host tree as text. Every name
 // every family reads is a byte string that may hold whatever a terminal acts on, and a
@@ -150,18 +199,65 @@ mod sink;
 // output faces the same problem with the same names, and a second implementation of these
 // rules is a second place for them to drift.
 mod escape;
-pub use escape::{printable, push_json_string};
+pub use escape::{hex, printable, push_json_string};
+
+// Building a JSON document, as against escaping the strings that go into one. Comma
+// placement and value formatting are the same rules whatever document is being written, so
+// they live here and every document this crate or a consumer emits is built through them —
+// the same move `escape` is, one level up from the characters.
+pub mod json;
+
+// The depth-first walk every family's reader is driven by: one frontier, one cycle check,
+// one set of bounds, with each family supplying what sits on the frontier and how a name's
+// children are read. Compiled where a family is, since with none there is no tree to walk.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+mod walk;
+
+// The path resolution every family's reader answers a lookup with: one component loop, one
+// ascent on `..`, one hop budget for symbolic links, with each family supplying only how a
+// name is found in a directory. Compiled where a family is, for the same reason the walk is.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+mod resolve;
+
+// One shape for a newtype over a field of on-disk flag bits: the set operations every one of
+// them needs, so no two of them have different ones. Compiled where a family is, since with
+// none there is no on-disk flag word.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+mod flags;
+
+// One table per named choice, generating the word a variant is written as, the list of
+// them, and the variant a word means. Every set of choices a caller names goes through it,
+// so a vocabulary cannot be spelled twice and drift. `NamedChoice` is public because the
+// same three questions are what a consumer's own argument parser asks, and asking them
+// generically is what keeps its list of choices from being a second copy of this one.
+mod naming;
+pub use naming::NamedChoice;
 
 // Image detection and the family selector it returns. `Filesystem` and `DetectError` are
 // always present; `detect` dispatches across whichever families are compiled in.
 mod detect;
 pub use detect::{DetectError, DetectOptions, Filesystem, detect, detect_with};
 
+// What a path is made of, and which of its components a directory can hold. Both questions
+// are asked by every family and on both sides of each of them — a source keying entries, a
+// model placing them, a reader resolving one, a sink creating one — so both are answered
+// here. A second answer that drifted would not fail; it would key two entries apart that the
+// model considers one path, or refuse a name where it is read and accept it where it is
+// written.
+mod path;
+
 // A wall-clock instant, and one extended attribute. Both are boundary vocabulary rather
 // than storage: how an instant splits across fields and how an attribute's name compresses
 // are the family's business, and each family's on-disk layer carries its own conversion.
+//
+// The DOS date is where that rule has an exception, and it is here because FAT and exFAT
+// carry one encoding rather than two — the same packed words, epoch, and granularity,
+// inherited from the same ancestor. Where each format puts those words in an entry stays in
+// that family's own layer, so this is compiled only where a family that stores it is.
 mod time;
-pub use time::Timestamp;
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub use time::DosTimestamp;
+pub use time::{Civil, Timestamp};
 mod xattr;
 pub use xattr::Xattr;
 
@@ -178,19 +274,26 @@ pub use source::{
 // projects into `Finding`, so there is one document shape and one severity scale however
 // many families a build carries.
 mod finding;
-pub use finding::{Coordinate, FINDINGS_SCHEMA_VERSION, Family, Finding, FindingReport, Severity};
+pub use finding::{
+    Coordinate, Deviation, FINDINGS_SCHEMA_VERSION, Family, Finding, FindingReport, ScanReport,
+    Severity,
+};
 
 // Where a filesystem begins, how strictly it is read, and what one read may allocate — the
 // same three settings whatever family answers them.
 mod policy;
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub use policy::MAX_SYMLINK_HOPS;
 pub use policy::{Limits, OpenOptions, ReadPolicy};
 
-// Opening an image without naming its family. Compiled only where a family is, since with
-// none there is nothing to open an image as — the condition is the disjunction of every
-// family feature, so a family added here is a family this reaches.
-#[cfg(any(feature = "ext", feature = "fat"))]
+// Opening an image without naming its family. Compiled only where a family with a *reader*
+// is: `FsReader` is an enum of concrete readers, so a build carrying only a family that has
+// not got one yet has nothing for it to hold. A family whose reader lands is added to this
+// condition in the same change; until then it is named by `detect` and refused by `open`
+// through an error variant that exists for exactly as long as something can produce it.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
 mod open;
-#[cfg(any(feature = "ext", feature = "fat"))]
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
 pub use open::{FsReader, OpenError, open, open_with};
 
 // What a format could not hold and what a read had to invent, both directions in one
@@ -278,3 +381,22 @@ pub mod ext;
 // without naming the family it belongs to.
 #[cfg(feature = "fat")]
 pub mod fat;
+
+// ── The exFAT family: the `exfat` module, behind the off-by-default `exfat` feature ──
+//
+// A family of its own, and not a member of the one it shares a name with: the two have a
+// different boot region, a different directory entry format, a different name encoding, and
+// an allocation model FAT has no equivalent of. Same arrangement as `fat` — the layers live
+// under the module, so nothing about an exFAT boot sector is reachable without naming the
+// family it belongs to.
+#[cfg(feature = "exfat")]
+pub mod exfat;
+
+// ── The btrfs family: the `btrfs` module, behind the off-by-default `btrfs` feature ──
+//
+// Same arrangement again, over a format built differently from all three above: B-trees over
+// a logical address space that a chunk tree maps onto the device, with a checksum on every
+// metadata block. The layers live under the module, so nothing about a chunk map is reachable
+// without naming the family it belongs to.
+#[cfg(feature = "btrfs")]
+pub mod btrfs;

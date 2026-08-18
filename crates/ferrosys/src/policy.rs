@@ -19,8 +19,27 @@ use crate::finding::Severity;
 /// of either family reaches neither.
 ///
 /// Compiled where there is a reader to hold to it.
-#[cfg(any(feature = "ext", feature = "fat"))]
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
 pub(crate) const MAX_PATH: usize = 4096;
+
+/// The most symbolic links a path resolution follows before calling it a loop, matching the
+/// kernel's `MAXSYMLINKS`.
+///
+/// A cycle (`a -> b -> a`) is the obvious case, but a chain long enough to be an effective
+/// denial of service is the one that matters on an image this crate did not write.
+///
+/// Here rather than in the family that first needed it, because the second family to resolve a
+/// path through a link has to follow exactly as many: a budget that differed between them
+/// would make one filesystem's `/bin/sh` reachable and another's not, over trees a
+/// distribution builds the same way.
+///
+/// Compiled where there is a reader at all, since the one resolution every family is driven by
+/// carries the budget whether or not a given format has a link to spend it on. Public at the
+/// crate root beside the resolver's other bounds, and only there — one concept, one path. A
+/// build carrying no family has no reader for it to bound, so the constant arrives with the
+/// first family compiled in.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub const MAX_SYMLINK_HOPS: u32 = 40;
 
 /// The conformance-strictness policy a read applies: a threshold over [`Severity`].
 ///

@@ -21,6 +21,10 @@
 //! a JSON string literal for a document. Both escape the same two classes of character, so a
 //! name that is safe in a message is safe in a report.
 //!
+//! [`hex`] is the third rendering and the one that escapes nothing: it writes bytes as
+//! themselves, for a document that carries the exact name beside the readable one and for a
+//! contract that has to state a UUID or a label as the bytes it is.
+//!
 //! Every escape [`printable`] emits names exactly one character of the input: a backslash is
 //! doubled first, so a name holding the four characters `\x1b` does not render as the one
 //! holding the escape byte. What that does *not* recover is a byte that is not text at all —
@@ -123,6 +127,32 @@ pub fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// `bytes` as lower-case hexadecimal, two digits each and no separator.
+///
+/// The rendering that loses nothing. Where [`printable`] and [`push_json_string`] make bytes
+/// readable — and are lossy over anything that is not text — this states them exactly, at a
+/// fixed two characters per byte. It is what a document carrying a name it could not render
+/// puts beside the rendering, and what a value that is an identifier rather than text — a
+/// UUID, a hash seed — is written as in the first place.
+///
+/// ```
+/// assert_eq!(ferrosys::hex(&[0xf0, 0xe1, 0x00]), "f0e100");
+/// assert_eq!(ferrosys::hex(&[]), "");
+/// ```
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        // A byte is two nibbles and each names one hex digit, so this is the same walk
+        // `push_json_escape` does one level up, without a format machine in the loop.
+        for shift in [4, 0] {
+            let nibble = u32::from((b >> shift) & 0xf);
+            out.push(char::from_digit(nibble, 16).expect("a nibble is a hex digit"));
+        }
+    }
+    out
+}
+
 /// Append `c` as JSON's `\uXXXX` escape.
 ///
 /// Every character this is called for is below `U+FFFF` — a control is at most `U+009F` and
@@ -158,7 +188,18 @@ fn is_direction_control(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{printable, push_json_string};
+    use super::{hex, printable, push_json_string};
+
+    #[test]
+    fn hex_states_bytes_exactly_and_at_a_fixed_width() {
+        assert_eq!(hex(b"\x00\x0f\xf0\xff"), "000ff0ff");
+        assert_eq!(hex(&[]), "");
+        // Two digits per byte whatever the byte is, so a fixed-width field renders at a
+        // fixed width and a leading zero is never dropped.
+        assert_eq!(hex(&[1u8; 16]).len(), 32);
+        // Lower case, which is what every other tool that prints a UUID or a seed writes.
+        assert_eq!(hex(b"\xab\xcd"), "abcd");
+    }
 
     /// `push_json_string`'s output for `s`, quotes included.
     fn json(s: &str) -> String {

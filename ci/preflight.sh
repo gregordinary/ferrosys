@@ -33,6 +33,9 @@ MSRV="1.88.0"
 E2FSPROGS="1.47.0"
 DOSFSTOOLS="4.2"
 MTOOLS="4.0.49"
+EXFATPROGS="1.4.2"
+RELAN_EXFAT="1.4.0"
+BTRFS_PROGS="7.1"
 UUID="f0e17055-0000-4000-8000-000000000000"
 FAKE_TIME="1700000000"
 
@@ -108,8 +111,15 @@ skip() {
 # in a diff is read beside the change that moved it, and one that falls is the finding.
 test_floor() {
     awk -F'|' -v k="$1" '
-        /^[^#]/ && $1 == k { print $2 + 0; found = 1 }
-        END { exit !found }
+        /^[^#]/ && $1 == k { value = $2 + 0; found++ }
+        END {
+            # A key written twice would print two numbers, and the caller comparing them
+            # with `-lt` would error and read the error as "not below floor" -- a floor
+            # that silently stops holding. One key, one number, or no answer at all.
+            if (found > 1) { exit 2 }
+            if (!found) { exit 1 }
+            print value
+        }
     ' "$root/ci/test-floors.txt"
 }
 
@@ -118,7 +128,9 @@ gate_tests() {
     local label="$1" key="$2"; shift 2
     local floor
     if ! floor="$(test_floor "$key")"; then
-        printf '  %-44s FAILED  (no floor recorded for "%s")\n' "$label" "$key"
+        local why="no floor recorded"
+        [ "$?" = 2 ] && why="more than one floor recorded"
+        printf '  %-44s FAILED  (%s for "%s")\n' "$label" "$why" "$key"
         failed+=("$label")
         return
     fi
@@ -148,11 +160,29 @@ gate_tests() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # The foreign implementations the suite treats as ground truth, and how each says which
-# version it is. There is no flag the three suites agree on — `e2fsprogs` answers `-V`,
+# version it is. There is no flag the five upstreams agree on — `e2fsprogs` answers `-V`,
 # only `fatlabel` has `--version` among the dosfstools three, `mkfs.fat` ends its help
 # with its banner, `fsck.fat` prints one only once it starts a check and so is pointed
 # at a device it fails on, and every mtools name is one binary answering alike. Each
 # entry is `name|marker|args`, where the marker is what the banner must contain.
+#
+# exfatprogs is the suite whose marker names no tool: every binary in it prints the same
+# `exfatprogs version : ...` line, so the entries differ only in which name is run. That
+# is still the check worth making — a partial install is a partial install, and each name
+# a gate calls has to be there.
+#
+# `exfat-populate` is the one binary this project compiles rather than installs, and what
+# it reports is the relan/exfat release it was linked against — the pin that decides what
+# the volumes it fills look like.
+#
+# btrfs-progs names the tool ahead of the suite everywhere but in the multiplexer, which
+# is the suite. It is also the one suite whose banner *ends* at the version, so the marker
+# carries the line break after it — upstream ships point releases beside their parents,
+# and a bare `v7.1` is a prefix of `v7.1.1`. And its corruptor is the one entry here whose
+# marker is not a version at all: `btrfs-corrupt-block` prints none anywhere, so what this
+# establishes is that the name runs and is the right program, and what holds it to the pin
+# is the directory it resolves to — which the tier asserts against the baseline's.
+BTRFS_MARK="btrfs-progs v$BTRFS_PROGS"$'\n'
 HOST_TOOLS=(
     "e2fsck|e2fsck $E2FSPROGS |-V"
     "mke2fs|mke2fs $E2FSPROGS |-V"
@@ -166,6 +196,17 @@ HOST_TOOLS=(
     "mdir|mdir (GNU mtools) $MTOOLS|--version"
     "minfo|minfo (GNU mtools) $MTOOLS|--version"
     "mtype|mtype (GNU mtools) $MTOOLS|--version"
+    "mkfs.exfat|exfatprogs version : $EXFATPROGS (|-V"
+    "fsck.exfat|exfatprogs version : $EXFATPROGS (|-V"
+    "tune.exfat|exfatprogs version : $EXFATPROGS (|-V"
+    "dump.exfat|exfatprogs version : $EXFATPROGS (|-V"
+    "exfatlabel|exfatprogs version : $EXFATPROGS (|-V"
+    "exfat-populate|exfat-populate (relan/exfat) $RELAN_EXFAT|--version"
+    "mkfs.btrfs|mkfs.btrfs, part of $BTRFS_MARK|--version"
+    "btrfs|$BTRFS_MARK|--version"
+    "btrfstune|btrfstune, part of $BTRFS_MARK|--version"
+    "btrfs-image|btrfs-image, part of $BTRFS_MARK|--version"
+    "btrfs-corrupt-block|usage: btrfs-corrupt-block|--help"
 )
 
 # Why the host-tool suite cannot run, or nothing and success when it can. The suite
@@ -194,19 +235,33 @@ missing_host_tool() {
                return 1 ;;
         esac
     done
-    if ! have getfattr; then
-        echo "getfattr not on PATH — install attr"
-        return 1
-    fi
+    # Both halves of the `attr` package. The archive round-trip gate reads an extended
+    # attribute back with `getfattr`, and the btrfs tier puts one on a source tree with
+    # `setfattr` before asking the baseline to carry it into an image.
+    local attr
+    for attr in getfattr setfattr; do
+        if ! have "$attr"; then
+            echo "$attr not on PATH — install attr"
+            return 1
+        fi
+    done
     return 0
 }
 
-# Every `run:` step in the workflow, and how this script covers it. A step named there
-# and absent here, or named here and gone from there, fails: the mirror rots silently
+# Every step in the workflow, and how this script covers it. A step named there and
+# absent here, or named here and gone from there, fails: the mirror rots silently
 # otherwise, which is the failure this script exists to prevent. Only `ci.yml` is pinned;
 # the docs workflow publishes a site rather than gating a push.
+#
+# The mirror is checked in both directions. A workflow step must be accounted for by a
+# gate this run *registered* -- not merely by an entry in a list, because a list entry
+# outlives the gate it names, and a `gate` call deleted from below would otherwise leave
+# parity green over a mirror that no longer holds.
 parity() {
-    python3 - "$root/.github/workflows/ci.yml" <<'PY'
+    local labels; labels="$(mktemp)"
+    printf '%s\n' "${passed[@]:-}" "${failed[@]:-}" "${skipped[@]:-}" > "$labels"
+    local status=0
+    python3 - "$root/.github/workflows/ci.yml" "$labels" <<'PY' || status=$?
 import re, sys
 
 # Steps deliberately not mirrored, and why. Everything else must be a gate above.
@@ -217,55 +272,118 @@ NOT_APPLICABLE = {
     "Install MSRV toolchain": "the MSRV gate installs it",
     "Install mdbook": "the book gate requires mdbook on PATH",
     "Install cargo-deny": "the dependency gate requires cargo-deny on PATH",
-    "Install attr for the getfattr xattr gate": "getfattr is required on PATH",
+    "Install the distribution packages the gates and the oracle builds need":
+        "getfattr is required on PATH, and the oracles are asserted rather than built",
     "Build e2fsprogs, put it on PATH, pin its config, assert the version":
         "the version already on PATH is asserted rather than built",
     "Build dosfstools and mtools, put them on PATH, assert the versions":
         "the versions already on PATH are asserted rather than built",
-    "Build crate": "the book gate builds what it links against",
-}
-MIRRORED = {
-    "Format", "Clippy", "Test",
-    "Library lints clean in every configuration it offers",
-    "Base library builds and passes its tests without the archive source",
-    "Library builds and passes its tests with FAT as the only family",
-    "Library builds and passes its tests with a family and no ext",
-    "Fuzz targets still type-check",
-    "Fuzz seeds are still readable images",
-    "Fuzz archive seed still parses, and reproduces from its generator",
-    "Rustdoc", "Check", "Public API matches its snapshot", "cargo check on MSRV",
-    "Build book", "Test guide examples against the crate",
-    "Dependencies carry no known advisory, and no license this crate cannot grant",
+    "Build exfatprogs, put it on PATH, assert the version":
+        "the version already on PATH is asserted rather than built",
+    "Build the exFAT populator, put it on PATH, assert the version":
+        "the version already on PATH is asserted rather than built",
+    "Build btrfs-progs, put it on PATH, assert the version":
+        "the version already on PATH is asserted rather than built",
 }
 
-steps, name = [], None
+# Each workflow step, and the gate here that mirrors it -- by the label that gate
+# registers, matched as a prefix so a label carrying a count or a target still names one
+# gate. The value is what makes this a mirror rather than a list: the label has to have
+# been registered by this run.
+MIRRORED = {
+    "Format": "fmt",
+    "Clippy": "clippy",
+    "Test": "test (workspace, host tools)",
+    "Library lints clean in every configuration it offers":
+        "lib lints clean in every configuration",
+    "One home per concept": "one home per concept",
+    "No body written twice": "no body written twice",
+    "Every page that names a family names all of them":
+        "every page that names a family names all of them",
+    "The guide asks for the version the crate is":
+        "the guide asks for the version the crate is",
+    "Base library builds and passes its tests without the archive source":
+        "base lib without the archive source",
+    "Library builds and passes its tests with FAT as the only family":
+        "lib with FAT as the only family",
+    "Library builds and passes its tests with a family and no ext":
+        "lib with a family, a source, and a sink, and no ext",
+    "Library builds and passes its tests with exFAT as the only family":
+        "lib with exFAT as the only family",
+    "Library builds and passes its tests with btrfs as the only family":
+        "lib with the newest family as the only one",
+    "Library builds and passes its tests with btrfs and every decoder":
+        "lib with that family and every decoder",
+    "Fuzz targets still type-check": "fuzz targets type-check",
+    "Fuzz seeds are still readable images": "fuzz seeds are readable images",
+    "Fuzz archive seed still parses, and reproduces from its generator":
+        "fuzz archive seed parses and reproduces",
+    "Rustdoc": "rustdoc (--document-private-items)",
+    "Check": "cross: ",
+    "Public API matches its snapshot": "public API matches its snapshot",
+    "cargo check on MSRV": "cargo +",
+    "Build crate": "book: build the crate it links against",
+    "Build book": "book: mdbook build",
+    "Test guide examples against the crate": "book: guide examples against the crate",
+    "Dependencies carry no known advisory, and no license this crate cannot grant":
+        "advisories, licenses, sources",
+}
+
+# The actions the workflow runs. An action's body is somebody else's script, so a new
+# one is a new thing running on the runner that nothing here has read -- it is
+# acknowledged rather than passed over.
+ACTIONS = {"actions/checkout", "actions/cache"}
+
+steps, unnamed, actions, name = [], 0, set(), None
 for line in open(sys.argv[1]):
-    if (m := re.match(r"^\s+- name:\s*(.+?)\s*$", line)):
+    # A step begins at `- name:`, `- run:`, or `- uses:`; a continuation line carries
+    # the same keys without the dash.
+    if (m := re.match(r"^\s+-?\s*name:\s*(.+?)\s*$", line)):
         name = m.group(1)
-    elif re.match(r"^\s+-?\s*uses:", line):
+    elif (m := re.match(r"^\s+-?\s*uses:\s*([^@\s]+)", line)):
+        actions.add(m.group(1))
         name = None
-    elif name and re.match(r"^\s+run:", line):
-        steps.append(name)
-        name = None
+    elif re.match(r"^\s+-?\s*run:", line):
+        # A `run:` the parser cannot attribute to a name is a command in the workflow
+        # this mirror cannot see, which is exactly what it must not pass over.
+        if name is None:
+            unnamed += 1
+        else:
+            steps.append(name)
+            name = None
+
+registered = [l.split(" — ")[0] for l in open(sys.argv[2]).read().splitlines() if l]
 
 # By name rather than by occurrence: a step name repeats across jobs — every job
 # begins with a toolchain step — and what is being accounted for is the command, not
 # how many runners happen to invoke it.
 seen = set(steps)
-known = MIRRORED | set(NOT_APPLICABLE)
+known = set(MIRRORED) | set(NOT_APPLICABLE)
 print(f"    distinct run: steps in ci.yml ... {len(seen)}")
-print(f"    mirrored here ................... {len(MIRRORED & seen)}")
+print(f"    mirrored here ................... {len(set(MIRRORED) & seen)}")
 print(f"    not applicable locally .......... {len(set(NOT_APPLICABLE) & seen)}")
 
 ok = True
-for s in seen - known:
+if unnamed:
+    print(f"    UNNAMED: {unnamed} run: step(s) in ci.yml carry no name to account for")
+    ok = False
+for a in sorted(actions - ACTIONS):
+    print(f"    UNKNOWN ACTION: ci.yml runs {a!r}, which nothing here has accounted for")
+    ok = False
+for s in sorted(seen - known):
     print(f"    UNCOVERED: ci.yml runs {s!r}; preflight does not mirror it")
     ok = False
-for s in known - seen:
+for s in sorted(known - seen):
     print(f"    STALE: preflight names {s!r}; ci.yml no longer runs it")
     ok = False
+for step, label in sorted(MIRRORED.items()):
+    if step in seen and not any(r.startswith(label) for r in registered):
+        print(f"    UNMIRRORED: {step!r} is claimed by a gate {label!r} this run never registered")
+        ok = False
 sys.exit(0 if ok else 1)
 PY
+    rm -f "$labels"
+    return $status
 }
 
 # The dependency graph, judged against deny.toml: known advisories, the licenses the
@@ -311,10 +429,12 @@ if [ "$list_only" = 1 ]; then
     cat <<EOF
 gates preflight runs, mirroring .github/workflows/ci.yml:
 
-  check       fmt, clippy, the library linted in every configuration it offers, the
-              workspace suite, the base library without the archive source, the library
-              with FAT as its only family, three fuzz gates, and rustdoc over private
-              items
+  check       fmt, clippy, the library linted in every configuration it offers, the three
+              consistency gates — one home per concept, no body written twice, and every
+              page that names a family naming all of them — the workspace suite, the
+              base library without the archive source, the library
+              with FAT as its only family and again with exFAT as its only family, three
+              fuzz gates, and rustdoc over private items
   deps        cargo deny over this workspace and the fuzz package: advisories,
               licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
@@ -343,6 +463,10 @@ export RUSTFLAGS="-D warnings"
 gate "fmt" cargo fmt --all --check
 gate "clippy" cargo clippy --all-targets --all-features -- -D warnings
 gate "lib lints clean in every configuration" ci/lint-features.sh
+gate "one home per concept" ci/one-home.sh
+gate "no body written twice" ci/duplicate-bodies.sh
+gate "every page that names a family names all of them" ci/family-coverage.sh
+gate "the guide asks for the version the crate is" ci/book-version.sh
 
 if ! host_tools_reason="$(missing_host_tool)"; then
     skip "test (workspace, host tools)" "$host_tools_reason"
@@ -357,6 +481,15 @@ gate_tests "lib with FAT as the only family" fat-only \
     cargo test -p ferrosys --no-default-features --features fat --lib
 gate_tests "lib with a family, a source, and a sink, and no ext" fat-dir \
     cargo test -p ferrosys --no-default-features --features fat,dir --lib
+gate_tests "lib with exFAT as the only family" exfat-only \
+    cargo test -p ferrosys --no-default-features --features exfat --lib
+gate_tests "lib with the newest family as the only one" btrfs-only \
+    cargo test -p ferrosys --no-default-features --features btrfs --lib
+# The same family with the three decoders, which is the only configuration where a
+# compressed extent is undone rather than declined. Both rows are run: the one above is what
+# a build without them refuses, and this is what a build with them reads.
+gate_tests "lib with that family and every decoder" btrfs-decoders \
+    cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib
 gate "fuzz targets type-check" \
     cargo check --manifest-path crates/ferrosys/fuzz/Cargo.toml --all-targets
 
@@ -466,7 +599,7 @@ else
     # against does not carry makes its examples fail to compile, and marking them
     # uncompiled instead would let them rot.
     gate "book: build the crate it links against" \
-        env CARGO_TARGET_DIR="$book_target" cargo build --features fat
+        env CARGO_TARGET_DIR="$book_target" cargo build --features fat,exfat,btrfs
     gate "book: mdbook build" mdbook build book
     gate "book: guide examples against the crate" \
         mdbook test book -L "$book_target/debug/deps"

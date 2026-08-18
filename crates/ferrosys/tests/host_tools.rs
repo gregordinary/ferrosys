@@ -2611,7 +2611,7 @@ fn mke2fs_baseline_of(profile: Profile, block_size: u32, size: u64) -> tempfile:
             "-q",
             "-F",
             "-t",
-            profile.name(),
+            profile.as_str(),
             "-b",
             &block_size.to_string(),
         ])
@@ -2627,7 +2627,7 @@ fn mke2fs_baseline_of(profile: Profile, block_size: u32, size: u64) -> tempfile:
     assert!(
         status.success(),
         "mke2fs {} baseline at {block_size} failed",
-        profile.name()
+        profile.as_str()
     );
     baseline
 }

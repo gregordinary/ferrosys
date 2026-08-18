@@ -1,8 +1,8 @@
 # What the dependency graph is allowed to contain.
 #
 # The crate is a filesystem writer with a deliberately small dependency surface: the
-# default build carries one crate, and the widest build carries four. A surface that
-# small is worth asserting rather than assuming, because the cost of it growing is paid
+# default build carries one crate, and the widest build carries six of its own. A surface
+# that small is worth asserting rather than assuming, because the cost of it growing is paid
 # by every consumer and the growth happens transitively, where nothing in this tree
 # names it.
 #
@@ -25,8 +25,9 @@
 
 [graph]
 # Every feature, because the features are where the dependencies are: the default build
-# reaches only `thiserror`, and `tar`, `dir`, and `serde` each add a crate that a check
-# of the default graph would never see.
+# reaches only `thiserror`, and `tar`, `dir`, `serde`, `zlib`, and `zstd` each add a crate
+# that a check of the default graph would never see. `lzo` adds none — its decoder is in the
+# crate — which is a property of that feature rather than a gap in this list.
 all-features = true
 # No target filter. The crate compiles for Linux, macOS, Windows, and 32-bit targets, and
 # each pulls a different platform shim — `windows-sys` on one, `linux-raw-sys` on

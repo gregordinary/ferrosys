@@ -237,7 +237,8 @@ pub fn write_dx_tail(
 /// # Errors
 ///
 /// [`ParseError::TooShort`] if `buf` does not reach the count;
-/// [`ParseError::InvalidField`] if the count exceeds the capacity.
+/// [`ParseError::InvalidField`] if the declared capacity exceeds the block's own, or the
+/// count exceeds the capacity.
 pub fn read_dx_countlimit(buf: &[u8], count_offset: usize) -> Result<(u16, u16), ParseError> {
     if buf.len() < count_offset + 4 {
         return Err(ParseError::TooShort {
@@ -248,6 +249,17 @@ pub fn read_dx_countlimit(buf: &[u8], count_offset: usize) -> Result<(u16, u16),
     }
     let limit = get_u16(buf, count_offset);
     let count = get_u16(buf, count_offset + 2);
+    // The limit is the block's own claim about how many slots it holds, and every
+    // consumer of the pair places something after slot `limit` — the checksum tail — or
+    // walks up to it. One that exceeds the block's capacity is incoherent on its own,
+    // whatever the count says, and the kernel refuses the block over it.
+    if usize::from(limit) > (buf.len() - count_offset) / DX_ENTRY_LEN {
+        return Err(ParseError::InvalidField {
+            structure: "DxCountLimit",
+            field: "limit",
+            value: u64::from(limit),
+        });
+    }
     if count > limit || count == 0 {
         return Err(ParseError::InvalidField {
             structure: "DxCountLimit",

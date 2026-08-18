@@ -28,9 +28,11 @@
 
 use std::collections::HashSet;
 
+use crate::path::is_reserved_name_char;
+
 use super::ondisk::{
     LFN_CHARS_PER_ENTRY, LFN_LAST_ENTRY, LFN_PADDING, LfnEntry, NAME_DELETED, NAME_LEADING_E5,
-    lfn_checksum,
+    lfn_checksum, unpadded,
 };
 
 /// Bytes in the name field of a directory entry: eight of base and three of extension.
@@ -50,11 +52,6 @@ pub const MAX_NAME_UNITS: usize = 255;
 /// The highest numeric tail this crate will assign. Seven characters of `~999999` leave one
 /// of the base, which is as far as the field goes.
 const MAX_TAIL: u32 = 999_999;
-
-/// Characters a long name may not contain. Each is a path or wildcard separator that a
-/// driver would interpret rather than store, so a name carrying one cannot be looked up by
-/// the name it was given.
-const LONG_NAME_FORBIDDEN: &[u8] = b"\"*/:<>?\\|";
 
 /// Characters a *short* name may not contain, beyond those a long name also excludes. Every
 /// one of these is legal in a long name, so an entry carrying one keeps it there and takes an
@@ -273,7 +270,7 @@ fn long_name_units(name: &[u8]) -> Result<Vec<u16>, NameError> {
         return Err(NameError::Empty);
     }
     for ch in text.chars() {
-        if ch.is_ascii() && (LONG_NAME_FORBIDDEN.contains(&(ch as u8)) || (ch as u8) < 0x20) {
+        if is_reserved_name_char(ch) {
             return Err(NameError::ForbiddenCharacter { ch });
         }
     }
@@ -372,8 +369,8 @@ fn assemble(base: &[u8], ext: &[u8]) -> [u8; SHORT_NAME_LEN] {
 ///
 /// Every byte the derivation emits is ASCII, so this is exact rather than lossy.
 pub(crate) fn render(short: &[u8; SHORT_NAME_LEN]) -> String {
-    let base = trim(&short[..BASE_LEN]);
-    let ext = trim(&short[BASE_LEN..]);
+    let base = unpadded(&short[..BASE_LEN]);
+    let ext = unpadded(&short[BASE_LEN..]);
     let mut out = String::with_capacity(SHORT_NAME_LEN + 1);
     out.push_str(&crate::escape::printable(base));
     if !ext.is_empty() {
@@ -381,15 +378,6 @@ pub(crate) fn render(short: &[u8; SHORT_NAME_LEN]) -> String {
         out.push_str(&crate::escape::printable(ext));
     }
     out
-}
-
-/// `field` without its trailing padding spaces.
-fn trim(field: &[u8]) -> &[u8] {
-    let end = field
-        .iter()
-        .rposition(|&b| b != b' ')
-        .map_or(0, |last| last + 1);
-    &field[..end]
 }
 
 /// The name folded to a single case, which is how a driver compares two of them.

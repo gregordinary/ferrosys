@@ -1,6 +1,6 @@
 [book]
 title = "ferrosys"
-description = "A pure-Rust, rootless, cross-platform library for building and reading ext2/3/4 images deterministically."
+description = "A pure-Rust, rootless, cross-platform library for building and reading ext2/3/4, FAT12/16/32, exFAT, and btrfs images deterministically."
 authors = ["The ferrosys Authors"]
 language = "en"
 src = "src"

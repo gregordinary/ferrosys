@@ -23,14 +23,18 @@ env:
   CARGO_TERM_COLOR: always
   # 0.5.x is required for `[rust] edition = 2024`.
   MDBOOK_VERSION: "0.5.4"
+  # By digest as well as by version: a binary this workflow executes is pinned to its
+  # bytes, not only to the release that names them. Same values as ci.yml's `book` job.
+  MDBOOK_SHA256_X86_64: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+  MDBOOK_SHA256_AARCH64: "753e5c5c363ee8a56972344dcf91466f005a51db84a7aeffe427ae3ef83d6d44"
 
 jobs:
   build:
     # Pages is GitHub's, and so are the actions that publish to it: `configure-pages`,
     # `upload-pages-artifact`, and `deploy-pages` exist on no other forge and are mirrored by
-    # no other forge. On a self-hosted Forgejo the first of them fails to resolve at all, so
-    # every push produced a red run for a site that instance was never going to serve.
-    # Skipping is the honest answer — the site has one publisher, and this names it.
+    # no other forge. Anywhere else the first of them does not resolve, and the run is red for
+    # a site that host was never going to serve. So the site has one publisher, and the
+    # condition below names it: this job runs there and skips everywhere else.
     #
     # `deploy` needs this job, so it skips with it.
     if: github.server_url == 'https://github.com'
@@ -44,16 +48,25 @@ jobs:
       - name: Install mdbook
         run: |
           mkdir -p "$HOME/.local/bin"
-          # The host architecture decides the asset, and one with no build named here fails
-          # rather than guessing. Kept identical to the `book` job in ci.yml: the same
-          # download in two workflows is the same rule, and it is wrong in both or neither.
+          # The host architecture decides the asset, and one with no digest pinned here
+          # fails rather than falling back to one that would not verify. Kept identical to
+          # the `book` job in ci.yml: the same download in two workflows is the same rule,
+          # and it is wrong in both or neither.
           case "$(uname -m)" in
-            x86_64)  triple="x86_64-unknown-linux-gnu" ;;
-            aarch64) triple="aarch64-unknown-linux-musl" ;;
-            *) echo "::error::no mdbook build named for $(uname -m)"; exit 1 ;;
+            x86_64)
+              triple="x86_64-unknown-linux-gnu"
+              digest="$MDBOOK_SHA256_X86_64" ;;
+            aarch64)
+              triple="aarch64-unknown-linux-musl"
+              digest="$MDBOOK_SHA256_AARCH64" ;;
+            *) echo "::error::no mdbook digest pinned for $(uname -m)"; exit 1 ;;
           esac
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz" \
-            | tar -xz -C "$HOME/.local/bin"
+          tarball="mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/${tarball}"
+          echo "${digest}  ${tarball}" | sha256sum -c - \
+            || { echo "::error::mdbook tarball digest mismatch"; exit 1; }
+          tar -xzf "$tarball" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build guide

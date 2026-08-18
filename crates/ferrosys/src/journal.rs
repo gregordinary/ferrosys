@@ -8,8 +8,12 @@
 //!
 //! Unlike every other on-disk structure in the crate, the jbd2 superblock is
 //! **big-endian** — jbd2 fixes its byte order rather than following the host or the
-//! ext4 little-endian convention — so it serializes through the big-endian accessors
-//! here rather than the little-endian ones in [`crate::ondisk`].
+//! ext4 little-endian convention — so it serializes through [`get_u32_be`] and
+//! [`put_u32_be`] rather than the little-endian accessors every other structure in the
+//! crate reads. Both live beside those, so this module names the byte order it needs
+//! rather than spelling it a second time.
+
+use crate::bytes::{get_u32_be, put_u32_be};
 
 /// The jbd2 superblock magic (`h_magic`).
 pub const JBD2_MAGIC: u32 = 0xc03b_3998;
@@ -29,6 +33,11 @@ pub(crate) const SUPERBLOCK_SIZE: usize = 1024;
 
 /// Byte offsets within the journal superblock of the fields a re-identification reads and
 /// writes.
+///
+/// A module rather than constants on a type, which is what every other on-disk structure here
+/// gets, because this is the one structure the crate does not model: the log's superblock is
+/// built and patched as raw bytes, since nothing reads its fields back as a record. A module
+/// of offsets is what an unmodelled structure has instead of a type to hang them on.
 pub(crate) mod offset {
     /// `s_feature_incompat`.
     pub const FEATURE_INCOMPAT: usize = 0x28;
@@ -64,7 +73,7 @@ pub(crate) const CRC32C_CHKSUM: u8 = 4;
 /// If `record` is shorter than [`SUPERBLOCK_SIZE`].
 pub(crate) fn superblock_is_checksummed(record: &[u8]) -> bool {
     assert!(record.len() >= SUPERBLOCK_SIZE, "a whole record is needed");
-    get_be_u32(record, offset::FEATURE_INCOMPAT) & (INCOMPAT_CSUM_V2 | INCOMPAT_CSUM_V3) != 0
+    get_u32_be(record, offset::FEATURE_INCOMPAT) & (INCOMPAT_CSUM_V2 | INCOMPAT_CSUM_V3) != 0
 }
 
 /// The checksum a journal superblock's bytes compute to: crc32c over the whole
@@ -170,35 +179,23 @@ pub fn build_superblock(params: &JournalParams) -> Vec<u8> {
     } = params;
     let mut b = vec![0u8; block_size as usize];
     // journal_header_t.
-    put_be_u32(&mut b, 0x00, JBD2_MAGIC);
-    put_be_u32(&mut b, 0x04, JBD2_SUPERBLOCK_V2);
+    put_u32_be(&mut b, 0x00, JBD2_MAGIC);
+    put_u32_be(&mut b, 0x04, JBD2_SUPERBLOCK_V2);
     // 0x08 h_sequence — zero in the superblock header.
     // journal_superblock_t.
-    put_be_u32(&mut b, 0x0c, block_size);
-    put_be_u32(&mut b, 0x10, journal_blocks);
-    put_be_u32(&mut b, 0x14, 1); // s_first: the first log block, after this superblock
-    put_be_u32(&mut b, 0x18, 1); // s_sequence: the first transaction is sequence 1
+    put_u32_be(&mut b, 0x0c, block_size);
+    put_u32_be(&mut b, 0x10, journal_blocks);
+    put_u32_be(&mut b, 0x14, 1); // s_first: the first log block, after this superblock
+    put_u32_be(&mut b, 0x18, 1); // s_sequence: the first transaction is sequence 1
     // 0x1c s_start — zero: an empty log with no transactions to replay.
     // 0x20 s_errno, 0x24..0x2c s_feature_{compat,incompat,ro_compat} — all zero: no
     // journal features on a plain v2 log.
     b[0x30..0x40].copy_from_slice(&uuid); // s_uuid
-    put_be_u32(&mut b, 0x40, 1); // s_nr_users: one filesystem uses this journal
+    put_u32_be(&mut b, 0x40, 1); // s_nr_users: one filesystem uses this journal
     // 0x44 s_dynsuper, 0x48 s_max_transaction, 0x4c s_max_trans_data — zero.
     // 0x50 s_checksum_type — zero: a v2 log carries no superblock checksum.
     // 0x100.. s_users — zero for a single internal journal.
     b
-}
-
-/// Write one big-endian `u32` at `off`.
-#[inline]
-fn put_be_u32(buf: &mut [u8], off: usize, v: u32) {
-    buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
-}
-
-/// Read one big-endian `u32` at `off`.
-#[inline]
-fn get_be_u32(buf: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
 /// The parsed head of a jbd2 journal superblock.
@@ -242,7 +239,7 @@ impl JournalSuperblock {
                 got: buf.len(),
             });
         }
-        let magic = get_be_u32(buf, 0x00);
+        let magic = get_u32_be(buf, 0x00);
         if magic != JBD2_MAGIC {
             return Err(ParseError::BadMagic {
                 structure: "JournalSuperblock",
@@ -250,7 +247,7 @@ impl JournalSuperblock {
                 expected: JBD2_MAGIC,
             });
         }
-        let blocktype = get_be_u32(buf, 0x04);
+        let blocktype = get_u32_be(buf, 0x04);
         if blocktype != JBD2_SUPERBLOCK_V2 {
             return Err(ParseError::BadMagic {
                 structure: "JournalSuperblock blocktype",
@@ -261,12 +258,12 @@ impl JournalSuperblock {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&buf[0x30..0x40]);
         Ok(Self {
-            block_size: get_be_u32(buf, 0x0c),
-            max_len: get_be_u32(buf, 0x10),
-            first: get_be_u32(buf, 0x14),
-            sequence: get_be_u32(buf, 0x18),
-            start: get_be_u32(buf, 0x1c),
-            nr_users: get_be_u32(buf, 0x40),
+            block_size: get_u32_be(buf, 0x0c),
+            max_len: get_u32_be(buf, 0x10),
+            first: get_u32_be(buf, 0x14),
+            sequence: get_u32_be(buf, 0x18),
+            start: get_u32_be(buf, 0x1c),
+            nr_users: get_u32_be(buf, 0x40),
             uuid,
         })
     }
@@ -304,16 +301,16 @@ mod tests {
         let uuid = [0x11u8; 16];
         let sb = build_superblock(&JournalParams::new(4096, 1024, uuid));
         assert_eq!(sb.len(), 4096);
-        assert_eq!(get_be_u32(&sb, 0x00), 0xc03b_3998);
-        assert_eq!(get_be_u32(&sb, 0x04), 4);
-        assert_eq!(get_be_u32(&sb, 0x08), 0);
-        assert_eq!(get_be_u32(&sb, 0x0c), 4096);
-        assert_eq!(get_be_u32(&sb, 0x10), 1024);
-        assert_eq!(get_be_u32(&sb, 0x14), 1);
-        assert_eq!(get_be_u32(&sb, 0x18), 1);
-        assert_eq!(get_be_u32(&sb, 0x1c), 0);
+        assert_eq!(get_u32_be(&sb, 0x00), 0xc03b_3998);
+        assert_eq!(get_u32_be(&sb, 0x04), 4);
+        assert_eq!(get_u32_be(&sb, 0x08), 0);
+        assert_eq!(get_u32_be(&sb, 0x0c), 4096);
+        assert_eq!(get_u32_be(&sb, 0x10), 1024);
+        assert_eq!(get_u32_be(&sb, 0x14), 1);
+        assert_eq!(get_u32_be(&sb, 0x18), 1);
+        assert_eq!(get_u32_be(&sb, 0x1c), 0);
         assert_eq!(&sb[0x30..0x40], &uuid);
-        assert_eq!(get_be_u32(&sb, 0x40), 1);
+        assert_eq!(get_u32_be(&sb, 0x40), 1);
         // Everything past the header is zero: no features, no checksum.
         assert!(sb[0x50..].iter().all(|&x| x == 0));
     }
@@ -345,14 +342,14 @@ mod tests {
         // Every incompat feature that is not a checksum leaves it that way; `revoke`,
         // `64bit`, and `async_commit` are the ones an ordinary log picks up.
         for bit in [0x1u32, 0x2, 0x4, 0x20] {
-            put_be_u32(&mut sb, offset::FEATURE_INCOMPAT, bit);
+            put_u32_be(&mut sb, offset::FEATURE_INCOMPAT, bit);
             assert!(
                 !superblock_is_checksummed(&sb),
                 "{bit:#x} is not a checksum"
             );
         }
         for bit in [INCOMPAT_CSUM_V2, INCOMPAT_CSUM_V3] {
-            put_be_u32(&mut sb, offset::FEATURE_INCOMPAT, bit);
+            put_u32_be(&mut sb, offset::FEATURE_INCOMPAT, bit);
             assert!(superblock_is_checksummed(&sb), "{bit:#x} is a checksum");
         }
     }

@@ -3,14 +3,16 @@
 Pure-Rust filesystem tooling: a formatter and reader with byte-reproducible on-disk
 geometry. It builds and reads filesystem images in userspace, over ordinary byte streams,
 in safe Rust. Each filesystem family is a module behind a feature of its own — `ext` is
-ext2, ext3, and ext4, with resize-safe geometry, and `fat` is FAT12, FAT16, and FAT32.
+ext2, ext3, and ext4, with resize-safe geometry, `fat` is FAT12, FAT16, and FAT32,
+`exfat` is the interchange format SDXC cards specify, and `btrfs` is the copy-on-write
+filesystem Fedora and openSUSE boot from.
 
 Formatting runs in two phases: a planner computes the complete on-disk layout as an
 in-memory value, and a materializer writes bytes against that plan. The UUID, hash
 seed, and timestamps are inputs the caller supplies, so the same inputs produce the
 same image byte for byte. The crate builds on Rust 1.88 or newer.
 
-> **Status:** under active development. The API is not yet stable. Following Cargo's
+> **Status:** under active development. Following Cargo's
 > `0.x` semantics, a breaking change bumps the minor version, and a `0.x` requirement
 > resolves only within that minor — so a breaking release reaches no one unasked.
 
@@ -56,6 +58,29 @@ assert_eq!(image.layout().fat_type, FatType::Fat16);
 # Ok(())
 # }
 # #[cfg(not(feature = "fat"))]
+# fn main() {}
+```
+
+And an exFAT volume, under the `exfat` feature, where one input is enough to make the output
+byte-reproducible — an empty exFAT volume records no time at all:
+
+```rust
+# #[cfg(feature = "exfat")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use ferrosys::exfat::{FormatOptions, Timestamp, VolumeLabel, format};
+use ferrosys::{Metadata, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .directory(b"/DCIM".to_vec(), Metadata::new(0o755, time))
+    .file(b"/DCIM/IMG_0001.JPG".to_vec(), vec![0xff; 4096], Metadata::new(0o644, time));
+
+let options = FormatOptions::new(0x1234_abcd).label(VolumeLabel::new("CARD")?);
+let image = format(source, 64 << 20, options)?;
+assert_eq!(image.layout().bytes_per_cluster, 4 << 10);
+# Ok(())
+# }
+# #[cfg(not(feature = "exfat"))]
 # fn main() {}
 ```
 
@@ -146,15 +171,79 @@ The FAT family:
   rather than of the volume. The default interprets nothing and hands the bytes back as
   they are; five single-byte OEM pages are built in, and any other is a caller's table.
 
+The exFAT family:
+
+- **Byte-reproducible from one input** — an empty exFAT volume records no time anywhere, so
+  the volume serial number is the whole of what a formatter would otherwise take from its
+  environment. Times reach the image only with the files that carry them.
+- **The volume's own up-case table decides what a name matches** — exFAT folds names for
+  comparison through a table each volume carries in its cluster heap, so a lookup resolves
+  what a driver reading the same volume resolves rather than what this crate's copy of a
+  table would. The writer emits the mapping the format recommends, and the reader decodes
+  whichever one it finds, compressed or literal, and checks it against its own checksum.
+- **Timestamps to ten milliseconds, with the zone the entry recorded** — three times per
+  file, each with a hundredths byte and a UTC offset the format stores beside it, so an
+  instant survives a round trip instead of being read as though every volume were written
+  where it is being read.
+- **Consecutive streams the allocation table does not describe** — a stream flagged
+  `NoFatChain` occupies a run of clusters resolved by arithmetic, with no chain in the table
+  at all. The writer allocates every run that way and the reader reads both shapes, so a
+  volume another implementation chained through the table reads back identically.
+- **An allocation bitmap, held against what the tree reaches** — one bit per cluster, written
+  from the same planned allocation the table is, and checked in both directions by a scan: a
+  cluster in use that no stream reaches, and a cluster a stream occupies that the bitmap
+  calls free. The second is the disagreement a checker does not look for.
+- **A reader for any conformant volume, whatever wrote it** — entry sets reassembled and held
+  to their set checksum and name hash, both run shapes followed, every field bounded to the
+  range the format states, and a whole-volume scan collecting each deviation as a typed
+  anomaly. Every length an image declares is narrowed to what the volume could hold, so a
+  crafted field costs what the bytes cost rather than what the number claims.
+
+The btrfs family, which this crate reads in full and writes from a source tree:
+
+- **The logical address space, and the trees on it** — every address in a btrfs is logical,
+  and a chunk tree maps that space onto the device. `Volume` is that map and the trees
+  through it; `Reader` is the filesystem view built on it. Two entry points, because the
+  format has two layers and the tools that make this family worth reading work at both.
+- **Every metadata block verified from the bytes that came off the device** — recomputed
+  rather than compared against a value re-serialized through this crate's own types, so a
+  filesystem this crate did not write verifies as itself. A block also records its own
+  address and the filesystem it belongs to, and both are held against what the reader
+  believed when it went to fetch it.
+- **File data held against the checksums the filesystem recorded for it** — a crc32c per
+  sector in a tree of its own, which is the one check no other family here can make: a file
+  whose bytes decayed on the medium sits under trees that are entirely well-formed.
+- **Subvolumes walked as part of one tree** — a directory entry naming a `ROOT_ITEM` is
+  where a subvolume is mounted, so a walk crosses the seam and a path across it is one path.
+  A node is a subvolume and an inode together, because an inode number means nothing alone.
+- **Every bound a crafted image needs** — a leaf whose items are packed the way the format
+  packs them, an item whose data stays inside its leaf under 64-bit arithmetic on every
+  target, a descent with a decreasing measure and a visited set, and a superblock copy that
+  records another place as its own.
+- **A source tree written whole, in one transaction** — ten trees and one more per
+  subvolume, every block checksummed, a crc32c beside every sector of file data, every
+  allocated block recorded in the extent tree with the tree that owns it, and every
+  superblock copy the device has room for. A caller names which of the source's directories
+  become subvolumes, and which one a mount that names none lands in. It streams into a
+  seekable destination and touches only the blocks it occupies, so a volume far larger than
+  memory becomes a file that stays sparse; and the five values a formatter would
+  conventionally invent are inputs, so two formats of the same parameters are the same bytes.
+
 ## Features
 
-Five, and the first two are the filesystem families — a build takes the families it
+Ten, and the first four are the filesystem families — a build takes the families it
 names. `ext` is on by default and is that family's whole surface: the formatter, the
 reader, the feature model, and the on-disk structures, all reached through the `ext`
 module. `fat` is off by default and adds the FAT12/FAT16/FAT32 formatter, reader,
-geometry planner, on-disk structures, and classifier, under the `fat` module. Granularity is per
-*family* rather than per format, since each set is one lineage sharing its on-disk
-structures.
+geometry planner, on-disk structures, and classifier, under the `fat` module. `exfat` is
+off by default and adds the same set for exFAT — formatter, reader, geometry planner,
+on-disk structures, and classifier — under the `exfat` module. `btrfs` is off by default
+and adds that family's reader, its logical address space, its B-trees, its geometry planner,
+its writer with subvolumes, its on-disk structures, and its classifier, under the `btrfs`
+module. Granularity is per *family*
+rather than per format, since each set is one lineage sharing its on-disk structures, and
+exFAT is a family of its own rather than a fourth FAT: it shares a name with FAT and no
+bytes.
 
 Turning every family off is a real build rather than a smaller version of the same one:
 it leaves the family-agnostic substrate the crate root carries — the `crc32c` primitive,
@@ -162,7 +251,19 @@ the source and extraction vocabulary, and `detect`, which says which filesystem 
 holds — and no family code at all. That is the build for a consumer that classifies
 images without reading them.
 
-The other three are off by default, so a build that wants none of them depends only on
+Three more name an algorithm rather than a family, because an encoding is a property of a
+run of bytes and not of the format around it. Each is off by default, and each is what lets a
+build read a file whose extents are stored that way — `zlib` for DEFLATE, `lzo` for LZO1X,
+`zstd` for Zstandard. btrfs is the family here that stores runs that way, so a build that
+wants to read them names a decoder beside it: `--features btrfs,zstd`. A build without the
+decoder for the algorithm a file was stored with declines that *file* by name; one without a
+decoder for an algorithm the filesystem advertises in its feature word declines the
+*filesystem*, which is what that word means. `lzo` takes no dependency, its decoder being in
+this crate; the other two take `miniz_oxide` and `ruzstd`, both of which decode and neither of
+which is reached by anything else. Verification needs none of them: the checksums a filesystem
+records cover the bytes it stored, so a compressed extent is verified without being expanded.
+
+The last three are off by default, so a build that wants none of them depends only on
 `thiserror`. None of them names a family: a source feeds whichever family is being written
 and a sink drains whichever one was opened, so `--features fat,dir` is a build that formats a
 FAT volume from a directory tree and extracts one back, with no ext code compiled.
@@ -191,7 +292,7 @@ FAT volume from a directory tree and extracts one back, with no ext code compile
 ## Command line
 
 [`ferrosys-cli`](https://crates.io/crates/ferrosys-cli) puts this crate on the command
-line as the `ferrosys` binary: `format`, `inspect`, `extract`, and `detect`.
+line as the `ferrosys` binary: `format`, `inspect`, `extract`, `detect`, and `identity`.
 
 ## Documentation
 

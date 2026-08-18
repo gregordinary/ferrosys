@@ -35,6 +35,7 @@
 #[non_exhaustive] pub ferrosys::AclError::InvalidPerm
 #[non_exhaustive] pub ferrosys::AclError::Malformed
 #[non_exhaustive] pub ferrosys::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::AclError::UndefinedId
 #[non_exhaustive] pub ferrosys::DetectError::Io
 #[non_exhaustive] pub ferrosys::OpenError::Refused
 #[non_exhaustive] pub ferrosys::TreeError::Io
@@ -45,10 +46,12 @@
 #[non_exhaustive] pub ferrosys::ext::AclError::InvalidPerm
 #[non_exhaustive] pub ferrosys::ext::AclError::Malformed
 #[non_exhaustive] pub ferrosys::ext::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::ext::AclError::UndefinedId
 #[non_exhaustive] pub ferrosys::ext::AllocError::BitmapTooLargeInMemory
 #[non_exhaustive] pub ferrosys::ext::AllocError::OutOfSpace
 #[non_exhaustive] pub ferrosys::ext::DirError::EntryTooLarge
 #[non_exhaustive] pub ferrosys::ext::DirError::IndexTooLarge
+#[non_exhaustive] pub ferrosys::ext::DirError::TailExceedsBlock
 #[non_exhaustive] pub ferrosys::ext::ExtentError::FileTooLarge
 #[non_exhaustive] pub ferrosys::ext::ExtentError::NodeBlockCount
 #[non_exhaustive] pub ferrosys::ext::ExtentError::NodeTooSmall
@@ -100,6 +103,8 @@
 #[non_exhaustive] pub ferrosys::ext::ModelError::HardlinkTargetMissing
 #[non_exhaustive] pub ferrosys::ext::ModelError::InvalidComponent
 #[non_exhaustive] pub ferrosys::ext::ModelError::InvalidXattrName
+#[non_exhaustive] pub ferrosys::ext::ModelError::LinkCarriesXattrs
+#[non_exhaustive] pub ferrosys::ext::ModelError::ModeCarriesFileType
 #[non_exhaustive] pub ferrosys::ext::ModelError::ParentMissing
 #[non_exhaustive] pub ferrosys::ext::ModelError::ParentNotDir
 #[non_exhaustive] pub ferrosys::ext::ModelError::ReservedPath
@@ -135,6 +140,7 @@
 #[non_exhaustive] pub ferrosys::ext::ReadError::WalkTooLarge
 #[non_exhaustive] pub ferrosys::ext::ReadError::XattrBlockWithoutFeature
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::DetectOptions
 #[non_exhaustive] pub struct ferrosys::FidelityRecord
 #[non_exhaustive] pub struct ferrosys::Finding
@@ -175,6 +181,7 @@ impl BitOr for ferrosys::ext::ondisk::InodeFlags
 impl BitOrAssign for ferrosys::ext::Compat
 impl BitOrAssign for ferrosys::ext::Incompat
 impl BitOrAssign for ferrosys::ext::RoCompat
+impl BitOrAssign for ferrosys::ext::ondisk::InodeFlags
 impl Checksummer for ferrosys::ext::Crc32c
 impl Checksummer for ferrosys::ext::NullCsum
 impl Clone for ferrosys::AcceptedLoss
@@ -183,6 +190,7 @@ impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Civil
 impl Clone for ferrosys::DetectError
 impl Clone for ferrosys::DetectOptions
 impl Clone for ferrosys::Direction
@@ -203,6 +211,7 @@ impl Clone for ferrosys::OpenError
 impl Clone for ferrosys::OpenOptions
 impl Clone for ferrosys::Property
 impl Clone for ferrosys::ReadPolicy
+impl Clone for ferrosys::ScanReport
 impl Clone for ferrosys::Severity
 impl Clone for ferrosys::Slack
 impl Clone for ferrosys::SourceEntry
@@ -273,7 +282,6 @@ impl Clone for ferrosys::ext::ReadError
 impl Clone for ferrosys::ext::ReadPolicy
 impl Clone for ferrosys::ext::ReservedRatio
 impl Clone for ferrosys::ext::RoCompat
-impl Clone for ferrosys::ext::ScanReport
 impl Clone for ferrosys::ext::Severity
 impl Clone for ferrosys::ext::SourceEntry
 impl Clone for ferrosys::ext::Timestamp
@@ -298,6 +306,7 @@ impl Clone for ferrosys::ext::ondisk::SuperBlock
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
 impl Copy for ferrosys::Family
@@ -370,6 +379,7 @@ impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Civil
 impl Debug for ferrosys::DetectError
 impl Debug for ferrosys::DetectOptions
 impl Debug for ferrosys::Direction
@@ -390,6 +400,7 @@ impl Debug for ferrosys::OpenError
 impl Debug for ferrosys::OpenOptions
 impl Debug for ferrosys::Property
 impl Debug for ferrosys::ReadPolicy
+impl Debug for ferrosys::ScanReport
 impl Debug for ferrosys::Severity
 impl Debug for ferrosys::Slack
 impl Debug for ferrosys::SourceEntry
@@ -462,7 +473,6 @@ impl Debug for ferrosys::ext::ReadError
 impl Debug for ferrosys::ext::ReadPolicy
 impl Debug for ferrosys::ext::ReservedRatio
 impl Debug for ferrosys::ext::RoCompat
-impl Debug for ferrosys::ext::ScanReport
 impl Debug for ferrosys::ext::Severity
 impl Debug for ferrosys::ext::SourceEntry
 impl Debug for ferrosys::ext::Timestamp
@@ -492,6 +502,7 @@ impl Default for ferrosys::LayeredSource
 impl Default for ferrosys::Limits
 impl Default for ferrosys::OpenOptions
 impl Default for ferrosys::ReadPolicy
+impl Default for ferrosys::ScanReport
 impl Default for ferrosys::Slack
 impl Default for ferrosys::Synthesis
 impl Default for ferrosys::Timestamp
@@ -517,15 +528,16 @@ impl Default for ferrosys::ext::Profile
 impl Default for ferrosys::ext::ReadPolicy
 impl Default for ferrosys::ext::ReservedRatio
 impl Default for ferrosys::ext::RoCompat
-impl Default for ferrosys::ext::ScanReport
 impl Default for ferrosys::ext::Timestamp
 impl Default for ferrosys::ext::TreeBuilder
 impl Default for ferrosys::ext::ondisk::GroupDescriptor
 impl Default for ferrosys::ext::ondisk::InodeFlags
 impl Default for ferrosys::ext::ondisk::SuperBlock
+impl Deviation for ferrosys::ext::Anomaly
 impl DirLayout for ferrosys::ext::HtreeDir
 impl DirLayout for ferrosys::ext::LinearDir
 impl Display for ferrosys::AclError
+impl Display for ferrosys::Civil
 impl Display for ferrosys::DetectError
 impl Display for ferrosys::OpenError
 impl Display for ferrosys::TreeError
@@ -536,6 +548,7 @@ impl Display for ferrosys::ext::ExtentError
 impl Display for ferrosys::ext::FeatureError
 impl Display for ferrosys::ext::FormatError
 impl Display for ferrosys::ext::GeometryError
+impl Display for ferrosys::ext::HashSignedness
 impl Display for ferrosys::ext::HashVersion
 impl Display for ferrosys::ext::IdentityError
 impl Display for ferrosys::ext::ModelError
@@ -548,6 +561,7 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Civil
 impl Eq for ferrosys::DetectError
 impl Eq for ferrosys::DetectOptions
 impl Eq for ferrosys::Direction
@@ -567,6 +581,7 @@ impl Eq for ferrosys::OpenError
 impl Eq for ferrosys::OpenOptions
 impl Eq for ferrosys::Property
 impl Eq for ferrosys::ReadPolicy
+impl Eq for ferrosys::ScanReport
 impl Eq for ferrosys::Severity
 impl Eq for ferrosys::Slack
 impl Eq for ferrosys::SourceEntry
@@ -628,7 +643,6 @@ impl Eq for ferrosys::ext::ReadError
 impl Eq for ferrosys::ext::ReadPolicy
 impl Eq for ferrosys::ext::ReservedRatio
 impl Eq for ferrosys::ext::RoCompat
-impl Eq for ferrosys::ext::ScanReport
 impl Eq for ferrosys::ext::Severity
 impl Eq for ferrosys::ext::SourceEntry
 impl Eq for ferrosys::ext::Timestamp
@@ -676,6 +690,7 @@ impl From<DetectError> for ferrosys::DetectError
 impl From<DetectError> for ferrosys::OpenError
 impl From<DirError> for ferrosys::ext::DirError
 impl From<DirError> for ferrosys::ext::FormatError
+impl From<Error> for ferrosys::DetectError
 impl From<Error> for ferrosys::ext::FormatError
 impl From<Error> for ferrosys::ext::IdentityError
 impl From<Error> for ferrosys::ext::ReadError
@@ -714,6 +729,12 @@ impl Hash for ferrosys::ext::Family
 impl Hash for ferrosys::ext::Incompat
 impl Hash for ferrosys::ext::Profile
 impl Hash for ferrosys::ext::RoCompat
+impl NamedChoice for ferrosys::Severity
+impl NamedChoice for ferrosys::ext::ErrorBehavior
+impl NamedChoice for ferrosys::ext::HashSignedness
+impl NamedChoice for ferrosys::ext::HashVersion
+impl NamedChoice for ferrosys::ext::Profile
+impl NamedChoice for ferrosys::ext::Severity
 impl Ord for ferrosys::Severity
 impl Ord for ferrosys::ext::DirHash
 impl Ord for ferrosys::ext::Severity
@@ -723,6 +744,7 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::DetectError
 impl PartialEq for ferrosys::DetectOptions
 impl PartialEq for ferrosys::Direction
@@ -742,6 +764,7 @@ impl PartialEq for ferrosys::OpenError
 impl PartialEq for ferrosys::OpenOptions
 impl PartialEq for ferrosys::Property
 impl PartialEq for ferrosys::ReadPolicy
+impl PartialEq for ferrosys::ScanReport
 impl PartialEq for ferrosys::Severity
 impl PartialEq for ferrosys::Slack
 impl PartialEq for ferrosys::SourceEntry
@@ -803,7 +826,6 @@ impl PartialEq for ferrosys::ext::ReadError
 impl PartialEq for ferrosys::ext::ReadPolicy
 impl PartialEq for ferrosys::ext::ReservedRatio
 impl PartialEq for ferrosys::ext::RoCompat
-impl PartialEq for ferrosys::ext::ScanReport
 impl PartialEq for ferrosys::ext::Severity
 impl PartialEq for ferrosys::ext::SourceEntry
 impl PartialEq for ferrosys::ext::Timestamp
@@ -841,6 +863,9 @@ pub const ferrosys::Acl::WRITE: u16
 pub const ferrosys::FINDINGS_SCHEMA_VERSION: u32
 pub const ferrosys::FidelityReport::MAX_RECORDS: usize
 pub const ferrosys::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::MAX_SYMLINK_HOPS: u32
+pub const ferrosys::NamedChoice::NAMES: &'static [Self]
+pub const ferrosys::Severity::NAMES: &'static [Self]
 pub const ferrosys::Slack::MAX_SHARE: u16
 pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
 pub const ferrosys::ext::Acl::ACCESS_NAME: &'static [u8]
@@ -854,14 +879,17 @@ pub const ferrosys::ext::Compat::HAS_JOURNAL: Self
 pub const ferrosys::ext::Compat::NONE: Self
 pub const ferrosys::ext::Compat::ORPHAN_FILE: Self
 pub const ferrosys::ext::Compat::RESIZE_INODE: Self
+pub const ferrosys::ext::ErrorBehavior::NAMES: &'static [Self]
 pub const ferrosys::ext::FeatureSet::DEFAULT: Self
 pub const ferrosys::ext::FeatureSet::EMPTY: Self
 pub const ferrosys::ext::FeatureSet::EXT2: Self
 pub const ferrosys::ext::FeatureSet::EXT3: Self
 pub const ferrosys::ext::FeatureSet::LATEST: Self
 pub const ferrosys::ext::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::ext::HashSignedness::NAMES: &'static [Self]
 pub const ferrosys::ext::HashSignedness::SIGNED_FLAG: u32
 pub const ferrosys::ext::HashSignedness::UNSIGNED_FLAG: u32
+pub const ferrosys::ext::HashVersion::NAMES: &'static [Self]
 pub const ferrosys::ext::Incompat::CSUM_SEED: Self
 pub const ferrosys::ext::Incompat::EXTENTS: Self
 pub const ferrosys::ext::Incompat::FILETYPE: Self
@@ -869,6 +897,7 @@ pub const ferrosys::ext::Incompat::FLEX_BG: Self
 pub const ferrosys::ext::Incompat::META_BG: Self
 pub const ferrosys::ext::Incompat::NONE: Self
 pub const ferrosys::ext::Incompat::SIXTY_FOUR_BIT: Self
+pub const ferrosys::ext::Profile::NAMES: &'static [Self]
 pub const ferrosys::ext::ReservedRatio::DEFAULT: Self
 pub const ferrosys::ext::RoCompat::DIR_NLINK: Self
 pub const ferrosys::ext::RoCompat::EXTRA_ISIZE: Self
@@ -877,6 +906,7 @@ pub const ferrosys::ext::RoCompat::LARGE_FILE: Self
 pub const ferrosys::ext::RoCompat::METADATA_CSUM: Self
 pub const ferrosys::ext::RoCompat::NONE: Self
 pub const ferrosys::ext::RoCompat::SPARSE_SUPER: Self
+pub const ferrosys::ext::Severity::NAMES: &'static [Self]
 pub const ferrosys::ext::Timestamp::NANOS_PER_SEC: u32
 pub const ferrosys::ext::extent::MAX_EXTENT_DEPTH: u16
 pub const ferrosys::ext::extent::MAX_EXTENT_LEN: u32
@@ -924,15 +954,22 @@ pub const ferrosys::ext::ondisk::ORPHAN_BLOCK_MAGIC: u32
 pub const ferrosys::ext::ondisk::ORPHAN_TAIL_LEN: usize
 pub const ferrosys::ext::ondisk::ROOT_INODE_MODE: u16
 pub const ferrosys::ext::ondisk::SUPERBLOCK_MAGIC: u16
+pub const ferrosys::ext::ondisk::SuperBlock::CHECKSUM_OFFSET: usize
+pub const ferrosys::ext::ondisk::SuperBlock::CHECKSUM_SEED_OFFSET: usize
+pub const ferrosys::ext::ondisk::SuperBlock::FEATURE_INCOMPAT_OFFSET: usize
+pub const ferrosys::ext::ondisk::SuperBlock::MAGIC_OFFSET: usize
 pub const ferrosys::ext::ondisk::SuperBlock::SIZE: usize
+pub const ferrosys::ext::ondisk::SuperBlock::UUID_OFFSET: usize
+pub const ferrosys::ext::ondisk::SuperBlock::VOLUME_NAME_OFFSET: usize
 pub const ferrosys::ext::ondisk::TIME_SECS_MAX: i64
 pub const ferrosys::ext::ondisk::TIME_SECS_MIN: i64
-pub const ferrosys::ext::read::MAX_SYMLINK_HOPS: u32
 pub const ferrosys::ext::read::MIN_DIRENT_LEN: u64
 pub const fn ferrosys::AcceptedLoss::and(self, property: Property) -> Self
 pub const fn ferrosys::AcceptedLoss::contains(self, property: Property) -> bool
 pub const fn ferrosys::AcceptedLoss::is_empty(self) -> bool
 pub const fn ferrosys::AcceptedLoss::without(self, property: Property) -> Self
+pub const fn ferrosys::Civil::at_secs(secs: i64) -> Self
+pub const fn ferrosys::Civil::to_secs(self) -> i64
 pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
 pub const fn ferrosys::DetectOptions::new() -> Self
 pub const fn ferrosys::Direction::as_str(self) -> &'static str
@@ -953,6 +990,7 @@ pub const fn ferrosys::Severity::as_str(self) -> &'static str
 pub const fn ferrosys::Synthesis::modes(self, file_mode: u16, dir_mode: u16) -> Self
 pub const fn ferrosys::Synthesis::new() -> Self
 pub const fn ferrosys::Synthesis::owner(self, uid: u32, gid: u32) -> Self
+pub const fn ferrosys::Timestamp::civil(self) -> Civil
 pub const fn ferrosys::Timestamp::from_secs(secs: i64) -> Self
 pub const fn ferrosys::ext::BlockRange::end(self) -> u64
 pub const fn ferrosys::ext::BlockRange::is_empty(self) -> bool
@@ -965,6 +1003,7 @@ pub const fn ferrosys::ext::Compat::unknown_bits(self) -> u32
 pub const fn ferrosys::ext::Compat::without(self, other: Self) -> Self
 pub const fn ferrosys::ext::CsumScheme::uninit_bg_semantics(self) -> bool
 pub const fn ferrosys::ext::CsumScheme::writes_object_checksums(self) -> bool
+pub const fn ferrosys::ext::ErrorBehavior::as_str(self) -> &'static str
 pub const fn ferrosys::ext::Family::as_str(self) -> &'static str
 pub const fn ferrosys::ext::FeatureSet::desc_size(self) -> u16
 pub const fn ferrosys::ext::FeatureSet::has_csum_seed(self) -> bool
@@ -990,10 +1029,11 @@ pub const fn ferrosys::ext::FileRange::is_empty(&self) -> bool
 pub const fn ferrosys::ext::FileRange::len(&self) -> u64
 pub const fn ferrosys::ext::FileRange::offset(&self) -> u64
 pub const fn ferrosys::ext::FormatOptions::plan_request(&self, size_bytes: u64) -> PlanRequest
+pub const fn ferrosys::ext::HashSignedness::as_str(self) -> &'static str
 pub const fn ferrosys::ext::HashSignedness::from_flags(flags: u32) -> Self
 pub const fn ferrosys::ext::HashSignedness::to_flag(self) -> u32
+pub const fn ferrosys::ext::HashVersion::as_str(self) -> &'static str
 pub const fn ferrosys::ext::HashVersion::from_u8(v: u8) -> Option<Self>
-pub const fn ferrosys::ext::HashVersion::name(self) -> &'static str
 pub const fn ferrosys::ext::HashVersion::to_u8(self) -> u8
 pub const fn ferrosys::ext::Incompat::bits(self) -> u32
 pub const fn ferrosys::ext::Incompat::contains(self, other: Self) -> bool
@@ -1006,7 +1046,11 @@ pub const fn ferrosys::ext::Limits::max_file_bytes(self, max: u64) -> Self
 pub const fn ferrosys::ext::Limits::max_findings(self, max: usize) -> Self
 pub const fn ferrosys::ext::Limits::max_walk_entries(self, max: usize) -> Self
 pub const fn ferrosys::ext::Limits::new() -> Self
+pub const fn ferrosys::ext::Location::at_group(group: u32) -> Self
+pub const fn ferrosys::ext::Location::at_inode(inode: u32) -> Self
+pub const fn ferrosys::ext::Location::or(self, other: Self) -> Self
 pub const fn ferrosys::ext::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::ext::OpenOptions::common(self, common: crate::OpenOptions) -> Self
 pub const fn ferrosys::ext::OpenOptions::csum_seed(self, seed: u32) -> Self
 pub const fn ferrosys::ext::OpenOptions::limits(self, limits: Limits) -> Self
 pub const fn ferrosys::ext::OpenOptions::new() -> Self
@@ -1015,8 +1059,8 @@ pub const fn ferrosys::ext::PlanRequest::grow(self, grow: GrowReservation) -> Se
 pub const fn ferrosys::ext::PlanRequest::inodes(self, inodes: InodeCount) -> Self
 pub const fn ferrosys::ext::PlanRequest::new(size_bytes: u64, feature: FeatureSet) -> Self
 pub const fn ferrosys::ext::PlanRequest::reserved(self, reserved: ReservedRatio) -> Self
+pub const fn ferrosys::ext::Profile::as_str(self) -> &'static str
 pub const fn ferrosys::ext::Profile::feature_set(self) -> FeatureSet
-pub const fn ferrosys::ext::Profile::name(self) -> &'static str
 pub const fn ferrosys::ext::Profile::of(features: FeatureSet) -> Self
 pub const fn ferrosys::ext::RoCompat::bits(self) -> u32
 pub const fn ferrosys::ext::RoCompat::contains(self, other: Self) -> bool
@@ -1025,6 +1069,7 @@ pub const fn ferrosys::ext::RoCompat::is_empty(self) -> bool
 pub const fn ferrosys::ext::RoCompat::unknown_bits(self) -> u32
 pub const fn ferrosys::ext::RoCompat::without(self, other: Self) -> Self
 pub const fn ferrosys::ext::Severity::as_str(self) -> &'static str
+pub const fn ferrosys::ext::Timestamp::civil(self) -> Civil
 pub const fn ferrosys::ext::Timestamp::from_secs(secs: i64) -> Self
 pub const fn ferrosys::ext::extent::node_capacity(node_bytes: usize) -> usize
 pub const fn ferrosys::ext::extent::tail_offset(node_bytes: usize) -> usize
@@ -1035,6 +1080,9 @@ pub const fn ferrosys::ext::ondisk::Inode::fits(inode_size: u16, extra_isize: u1
 pub const fn ferrosys::ext::ondisk::Inode::has_checksum_hi(inode_size: u16, extra_isize: u16) -> bool
 pub const fn ferrosys::ext::ondisk::InodeFlags::bits(self) -> u32
 pub const fn ferrosys::ext::ondisk::InodeFlags::contains(self, other: Self) -> bool
+pub const fn ferrosys::ext::ondisk::InodeFlags::from_bits(bits: u32) -> Self
+pub const fn ferrosys::ext::ondisk::InodeFlags::is_empty(self) -> bool
+pub const fn ferrosys::ext::ondisk::InodeFlags::without(self, other: Self) -> Self
 pub const fn ferrosys::ext::ondisk::decode_time(field: u32, extra: u32) -> crate::time::Timestamp
 pub const fn ferrosys::ext::ondisk::dx_limit(block_size: usize, count_offset: usize, checksums: bool) -> usize
 pub const fn ferrosys::ext::ondisk::dx_tail_offset(count_offset: usize, limit: usize) -> usize
@@ -1062,6 +1110,7 @@ pub ferrosys::AclError::InvalidPerm::perm: u16
 pub ferrosys::AclError::Malformed::reason: &'static str
 pub ferrosys::AclError::MaskRequired
 pub ferrosys::AclError::MissingRequired::tag: &'static str
+pub ferrosys::AclError::UndefinedId::tag: &'static str
 pub ferrosys::AclQualifier::Group(u32)
 pub ferrosys::AclQualifier::GroupObj
 pub ferrosys::AclQualifier::Mask
@@ -1071,6 +1120,12 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Civil::day: u32
+pub ferrosys::Civil::hour: u32
+pub ferrosys::Civil::minute: u32
+pub ferrosys::Civil::month: u32
+pub ferrosys::Civil::second: u32
+pub ferrosys::Civil::year: i64
 pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
 pub ferrosys::DetectError::Io::message: String
 pub ferrosys::DetectError::Unrecognized
@@ -1181,6 +1236,7 @@ pub ferrosys::ext::AclError::InvalidPerm::perm: u16
 pub ferrosys::ext::AclError::Malformed::reason: &'static str
 pub ferrosys::ext::AclError::MaskRequired
 pub ferrosys::ext::AclError::MissingRequired::tag: &'static str
+pub ferrosys::ext::AclError::UndefinedId::tag: &'static str
 pub ferrosys::ext::AclQualifier::Group(u32)
 pub ferrosys::ext::AclQualifier::GroupObj
 pub ferrosys::ext::AclQualifier::Mask
@@ -1219,6 +1275,8 @@ pub ferrosys::ext::DirError::EntryTooLarge::need: usize
 pub ferrosys::ext::DirError::IndexTooLarge::blocks: usize
 pub ferrosys::ext::DirError::IndexTooLarge::capacity: usize
 pub ferrosys::ext::DirError::MissingDotEntries
+pub ferrosys::ext::DirError::TailExceedsBlock::block_size: usize
+pub ferrosys::ext::DirError::TailExceedsBlock::tail_len: usize
 pub ferrosys::ext::DirHash::major: u32
 pub ferrosys::ext::DirHash::minor: u32
 pub ferrosys::ext::Entry::file_type: crate::ondisk::FileType
@@ -1469,6 +1527,9 @@ pub ferrosys::ext::ModelError::InvalidComponent::path: Vec<u8>
 pub ferrosys::ext::ModelError::InvalidXattrName::name: Vec<u8>
 pub ferrosys::ext::ModelError::InvalidXattrName::path: Vec<u8>
 pub ferrosys::ext::ModelError::InvalidXattrName::reason: &'static str
+pub ferrosys::ext::ModelError::LinkCarriesXattrs::path: Vec<u8>
+pub ferrosys::ext::ModelError::ModeCarriesFileType::mode: u16
+pub ferrosys::ext::ModelError::ModeCarriesFileType::path: Vec<u8>
 pub ferrosys::ext::ModelError::ParentMissing::path: Vec<u8>
 pub ferrosys::ext::ModelError::ParentNotDir::path: Vec<u8>
 pub ferrosys::ext::ModelError::ReservedPath::path: Vec<u8>
@@ -1485,10 +1546,8 @@ pub ferrosys::ext::ModelError::XattrNameTooLong::path: Vec<u8>
 pub ferrosys::ext::ModelError::XattrsTooLarge::needed: usize
 pub ferrosys::ext::ModelError::XattrsTooLarge::path: Vec<u8>
 pub ferrosys::ext::ModelError::XattrsWithoutFeature::path: Vec<u8>
-pub ferrosys::ext::OpenOptions::base: u64
+pub ferrosys::ext::OpenOptions::common: crate::OpenOptions
 pub ferrosys::ext::OpenOptions::csum_seed: Option<u32>
-pub ferrosys::ext::OpenOptions::limits: crate::policy::Limits
-pub ferrosys::ext::OpenOptions::policy: crate::policy::ReadPolicy
 pub ferrosys::ext::ParseError::BadMagic::expected: u32
 pub ferrosys::ext::ParseError::BadMagic::found: u32
 pub ferrosys::ext::ParseError::BadMagic::structure: &'static str
@@ -1697,6 +1756,8 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
+pub fn ferrosys::Deviation::to_finding(&self, unit: u32) -> Finding /* required */
 pub fn ferrosys::FidelityReport::count(&self, direction: Direction, property: Property) -> u64
 pub fn ferrosys::FidelityReport::is_faithful(&self) -> bool
 pub fn ferrosys::FidelityReport::is_truncated(&self) -> bool
@@ -1722,8 +1783,10 @@ pub fn ferrosys::FindingReport::to_sarif(&self, artifact_uri: Option<&str>) -> S
 pub fn ferrosys::FindingReport::to_table(&self) -> String
 pub fn ferrosys::FindingReport::worst_severity(&self) -> Option<Severity>
 pub fn ferrosys::FsReader::family(&self) -> crate::finding::Family
-pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> /* required */
+pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
+pub fn ferrosys::FsTree::family(&self) -> Family /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
@@ -1734,7 +1797,16 @@ pub fn ferrosys::LayeredSource::new() -> Self
 pub fn ferrosys::Metadata::new(mode: u16, mtime: Timestamp) -> Self
 pub fn ferrosys::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
 pub fn ferrosys::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::NamedChoice::as_str(self) -> &'static str /* required */
+pub fn ferrosys::NamedChoice::from_name(name: &str) -> Option<Self> /* required */
 pub fn ferrosys::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ScanReport::anomalies(&self) -> &[A]
+pub fn ferrosys::ScanReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
+pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
 pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
@@ -1769,11 +1841,13 @@ pub fn ferrosys::ext::Anomaly::to_finding(&self, block_size: u32) -> Finding
 pub fn ferrosys::ext::Checksummer::base_seed(&self) -> u32 /* required */
 pub fn ferrosys::ext::Checksummer::crc32c(&self, seed: u32, data: &[u8]) -> u32 /* required */
 pub fn ferrosys::ext::Checksummer::scheme(&self) -> CsumScheme /* required */
+pub fn ferrosys::ext::Compat::describe(self, out: &mut String)
 pub fn ferrosys::ext::Compat::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::Compat::names(self) -> Vec<&'static str>
 pub fn ferrosys::ext::Crc32c::new(uuid: &[u8; 16]) -> Self
 pub fn ferrosys::ext::Crc32c::with_seed(base_seed: u32) -> Self
 pub fn ferrosys::ext::DirLayout::build_blocks(&self, entries: &[DirEntry], block_size: usize) -> Result<Vec<DirBlock>, DirError> /* required */
+pub fn ferrosys::ext::ErrorBehavior::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::ExtentNode::depth(&self) -> u16
 pub fn ferrosys::ext::ExtentNode::is_empty(&self) -> bool
 pub fn ferrosys::ext::ExtentNode::len(&self) -> usize
@@ -1809,12 +1883,15 @@ pub fn ferrosys::ext::FormatPlan::used_inodes(&self) -> u32
 pub fn ferrosys::ext::FormatPlan::write_to(self, sink: impl Write + Seek) -> Result<Layout, FormatError>
 pub fn ferrosys::ext::FsModel::root(&self) -> &ModelInode
 pub fn ferrosys::ext::FsModel::used_inode_count(&self) -> u32
+pub fn ferrosys::ext::HashSignedness::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::ext::HashVersion::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::IdentityChange::is_empty(&self) -> bool
 pub fn ferrosys::ext::IdentityChange::new() -> Self
 pub fn ferrosys::ext::Image::as_bytes(&self) -> &[u8]
 pub fn ferrosys::ext::Image::into_bytes(self) -> Vec<u8>
 pub fn ferrosys::ext::Image::layout(&self) -> &Layout
 pub fn ferrosys::ext::Image::write_to(&self, w: impl std::io::Write) -> std::io::Result<()>
+pub fn ferrosys::ext::Incompat::describe(self, out: &mut String)
 pub fn ferrosys::ext::Incompat::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::Incompat::names(self) -> Vec<&'static str>
 pub fn ferrosys::ext::JournalSuperblock::read_from(buf: &[u8]) -> Result<Self, crate::ondisk::ParseError>
@@ -1831,6 +1908,7 @@ pub fn ferrosys::ext::Metadata::new(mode: u16, mtime: Timestamp) -> Self
 pub fn ferrosys::ext::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
 pub fn ferrosys::ext::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
 pub fn ferrosys::ext::ModelConfig::new(feature: FeatureSet, first_user_inode: u32, default_time: Timestamp) -> Self
+pub fn ferrosys::ext::Profile::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::ReadError::anomaly(&self) -> Anomaly
 pub fn ferrosys::ext::ReadPolicy::is_fatal(self, severity: Severity) -> bool
 pub fn ferrosys::ext::Reader::device(&self, inode: &Inode) -> (u32, u32)
@@ -1859,14 +1937,10 @@ pub fn ferrosys::ext::Reader::xattrs(&mut self, inode: &Inode) -> Result<Vec<Xat
 pub fn ferrosys::ext::ReservedRatio::blocks(self, total_blocks: u64) -> u64
 pub fn ferrosys::ext::ReservedRatio::from_hundredths_of_percent(hundredths: u16) -> Option<Self>
 pub fn ferrosys::ext::ReservedRatio::hundredths_of_percent(self) -> u16
+pub fn ferrosys::ext::RoCompat::describe(self, out: &mut String)
 pub fn ferrosys::ext::RoCompat::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::RoCompat::names(self) -> Vec<&'static str>
-pub fn ferrosys::ext::ScanReport::anomalies(&self) -> &[Anomaly]
-pub fn ferrosys::ext::ScanReport::has_fatal(&self, policy: ReadPolicy) -> bool
-pub fn ferrosys::ext::ScanReport::is_clean(&self) -> bool
-pub fn ferrosys::ext::ScanReport::is_truncated(&self) -> bool
-pub fn ferrosys::ext::ScanReport::to_report(&self) -> FindingReport
-pub fn ferrosys::ext::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::ext::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::ext::Source::into_entries(self) -> Vec<SourceEntry> /* required */
 pub fn ferrosys::ext::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::ext::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
@@ -1923,6 +1997,8 @@ pub fn ferrosys::ext::ondisk::read_dx_root_info(buf: &[u8]) -> Result<(u8, u8), 
 pub fn ferrosys::ext::ondisk::read_orphan_tail(block: &[u8]) -> Result<u32, super::ParseError>
 pub fn ferrosys::ext::ondisk::rec_len_from_disk(disk: u16, block_size: usize) -> usize
 pub fn ferrosys::ext::ondisk::rec_len_to_disk(len: usize, block_size: usize) -> u16
+pub fn ferrosys::ext::ondisk::superblock_checksum(bytes: &[u8]) -> u32
+pub fn ferrosys::ext::ondisk::unpadded(field: &[u8]) -> &[u8]
 pub fn ferrosys::ext::ondisk::write_dir_tail(buf: &mut [u8], checksum: u32) -> Result<(), super::ParseError>
 pub fn ferrosys::ext::ondisk::write_dx_entries(buf: &mut [u8], count_offset: usize, limit: usize, entries: &[DxEntry]) -> Result<(), super::ParseError>
 pub fn ferrosys::ext::ondisk::write_dx_node_header(buf: &mut [u8]) -> Result<(), super::ParseError>
@@ -1930,6 +2006,23 @@ pub fn ferrosys::ext::ondisk::write_dx_root_header(buf: &mut [u8], dir_ino: u32,
 pub fn ferrosys::ext::ondisk::write_dx_tail(buf: &mut [u8], count_offset: usize, limit: usize, checksum: u32) -> Result<(), super::ParseError>
 pub fn ferrosys::ext::plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError>
 pub fn ferrosys::ext::rewrite_identity<F: Read + Write + Seek>(image: &mut F, change: &IdentityChange) -> Result<IdentityReport, IdentityError>
+pub fn ferrosys::ext::rewrite_identity_at<F: Read + Write + Seek>(image: &mut F, change: &IdentityChange, base: u64) -> Result<IdentityReport, IdentityError>
+pub fn ferrosys::hex(bytes: &[u8]) -> String
+pub fn ferrosys::json::Array::end(self)
+pub fn ferrosys::json::Array::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Array::obj(&mut self) -> Object<'_>
+pub fn ferrosys::json::Object::arr(&mut self, key: &str) -> Array<'_>
+pub fn ferrosys::json::Object::bool(&mut self, key: &str, value: bool)
+pub fn ferrosys::json::Object::bytes(&mut self, key: &str, value: &[u8])
+pub fn ferrosys::json::Object::end(self)
+pub fn ferrosys::json::Object::i64(&mut self, key: &str, value: i64)
+pub fn ferrosys::json::Object::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Object::obj(&mut self, key: &str) -> Object<'_>
+pub fn ferrosys::json::Object::raw(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::str(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::strings(&mut self, key: &str, values: &[&str])
+pub fn ferrosys::json::Object::u64(&mut self, key: &str, value: u64)
+pub fn ferrosys::json::Object::u64s(&mut self, key: &str, values: &[u64])
 pub fn ferrosys::open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError>
 pub fn ferrosys::open_with<R: Read + Seek>(src: R, options: &crate::policy::OpenOptions) -> Result<FsReader<R>, OpenError>
 pub fn ferrosys::printable(bytes: &[u8]) -> String
@@ -1944,6 +2037,7 @@ pub mod ferrosys::ext::journal
 pub mod ferrosys::ext::model
 pub mod ferrosys::ext::ondisk
 pub mod ferrosys::ext::read
+pub mod ferrosys::json
 pub struct ferrosys::AcceptedLoss(/* private */)
 pub struct ferrosys::Acl { /* private fields */ }
 pub struct ferrosys::AclEntry
@@ -1952,6 +2046,7 @@ pub struct ferrosys::FileRange { /* private fields */ }
 pub struct ferrosys::FindingReport { /* private fields */ }
 pub struct ferrosys::LayeredSource { /* private fields */ }
 pub struct ferrosys::Metadata
+pub struct ferrosys::ScanReport<A> { /* private fields */ }
 pub struct ferrosys::SourceEntry
 pub struct ferrosys::Timestamp
 pub struct ferrosys::TreeBuilder { /* private fields */ }
@@ -1976,7 +2071,6 @@ pub struct ferrosys::ext::NullCsum
 pub struct ferrosys::ext::Reader<R> { /* private fields */ }
 pub struct ferrosys::ext::ReservedRatio { /* private fields */ }
 pub struct ferrosys::ext::RoCompat(/* private */)
-pub struct ferrosys::ext::ScanReport { /* private fields */ }
 pub struct ferrosys::ext::SourceEntry
 pub struct ferrosys::ext::Timestamp
 pub struct ferrosys::ext::TreeBuilder { /* private fields */ }
@@ -1987,8 +2081,12 @@ pub struct ferrosys::ext::ondisk::DxEntry
 pub struct ferrosys::ext::ondisk::ExtentHeader
 pub struct ferrosys::ext::ondisk::ExtentIdx
 pub struct ferrosys::ext::ondisk::ExtentLeaf
-pub struct ferrosys::ext::ondisk::InodeFlags(u32)
+pub struct ferrosys::ext::ondisk::InodeFlags(/* private */)
+pub struct ferrosys::json::Array<'a> { /* private fields */ }
+pub struct ferrosys::json::Object<'a> { /* private fields */ }
+pub trait ferrosys::Deviation
 pub trait ferrosys::FsTree
+pub trait ferrosys::NamedChoice: Copy + Sized + 'static
 pub trait ferrosys::Source
 pub trait ferrosys::ext::Checksummer: crate::sealed::Sealed
 pub trait ferrosys::ext::DirLayout: crate::sealed::Sealed
@@ -1996,3 +2094,4 @@ pub trait ferrosys::ext::Source
 pub type ferrosys::Coordinate = (std::borrow::Cow<'static, str>, u64)
 pub type ferrosys::FsTree::Node
 pub type ferrosys::ext::Coordinate = (std::borrow::Cow<'static, str>, u64)
+pub type ferrosys::ext::ScanReport = crate::ScanReport<Anomaly>

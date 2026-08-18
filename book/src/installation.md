@@ -17,14 +17,19 @@ or by editing `Cargo.toml`:
 ferrosys = "0.4"
 ```
 
-The build is pure Rust and depends only on `thiserror`. Five features shape it, and the
-first two are the filesystem families — a build takes the families it names, so a consumer
-that wants an ext image compiles no FAT code:
+The build is pure Rust and depends only on `thiserror`. Features shape it, and the first
+four are the filesystem families — a build takes the families it names, so a consumer that
+wants an ext image compiles no FAT code:
 
 | Feature | Default | What it adds | What it depends on |
 |---|---|---|---|
 | `ext` | on | The ext2/ext3/ext4 family, under the `ext` module: the formatter, the reader, the feature model, and the on-disk structures | — |
 | `fat` | off | The FAT12/FAT16/FAT32 family, under the `fat` module: the formatter, the reader, the geometry planner, the on-disk structures, and the classifier that recognizes a FAT volume | — |
+| `exfat` | off | The exFAT family, under the `exfat` module: the formatter, the reader, the planner, the on-disk structures, and the classifier | — |
+| `btrfs` | off | The btrfs family, under the `btrfs` module: the reader over its two layers, the formatter, the B-tree engine, the chunk map, and the on-disk structures | — |
+| `zlib` | off | Reading a file whose extents are stored as DEFLATE | `miniz_oxide` |
+| `lzo` | off | Reading a file whose extents are stored as LZO1X | — |
+| `zstd` | off | Reading a file whose extents are stored as Zstandard | `ruzstd` |
 | `tar` | off | `ArchiveSource` and `ArchiveSink`: a filesystem built from a tar stream, and one written back out as one, with PAX times, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` records | `tar` |
 | `dir` | off | `DirectorySource` and `DirectorySink`: a filesystem built from a directory tree on this machine, and one written back out as a tree, with modes, ownership, times, hard links, special files, and extended attributes. Built on Linux, whose metadata and extended attributes both ends read and write | `rustix` |
 | `serde` | off | `Serialize` on the findings taxonomy, each family's planned geometry, and the ext feature model, for embedding them in a document of your own | `serde` |
@@ -32,6 +37,16 @@ that wants an ext image compiles no FAT code:
 Granularity is per family rather than per format: `ext` is ext2, ext3, and ext4 together,
 and `fat` is FAT12, FAT16, and FAT32 together, since each set is one lineage sharing its
 on-disk structures.
+
+The three decoders are named for the algorithm rather than for a family, because an
+encoding is a property of a run of bytes and not of the format around it. Of the families
+here, btrfs is the one that stores runs that way, so a build that wants to read them names
+a decoder beside it: `--features btrfs,zstd`. What each one decides is what a *file* does
+when it is read — a build without the decoder for the algorithm a file was stored with
+declines that file by name, and one without a decoder for an algorithm the filesystem
+*advertises in its feature word* declines the filesystem itself. Verification is a separate
+question and needs none of them: the checksums a filesystem records cover the bytes it
+stored, so they are checked whether or not those bytes can be expanded.
 
 `default-features = false` is a real build, not a smaller version of the same one: it
 leaves the family-agnostic substrate the crate root carries — the `crc32c` primitive, the

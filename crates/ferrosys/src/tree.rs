@@ -38,12 +38,21 @@ use crate::xattr::Xattr;
 pub enum TreeError {
     /// The underlying source could not be read or sought.
     ///
-    /// The `kind` is [`std::io::Error`]'s own classification, carried separately because it
-    /// is what a caller acts on: a truncated image
-    /// ([`UnexpectedEof`](std::io::ErrorKind::UnexpectedEof)) is a property of the image
-    /// being read, while a permission failure
+    /// The `kind` is [`std::io::Error`]'s own classification, kept beside the message rather
+    /// than folded into it because it is what a caller *acts* on: a truncated image
+    /// ([`UnexpectedEof`](std::io::ErrorKind::UnexpectedEof)) is a property of what is being
+    /// read, while a permission failure
     /// ([`PermissionDenied`](std::io::ErrorKind::PermissionDenied)) is a property of the
-    /// environment, and telling them apart should not require matching on the message.
+    /// environment, and telling them apart should not require matching on text.
+    ///
+    /// It does not appear in the rendered message, because the message already says it:
+    /// `message` is the underlying error rendered by [`std::io::Error`], which opens with the
+    /// kind's own description. The field is the machine-readable half of a fact the text
+    /// already carries.
+    ///
+    /// Every error in this crate records an i/o failure this way. They are separate variants
+    /// on separate enums because their *other* variants are, and a caller matching on one
+    /// should not reach through a wrapper for the two fields it wants.
     #[error("i/o error: {message}")]
     #[non_exhaustive]
     Io {
@@ -199,6 +208,65 @@ impl Attributes {
             synthesized: Vec::new(),
         }
     }
+
+    /// What a [`stat`](FsTree::stat) answers on a family whose whole record of a node is a
+    /// read-only bit and two times.
+    ///
+    /// This is the read-side mirror of
+    /// [`LossPolicy::record_losses`](crate::fidelity::LossPolicy), which is the one place
+    /// that says what such a format *drops*. The two families in that class lose the same
+    /// six properties for the same reason and invent the same four back, so both answers
+    /// have one home and neither can gain a clause the other does not.
+    ///
+    /// `times` is `(access, modification)`, or `None` for a node the format stores no entry
+    /// for — the root directory on both families, which therefore has no times at all rather
+    /// than invented ones. There is no change time in either format, so the modification time
+    /// stands for it: it is the closest thing the volume records, and the alternative is a
+    /// value invented out of nothing.
+    ///
+    /// The read-only bit is the single permission bit either format holds, and it clears the
+    /// write bits of whatever mode the caller named. The other eight still came from the
+    /// caller and nothing in the volume speaks to them, which is why the mode is named as
+    /// invented either way.
+    #[cfg(any(feature = "fat", feature = "exfat"))]
+    pub(crate) fn from_read_only_bit(
+        synthesis: &Synthesis,
+        is_dir: bool,
+        read_only: bool,
+        times: Option<(crate::time::Timestamp, crate::time::Timestamp)>,
+    ) -> Self {
+        let mut mode = if is_dir {
+            synthesis.dir_mode
+        } else {
+            synthesis.file_mode
+        };
+        if read_only {
+            mode &= !crate::fidelity::WRITE_BITS;
+        }
+        let zero = crate::time::Timestamp::from_secs(0);
+        let (atime, mtime) = times.unwrap_or((zero, zero));
+        let mut synthesized = vec![
+            Property::Ownership,
+            Property::Permissions,
+            Property::ChangeTime,
+        ];
+        if times.is_none() {
+            synthesized.push(Property::AccessTime);
+            synthesized.push(Property::ModificationTime);
+        }
+        Self {
+            meta: Metadata {
+                mode,
+                uid: synthesis.uid,
+                gid: synthesis.gid,
+                atime,
+                ctime: mtime,
+                mtime,
+            },
+            xattrs: Vec::new(),
+            synthesized,
+        }
+    }
 }
 
 /// The four operations an extraction needs of a filesystem, whichever family it is.
@@ -215,6 +283,17 @@ pub trait FsTree {
     /// The family's own handle to a node — an inode, a directory entry, whatever it
     /// already holds. A sink treats it as opaque and hands it back unchanged.
     type Node;
+
+    /// Which family this reader is of, which is what a [`TreeError`] it produces names.
+    fn family(&self) -> Family;
+
+    /// The cap a read through this reader is held to — the caller's
+    /// [`Limits::max_file_bytes`](crate::Limits::max_file_bytes), which defaults to no cap
+    /// at all.
+    ///
+    /// The reader answers rather than the caller because the limits are the ones the
+    /// reader was opened under, and a sink draining it never saw them.
+    fn max_file_bytes(&self) -> u64;
 
     /// Walk every name in the tree, calling `visit` for each.
     ///
@@ -298,13 +377,68 @@ pub trait FsTree {
     /// kilobytes, with no setting a caller could reach that prevented it.
     ///
     /// The check is on the declared length and happens before a byte is written, so what a
-    /// sink refuses is exactly what a whole-file read of the same node would refuse. The
-    /// family answers because the refusal names it, and because the cap is that reader's.
+    /// sink refuses is exactly what a whole-file read of the same node would refuse.
+    ///
+    /// The rule is one rule and the refusal is one sentence, so this is written here rather
+    /// than once per family: what varies between them is the family in the message and the
+    /// cap being applied, and both are asked for above.
     ///
     /// # Errors
     ///
     /// [`TreeError::LimitExceeded`] naming the path and the cap.
-    fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>;
+    // In a build with no family compiled in, [`Family`] has no variants, so `family()`
+    // cannot return and everything after it here is unreachable. That build also has no
+    // implementor of this trait, which is what makes the body dead rather than wrong. The
+    // predicate names every family, so a build carrying any one of them reaches every line
+    // here and carries no allowance hiding what the allowance was scoped to expose.
+    #[cfg_attr(
+        not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")),
+        allow(unreachable_code, unused_variables)
+    )]
+    fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
+        let cap = self.max_file_bytes();
+        if size > cap {
+            return Err(TreeError::LimitExceeded {
+                family: self.family(),
+                detail: format!(
+                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read \
+                     is held to",
+                    crate::escape::printable(path)
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Every failure a walk through [`FsTree::walk_tree`] can have, kept apart until the walk
+/// ends.
+///
+/// A family's walk carries one error type; a walk through this surface has three sources for
+/// one — the filesystem's own, a node the shared frame cannot describe, and the visitor's,
+/// which is the sink's. Collapsing them at the point they occur would report a sink's failure
+/// as a fault in the image, so they ride separately for the length of the walk and are
+/// unwrapped at the end.
+///
+/// `R` is the family's own read error. It is a parameter rather than a fixed type because the
+/// conversion that makes `?` work on it — `From<R>` — is what each family writes for itself;
+/// a blanket one here would collide with the reflexive `From<T> for T`.
+///
+/// Compiled where a family is: with none there is no tree to walk.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) enum WalkFail<R, E> {
+    /// The filesystem's own failure, which the family's walk produced.
+    Read(R),
+    /// A node the walk reached that the shared frame cannot describe.
+    ///
+    /// A property of this surface rather than of any family, which is why every family's
+    /// walk handles it. Only the ext family produces one today: an inode's mode nibble can
+    /// name no file type, where every FAT node is a directory or a file and both are kinds
+    /// the frame has.
+    #[cfg_attr(not(feature = "ext"), allow(dead_code))]
+    Tree(TreeError),
+    /// The visitor's own failure, which is the sink's.
+    Visitor(E),
 }
 
 #[cfg(test)]

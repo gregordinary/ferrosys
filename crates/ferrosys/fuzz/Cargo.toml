@@ -13,9 +13,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 # `tar` for the archive target: the parser reads untrusted input, so it is fuzzed
-# alongside the readers rather than left to the crate's own tests. `fat` for the FAT
-# reader target, which is not in the default feature set.
-ferrosys = { path = "..", features = ["tar", "fat"] }
+# alongside the readers rather than left to the crate's own tests. `fat`, `exfat`, and
+# `btrfs` for those families' reader targets, none of which is in the default feature set.
+# The three compression features so the btrfs target reaches the decoders — without them
+# `read_data` answers `UnsupportedCompression` before a decoder runs, and the fuzzer
+# exercises the refusal instead of the code the contract is about.
+ferrosys = { path = "..", features = ["tar", "fat", "exfat", "btrfs", "lzo", "zlib", "zstd"] }
 
 [[bin]]
 name = "reader_scan"
@@ -34,6 +37,20 @@ bench = false
 [[bin]]
 name = "fat_reader"
 path = "fuzz_targets/fat_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exfat_reader"
+path = "fuzz_targets/exfat_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "btrfs_reader"
+path = "fuzz_targets/btrfs_reader.rs"
 test = false
 doc = false
 bench = false

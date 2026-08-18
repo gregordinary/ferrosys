@@ -19,7 +19,7 @@
 
 use std::borrow::Cow;
 
-use crate::escape::push_json_string;
+use crate::json::{Array, Object};
 
 /// How serious a deviation from what this crate emits is, ordered least to most serious so
 /// a policy can set a fatal threshold over it.
@@ -31,15 +31,6 @@ use crate::escape::push_json_string;
 /// The domain is closed and the type is exhaustive: these four are the whole scale, and
 /// adding a fifth *should* break a caller that switches on it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-// One spelling of a severity, whichever projection asks for it. `as_str`, `to_json`, and
-// SARIF all render it lower case, and a `serde` form that emitted `"Cosmetic"` would be a
-// second vocabulary for the same closed set — one a consumer reading either document would
-// have to learn twice.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize),
-    serde(rename_all = "lowercase")
-)]
 pub enum Severity {
     /// Valid and harmless: a representation a conformant reader accepts without remark.
     Cosmetic,
@@ -52,18 +43,16 @@ pub enum Severity {
     Structural,
 }
 
-impl Severity {
-    /// The lowercase name of this severity, for a rendered report.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Severity::Cosmetic => "cosmetic",
-            Severity::Conformance => "conformance",
-            Severity::Integrity => "integrity",
-            Severity::Structural => "structural",
-        }
-    }
-}
+// The scale a report prints and a caller sets a threshold on, in the order it is offered:
+// least serious first, which is the comparison order and the order a `--fail-on` list reads.
+crate::naming::named_choice!(Severity {
+    Severity::Cosmetic => "cosmetic",
+    Severity::Conformance => "conformance",
+    Severity::Integrity => "integrity",
+    Severity::Structural => "structural",
+});
+
+crate::naming::serialize_as_name!(Severity);
 
 /// Which filesystem family reported a finding.
 ///
@@ -75,12 +64,6 @@ impl Severity {
 /// family has no way to name one and no way to produce a finding either.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
-// Lower case, for the reason `Severity` is: one name per family across every projection.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize),
-    serde(rename_all = "lowercase")
-)]
 pub enum Family {
     /// The ext2/ext3/ext4 family.
     #[cfg(feature = "ext")]
@@ -88,6 +71,12 @@ pub enum Family {
     /// The FAT12/FAT16/FAT32 family.
     #[cfg(feature = "fat")]
     Fat,
+    /// The exFAT family.
+    #[cfg(feature = "exfat")]
+    ExFat,
+    /// The btrfs family.
+    #[cfg(feature = "btrfs")]
+    Btrfs,
 }
 
 impl Family {
@@ -101,9 +90,15 @@ impl Family {
             Family::Ext => "ext",
             #[cfg(feature = "fat")]
             Family::Fat => "fat",
+            #[cfg(feature = "exfat")]
+            Family::ExFat => "exfat",
+            #[cfg(feature = "btrfs")]
+            Family::Btrfs => "btrfs",
         }
     }
 }
+
+crate::naming::serialize_as_name!(Family);
 
 /// One named coordinate a family locates a finding by: `("group", 3)`, `("inode", 12)`,
 /// `("cluster", 57)`.
@@ -290,17 +285,18 @@ impl FindingReport {
     /// failure.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let mut out = String::from("{\"schema\":");
-        out.push_str(&FINDINGS_SCHEMA_VERSION.to_string());
-        out.push_str(",\"clean\":");
-        out.push_str(if self.is_clean() { "true" } else { "false" });
-        out.push_str(",\"count\":");
-        out.push_str(&self.findings.len().to_string());
-        out.push_str(",\"truncated\":");
-        out.push_str(if self.truncated { "true" } else { "false" });
-        out.push_str(",\"findings\":");
-        push_findings_json(&mut out, &self.findings);
-        out.push('}');
+        let mut out = String::new();
+        let mut o = Object::new(&mut out);
+        o.u64("schema", u64::from(FINDINGS_SCHEMA_VERSION));
+        o.bool("clean", self.is_clean());
+        o.u64("count", self.findings.len() as u64);
+        o.bool("truncated", self.truncated);
+        let mut findings = o.arr("findings");
+        for f in &self.findings {
+            push_finding_json(findings.obj(), f);
+        }
+        findings.end();
+        o.end();
         out
     }
 
@@ -335,31 +331,48 @@ impl FindingReport {
     /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
     #[must_use]
     pub fn to_sarif(&self, artifact_uri: Option<&str>) -> String {
-        let mut out = String::from(
-            "{\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\
-             \"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"ferrosys\",\"rules\":[",
-        );
-        push_sarif_rules(&mut out, &self.findings);
-        out.push_str("]}},\"results\":[");
-        for (i, f) in self.findings.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            push_sarif_result(&mut out, f, artifact_uri);
+        let mut out = String::new();
+        let mut doc = Object::new(&mut out);
+        doc.str("$schema", "https://json.schemastore.org/sarif-2.1.0.json");
+        doc.str("version", "2.1.0");
+        let mut runs = doc.arr("runs");
+        let mut run = runs.obj();
+
+        let mut tool = run.obj("tool");
+        let mut driver = tool.obj("driver");
+        driver.str("name", "ferrosys");
+        push_sarif_rules(driver.arr("rules"), &self.findings);
+        driver.end();
+        tool.end();
+
+        let mut results = run.arr("results");
+        for f in &self.findings {
+            push_sarif_result(results.obj(), f, artifact_uri);
         }
-        out.push(']');
+        results.end();
+
         if self.truncated {
+            let mut invocations = run.arr("invocations");
+            let mut invocation = invocations.obj();
             // `executionSuccessful` is required of an invocation: the scan did run to the
-            // cap, so it succeeded — the notification is what says the results stop short
-            // of the image.
-            out.push_str(
-                ",\"invocations\":[{\"executionSuccessful\":true,\
-                 \"toolExecutionNotifications\":[{\"level\":\"warning\",\"message\":{\"text\":",
-            );
-            push_json_string(&mut out, &self.truncation_notice());
-            out.push_str("}}]}]");
+            // cap, so it succeeded — the notification is what says the results stop short of
+            // the image.
+            invocation.bool("executionSuccessful", true);
+            let mut notifications = invocation.arr("toolExecutionNotifications");
+            let mut notification = notifications.obj();
+            notification.str("level", "warning");
+            let mut message = notification.obj("message");
+            message.str("text", &self.truncation_notice());
+            message.end();
+            notification.end();
+            notifications.end();
+            invocation.end();
+            invocations.end();
         }
-        out.push_str("}]}");
+
+        run.end();
+        runs.end();
+        doc.end();
         out
     }
 
@@ -430,21 +443,272 @@ impl FindingReport {
     }
 }
 
-/// Append the `findings` array: one JSON object per finding.
-fn push_findings_json(out: &mut String, findings: &[Finding]) {
-    out.push('[');
-    for (i, f) in findings.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        push_finding_json(out, f);
-    }
-    out.push(']');
+/// A family's own typed deviation from what its writer emits, and how it reaches the shared
+/// frame.
+///
+/// Each family keeps its taxonomy typed and its own — its subsystem as a value rather than a
+/// word, its location in the coordinates that family's consumers reason about. This is the
+/// two things everything above a family needs of one regardless: how serious it is, and what
+/// it looks like as a [`Finding`].
+pub trait Deviation {
+    /// How serious the deviation is.
+    fn severity(&self) -> Severity;
+
+    /// Project into the family-agnostic frame, resolving a location addressed in units of
+    /// `unit` bytes to the byte offset a [`Finding`] carries.
+    ///
+    /// The unit is the family's addressing unit — a block for ext, a sector for a FAT — and
+    /// it is supplied rather than carried by the deviation because it is a property of the
+    /// filesystem the scan ran over rather than of any one finding in it.
+    fn to_finding(&self, unit: u32) -> Finding;
 }
 
-/// Append one finding as a JSON object: `severity`, `family`, `category`, an `offset` when
-/// one is known, a `location` holding the family's own coordinates, and the `detail`.
-fn push_finding_json(out: &mut String, f: &Finding) {
+/// Build a [`Finding`] from a family's severity, subsystem, description, and named
+/// coordinates, resolving the one coordinate that addresses bytes into an offset.
+///
+/// Every family's projection is this shape: name the coordinates outermost first, drop the
+/// ones the deviation does not carry, and turn the unit-addressed one into a byte offset
+/// under the filesystem's addressing unit. What differs between them is *which* coordinates
+/// and which of those addresses bytes — a block for ext, a sector for a FAT — so those are
+/// the arguments and the rest is here.
+///
+/// `coordinates` are `(name, value)` pairs in the order the family reports them, and a `None`
+/// value is a coordinate this deviation does not have. `addressed` is the value that counts
+/// in units of `unit` bytes, or [`None`] where the deviation is located only by something
+/// whose place depends on the layout rather than on the number — a group, an inode, a
+/// cluster — and so carries no offset.
+///
+/// The multiplication is checked. A block or sector number out of an untrusted image can be
+/// anything, and a product that does not fit means the unit is not in the image at all, so
+/// there is no offset to name rather than a wrapped one to name wrongly.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) fn project(
+    severity: Severity,
+    family: Family,
+    category: &'static str,
+    coordinates: &[(&'static str, Option<u64>)],
+    addressed: Option<u64>,
+    unit: u32,
+    detail: &str,
+) -> Finding {
+    Finding {
+        severity,
+        family,
+        category: Cow::Borrowed(category),
+        offset: addressed.and_then(|value| value.checked_mul(u64::from(unit))),
+        coordinates: coordinates
+            .iter()
+            .filter_map(|&(name, value)| value.map(|value| (Cow::Borrowed(name), value)))
+            .collect(),
+        detail: detail.to_string(),
+    }
+}
+
+/// What a whole-filesystem scan found: every [`Deviation`] it met, in the order it walked
+/// them.
+///
+/// A lenient read rejects no image, so an empty report means the filesystem is conformant to
+/// what this crate's writer for that family emits, and a non-empty one is a list of findings
+/// rather than a failure. [`has_fatal`](Self::has_fatal) applies a
+/// [`ReadPolicy`](crate::ReadPolicy) threshold back to those findings.
+///
+/// This holds the family's own taxonomy, kept typed, which is what a consumer reasoning about
+/// that format wants. Rendering it — as JSON, as SARIF, as a table — goes through
+/// [`to_report`](Self::to_report), which projects into [`FindingReport`] so one document shape
+/// serves every family.
+///
+/// A report holds at most [`Limits::max_findings`](crate::Limits::max_findings) deviations and
+/// says so through [`is_truncated`](Self::is_truncated) when it stopped there.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct ScanReport<A> {
+    anomalies: Vec<A>,
+    truncated: bool,
+    /// The findings cap the scan that produced this report ran under — the
+    /// [`Limits::max_findings`](crate::Limits::max_findings) it was opened with, which a
+    /// caller may set to anything. Kept so a truncation notice names the bound that actually
+    /// applied rather than the default constant, which need not be the same number.
+    ///
+    /// It is not serialized: the cap is a property of the scan that ran, not of the report's
+    /// findings, and `truncated` already says whether it was reached.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    cap: usize,
+    /// The addressing unit of the filesystem scanned, in bytes, which turns a location into
+    /// the byte offset a [`Finding`] carries. Zero for a report no scan produced, where there
+    /// is nothing to convert.
+    ///
+    /// Not serialized for the same reason the cap is not: it describes the filesystem the
+    /// scan ran over rather than any finding in it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    unit: u32,
+}
+
+impl<A> Default for ScanReport<A> {
+    /// An empty report from a scan under the default limits.
+    fn default() -> Self {
+        Self {
+            anomalies: Vec::new(),
+            truncated: false,
+            cap: FindingReport::MAX_FINDINGS,
+            unit: 0,
+        }
+    }
+}
+
+impl<A> ScanReport<A> {
+    /// The deviations found, in scan order.
+    #[must_use]
+    pub fn anomalies(&self) -> &[A] {
+        &self.anomalies
+    }
+
+    /// Whether the scan stopped at its findings cap with the filesystem still unfinished.
+    ///
+    /// A truncated report is a floor, not a full accounting: the filesystem holds at least
+    /// these findings, and the scan did not look at the rest of it. Everything derived from
+    /// the report — [`worst_severity`](Self::worst_severity), [`has_fatal`](Self::has_fatal)
+    /// — is likewise a floor, and [`is_clean`](Self::is_clean) is `false` whatever the report
+    /// holds, since a scan that stopped short has seen nothing that would let it call a
+    /// filesystem clean.
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Whether the scan looked at the whole filesystem and found nothing.
+    ///
+    /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
+    /// holds. The cap can be set low enough that a scan stops before reporting anything — at
+    /// zero, before reading a single structure — and an empty report from a scan that stopped
+    /// is an absence of looking, not an absence of faults.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        !self.truncated && self.anomalies.is_empty()
+    }
+}
+
+impl<A: Deviation> ScanReport<A> {
+    /// A report holding `anomalies`, from a scan that ran under `cap` over a filesystem
+    /// addressing in units of `unit` bytes, and stopped early if `truncated`.
+    ///
+    /// Compiled where a family is: with none there is no scan to produce one.
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+    pub(crate) fn new(anomalies: Vec<A>, truncated: bool, cap: usize, unit: u32) -> Self {
+        Self {
+            anomalies,
+            truncated,
+            cap,
+            unit,
+        }
+    }
+
+    /// The severity of the most serious deviation, or `None` when the report is clean.
+    #[must_use]
+    pub fn worst_severity(&self) -> Option<Severity> {
+        self.anomalies.iter().map(Deviation::severity).max()
+    }
+
+    /// Whether any deviation the scan found is fatal under `policy` — the same threshold
+    /// [`ReadPolicy::Strict`] enforces when opening a filesystem. Under
+    /// [`ReadPolicy::Lenient`] it is always `false`.
+    ///
+    /// This is the scan's verdict, which is not the whole of a strict read. A scan checks the
+    /// metadata a strict read checks, but it does not follow every path, so a fault only a
+    /// full read reaches leaves the scan clean while the read that reaches it still fails.
+    ///
+    /// [`ReadPolicy::Strict`]: crate::ReadPolicy::Strict
+    /// [`ReadPolicy::Lenient`]: crate::ReadPolicy::Lenient
+    #[must_use]
+    pub fn has_fatal(&self, policy: crate::ReadPolicy) -> bool {
+        self.anomalies.iter().any(|a| policy.is_fatal(a.severity()))
+    }
+
+    /// Project the report into the crate's family-agnostic frame, which is what renders.
+    ///
+    /// Each deviation becomes a [`Finding`] carrying the same severity, its family's own
+    /// subsystem word as the category, its coordinates under that family's own names, and —
+    /// where the location resolves to one — the byte offset it sits at. Truncation and the cap
+    /// that caused it carry across, so the projected report says the same thing about how much
+    /// of the filesystem was looked at.
+    #[must_use]
+    pub fn to_report(&self) -> FindingReport {
+        let findings = self
+            .anomalies
+            .iter()
+            .map(|a| a.to_finding(self.unit))
+            .collect();
+        FindingReport::new(findings, self.truncated, self.cap)
+    }
+}
+
+/// A bounded accumulator of deviations, which is what a scan collects into.
+///
+/// The bound is the whole reason it exists: how many deviations a filesystem yields is that
+/// filesystem's own claim, and a handful of crafted structures can name the same blocks over
+/// and over. A scan that collected all of them would have its memory decided by the bytes it
+/// was pointed at.
+///
+/// Pushing past the cap drops the deviation and records the truncation, so what a scan holds
+/// never exceeds what its report will carry. [`is_full`](Self::is_full) is what lets a scan
+/// stop *looking* as well, rather than reading the rest of a filesystem for findings it would
+/// discard.
+///
+/// Compiled where a family is: with none there is no scan to collect into one.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) struct Findings<A> {
+    anomalies: Vec<A>,
+    cap: usize,
+    truncated: bool,
+}
+
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+impl<A> Findings<A> {
+    /// An empty accumulator holding at most `cap` deviations.
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            anomalies: Vec::new(),
+            cap,
+            truncated: false,
+        }
+    }
+
+    /// Record `anomaly`, or record that it was dropped because the cap was reached.
+    pub(crate) fn push(&mut self, anomaly: A) {
+        if self.anomalies.len() >= self.cap {
+            self.truncated = true;
+        } else {
+            self.anomalies.push(anomaly);
+        }
+    }
+
+    /// Whether the cap has been reached, so a scan may stop looking rather than keep reading
+    /// a filesystem for deviations it would discard.
+    ///
+    /// Asking is not idle, which is why this takes `&mut self`: a scan that stops here has
+    /// not looked at the rest of the filesystem, so reaching the cap *is* the truncation and
+    /// is recorded as one. That is what makes a cap of zero produce an empty report that is
+    /// not clean — an absence of findings from a scan that never looked is not a verdict
+    /// about the image.
+    pub(crate) fn is_full(&mut self) -> bool {
+        if self.anomalies.len() >= self.cap {
+            self.truncated = true;
+        }
+        self.truncated
+    }
+}
+
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+impl<A: Deviation> Findings<A> {
+    /// The report these deviations make, over a filesystem addressing in units of `unit`
+    /// bytes.
+    pub(crate) fn into_report(self, unit: u32) -> ScanReport<A> {
+        ScanReport::new(self.anomalies, self.truncated, self.cap, unit)
+    }
+}
+
+/// Write one finding into `o`: `severity`, `family`, `category`, an `offset` when one is
+/// known, a `location` holding the family's own coordinates, and the `detail`.
+fn push_finding_json(mut o: Object<'_>, f: &Finding) {
     // Destructured exhaustively on purpose: a field added to `Finding` is a compile error
     // here, which forces a decision about the emitted record rather than letting a new fact
     // about a finding go silently unreported.
@@ -456,36 +720,24 @@ fn push_finding_json(out: &mut String, f: &Finding) {
         coordinates,
         detail,
     } = f;
-    out.push_str("{\"severity\":\"");
-    out.push_str(severity.as_str());
-    out.push_str("\",\"family\":\"");
-    out.push_str(family.as_str());
-    out.push_str("\",\"category\":");
-    push_json_string(out, category);
+    o.str("severity", severity.as_str());
+    o.str("family", family.as_str());
+    o.str("category", category);
     if let Some(offset) = offset {
-        out.push_str(",\"offset\":");
-        out.push_str(&offset.to_string());
+        o.u64("offset", *offset);
     }
-    out.push_str(",\"location\":");
-    push_coordinates_json(out, coordinates);
-    out.push_str(",\"detail\":");
-    push_json_string(out, detail);
-    out.push('}');
+    push_coordinates_json(o.obj("location"), coordinates);
+    o.str("detail", detail);
+    o.end();
 }
 
-/// Append a JSON object for a finding's coordinates, one member per coordinate in the order
-/// the family reported them.
-fn push_coordinates_json(out: &mut String, coordinates: &[Coordinate]) {
-    out.push('{');
-    for (i, (name, value)) in coordinates.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        push_json_string(out, name);
-        out.push(':');
-        out.push_str(&value.to_string());
+/// Write a finding's coordinates into `o`, one member per coordinate in the order the family
+/// reported them.
+fn push_coordinates_json(mut o: Object<'_>, coordinates: &[Coordinate]) {
+    for (name, value) in coordinates {
+        o.u64(name, *value);
     }
-    out.push('}');
+    o.end();
 }
 
 /// A compact one-line location for the human table: the coordinates as `name value`, joined
@@ -519,27 +771,26 @@ fn sarif_level(severity: Severity) -> &'static str {
 /// A rule is identified by `family/category`, because two families' subsystems may share a
 /// word — a `directory` finding about a FAT is not a `directory` finding about an ext4 — and
 /// a SARIF consumer grouping by `ruleId` would otherwise merge them.
-fn push_sarif_rules(out: &mut String, findings: &[Finding]) {
+fn push_sarif_rules(mut rules: Array<'_>, findings: &[Finding]) {
     let mut seen: Vec<String> = Vec::new();
     for f in findings {
         let id = rule_id(f);
-        if !seen.contains(&id) {
-            if !seen.is_empty() {
-                out.push(',');
-            }
-            out.push_str("{\"id\":");
-            push_json_string(out, &id);
-            out.push_str(",\"name\":");
-            push_json_string(out, &id);
-            out.push_str(",\"shortDescription\":{\"text\":");
-            push_json_string(
-                out,
-                &format!("{} {} finding", f.family.as_str(), f.category),
-            );
-            out.push_str("}}");
-            seen.push(id);
+        if seen.contains(&id) {
+            continue;
         }
+        let mut rule = rules.obj();
+        rule.str("id", &id);
+        rule.str("name", &id);
+        let mut description = rule.obj("shortDescription");
+        description.str(
+            "text",
+            &format!("{} {} finding", f.family.as_str(), f.category),
+        );
+        description.end();
+        rule.end();
+        seen.push(id);
     }
+    rules.end();
 }
 
 /// The SARIF rule a finding belongs to: the family and its own subsystem word.
@@ -550,77 +801,62 @@ fn rule_id(f: &Finding) -> String {
 /// Append one SARIF result: its rule, level (from the severity), message (the detail), a
 /// location carrying the artifact, the byte offset, and the logical address when any is
 /// known, and the full typed value in `properties`.
-fn push_sarif_result(out: &mut String, f: &Finding, artifact_uri: Option<&str>) {
-    out.push_str("{\"ruleId\":");
-    push_json_string(out, &rule_id(f));
-    out.push_str(",\"level\":\"");
-    out.push_str(sarif_level(f.severity));
-    out.push_str("\",\"message\":{\"text\":");
-    push_json_string(out, &f.detail);
-    out.push('}');
+fn push_sarif_result(mut result: Object<'_>, f: &Finding, artifact_uri: Option<&str>) {
+    result.str("ruleId", &rule_id(f));
+    result.str("level", sarif_level(f.severity));
+    let mut message = result.obj("message");
+    message.str("text", &f.detail);
+    message.end();
 
     // Emit `locations` only when there is something to record: an empty location object
     // would carry nothing.
-    let address = location_compact(f);
     let has_address = !f.coordinates.is_empty();
     if artifact_uri.is_some() || f.offset.is_some() || has_address {
-        out.push_str(",\"locations\":[{");
-        let mut first = true;
+        let mut locations = result.arr("locations");
+        let mut location = locations.obj();
         if artifact_uri.is_some() || f.offset.is_some() {
-            out.push_str("\"physicalLocation\":{");
+            let mut physical = location.obj("physicalLocation");
             if let Some(uri) = artifact_uri {
-                out.push_str("\"artifactLocation\":{\"uri\":");
-                push_json_string(out, uri);
-                out.push('}');
+                let mut artifact = physical.obj("artifactLocation");
+                artifact.str("uri", uri);
+                artifact.end();
             }
             if let Some(offset) = f.offset {
-                if artifact_uri.is_some() {
-                    out.push(',');
-                }
-                out.push_str("\"address\":{\"absoluteAddress\":");
-                out.push_str(&offset.to_string());
-                out.push('}');
+                let mut address = physical.obj("address");
+                address.u64("absoluteAddress", offset);
+                address.end();
             }
-            out.push('}');
-            first = false;
+            physical.end();
         }
         if has_address {
-            if !first {
-                out.push(',');
-            }
-            out.push_str("\"logicalLocations\":[{\"fullyQualifiedName\":");
-            push_json_string(out, &address);
-            out.push_str("}]");
+            let mut logical = location.arr("logicalLocations");
+            let mut named = logical.obj();
+            named.str("fullyQualifiedName", &location_compact(f));
+            named.end();
+            logical.end();
         }
-        out.push_str("}]");
+        location.end();
+        locations.end();
     }
 
-    out.push_str(",\"properties\":");
-    push_sarif_properties(out, f);
-    out.push('}');
+    push_sarif_properties(result.obj("properties"), f);
+    result.end();
 }
 
 /// Append the SARIF `properties` bag: the exact severity, family, and category as strings,
 /// the byte offset when known, and each coordinate — everything SARIF's three-level `level`
 /// and its location model cannot themselves carry.
-fn push_sarif_properties(out: &mut String, f: &Finding) {
-    out.push_str("{\"severity\":");
-    push_json_string(out, f.severity.as_str());
-    out.push_str(",\"family\":");
-    push_json_string(out, f.family.as_str());
-    out.push_str(",\"category\":");
-    push_json_string(out, &f.category);
+fn push_sarif_properties(mut o: Object<'_>, f: &Finding) {
+    o.str("severity", f.severity.as_str());
+    o.str("family", f.family.as_str());
+    o.str("category", &f.category);
     if let Some(offset) = f.offset {
-        out.push_str(",\"offset\":");
-        out.push_str(&offset.to_string());
+        o.u64("offset", offset);
     }
     for (name, value) in &f.coordinates {
-        out.push(',');
-        push_json_string(out, name);
-        out.push(':');
-        out.push_str(&value.to_string());
+        o.u64(name, *value);
     }
-    out.push('}');
+    o.end();
 }
 
 #[cfg(test)]

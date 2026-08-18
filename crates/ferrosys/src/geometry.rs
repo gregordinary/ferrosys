@@ -889,14 +889,18 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
             }
             GrowReservation::Max if !can_reserve => 0,
             // The format's own ceiling, bounded by the share of the filesystem a
-            // reservation may occupy. Filling the map costs the same 1024 blocks (at a
-            // 4 KiB block) whatever the size, which is a quarter of a 16 MiB filesystem
-            // and nothing at all on a large one — so past the knee this is the ceiling
-            // and below it the share, and `Max` cannot make a format fail for lack of the
-            // room its own headroom took.
+            // reservation may occupy and by the room the block group leaves beside the
+            // superblock and the live table. Filling the map costs the same 1024 blocks
+            // (at a 4 KiB block) whatever the size, which is a quarter of a 16 MiB
+            // filesystem and nothing at all on a large one — so past the knee this is the
+            // ceiling and below it the share. The group-room bound is what keeps the
+            // promise `Max` documents: near the size where the descriptor run outgrows a
+            // group on its own, an unclamped reservation is what would push it over, and
+            // `Max` must never make a format fail for the room its own headroom took.
             GrowReservation::Max => reserved_limit
                 .min(ceiling_gdt.saturating_sub(gdt))
-                .min(total_blocks / GROW_MAX_SHARE),
+                .min(total_blocks / GROW_MAX_SHARE)
+                .min(bpg.saturating_sub(1 + gdt)),
         };
 
         // The superblock, descriptor table, and reserved descriptor blocks form one
@@ -1452,15 +1456,21 @@ mod tests {
         for bs in [1024u32, 2048, 4096] {
             for shift in 4..=23u32 {
                 let mib = 1u64 << shift;
-                let planned = plan_geo(
-                    mib * MIB,
-                    GrowReservation::Max,
-                    FeatureSet {
-                        block_size: bs,
-                        ..FeatureSet::default()
-                    },
-                );
-                let Ok(l) = planned else { continue };
+                let features = FeatureSet {
+                    block_size: bs,
+                    ..FeatureSet::default()
+                };
+                let planned = plan_geo(mib * MIB, GrowReservation::Max, features);
+                let Ok(l) = planned else {
+                    // `Max` may fail only where the geometry itself cannot be expressed:
+                    // the same size with no reservation at all must fail too, or the
+                    // headroom turned a formattable size into an unformattable one —
+                    // the opposite of what `Max` documents. A sweep that stepped past
+                    // its failures would never see that happen.
+                    plan_geo(mib * MIB, GrowReservation::None, features)
+                        .expect_err("Max failed a size that plans without a reservation");
+                    continue;
+                };
                 let run = super_overhead(l.gdt_blocks, l.reserved_gdt_blocks);
                 assert!(
                     l.group_count < 2 || run <= u64::from(l.blocks_per_group),
@@ -1469,6 +1479,32 @@ mod tests {
                     l.blocks_per_group
                 );
             }
+        }
+    }
+
+    #[test]
+    fn max_plans_every_size_the_geometry_itself_can_express() {
+        // The band just below the size where the descriptor run outgrows a 1 KiB-block
+        // group: the live table alone still fits, and an unclamped `Max` reservation is
+        // what would push the run over. These sizes must plan — refusing them is `Max`
+        // failing a size that formats without it, which is the opposite of what it
+        // documents — and the run must still fit the group with the headroom in place.
+        let features = FeatureSet {
+            block_size: 1024,
+            ..FeatureSet::default()
+        };
+        for groups in [126_961u64, 129_000, 131_056] {
+            let bytes = groups * 8 * 1024 * 1024;
+            plan_geo(bytes, GrowReservation::None, features)
+                .expect("the geometry itself is expressible");
+            let l = plan_geo(bytes, GrowReservation::Max, features)
+                .unwrap_or_else(|e| panic!("{groups} groups: Max refused what None plans: {e}"));
+            let run = super_overhead(l.gdt_blocks, l.reserved_gdt_blocks);
+            assert!(
+                run <= u64::from(l.blocks_per_group),
+                "{groups} groups: a {run}-block run in a {}-block group",
+                l.blocks_per_group
+            );
         }
     }
 

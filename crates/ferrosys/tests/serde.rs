@@ -120,9 +120,70 @@ fn a_feature_set_serializes_as_the_on_disk_words_it_holds() {
     assert_eq!(doc["block_size"], serde_json::json!(4096));
     assert_eq!(doc["inode_size"], serde_json::json!(256));
 
-    // The family selector is a closed domain and serializes as its variant name.
-    assert_eq!(json(&Profile::Ext2), serde_json::json!("Ext2"));
-    assert_eq!(json(&Profile::Ext4), serde_json::json!("Ext4"));
+    // The family selector is a closed domain and serializes as the word it is written as
+    // everywhere else -- `ext2`, not `Ext2`.
+    assert_eq!(
+        json(&Profile::Ext2),
+        serde_json::json!(Profile::Ext2.as_str())
+    );
+    assert_eq!(json(&Profile::Ext4), serde_json::json!("ext4"));
+}
+
+#[test]
+fn a_closed_domain_serializes_as_the_word_this_crate_writes_it_as() {
+    // The rule for every closed set on this surface: what a consumer embedding one of these
+    // values reads is the word the crate prints, not the spelling its variants happen to
+    // have in Rust. A second vocabulary for one set is a vocabulary a reader has to learn
+    // twice, and the derived one is the half nothing else in the crate ever says.
+    //
+    // Held over every such type at once rather than over the one that prompted it: the
+    // spellings that differ most are the ones a derive would mangle worst -- a compound
+    // name, a family whose word is not its capitalization, a property whose word has a
+    // space in it.
+    use ferrosys::ext::Category;
+    use ferrosys::{Direction, Family, Property, Severity};
+
+    assert_eq!(
+        json(&Property::ChangeTime),
+        serde_json::json!("change time")
+    );
+    assert_eq!(
+        json(&Property::ExtendedAttributes),
+        serde_json::json!("extended attributes")
+    );
+    assert_eq!(
+        json(&Direction::Synthesized),
+        serde_json::json!("synthesized")
+    );
+    assert_eq!(
+        json(&Category::GroupDescriptor),
+        serde_json::json!("group descriptor")
+    );
+    assert_eq!(json(&Family::ExFat), serde_json::json!("exfat"));
+    assert_eq!(
+        json(&Severity::Conformance),
+        serde_json::json!("conformance")
+    );
+
+    // And the rule itself, over every variant of every one of them: the serialization is
+    // the name, with nothing between them to drift.
+    for property in [
+        Property::Ownership,
+        Property::Permissions,
+        Property::SpecialBits,
+        Property::Kind,
+        Property::ExtendedAttributes,
+        Property::AccessTime,
+        Property::ChangeTime,
+        Property::ModificationTime,
+        Property::TimePrecision,
+        Property::Name,
+    ] {
+        assert_eq!(json(&property), serde_json::json!(property.as_str()));
+    }
+    for severity in Severity::NAMES {
+        assert_eq!(json(severity), serde_json::json!(severity.as_str()));
+    }
 }
 
 #[test]

@@ -146,11 +146,36 @@ where
     // the floor itself is a candidate, not a value already ruled out.
     let mut lo = floor.saturating_sub(1);
     let mut candidate = floor;
-    let (mut hi, mut fitted) = loop {
+    let (mut hi, mut fitted) = 'climb: loop {
         match probe(candidate) {
             Probe::Fits(value) => break (candidate, value),
             Probe::Impossible(e) => return Err(Some(e)),
-            Probe::Exhausted(e) => return Err(Some(e)),
+            Probe::Exhausted(e) => {
+                // Upward-closed: everything at or above `candidate` refuses this way, so
+                // a fit — if there is one — lies strictly between the last count proven
+                // too small and this candidate. The doubling can overshoot a window
+                // narrower than one doubling, so the window is bisected rather than
+                // surrendered: too-small raises the floor, another upward-closed refusal
+                // lowers the ceiling, and only a window that closes empty returns the
+                // refusal.
+                let mut above = candidate;
+                let mut refusal = e;
+                loop {
+                    if above - lo <= 1 {
+                        return Err(Some(refusal));
+                    }
+                    let mid = lo + (above - lo) / 2;
+                    match probe(mid) {
+                        Probe::Fits(value) => break 'climb (mid, value),
+                        Probe::Impossible(e) => return Err(Some(e)),
+                        Probe::Exhausted(e) => {
+                            above = mid;
+                            refusal = e;
+                        }
+                        Probe::Tight | Probe::TooSmall(_) => lo = mid,
+                    }
+                }
+            }
             Probe::Tight | Probe::TooSmall(_) if candidate == ceiling => {
                 return Err(match probe(ceiling) {
                     Probe::TooSmall(e) => Some(e),
@@ -194,6 +219,24 @@ mod tests {
                 Probe::TooSmall("below the threshold")
             }
         }
+    }
+
+    #[test]
+    fn a_fit_window_narrower_than_one_doubling_is_found_not_stepped_over() {
+        // The climb doubles, so a window that opens and closes between two of its
+        // candidates is one the climb itself never lands in: from 4 it steps to 8, and a
+        // domain that fits only 5 and 6 answers 8 with the upward-closed refusal. That
+        // refusal bounds the window rather than ending the search — the fit is between
+        // the last too-small count and the refused one.
+        for (least, top) in [(5u64, 6u64), (5, 5), (3, 3), (9, 11)] {
+            let (n, carried) =
+                bracket(1, 1 << 30, threshold(least, top)).expect("a size in the window fits");
+            assert_eq!(n, least, "the smallest that fits, window {least}..={top}");
+            assert_eq!(carried, least);
+        }
+        // And a window that is genuinely empty is the refusal, not a loop.
+        let err = bracket(8, 1 << 30, threshold(5, 6)).expect_err("nothing at or above 8 fits");
+        assert_eq!(err, Some("past the top"));
     }
 
     #[test]

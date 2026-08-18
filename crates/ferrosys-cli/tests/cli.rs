@@ -17,27 +17,113 @@ const FERROSYS: &str = env!("CARGO_BIN_EXE_ferrosys");
 const UUID: &str = "f0e17055-0000-4000-8000-000000000000";
 const TIME: &str = "1700000000";
 
-// The host-tool helpers below — `tool`, `available`, `e2fsck_clean`, the version pin —
-// mirror `ferrosys/tests/util/mod.rs`. They are a copy rather than an include
-// because a crate's packaged tests cannot include a file from a sibling crate's
-// directory; a behavioral change here belongs there too.
+// The host-tool helpers below — `tool`, `available`, the version pin, the checkers — mirror
+// `ferrosys/tests/util/mod.rs`, function for function and rule for rule. They are a copy
+// rather than an include because a crate's packaged tests cannot include a file from a
+// sibling crate's directory; a behavioral change here belongs there too, and the reverse.
 
-/// The `e2fsprogs` release the gates are written against: the version CI builds from
-/// source, and the one whose observed behavior pinned every expected value in these
-/// tests.
+/// The `e2fsprogs` release the ext gates are written against: the version CI builds from
+/// source, and the one whose observed behavior pinned every expected value in these tests.
 const E2FSPROGS_VERSION: &str = "1.47.0";
 
-/// The tools that ship in `e2fsprogs` and so are held to [`E2FSPROGS_VERSION`].
-/// Anything else (`tar`, `python3`, `getfattr`) has no version pin.
-const E2FSPROGS_TOOLS: &[&str] = &["debugfs", "dumpe2fs", "e2fsck", "mke2fs", "resize2fs"];
+/// The `dosfstools` release the FAT gates are written against, supplying `fsck.fat` as the
+/// checker for the volumes they write.
+const DOSFSTOOLS_VERSION: &str = "4.2";
+
+/// The `exfatprogs` release the exFAT gates are written against, supplying `fsck.exfat` as
+/// the checker for the volumes they write and `mkfs.exfat` as the formatter for the one
+/// volume here that this tool did not write.
+const EXFATPROGS_VERSION: &str = "1.4.2";
+
+/// The relan/exfat release `exfat-populate` is linked against — the second complete
+/// implementation of exFAT, and what puts a tree into a volume this tool had no hand in.
+const RELAN_EXFAT_VERSION: &str = "1.4.0";
+
+/// The `btrfs-progs` release the btrfs gate is written against, supplying `mkfs.btrfs` —
+/// which both lays out the filesystem and fills it from a directory, so this family's foreign
+/// fixture needs one tool where exFAT's needs two.
+///
+/// This family's binary is read-only, so there is no volume here it wrote and nothing for a
+/// checker to accept: every btrfs the tool is pointed at is one it had no hand in.
+const BTRFS_PROGS_VERSION: &str = "7.1";
+
+/// A suite whose tools are held to an exact version, and how each of them says so.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Suite {
+    E2fsprogs,
+    Dosfstools,
+    Exfatprogs,
+    RelanExfat,
+    BtrfsProgs,
+}
+
+impl Suite {
+    fn version(self) -> &'static str {
+        match self {
+            Suite::E2fsprogs => E2FSPROGS_VERSION,
+            Suite::Dosfstools => DOSFSTOOLS_VERSION,
+            Suite::Exfatprogs => EXFATPROGS_VERSION,
+            Suite::RelanExfat => RELAN_EXFAT_VERSION,
+            Suite::BtrfsProgs => BTRFS_PROGS_VERSION,
+        }
+    }
+
+    /// What `name`'s version banner must contain when it is the pinned release.
+    ///
+    /// A substring rather than a parse, because the suites agree on nothing beyond printing
+    /// their name and their version somewhere: `e2fsprogs` writes `mke2fs 1.47.0 (5-Feb-2023)`
+    /// and `dosfstools` writes `fsck.fat 4.2 (2021-01-31)`. The trailing character is what
+    /// keeps `4.2` from also matching a hypothetical `4.2.1`.
+    fn marker(self, name: &str) -> String {
+        let version = self.version();
+        match self {
+            Suite::E2fsprogs => format!("{name} {version} "),
+            Suite::Dosfstools => format!("{name} {version} ("),
+            // `exfatprogs` names itself and not the binary: every tool in it prints
+            // `exfatprogs version : 1.4.2 (…)`, so there is no tool name to match on.
+            Suite::Exfatprogs => format!("exfatprogs version : {version} ("),
+            // The populator reports the library release it was linked against, since that is
+            // what decides how a volume comes out. Its own source is in this tree.
+            Suite::RelanExfat => format!("{name} (relan/exfat) {version}"),
+            // `btrfs-progs` names the tool ahead of the suite, so the banner carries both.
+            Suite::BtrfsProgs => format!("{name}, part of btrfs-progs v{version}\n"),
+        }
+    }
+}
+
+/// Every tool a gate consults that ships in a pinned suite, with the arguments that make it
+/// print its version banner. Anything absent from this table (`tar`, `python3`, `getfattr`)
+/// is probed for existence alone and has no pin.
+///
+/// The probe arguments differ per tool because the tools do. `e2fsprogs` answers `-V`
+/// throughout; `fsck.fat` prints a banner only when it starts a check, so it is pointed at a
+/// device it will fail on and the banner it prints first is the answer.
+const PINNED: &[(&str, Suite, &[&str])] = &[
+    ("debugfs", Suite::E2fsprogs, &["-V"]),
+    ("dumpe2fs", Suite::E2fsprogs, &["-V"]),
+    ("e2fsck", Suite::E2fsprogs, &["-V"]),
+    ("mke2fs", Suite::E2fsprogs, &["-V"]),
+    ("resize2fs", Suite::E2fsprogs, &["-V"]),
+    ("fsck.fat", Suite::Dosfstools, &["-n", "/dev/null"]),
+    ("mkfs.exfat", Suite::Exfatprogs, &["-V"]),
+    ("fsck.exfat", Suite::Exfatprogs, &["-V"]),
+    ("exfat-populate", Suite::RelanExfat, &["--version"]),
+    ("mkfs.btrfs", Suite::BtrfsProgs, &["--version"]),
+];
+
+fn pinned(name: &str) -> Option<(Suite, &'static [&'static str])> {
+    PINNED
+        .iter()
+        .find(|(tool, _, _)| *tool == name)
+        .map(|(_, suite, probe)| (*suite, *probe))
+}
 
 /// A host-tool invocation with its environment pinned.
 ///
-/// `LC_ALL=C`, because the gates read tool output — `dumpe2fs` field names, `tar`
-/// listings — and a translated message would fail them for reasons that have nothing
-/// to do with the image. `mke2fs` additionally gets the vendored configuration, so the
-/// feature set an oracle image carries is the project's, not whatever the host
-/// distribution enables.
+/// `LC_ALL=C`, because the gates read tool output — `dumpe2fs` field names, `tar` listings —
+/// and a translated message would fail them for reasons that have nothing to do with the
+/// image. `mke2fs` additionally gets the vendored configuration, so the feature set an oracle
+/// image carries is the project's, not whatever the host distribution enables.
 fn tool(name: &str) -> Command {
     let mut cmd = Command::new(name);
     cmd.env("LC_ALL", "C");
@@ -49,7 +135,76 @@ fn tool(name: &str) -> Command {
 
 /// The vendored `mke2fs.conf`, applied at every `mke2fs` call site via [`tool`].
 fn mke2fs_config() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ci/mke2fs.conf")
+    ci_dir().join("mke2fs.conf")
+}
+
+fn ci_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ci")
+}
+
+/// Whether `name` is runnable, printing a loud skip banner when it is not.
+///
+/// A gate that needs a foreign implementation and does not get one has verified nothing, so
+/// where the gates are expected to run (CI sets `FERROSYS_REQUIRE_HOST_TOOLS`) a missing tool
+/// fails the run outright rather than passing in silence.
+///
+/// A tool from a pinned suite is also held to that suite's version: under
+/// `FERROSYS_REQUIRE_HOST_TOOLS` a different version is a hard failure — the run would
+/// otherwise claim an oracle it did not consult — and elsewhere it is reported once per gate,
+/// so a local divergence from CI reads as what it is.
+fn available(name: &str) -> bool {
+    // An unpinned tool is asked `-V` and judged on whether anything came back at all.
+    let (suite, args) = pinned(name).unwrap_or((Suite::E2fsprogs, &["-V"]));
+
+    // Presence, not success. An exit status says nothing useful here: `-V` is not every
+    // tool's version flag, and `fsck.fat` is deliberately pointed at a device it will fail
+    // on. Any output means the binary exists and ran, which is the question; the arguments
+    // only have to make it exit promptly rather than block on input.
+    let Ok(probe) = tool(name).args(args).output() else {
+        return missing(name);
+    };
+    let banner = format!(
+        "{}{}",
+        String::from_utf8_lossy(&probe.stdout),
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    if banner.is_empty() && !probe.status.success() {
+        return missing(name);
+    }
+    if pinned(name).is_some() {
+        check_version(name, suite, &banner);
+    }
+    true
+}
+
+/// Report a tool that is not there, and decide whether that ends the run.
+fn missing(name: &str) -> bool {
+    assert!(
+        std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
+        "host-tool gate requires `{name}` but it was not found on PATH"
+    );
+    eprintln!(
+        "\n!!! SKIPPING host-tool gate: `{name}` not found on PATH — \
+         correctness was NOT verified against the foreign implementation !!!\n"
+    );
+    false
+}
+
+/// Hold a pinned tool's version banner to the release its suite is pinned at.
+fn check_version(name: &str, suite: Suite, banner: &str) {
+    if banner.contains(&suite.marker(name)) {
+        return;
+    }
+    let version = suite.version();
+    assert!(
+        std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
+        "the gates pin `{name}` at {version} as their oracle, but the one on PATH \
+         does not report it. It answered:\n{banner}"
+    );
+    eprintln!(
+        "note: `{name}` is not the {version} the gates are written against — a \
+         divergence may not reproduce under CI's pinned oracle"
+    );
 }
 
 /// The exit codes the tool contracts to, mirroring `e2fsck`'s.
@@ -57,69 +212,6 @@ const OK: i32 = 0;
 const IMAGE_BAD: i32 = 4;
 const OPERATIONAL: i32 = 8;
 const USAGE: i32 = 16;
-
-/// Whether `name` is runnable, printing a loud skip banner when it is not.
-///
-/// A gate that needs a foreign implementation and does not get one has verified nothing,
-/// so where the gates are expected to run (CI sets `FERROSYS_REQUIRE_HOST_TOOLS`) a
-/// missing tool fails the run outright.
-///
-/// The probe only asks whether the binary exists and runs, so any output — a version
-/// line, or a complaint that `-V` is not its flag — counts as present; the flag just has
-/// to make the tool exit promptly rather than block on input. `-V` is the e2fsprogs
-/// version flag, and the tools that spell it `--version` instead (`tar`, `python3`)
-/// answer `-V` with a prompt exit all the same.
-///
-/// An `e2fsprogs` tool is also held to [`E2FSPROGS_VERSION`]: under
-/// `FERROSYS_REQUIRE_HOST_TOOLS` a different version is a hard failure — the run would
-/// otherwise claim an oracle it did not consult — and elsewhere it is reported once per
-/// gate, so a local divergence from CI reads as what it is.
-fn available(name: &str) -> bool {
-    let probe = tool(name).arg("-V").output();
-    let ok = probe
-        .as_ref()
-        .map(|o| o.status.success() || !o.stderr.is_empty() || !o.stdout.is_empty())
-        .unwrap_or(false);
-    if !ok {
-        assert!(
-            std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
-            "gate requires `{name}` but it was not found on PATH"
-        );
-        eprintln!(
-            "\n!!! SKIPPING gate: `{name}` not found on PATH — \
-             this was NOT verified against a foreign implementation !!!\n"
-        );
-        return false;
-    }
-    if E2FSPROGS_TOOLS.contains(&name) {
-        let probe = probe.expect("probed above");
-        // The banner is "<name> 1.47.0 (5-Feb-2023)"; the version is the token after
-        // the tool's own name.
-        let banner = format!(
-            "{}{}",
-            String::from_utf8_lossy(&probe.stdout),
-            String::from_utf8_lossy(&probe.stderr)
-        );
-        let version = banner
-            .split_whitespace()
-            .skip_while(|t| *t != name)
-            .nth(1)
-            .unwrap_or("unknown");
-        if version != E2FSPROGS_VERSION {
-            assert!(
-                std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
-                "the gates pin e2fsprogs {E2FSPROGS_VERSION} as their oracle, \
-                 but `{name}` reports {version}"
-            );
-            eprintln!(
-                "note: `{name}` is version {version}, not the {E2FSPROGS_VERSION} the \
-                 gates are written against — a divergence may not reproduce under CI's \
-                 pinned oracle"
-            );
-        }
-    }
-    true
-}
 
 /// Run the tool and hand back everything it produced.
 fn run(args: &[&str]) -> Output {
@@ -517,18 +609,28 @@ fn an_image_built_from_an_archive_checks_clean() {
 
 /// Assert `e2fsck -fn` finds nothing to fault, reporting both streams labeled.
 fn e2fsck_clean(image: &Path) {
-    let out = tool("e2fsck")
-        .args(["-f", "-n"])
-        .arg(image)
-        .output()
-        .expect("spawn e2fsck");
-    assert!(
-        out.status.success(),
-        "e2fsck faulted the image (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+    if let Err(report) = checked(tool("e2fsck").args(["-f", "-n"]).arg(image), "e2fsck") {
+        panic!("e2fsck faulted the image\n{report}");
+    }
+}
+
+/// Run a checker and hand back what it said, or the whole of its complaint when it refused.
+///
+/// The `Ok` case carries the checker's own summary, which is a second opinion on what an
+/// image contains and is worth asserting on where a gate wants it. This is the shape
+/// `ferrosys/tests/util/mod.rs` uses, so a gate written against one harness reads the same
+/// against the other.
+fn checked(cmd: &mut Command, name: &str) -> Result<String, String> {
+    let out = cmd.output().unwrap_or_else(|e| panic!("spawn {name}: {e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    Err(format!(
+        "{name} exited {:?}\nstdout:\n{stdout}\nstderr:\n{}",
         out.status.code(),
-        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
+    ))
 }
 
 // Walking a tree records Linux inode metadata and Linux extended attributes, so the
@@ -1637,7 +1739,7 @@ fn the_four_exit_codes_are_reachable_and_distinct() {
     // The report still came out — a bad filesystem is described *and* faulted.
     assert!(!out.stdout.is_empty());
 
-    // 8: the bytes are not an ext filesystem at all, so there is no opinion to form.
+    // 8: the bytes are not a filesystem at all, so there is no opinion to form.
     let blob = at(&dir, "blob.img");
     std::fs::write(&blob, vec![0x5a; 64 * 1024]).expect("write");
     assert_eq!(
@@ -1948,6 +2050,21 @@ fn extract_writes_one_artifact_and_nothing_else() {
     assert_eq!(code(&out), OK);
     assert_eq!(out.stdout, b"ferrosys\n");
     assert!(out.stderr.is_empty());
+
+    // A `..` component is an ascent, which is what reaches a file through the relative links
+    // that ascend on a real root filesystem. At the root there is nothing to ascend to, so a
+    // run of them stays there rather than naming anything on the machine reading the image.
+    for path_in_image in [
+        "/etc/../etc/hostname",
+        "/../etc/hostname",
+        "/etc/../../../etc/hostname",
+    ] {
+        assert_eq!(
+            ok(&["extract", path, "--cat", path_in_image]),
+            b"ferrosys\n",
+            "{path_in_image}"
+        );
+    }
 
     // A path the filesystem does not have is an operational failure, not a bad image: the
     // filesystem is fine, the request was not.
@@ -2601,6 +2718,30 @@ fn identity_rewrites_what_an_image_is_known_by() {
 }
 
 #[test]
+fn identity_calls_a_sound_foreign_volume_what_it_is_not_a_bad_filesystem() {
+    // `identity` rewrites ext fields, and pointed at a sound volume of another family the
+    // verdict must be the one every verb gives a request it cannot carry out — exit 8 —
+    // not "a filesystem was read and it is bad", which would send a CI step hunting for
+    // damage in a volume that has none. The refusal names what the image holds, in the
+    // word `detect` prints for it.
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    assert_eq!(code(&format_esp(&image, &tree)), OK);
+    let path = image.to_str().expect("a text path");
+
+    let out = run(&["identity", "--label", "x", path]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("fat32"), "{said}");
+    assert!(said.contains("ext"), "{said}");
+
+    // And the volume is untouched: a refusal writes nothing.
+    let word = ok(&["detect", path]);
+    assert_eq!(String::from_utf8_lossy(&word), "fat32\n");
+}
+
+#[test]
 fn identity_reports_json_and_refuses_a_run_that_would_write_nothing() {
     let dir = scratch();
     let image = at(&dir, "id.img");
@@ -2699,66 +2840,20 @@ fn identity_refuses_a_uuid_that_seeds_the_checksums_and_leaves_the_image_alone()
 // half of that claim, and `fsck.fat` is the foreign judge for the images they write —
 // the same contract `e2fsck_clean` carries above.
 
-/// The `dosfstools` release the FAT gates are written against, mirroring the pin in
-/// `ferrosys/tests/util/mod.rs`.
-const DOSFSTOOLS_VERSION: &str = "4.2";
-
 /// Whether `fsck.fat` is runnable and is the pinned version.
 ///
-/// `fsck.fat` prints its banner only while failing, so the probe points it at a device it
-/// certainly cannot check and reads the banner off the complaint.
+/// It is in [`PINNED`] like every other checker, so this is [`available`] under its own name
+/// rather than a second probe with its own rules.
 fn fsck_fat_available() -> bool {
-    let probe = tool("fsck.fat").args(["-n", "/dev/null"]).output();
-    let Ok(probe) = probe else {
-        assert!(
-            std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
-            "gate requires `fsck.fat` but it was not found on PATH"
-        );
-        eprintln!(
-            "\n!!! SKIPPING gate: `fsck.fat` not found on PATH — \
-             this was NOT verified against a foreign implementation !!!\n"
-        );
-        return false;
-    };
-    let banner = format!(
-        "{}{}",
-        String::from_utf8_lossy(&probe.stdout),
-        String::from_utf8_lossy(&probe.stderr)
-    );
-    let version = banner
-        .split_whitespace()
-        .skip_while(|t| *t != "fsck.fat")
-        .nth(1)
-        .unwrap_or("unknown");
-    if version != DOSFSTOOLS_VERSION {
-        assert!(
-            std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
-            "the gates pin dosfstools {DOSFSTOOLS_VERSION} as their oracle, \
-             but `fsck.fat` reports {version}"
-        );
-        eprintln!(
-            "note: `fsck.fat` is version {version}, not the {DOSFSTOOLS_VERSION} the gates \
-             are written against"
-        );
-    }
-    true
+    available("fsck.fat")
 }
 
-/// Check a FAT image with `fsck.fat -n`, which answers no to every repair — so the image
-/// is never modified and the exit status is a verdict rather than a report of repairs.
+/// Check a FAT image with `fsck.fat -n`, which answers no to every repair — so the image is
+/// never modified and the exit status is a verdict rather than a report of what was fixed.
 fn fsck_fat_clean(image: &Path) {
-    let out = tool("fsck.fat")
-        .arg("-n")
-        .arg(image)
-        .output()
-        .expect("fsck.fat runs");
-    assert!(
-        out.status.success(),
-        "fsck.fat exited {:?}\nstdout:\n{}\nstderr:\n{}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    if let Err(report) = checked(tool("fsck.fat").arg("-n").arg(image), "fsck.fat") {
+        panic!("fsck.fat faulted the image\n{report}");
+    }
 }
 
 /// A serial number in the form the tool prints and reads.
@@ -2953,7 +3048,7 @@ fn a_fat_volume_is_detected_described_and_read_back_by_the_binary() {
 
     // `detect` names the type, not just the family: the word a caller acts on, and the
     // same word `-t` takes. Answering `unrecognized` here is the failure this whole
-    // workstream exists to end.
+    // command exists to end.
     assert_eq!(ok(&["detect", path]), b"fat32\n");
 
     // `inspect` describes it through the same envelope an ext image gets: a head that
@@ -3143,4 +3238,1594 @@ fn a_fat_build_refuses_what_it_would_lose_until_it_is_told_it_may() {
     assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
     let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
     assert!(!listing.contains("/link"), "{listing}");
+}
+
+// -- the exFAT family -----------------------------------------------------------------
+//
+// The third family's half of the same claim, and the one place these gates go further than
+// the two above: one of them runs the shipping binary over a volume *no part of this
+// workspace wrote*. The FAT family's gap here is what makes that worth a gate of its own —
+// the library could read a volume the binary answered `unrecognized` for, and every test
+// used images the tool could also write, so nothing noticed. A foreign image through the
+// command is the check that would have.
+
+/// The volume serial the exFAT gates write, in the form the tool prints and reads.
+const EXFAT_SERIAL: &str = "5E71-A10C";
+
+/// Check an exFAT volume with `fsck.exfat -n`, which answers no to every repair — so the
+/// image is never modified and the exit status is a verdict rather than a report of what was
+/// fixed.
+fn fsck_exfat_clean(image: &Path) {
+    if let Err(report) = checked(tool("fsck.exfat").arg("-n").arg(image), "fsck.exfat") {
+        panic!("fsck.exfat faulted the image\n{report}");
+    }
+}
+
+/// Format the ESP tree as an exFAT volume, accepting the two losses a host tree always takes.
+///
+/// The same two the FAT gates accept, which is worth stating because the reason has narrowed
+/// and not gone: exFAT keeps a creation and a modification time to ten milliseconds, so the
+/// odd second `esp_tree` sets survives in both of those exactly — and its *access* time is
+/// two-second granular like FAT's, with no hundredths field beside it, so the precision is
+/// still lost on that one. The change time has nowhere to go in either format.
+fn format_exfat(image: &Path, tree: &Path) -> Output {
+    run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "exfat",
+        "--volume-serial",
+        EXFAT_SERIAL,
+        "--label",
+        "ESP",
+        "--owner",
+        "0:0",
+        "--accept-loss",
+        "change-time,time-precision",
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+        image.to_str().expect("a text path"),
+    ])
+}
+
+#[test]
+fn an_exfat_volume_the_tool_wrote_is_one_a_foreign_checker_accepts() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    let out = format_exfat(&image, &tree);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The summary names what the volume could not carry, in the words `--accept-loss` reads —
+    // so a property the report shows is one that can be typed back in.
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("change-time"), "{said}");
+    assert!(said.contains("time-precision"), "{said}");
+    assert!(said.contains("Volume serial number:   5E71-A10C"), "{said}");
+    assert!(said.contains("Volume label:           ESP\n"), "{said}");
+    // The three the format allocates before a caller's first file, which no other family's
+    // summary has a line for.
+    assert!(said.contains("Up-case table at cluster:"), "{said}");
+
+    if available("fsck.exfat") {
+        fsck_exfat_clean(&image);
+    }
+}
+
+#[test]
+fn exfat_refuses_the_time_flag_it_has_no_field_for() {
+    // An exFAT volume records no instant of its own anywhere, so `--time` here would be
+    // an accepted flag that changes nothing — which reads as one that worked. It is
+    // refused by name, exactly as any other option of a family that was not named is,
+    // and the command line without it is complete.
+    let dir = scratch();
+    let image = at(&dir, "timed.img");
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "exfat",
+        "--volume-serial",
+        EXFAT_SERIAL,
+        "--time",
+        TIME,
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--time") && said.contains("exfat"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+}
+
+#[test]
+fn an_exfat_volume_is_detected_described_and_read_back_by_the_binary() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    assert_eq!(code(&format_exfat(&image, &tree)), OK);
+    let path = image.to_str().expect("a text path");
+
+    // One word, and it is the family's: this format has one revision and every volume records
+    // it, so there is no finer answer to give. It is the same word `-t` takes.
+    assert_eq!(ok(&["detect", path]), b"exfat\n");
+
+    // `inspect` describes it through the same envelope the other two get: a head that means
+    // the same thing for all three, then this family's own body.
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Filesystem family:          exfat"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem variant:         exfat"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem identifier:      5E71-A10C"),
+        "{report}"
+    );
+    // The body is exFAT's own vocabulary, and none of either neighbour's: no block groups,
+    // and no second allocation table to count.
+    assert!(report.contains("Up-case table at cluster:"), "{report}");
+    assert!(report.contains("Volume state:"), "{report}");
+    assert!(!report.contains("Block groups:"), "{report}");
+    assert!(!report.contains("Allocation tables:"), "{report}");
+    // ...and the whole image was scanned, so this is a verdict rather than a description.
+    assert!(report.contains("no findings"), "{report}");
+
+    // `extract` reads the tree back out through the shared extraction surface. The names come
+    // back in the case they went in — this format stores one name and stores it whole.
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    for name in ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI", "/readme.txt"] {
+        assert!(listing.contains(name), "{name} is missing from\n{listing}");
+    }
+    assert_eq!(ok(&["extract", path, "--cat", "/readme.txt"]), b"hello\n");
+}
+
+#[test]
+fn a_volume_nothing_here_wrote_is_read_by_the_shipping_binary() {
+    // The measurement this family's CLI half exists for, and the one the FAT family had no
+    // gate for. Every byte of this volume was decided by `mkfs.exfat` and by relan/exfat's
+    // `libexfat`; the binary has to identify it, describe it, and read what is in it.
+    if !available("mkfs.exfat") || !available("exfat-populate") {
+        return;
+    }
+    let dir = scratch();
+    let image = at(&dir, "foreign.img");
+    std::fs::File::create(&image)
+        .expect("create the image")
+        .set_len(64 << 20)
+        .expect("size the image");
+    let out = tool("mkfs.exfat")
+        .args(["-L", "FOREIGN"])
+        .arg(&image)
+        .output()
+        .expect("spawn mkfs.exfat");
+    assert!(
+        out.status.success(),
+        "the baseline could not build the volume: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A tree with a name longer than one entry spells and a file large enough to span several
+    // clusters, so what the binary reads back is a reassembled name and a followed run rather
+    // than one entry and one cluster.
+    let script = "mkdir /DCIM\nwrite /DCIM/A_Long_Name_For_The_Reader.bin 200000 1\n";
+    let mut child = tool("exfat-populate")
+        .arg(&image)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn exfat-populate");
+    child
+        .stdin
+        .as_mut()
+        .expect("the populator's standard input")
+        .write_all(script.as_bytes())
+        .expect("write the script");
+    let filled = child.wait_with_output().expect("wait for exfat-populate");
+    assert!(
+        filled.status.success(),
+        "the foreign populator could not fill the volume: {}",
+        String::from_utf8_lossy(&filled.stderr)
+    );
+
+    let path = image.to_str().expect("a text path");
+    assert_eq!(ok(&["detect", path]), b"exfat\n");
+
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Filesystem family:          exfat"),
+        "{report}"
+    );
+    // A volume a conformant foreign implementation wrote is one this tool finds nothing wrong
+    // with. A finding here is either a real difference between two writers or a rule this
+    // crate has stated too narrowly, and both are worth a red gate.
+    assert!(report.contains("no findings"), "{report}");
+
+    // And the contents, which is the half a clean scan does not cover: a reader that read
+    // nothing would report no anomalies either.
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    assert!(
+        listing.contains("/DCIM/A_Long_Name_For_The_Reader.bin"),
+        "{listing}"
+    );
+    let bytes = ok(&[
+        "extract",
+        path,
+        "--cat",
+        "/DCIM/A_Long_Name_For_The_Reader.bin",
+    ]);
+    assert_eq!(bytes.len(), 200_000, "the whole file came back");
+    // The populator's fill is a little-endian counter naming the offset each word belongs at,
+    // so a read that landed four bytes out reads back a number that says where it really is.
+    let word = u32::from_le_bytes(bytes[4000..4004].try_into().expect("four bytes"));
+    assert_eq!(word, 1000 + 1, "the bytes came from the right offset");
+}
+
+#[test]
+fn a_size_this_family_cannot_search_for_is_refused_before_anything_is_read() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+
+    // `--size auto` plans candidate sizes and places the contents into each, and that search
+    // is a family's own. This one has none, so the refusal comes from the command line rather
+    // than from a plan — which is what keeps a whole tree from being walked to say so.
+    //
+    // The source is a directory that is not there, and that is the assertion: a run that
+    // reached the planning stage would fail on the missing tree instead, so the message being
+    // about the size is what says nothing was read. Without it the refusal could equally come
+    // from the plan, which spells the same words on purpose.
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "-t",
+        "exfat",
+        "--volume-serial",
+        EXFAT_SERIAL,
+        "--accept-loss",
+        "change-time,time-precision",
+        "--from-dir",
+        dir.path()
+            .join("no-such-tree")
+            .to_str()
+            .expect("a text path"),
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--size auto"), "{said}");
+    assert!(said.contains("exfat"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+}
+
+#[test]
+fn an_option_belongs_to_a_family_or_to_the_class_that_shares_it() {
+    let dir = scratch();
+    let image = at(&dir, "out.img");
+    let path = image.to_str().expect("a text path");
+
+    // Each family names its own identity, and neither of the other two flags reaches this one.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "exfat",
+        "--volume-id",
+        SERIAL,
+        path,
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--volume-id"), "{said}");
+    assert!(said.contains("fat family"), "{said}");
+
+    // ...and the reverse, so neither direction is the one that happens to work.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "--uuid",
+        UUID,
+        "--volume-serial",
+        EXFAT_SERIAL,
+        "--time",
+        TIME,
+        path,
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--volume-serial"), "{said}");
+    assert!(said.contains("exfat family"), "{said}");
+
+    // But `--accept-loss` belongs to a *class* rather than to a family: the two formats that
+    // record a name, a few attribute bits and some times lose the same six properties for the
+    // same reason, so the option reaches both and is refused only for the third.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--accept-loss",
+        "all",
+        path,
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--accept-loss"), "{said}");
+    assert!(said.contains("the fat and exfat families"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+}
+
+/// A path that descends through a regular file is the caller's error, on every family.
+///
+/// The exit-code contract draws the 4-versus-8 line at "a filesystem was read, and it is
+/// bad", so a typo'd path must answer 8 with the path in the message whichever family
+/// answers — a gate keyed on 4 must never receive a corruption verdict from a caller's typo.
+#[test]
+fn a_path_through_a_file_is_the_callers_error_whichever_family_answers() {
+    let dir = scratch();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).expect("make the tree");
+    std::fs::write(tree.join("hello.txt"), b"hello\n").expect("the file");
+    // Modes the FAT and exFAT read-back reports for every entry, so the format loses
+    // nothing this test is not about.
+    std::fs::set_permissions(&tree, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the directory's mode");
+    std::fs::set_permissions(
+        tree.join("hello.txt"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .expect("the file's mode");
+    let tree = tree.to_str().expect("a text path");
+
+    let families: [(&str, Vec<&str>); 4] = [
+        ("ext4", vec!["--uuid", UUID, "--time", TIME]),
+        (
+            "fat32",
+            vec![
+                "--volume-id",
+                SERIAL,
+                "--time",
+                TIME,
+                "--accept-loss",
+                "change-time,time-precision",
+            ],
+        ),
+        (
+            "exfat",
+            vec![
+                "--volume-serial",
+                EXFAT_SERIAL,
+                "--accept-loss",
+                "change-time,time-precision",
+            ],
+        ),
+        // The one family whose smallest default-profile volume is past sixty-four mebibytes.
+        (
+            "btrfs",
+            vec!["--fsid", FSID, "--time", TIME, "--size", "128M"],
+        ),
+    ];
+    for (family, identity) in families {
+        let image = at(&dir, &format!("{family}.img"));
+        let path = image.to_str().expect("a text path");
+        let mut args = vec!["format", "-t", family, "--owner", "0:0", "--from-dir", tree];
+        if family != "btrfs" {
+            args.extend_from_slice(&["--size", "64M"]);
+        }
+        args.extend_from_slice(&identity);
+        args.push(path);
+        let out = run(&args);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+        let out = run(&["extract", path, "--cat", "/hello.txt/x"]);
+        assert_eq!(
+            code(&out),
+            OPERATIONAL,
+            "{family}: a typo'd path is not a verdict about the image:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("no such path in the filesystem: /hello.txt/x"),
+            "{family}: what reaches the caller is the path it typed: {said}"
+        );
+    }
+}
+
+#[test]
+fn an_exfat_label_is_text_and_a_lookup_is_case_insensitive() {
+    let dir = scratch();
+    let image = at(&dir, "esp.img");
+    let tree = esp_tree(&dir);
+    let path = image.to_str().expect("a text path");
+    assert_eq!(code(&format_exfat(&image, &tree)), OK);
+
+    // The volume's own up-case table is what a lookup folds through, so a path in a case
+    // nobody wrote reaches the entry a driver reading the same volume would reach.
+    assert_eq!(ok(&["extract", path, "--cat", "/README.TXT"]), b"hello\n");
+    assert_eq!(ok(&["extract", path, "--cat", "/readme.txt"]), b"hello\n");
+
+    // A label of twelve code units is one the eleven-unit field cannot hold, and it is refused
+    // rather than truncated into a name no reader spells the way it was typed.
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "exfat",
+        "--volume-serial",
+        EXFAT_SERIAL,
+        "--label",
+        "TWELVE CHARS",
+        at(&dir, "labelled.img").to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--label"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// -- the btrfs family -----------------------------------------------------------------
+//
+// The fourth family, and the one whose two halves shipped a release apart: the reading gates
+// below came first and every fixture in them is a filesystem `mkfs.btrfs` built and filled,
+// which is the case the exFAT gates had to construct deliberately and the one that matters
+// most — a library that reads an image the shipping binary answers `unrecognized` for is a
+// library nobody can point at anything. The writing gates follow, and what they add is the
+// other direction: an image this tool laid out, put in front of the checker that has no hand
+// in it.
+
+/// How large the btrfs fixture is.
+///
+/// Above the smallest this pin will format at its default metadata profile, and sparse, so what
+/// it costs is its metadata and the file put into it.
+const BTRFS_BYTES: u64 = 512 << 20;
+
+/// A btrfs nothing in this workspace wrote, filled from a tree nothing in this workspace reads.
+///
+/// One tool does both halves, which is this family's difference from exFAT's fixture: `mkfs.btrfs
+/// -r` lays the filesystem out and copies a directory into it, and `--subvol` makes part of that
+/// directory a filesystem tree of its own — so the fixture reaches a structure no other family
+/// here has, without a second implementation being involved.
+fn foreign_btrfs(dir: &tempfile::TempDir) -> PathBuf {
+    let tree = dir.path().join("btrfs-tree");
+    std::fs::create_dir_all(tree.join("etc")).expect("make the tree");
+    std::fs::create_dir(tree.join("home")).expect("make the subvolume's directory");
+    std::fs::write(tree.join("etc/hostname"), b"hello\n").expect("write the file");
+    std::fs::write(tree.join("home/note.txt"), b"inside\n").expect("write the file");
+    // A link naming a directory, which is how every current distribution's root filesystem is
+    // laid out: `/bin`, `/lib`, and `/sbin` are links into `/usr`, so a path resolved through
+    // one is the ordinary case rather than an edge of it.
+    std::os::unix::fs::symlink("etc", tree.join("to-etc")).expect("link to a directory");
+
+    let image = at(dir, "foreign-btrfs.img");
+    std::fs::File::create(&image)
+        .expect("create the image")
+        .set_len(BTRFS_BYTES)
+        .expect("size the image");
+    let out = tool("mkfs.btrfs")
+        .args([
+            "-q", "-f", "-s", "4096", "-L", "FOREIGN", "--subvol", "rw:home", "-r",
+        ])
+        .arg(&tree)
+        .arg(&image)
+        .output()
+        .expect("spawn mkfs.btrfs");
+    assert!(
+        out.status.success(),
+        "the baseline could not build the filesystem: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    image
+}
+
+#[test]
+fn a_btrfs_nothing_here_wrote_is_detected_described_and_read_back_by_the_binary() {
+    if !available("mkfs.btrfs") {
+        return;
+    }
+    let dir = scratch();
+    let image = foreign_btrfs(&dir);
+    let path = image.to_str().expect("a text path");
+
+    // One word, and it is the family's: this format has one revision, no lineage to spell, and
+    // nothing finer to sub-classify into.
+    assert_eq!(ok(&["detect", path]), b"btrfs\n");
+
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Filesystem family:          btrfs"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem variant:         btrfs"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Label:                      FOREIGN"),
+        "{report}"
+    );
+    // The body is this family's own vocabulary and none of the other three's: a tree block is
+    // not a block group, and a chunk map is a layer no other family in this tool has.
+    assert!(report.contains("Tree block size:"), "{report}");
+    assert!(report.contains("Mapped chunks:"), "{report}");
+    assert!(report.contains("FS_TREE at:"), "{report}");
+    assert!(!report.contains("Block groups:"), "{report}");
+    assert!(!report.contains("Allocation tables:"), "{report}");
+    // Every superblock copy the volume has room for, said one by one rather than counted: which
+    // copy is damaged is what a person acts on.
+    assert!(
+        report.contains("Superblock copies:          present"),
+        "{report}"
+    );
+    // The subvolumes, which is the thing someone points this command at a btrfs to find out.
+    // The top-level tree is one of them and is the one no directory entry names.
+    assert!(report.contains("Subvolume <top-level>:"), "{report}");
+    assert!(report.contains("Subvolume home:"), "{report}");
+    // A filesystem a conformant foreign implementation wrote is one this tool finds nothing
+    // wrong with. A finding here is either a real difference between two writers or a rule this
+    // crate has stated too narrowly, and both are worth a red gate.
+    assert!(report.contains("no findings"), "{report}");
+
+    // And the contents, which is the half a clean scan does not cover: a reader that read
+    // nothing would report no anomalies either. The walk crosses the subvolume boundary, so
+    // what comes back is the filesystem rather than one of its trees.
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    for name in ["/etc/hostname", "/home", "/home/note.txt", "/to-etc -> etc"] {
+        assert!(listing.contains(name), "{name} is missing from\n{listing}");
+    }
+    assert_eq!(ok(&["extract", path, "--cat", "/etc/hostname"]), b"hello\n");
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/home/note.txt"]),
+        b"inside\n"
+    );
+    // A path continuing through a link to a directory, which is the resolution a distribution's
+    // root filesystem needs on nearly every absolute path in it.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/to-etc/hostname"]),
+        b"hello\n"
+    );
+    // And an ascent, on a filesystem this tool did not write: back out of one directory and
+    // down into another, which is the other half of what a relative link on a real root
+    // filesystem needs.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/home/../etc/hostname"]),
+        b"hello\n"
+    );
+}
+
+// -- the btrfs family, written --------------------------------------------------------
+//
+// What the gates above establish is that this tool reads a filesystem it had no hand in.
+// These are the other direction, and the authority runs the other way with it: the checker
+// that built none of these images is what says each one is a filesystem, and this tool's own
+// reader is what says the tree inside it is the tree that went in. Neither claim alone is
+// enough — a checker accepts an empty filesystem happily, and a reader agreeing with the
+// writer it was built beside proves only that the two share a misunderstanding.
+
+/// How large the images these gates write are.
+///
+/// Well past the smallest this pin formats at the default profile pairing, and sparse, so what
+/// one costs is its metadata and whatever went into it.
+const BTRFS_WRITTEN_BYTES: &str = "1G";
+
+/// The filesystem id every image here is written with, in the dashed form the tool prints.
+const FSID: &str = "5f2ac1de-0000-4000-8000-000000000001";
+
+/// Assert `btrfs check` finds nothing to fault, with its data pass as well.
+///
+/// Both passes, because they are two checkers rather than one loud one: a file whose bytes
+/// have been altered is a clean filesystem to the first and a fault to the second, so an image
+/// that has only met the first has not been asked about its data at all.
+fn btrfs_check_clean(image: &Path) {
+    for extra in [&[][..], &["--check-data-csum"][..]] {
+        let mut cmd = tool("btrfs");
+        cmd.args(["check", "--readonly"]).args(extra).arg(image);
+        if let Err(report) = checked(&mut cmd, "btrfs check") {
+            panic!("btrfs check faulted an image this tool wrote\n{report}");
+        }
+    }
+}
+
+/// A source tree with one of everything the round trip below asserts on.
+///
+/// Small, and each entry is a distinct claim: a nested directory, a file whose bytes are past
+/// what a leaf holds so it becomes an addressed extent, a file small enough to live inside the
+/// metadata, a symbolic link, and a second name for a file. Two directories at the root, which
+/// is what lets the subvolume gate make one a tree of its own and leave the other where it is.
+fn btrfs_source(dir: &tempfile::TempDir) -> PathBuf {
+    let root = dir.path().join("btrfs-source");
+    std::fs::create_dir_all(root.join("system/etc")).expect("make the tree");
+    std::fs::create_dir_all(root.join("people/user")).expect("make the tree");
+    std::fs::write(root.join("system/etc/hostname"), b"ferrosys\n").expect("write the file");
+    // Every byte a function of its own position, so a read that returned another file's
+    // correctly-checksummed bytes is caught by the contents rather than by the length.
+    let large: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+    std::fs::write(root.join("people/user/blob.bin"), &large).expect("write the file");
+    std::os::unix::fs::symlink("etc/hostname", root.join("system/name")).expect("link to a file");
+    std::fs::hard_link(
+        root.join("system/etc/hostname"),
+        root.join("system/etc/hostname.also"),
+    )
+    .expect("a second name for one file");
+    root
+}
+
+#[test]
+fn a_btrfs_this_tool_wrote_is_a_filesystem_the_checker_accepts_and_reads_back_as_it_went_in() {
+    if !available("mkfs.btrfs") {
+        return;
+    }
+    let dir = scratch();
+    let source = btrfs_source(&dir);
+    let image = at(&dir, "written.img");
+    let path = image.to_str().expect("a text path");
+
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "--label",
+        "ferrosys",
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The authority that had no hand in it.
+    btrfs_check_clean(&image);
+
+    // And this tool's own reader over the same image, which is the half a checker cannot make:
+    // a filesystem with the wrong bytes under the right checksums passes `check` and fails here.
+    assert_eq!(ok(&["detect", path]), b"btrfs\n");
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    assert!(
+        report.contains("Filesystem family:          btrfs"),
+        "{report}"
+    );
+    assert!(
+        report.contains(FSID),
+        "the id it was written with: {report}"
+    );
+    assert!(report.contains("ferrosys"), "the label: {report}");
+    assert!(report.contains("no findings"), "{report}");
+
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname"]),
+        b"ferrosys\n"
+    );
+    // Through the symbolic link, and through it to the file it names.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/name"]),
+        b"ferrosys\n"
+    );
+    // The second name for one file is the same file.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname.also"]),
+        b"ferrosys\n"
+    );
+    // And the file whose bytes are past what a leaf holds comes back as what went in, byte for
+    // byte, which is what says the extents were addressed rather than merely counted.
+    let large: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/people/user/blob.bin"]),
+        large
+    );
+}
+
+/// A feature named on the command line reaches the superblock, and the filesystem it produces
+/// is one the checker still accepts.
+///
+/// The case worth writing the option for: `block-group-tree` is a default of this pin and a
+/// kernel older than 6.1 cannot mount a filesystem carrying it, so clearing it is how a caller
+/// writes an image for an older kernel. What is asserted is the whole path — the word is
+/// parsed in btrfs's vocabulary, the planner writes the word it selected, `inspect` prints the
+/// same word back, and an authority that had no hand in any of it calls the result sound.
+#[test]
+fn a_feature_named_on_the_command_line_reaches_the_filesystem_and_is_read_back_by_its_name() {
+    if !available("mkfs.btrfs") {
+        return;
+    }
+    let dir = scratch();
+    let source = btrfs_source(&dir);
+    let image = at(&dir, "features.img");
+    let path = image.to_str().expect("a text path");
+
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "-O",
+        "^block-group-tree",
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    btrfs_check_clean(&image);
+
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    let features = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Filesystem features:"))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("inspect reported no feature line\n{report}"));
+    assert!(
+        !features.split(' ').any(|word| word == "block-group-tree"),
+        "the feature the command line cleared is still there: {features}"
+    );
+    // The rest of the baseline is untouched, which is what says one name moved one feature.
+    for word in ["free-space-tree", "no-holes", "skinny-metadata", "extref"] {
+        assert!(
+            features.split(' ').any(|have| have == word),
+            "{word} is missing from {features}"
+        );
+    }
+
+    // A word of another family's vocabulary is refused rather than ignored, so a command line
+    // that asked for something this filesystem has no concept of does not quietly succeed.
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "-O",
+        "has_journal",
+        "--time",
+        TIME,
+        at(&dir, "refused.img").to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not a feature name of the btrfs family"),
+        "{err}"
+    );
+}
+
+#[test]
+fn subvolumes_are_written_where_the_command_line_put_them_and_the_checker_takes_them() {
+    if !available("mkfs.btrfs") {
+        return;
+    }
+    let dir = scratch();
+    let source = btrfs_source(&dir);
+    let image = at(&dir, "subvolumes.img");
+    let path = image.to_str().expect("a text path");
+
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "--subvol",
+        "5f2ac1de-0000-4000-8000-0000000000a1:/system",
+        "--subvol",
+        "ro:5f2ac1de-0000-4000-8000-0000000000a2:/people",
+        "--default-subvol",
+        "/system",
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    btrfs_check_clean(&image);
+
+    // The checker's root-reference pass is what says the linkage between a subvolume and the
+    // directory it hangs under is sound, and it runs above. What this adds is that the trees
+    // are the ones asked for: two beside the one every btrfs has, one of them read-only, and a
+    // mount told no subvolume landing on the first.
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    assert!(report.contains("Subvolume system:"), "{report}");
+    assert!(report.contains("default"), "{report}");
+    assert!(
+        report.contains("Subvolume people:") && report.contains("read-only"),
+        "{report}"
+    );
+
+    // A walk crosses the boundary rather than stopping at it, so the tree a reader sees is the
+    // filesystem rather than one of its trees — which is the property that makes a subvolume
+    // layout usable at all.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname"]),
+        b"ferrosys\n"
+    );
+}
+
+#[test]
+fn every_identifier_and_every_geometry_knob_reaches_the_image() {
+    if !available("mkfs.btrfs") {
+        return;
+    }
+    let dir = scratch();
+    let image = at(&dir, "knobs.img");
+    let path = image.to_str().expect("a text path");
+
+    // Each identifier a distinct value, so a field written out of the wrong one is visible
+    // rather than a coincidence of zeros — and a geometry that is not the default at any of
+    // its four knobs, so a knob that was read and dropped is a difference rather than a match.
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "--metadata-uuid",
+        "5f2ac1de-0000-4000-8000-0000000000b1",
+        "--chunk-tree-uuid",
+        "5f2ac1de-0000-4000-8000-0000000000b2",
+        "--device-uuid",
+        "5f2ac1de-0000-4000-8000-0000000000b3",
+        "--subvolume-uuid",
+        "5f2ac1de-0000-4000-8000-0000000000b4",
+        "--sector-size",
+        "4096",
+        "--node-size",
+        "4096",
+        "--metadata-profile",
+        "single",
+        "--data-profile",
+        "dup",
+        "--time",
+        TIME,
+        "--json",
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    btrfs_check_clean(&image);
+
+    let receipt = String::from_utf8_lossy(&out.stdout).into_owned();
+    for uuid in [
+        "5f2ac1de-0000-4000-8000-0000000000b1",
+        "5f2ac1de-0000-4000-8000-0000000000b2",
+        "5f2ac1de-0000-4000-8000-0000000000b3",
+        "5f2ac1de-0000-4000-8000-0000000000b4",
+    ] {
+        assert!(receipt.contains(uuid), "{uuid} is not in {receipt}");
+    }
+    assert!(receipt.contains("\"node_size\":4096"), "{receipt}");
+    // A profile decides how many copies of a chunk the device carries, and this line asks for
+    // them the other way round from the defaults — so a run that ignored both options would
+    // still differ from one that ignored only one.
+    let copies = |contents: &str| {
+        receipt
+            .split(&format!("\"contents\":\"{contents}\""))
+            .nth(1)
+            .and_then(|tail| tail.split("\"device_offsets\":[").nth(1))
+            .and_then(|tail| tail.split(']').next())
+            .map(|list| list.split(',').count())
+            .unwrap_or_else(|| panic!("no {contents} chunk in {receipt}"))
+    };
+    assert_eq!(copies("metadata"), 1, "unreplicated metadata is one copy");
+    assert_eq!(copies("system"), 1, "the system chunk follows the metadata");
+    assert_eq!(copies("data"), 2, "replicated data is two copies");
+}
+
+#[test]
+fn a_btrfs_format_this_tool_refuses_says_which_word_it_refused_and_writes_nothing() {
+    let dir = scratch();
+
+    // Two subvolumes under one identifier make a UUID tree with a repeated key. Caught by the
+    // name the caller typed rather than by the tree that came out of it, which is a fact about
+    // a structure nobody asked about.
+    let image = at(&dir, "repeated.img");
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "--subvol",
+        "5f2ac1de-0000-4000-8000-0000000000a1:/one",
+        "--subvol",
+        "5f2ac1de-0000-4000-8000-0000000000a1:/two",
+        "--time",
+        TIME,
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("/one") && said.contains("/two"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+
+    // An identity is required, as every family's is: an image whose bytes are a function of
+    // its inputs is one that has been given them.
+    let image = at(&dir, "unidentified.img");
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--time",
+        TIME,
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--fsid"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!image.exists(), "a refused line wrote nothing");
+
+    // Another family's identity is refused by name rather than passed over. `--uuid` is the
+    // same width as `--fsid` and a field of a different format, which is exactly the pairing
+    // that would otherwise be quietly accepted.
+    let out = run(&[
+        "format",
+        "--size",
+        BTRFS_WRITTEN_BYTES,
+        "-t",
+        "btrfs",
+        "--uuid",
+        FSID,
+        "--time",
+        TIME,
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--uuid") && said.contains("btrfs"), "{said}");
+
+    // And `--size auto` names a search this family does not have, refused before a source is
+    // read rather than after.
+    let out = run(&[
+        "format",
+        "--size",
+        "auto",
+        "-t",
+        "btrfs",
+        "--fsid",
+        FSID,
+        "--time",
+        TIME,
+        image.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), USAGE);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--size auto"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn two_btrfs_formats_of_one_command_line_are_one_image() {
+    let dir = scratch();
+    // The reproducibility claim reaching the command line: the tool reads neither the clock nor
+    // a random source, so the same words twice are the same bytes twice. Every identifier this
+    // family invents is an input above, which is what makes it true here.
+    //
+    // **From an archive rather than from a directory tree, and the difference is the host's.**
+    // A tar member's times are in the archive, so reading it twice describes one source twice.
+    // A host tree's times are the host's, and *walking one changes them*: on a filesystem that
+    // records access times, the walk that reads a file updates that file's access time, so the
+    // second walk of one tree is a walk of a tree that is no longer what the first one saw.
+    // btrfs is the family where that shows, because it is the only one of the four that stores
+    // an access time to the nanosecond — and the difference is a millisecond. So the claim this
+    // asserts is about the tool, and pointing it at a directory would have been asserting
+    // something about the machine.
+    let archive = write_archive(&dir);
+    let mut written = Vec::new();
+    for name in ["first.img", "second.img"] {
+        let image = at(&dir, name);
+        let out = run(&[
+            "format",
+            "--size",
+            BTRFS_WRITTEN_BYTES,
+            "-t",
+            "btrfs",
+            "--fsid",
+            FSID,
+            "--subvol",
+            "5f2ac1de-0000-4000-8000-0000000000a1:/etc",
+            "--time",
+            TIME,
+            "--from-tar",
+            archive.to_str().expect("a text path"),
+            image.to_str().expect("a text path"),
+        ]);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        written.push(std::fs::read(&image).expect("read the image back"));
+    }
+    assert!(
+        written[0] == written[1],
+        "the same inputs wrote different bytes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the matrix: one question, every family
+// ---------------------------------------------------------------------------
+
+/// One volume of each family, and the two words every report names it by.
+struct Volume {
+    /// The word `detect` prints and every report carries as `variant`.
+    variant: &'static str,
+    /// The lineage the variant belongs to, which is the reports' `family`.
+    family: &'static str,
+    image: PathBuf,
+}
+
+/// Write one volume per family from a single tree, so a case can ask each of them the same
+/// question and compare the answers.
+///
+/// What differs between the four calls is only what a family must be told: an identifier of
+/// its own kind, a size its minimum fits inside, and — for the two formats with no field for
+/// an owner, a mode, or a change time — permission to lose the properties a host tree always
+/// carries. Everything a question below could pick up on is the same in all four.
+fn one_volume_per_family(dir: &tempfile::TempDir) -> Vec<Volume> {
+    let tree = esp_tree(dir);
+    let tree = tree.to_str().expect("a text path");
+    // The two formats that record neither an owner nor a mode lose the same pair here, plus
+    // the change time and the sub-second part of the times, exactly as the FAT and exFAT
+    // gates above accept them.
+    const LOST: &str = "ownership,permissions,change-time,time-precision";
+    let mut volumes = Vec::new();
+    for (variant, family, name, argv) in [
+        (
+            "ext4",
+            "ext",
+            "ext.img",
+            vec![
+                "-t", "ext4", "--size", "64M", "--uuid", UUID, "--time", TIME,
+            ],
+        ),
+        (
+            "fat32",
+            "fat",
+            "fat.img",
+            vec![
+                "-t",
+                "fat32",
+                "--size",
+                "64M",
+                "--volume-id",
+                SERIAL,
+                "--time",
+                TIME,
+                "--accept-loss",
+                LOST,
+            ],
+        ),
+        (
+            "exfat",
+            "exfat",
+            "exfat.img",
+            vec![
+                "-t",
+                "exfat",
+                "--size",
+                "64M",
+                "--volume-serial",
+                EXFAT_SERIAL,
+                "--accept-loss",
+                LOST,
+            ],
+        ),
+        (
+            "btrfs",
+            "btrfs",
+            "btrfs.img",
+            vec![
+                "-t",
+                "btrfs",
+                "--size",
+                BTRFS_WRITTEN_BYTES,
+                "--fsid",
+                FSID,
+                "--time",
+                TIME,
+            ],
+        ),
+    ] {
+        let image = at(dir, name);
+        let path = image.to_str().expect("a text path");
+        let mut args = vec!["format"];
+        args.extend_from_slice(&argv);
+        args.extend_from_slice(&["--from-dir", tree, path]);
+        let out = run(&args);
+        assert_eq!(
+            code(&out),
+            OK,
+            "{variant} did not format:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        volumes.push(Volume {
+            variant,
+            family,
+            image,
+        });
+    }
+    volumes
+}
+
+#[test]
+fn every_family_answers_every_read_command_the_matrix_pairs_it_with() {
+    // Per-family drift lives where a command is exercised on one family and assumed for the
+    // rest, so the cells are filled rather than sampled: every read verb, every output
+    // dialect, and the base offset, against each of the four. What each answer *says* is a
+    // family's own business; that it answers at all, in the shape the shared surface
+    // promises, is this crate's.
+    let dir = scratch();
+    let volumes = one_volume_per_family(&dir);
+    for volume in &volumes {
+        let path = volume.image.to_str().expect("a text path");
+        let Volume {
+            variant, family, ..
+        } = volume;
+
+        // What the image is, in one word.
+        assert_eq!(
+            String::from_utf8_lossy(&ok(&["detect", path])),
+            format!("{variant}\n")
+        );
+
+        // The report, in each of its three dialects, plus the two flags that change what a
+        // scan costs and what its verdict decides.
+        let table = String::from_utf8(ok(&["inspect", path])).expect("text");
+        assert!(table.contains("no findings"), "{variant} inspect:\n{table}");
+        let head = json_head(&ok(&["inspect", "--json", path]));
+        assert_eq!(
+            head,
+            format!("{family} {variant}"),
+            "{variant} inspect json"
+        );
+        let sarif = String::from_utf8(ok(&["inspect", "--sarif", path])).expect("text");
+        assert!(
+            sarif.contains("\"version\":\"2.1.0\""),
+            "{variant} sarif:\n{sarif}"
+        );
+        ok(&["inspect", "--quick", path]);
+        ok(&["inspect", "--fail-on", "integrity", path]);
+        ok(&["inspect", "--fail-on", "conformance", path]);
+
+        // Every way of getting the contents back out. The listing and the single entry come
+        // in both dialects, so a consumer of either reads the same tree.
+        let listing = String::from_utf8(ok(&["extract", "--list", path])).expect("text");
+        assert!(
+            listing.contains("/EFI/BOOT/BOOTX64.EFI") && listing.contains("/readme.txt"),
+            "{variant} listing:\n{listing}"
+        );
+        for argv in [
+            vec!["extract", "--list", "--json", path],
+            vec!["extract", "--stat", "/readme.txt", path],
+            vec!["extract", "--stat", "/readme.txt", "--json", path],
+        ] {
+            let out = ok(&argv);
+            assert!(
+                !out.is_empty(),
+                "{variant}: `{}` said nothing",
+                argv.join(" ")
+            );
+        }
+        assert_eq!(
+            ok(&["extract", "--cat", "/readme.txt", path]),
+            b"hello\n",
+            "{variant} --cat"
+        );
+
+        // Out to an archive, and out to a tree. The destination is named rather than
+        // prepared, and the tree needs the owner a read of the image reports to be one this
+        // process may set -- which for the two formats with no owner field is what
+        // `--assume-owner` decides.
+        let tar = at(&dir, &format!("{variant}.tar"));
+        ok(&[
+            "extract",
+            "--to-tar",
+            tar.to_str().expect("a text path"),
+            path,
+        ]);
+        let tar_bytes = std::fs::read(&tar).expect("read the archive");
+        assert!(
+            tar_bytes
+                .windows(b"readme.txt".len())
+                .any(|w| w == b"readme.txt"),
+            "{variant}: the archive carries no readme"
+        );
+        let unpacked = at(&dir, &format!("{variant}-tree"));
+        let owner = owner_of(&volume.image);
+        ok(&[
+            "extract",
+            "--to-dir",
+            unpacked.to_str().expect("a text path"),
+            "--assume-owner",
+            &owner,
+            path,
+        ]);
+        assert_eq!(
+            std::fs::read(unpacked.join("readme.txt")).expect("read the file back"),
+            b"hello\n",
+            "{variant}: the tree came back wrong"
+        );
+
+        // And the same image a megabyte into a larger one, which is where a partition puts
+        // it: every read is relative to where the filesystem begins, on every family.
+        let disk = at(&dir, &format!("{variant}-disk.img"));
+        let mut bytes = vec![0x00; 1 << 20];
+        bytes.extend_from_slice(&std::fs::read(&volume.image).expect("read the image"));
+        std::fs::write(&disk, &bytes).expect("write the disk");
+        let disk = disk.to_str().expect("a text path");
+        assert_eq!(
+            String::from_utf8_lossy(&ok(&["detect", "--offset", "1M", disk])),
+            format!("{variant}\n")
+        );
+        assert_eq!(
+            ok(&["extract", "--offset", "1M", "--cat", "/readme.txt", disk]),
+            b"hello\n",
+            "{variant} at an offset"
+        );
+        // And both documents that describe the partition carry the coordinate it was found
+        // at, spelled the same way, so a caller scanning a disk can line the pair up.
+        let described = ok(&["inspect", "--json", "--offset", "1M", disk]);
+        let detected = ok(&["detect", "--json", "--offset", "1M", disk]);
+        for document in [&described, &detected] {
+            assert!(
+                String::from_utf8_lossy(document).contains("\"offset\":1048576"),
+                "{variant}: {}",
+                String::from_utf8_lossy(document)
+            );
+        }
+    }
+}
+
+/// The `family` and `variant` a JSON report names itself by, as one string to compare.
+///
+/// Read with `python3` rather than a JSON crate for the reason every other JSON gate here
+/// does: the document has to be one something outside this workspace parses.
+fn json_head(document: &[u8]) -> String {
+    let judge = r#"
+import json, sys
+doc = json.load(sys.stdin)
+# The five head fields mean the same thing whatever family answered, so a consumer that
+# reads only these never learns which one did.
+assert doc["schema"] == 2, doc
+assert isinstance(doc["size"], int) and doc["size"] > 0, doc
+assert isinstance(doc["allocation_unit"], int) and doc["allocation_unit"] > 0, doc
+assert doc["identifier"], doc
+assert doc["findings"]["clean"] is True, doc["findings"]
+# And the body is the family's own, under its own name and no other's.
+for name in ("ext", "fat", "exfat", "btrfs"):
+    assert (name in doc) == (name == doc["family"]), (name, doc["family"])
+print(doc["family"], doc["variant"])
+"#;
+    let mut child = tool("python3")
+        .args(["-c", judge])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn python3");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(document)
+        .expect("write the document");
+    let out = child.wait_with_output().expect("python3 finishes");
+    assert!(
+        out.status.success(),
+        "the report is not the document a consumer reads:\n{}\n{}",
+        String::from_utf8_lossy(document),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The owner of a file this process wrote, spelled the way `--assume-owner` reads it.
+///
+/// Taken from a file rather than asked of the system, because what the option has to name is
+/// an owner this process may set on a file it creates -- which is exactly the owner the
+/// files it just created have.
+fn owner_of(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::metadata(path).expect("stat a file this process wrote");
+    format!("{}:{}", meta.uid(), meta.gid())
+}
+
+#[test]
+fn an_option_only_one_family_can_answer_is_refused_by_name_on_each_of_the_others() {
+    // Scoping is enforced after parsing, by name, so the refusal has to be checked on every
+    // family that lacks the option rather than on the first one that does. Both of these
+    // are ext's alone: a block group is how an ext filesystem divides itself, and `identity`
+    // rewrites ext's own identifying fields.
+    let dir = scratch();
+    for volume in &one_volume_per_family(&dir) {
+        let path = volume.image.to_str().expect("a text path");
+        let variant = volume.variant;
+        if volume.family == "ext" {
+            ok(&["inspect", "--groups", path]);
+            continue;
+        }
+
+        let out = run(&["inspect", "--groups", path]);
+        assert_eq!(
+            code(&out),
+            OPERATIONAL,
+            "{variant}: --groups is refused, not faulted"
+        );
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("--groups"), "{variant}: {said}");
+        assert!(said.contains(volume.family), "{variant}: {said}");
+
+        // The verdict a request the tool cannot carry out gets, and never the corruption
+        // verdict: the volume is sound and a gate keyed on 4 must not hear otherwise.
+        let out = run(&["identity", "--label", "renamed", path]);
+        assert_eq!(
+            code(&out),
+            OPERATIONAL,
+            "{variant}: identity is refused, not faulted"
+        );
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains(variant), "{variant}: {said}");
+        assert!(said.contains("ext"), "{variant}: {said}");
+    }
+}
+
+#[test]
+fn a_strict_read_refuses_what_the_default_interprets_and_says_which_refusal_it_fell_back_from() {
+    // The contract `--strict` exists for: extraction writes an image's contents somewhere,
+    // so a filesystem carrying something the reader does not follow yields output that looks
+    // complete and is not. The default recovers what it can and says so; `--strict` makes
+    // the refusal the answer.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    let archive = write_archive(&dir);
+    assert_eq!(code(&format(&image, "64M", Some(&archive))), OK);
+
+    // An incompatible feature bit no ext feature defines, which is exactly the shape a
+    // reader must refuse rather than guess at: `s_feature_incompat` is 0x60 into the
+    // superblock, which is 1024 bytes into the image.
+    let mut bytes = std::fs::read(&image).expect("read the image");
+    let at_bit = 1024 + 0x60;
+    let mut word = u32::from_le_bytes(bytes[at_bit..at_bit + 4].try_into().expect("four bytes"));
+    word |= 1 << 27;
+    bytes[at_bit..at_bit + 4].copy_from_slice(&word.to_le_bytes());
+    let unknown = at(&dir, "unknown.img");
+    std::fs::write(&unknown, &bytes).expect("write the image");
+    let path = unknown.to_str().expect("a text path");
+    let tar = at(&dir, "out.tar");
+    let tar = tar.to_str().expect("a text path");
+
+    // Leniently by default: the contents come out, and the run says which refusal it fell
+    // back from rather than dropping it.
+    let out = run(&["extract", "--to-tar", tar, path]);
+    assert_eq!(
+        code(&out),
+        OK,
+        "the default recovers what it can:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("0x08000000"), "{said}");
+    assert!(said.contains("--strict refuses instead"), "{said}");
+
+    // And with the flag, the refusal is the answer -- exit 8, because a request the tool
+    // will not carry out is not a verdict that the filesystem is damaged.
+    let out = run(&["extract", "--strict", "--to-tar", tar, path]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("0x08000000"), "{said}");
+    assert!(!said.contains("best-effort"), "{said}");
+}
+
+#[test]
+fn what_a_format_cannot_record_is_reported_as_whatever_the_caller_says_to_assume() {
+    // A FAT directory entry has no owner and no mode, so a read of one fills both in. What
+    // it fills them in *with* is the caller's to name, and the same two options decide what
+    // a format compares a source against -- which is what makes a round trip through a
+    // format that records neither of them lossless on paper as well as in fact.
+    let dir = scratch();
+    let tree = esp_tree(&dir);
+    let image = at(&dir, "esp.img");
+    assert_eq!(code(&format_esp(&image, &tree)), OK);
+    let path = image.to_str().expect("a text path");
+
+    // The defaults a read fills in: root, and the conventional modes.
+    let listing = String::from_utf8(ok(&["extract", "--list", path])).expect("text");
+    assert!(
+        listing.contains("drwxr-xr-x   -      0      0"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("-rw-r--r--   -      0      0"),
+        "{listing}"
+    );
+
+    // And what the caller said to assume instead, in both halves of both options: the file
+    // mode and the directory mode are named apart, and so are the owner's two numbers.
+    let listing = String::from_utf8(ok(&[
+        "extract",
+        "--list",
+        "--assume-owner",
+        "1000:100",
+        "--assume-modes",
+        "600:700",
+        path,
+    ]))
+    .expect("text");
+    assert!(
+        listing.contains("drwx------   -   1000    100"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("-rw-------   -   1000    100"),
+        "{listing}"
+    );
+
+    // The same values reach a single entry's report, so a caller reading one file sees what
+    // a caller listing the tree saw.
+    let stat = String::from_utf8(ok(&[
+        "extract",
+        "--stat",
+        "/readme.txt",
+        "--assume-owner",
+        "1000:100",
+        "--assume-modes",
+        "600:700",
+        path,
+    ]))
+    .expect("text");
+    assert!(stat.contains("1000"), "{stat}");
+    assert!(stat.contains("600"), "{stat}");
+}
+
+#[test]
+fn every_family_writes_a_receipt_a_consumer_reads_the_same_way() {
+    // A receipt is what a build hands the step after it, so the head is the same five fields
+    // whichever family wrote it and the geometry underneath is the family's own. The verbs
+    // that read an image already answer in one shape (the case above); this is the verb that
+    // writes one.
+    let dir = scratch();
+    for (variant, family, name, argv) in [
+        (
+            "ext4",
+            "ext",
+            "ext.img",
+            vec![
+                "-t", "ext4", "--size", "64M", "--uuid", UUID, "--time", TIME,
+            ],
+        ),
+        (
+            "fat32",
+            "fat",
+            "fat.img",
+            vec![
+                "-t",
+                "fat32",
+                "--size",
+                "64M",
+                "--volume-id",
+                SERIAL,
+                "--time",
+                TIME,
+            ],
+        ),
+        (
+            "exfat",
+            "exfat",
+            "exfat.img",
+            vec![
+                "-t",
+                "exfat",
+                "--size",
+                "64M",
+                "--volume-serial",
+                EXFAT_SERIAL,
+            ],
+        ),
+        (
+            "btrfs",
+            "btrfs",
+            "btrfs.img",
+            vec![
+                "-t",
+                "btrfs",
+                "--size",
+                BTRFS_WRITTEN_BYTES,
+                "--fsid",
+                FSID,
+                "--time",
+                TIME,
+            ],
+        ),
+    ] {
+        let image = at(&dir, name);
+        let mut args = vec!["format", "--json"];
+        args.extend_from_slice(&argv);
+        args.push(image.to_str().expect("a text path"));
+        let receipt = ok(&args);
+
+        let judge = r#"
+import json, sys
+doc = json.load(sys.stdin)
+assert doc["schema"] == 2, doc
+# How much of the destination the filesystem occupies -- what a step after this one acts on.
+assert doc["written"] > 0, doc
+# And what the build cost the source, from the families that can cost it anything. ext holds
+# every property this crate names, so its receipt has no fidelity object to carry.
+if doc["family"] != "ext":
+    assert doc["fidelity"]["faithful"] is True, doc["fidelity"]
+print(doc["family"], doc["variant"])
+"#;
+        let mut child = tool("python3")
+            .args(["-c", judge])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn python3");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(&receipt)
+            .expect("write the document");
+        let out = child.wait_with_output().expect("python3 finishes");
+        assert!(
+            out.status.success(),
+            "{variant}: the receipt is not a document a consumer reads:\n{}\n{}",
+            String::from_utf8_lossy(&receipt),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("{family} {variant}")
+        );
+
+        // The creation time is reported by every family that has one to report, and the one
+        // that refuses `--time` reports none -- so the key's absence means the format has no
+        // field rather than that the receipt forgot.
+        let carries_time = String::from_utf8_lossy(&receipt).contains("\"created\"");
+        assert_eq!(
+            carries_time,
+            variant != "exfat",
+            "{variant}: `created` is reported by exactly the families that record one"
+        );
+    }
 }

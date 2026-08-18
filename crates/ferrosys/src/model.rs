@@ -14,14 +14,15 @@
 //! without one the root keeps its `0755` root-owned defaults. An input this profile
 //! cannot represent is a typed [`ModelError`], never a dropped or truncated entry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::acl::Acl;
 use crate::feature::{FeatureSet, LARGE_FILE_MIN_SIZE};
 use crate::ondisk::{
     FileType, Inode, has_empty_name, longest_stored_name, split_for_storage, xattr_block_len,
 };
-use crate::source::{EntryKind, FileContent, Metadata, Source, SourceEntry};
+use crate::path::canonical_parts;
+use crate::source::{EntryKind, FileContent, MODE_TYPE_MASK, Metadata, Source, SourceEntry};
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
 
@@ -51,9 +52,21 @@ const FAST_SYMLINK_MAX: usize = 60;
 /// hard links than this.
 const EXT4_LINK_MAX: u16 = 65000;
 
-/// The file-type bits of a mode (`S_IFMT`), which say what an inode is; the remaining
-/// bits are the permission and `setuid`/`setgid`/sticky bits.
-const MODE_TYPE_MASK: u16 = 0o170000;
+/// Refuse a stated mode that carries file-type bits.
+///
+/// The entry's kind supplies them, and a mode arriving with its own — a raw `st_mode`
+/// passed through whole is the natural way — would put a second type on the inode, which
+/// the write would accept and every checker and driver would read as corruption. Every
+/// other unrepresentable input here is a typed refusal, and so is this.
+fn validate_mode(path: &[u8], mode: u16) -> Result<(), ModelError> {
+    if mode & MODE_TYPE_MASK != 0 {
+        return Err(ModelError::ModeCarriesFileType {
+            path: path.to_vec(),
+            mode,
+        });
+    }
+    Ok(())
+}
 
 /// An input the model cannot represent.
 ///
@@ -148,6 +161,23 @@ pub enum ModelError {
         /// The reserved path.
         path: Vec<u8>,
     },
+    /// An entry's `mode` carries file-type bits, which the entry's kind supplies.
+    ///
+    /// [`Metadata::mode`](crate::Metadata::mode) holds the permission and
+    /// set-user/group/sticky bits alone. A raw `st_mode` passed through whole would put a
+    /// second file type on the inode — one the directory entry contradicts — and the write
+    /// would succeed while every checker and driver reads the result as corrupt.
+    #[error(
+        "{}: mode {mode:#o} carries file-type bits, which the entry's kind supplies",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    ModeCarriesFileType {
+        /// The offending path.
+        path: Vec<u8>,
+        /// The mode as given.
+        mode: u16,
+    },
     /// A hard link's target does not exist.
     #[error(
         "hard link {} targets {}, which does not exist",
@@ -160,6 +190,21 @@ pub enum ModelError {
         path: Vec<u8>,
         /// The missing target.
         target: Vec<u8>,
+    },
+    /// A hard link states extended attributes other than its target's, which no filesystem
+    /// holds: a link is a name for an inode, and attributes belong to the inode. A member
+    /// that repeats the target's attributes exactly states nothing new and is accepted —
+    /// some archive producers write hard-link members that way — and anything else is
+    /// refused rather than half-applied. State changes on the target instead.
+    #[error(
+        "hard link {} states extended attributes other than its target's, and attributes \
+         belong to the target",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    LinkCarriesXattrs {
+        /// The link's path.
+        path: Vec<u8>,
     },
     /// A hard link's target is a directory. Every other file type may carry more than
     /// one name; a directory may not, since a second name would make the tree a cycle.
@@ -709,20 +754,23 @@ fn validate_file_size(path: &[u8], size: u64, config: &ModelConfig) -> Result<()
 /// separators and no-op `.` elements — `/`, `.`, `./`, and the empty path all do. Such
 /// an entry describes the root directory rather than something inside it.
 fn names_the_root(path: &[u8]) -> bool {
-    path.split(|&b| b == b'/')
-        .all(|part| part.is_empty() || part == b".")
+    canonical_parts(path).is_empty()
 }
 
-/// Split a path into its meaningful components. A `.` component is a no-op and
-/// dropped; `..`, an over-long component, or one containing a NUL is rejected.
+/// Split a path into its meaningful components, and refuse the ones ext cannot hold.
+///
+/// Which components a path *has* is [`canonical_parts`], the rule every path in this crate
+/// is normalized by — so `/etc/hostname`, `//etc//hostname`, and `etc/./hostname` are one
+/// path here exactly as they are to a caller keying entries outside a model. Validation is
+/// what this adds on top: `..` would traverse out of the tree, a component past 255 bytes
+/// does not fit a directory entry's name field, and a NUL cannot appear in one at all.
+///
+/// Normalizing once and validating the result is what keeps the two from disagreeing: a
+/// second normalization would not fail if it drifted, it would quietly key two entries apart
+/// that the model considers one path.
 fn components(path: &[u8]) -> Result<Vec<Vec<u8>>, ModelError> {
     let mut out = Vec::new();
-    for part in path.split(|&b| b == b'/') {
-        if part.is_empty() || part == b"." {
-            continue; // leading/trailing/repeated slash, or a no-op "." component
-        }
-        // A NUL cannot appear in a directory entry name, so a component carrying one is
-        // rejected rather than written into a dirent the kernel would refuse.
+    for part in canonical_parts(path) {
         if part == b".." || part.len() > 255 || part.contains(&0) {
             return Err(ModelError::InvalidComponent {
                 path: path.to_vec(),
@@ -738,6 +786,9 @@ fn components(path: &[u8]) -> Result<Vec<Vec<u8>>, ModelError> {
 }
 
 /// Join components back into a canonical key for the path map.
+///
+/// The same join [`canonical_key`](crate::path::canonical_key) makes, over the same
+/// components — which is what the test below pins.
 fn key(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.join(&b'/')
 }
@@ -811,6 +862,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         Some(entry) => {
             let times = config.times(&entry.meta);
             times.validate(&entry.path)?;
+            validate_mode(&entry.path, entry.meta.mode)?;
             let xattrs = stored_xattrs(&entry.path, &entry.xattrs)?;
             validate_xattrs(&entry.path, &xattrs, &config)?;
             let mut root = dir_inode(ROOT_INO, 0o040000 | entry.meta.mode, times, xattrs);
@@ -878,6 +930,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         let meta = &n.entry.meta;
         let times = config.times(meta);
         times.validate(&n.entry.path)?;
+        validate_mode(&n.entry.path, meta.mode)?;
         let xattrs = stored_xattrs(&n.entry.path, &n.entry.xattrs)?;
         validate_xattrs(&n.entry.path, &xattrs, &config)?;
         // Every kind but a directory shares this leaf construction; a directory's
@@ -1003,11 +1056,12 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         }
         links.insert(path_key, n);
     }
+    let mut resolved: HashMap<Vec<u8>, u32> = HashMap::new();
     for (path_key, n) in &links {
         let EntryKind::HardLink { target } = &n.entry.kind else {
             unreachable!("only hard links were collected");
         };
-        let target_ino = resolve_link(&n.entry.path, target, &path_ino, &links)?;
+        let target_ino = resolve_link(&n.entry.path, target, &path_ino, &links, &mut resolved)?;
         // Every file type but a directory may carry more than one name. A second name
         // for a directory would turn the tree into a cycle, which no kernel permits.
         if inodes[&target_ino].is_dir() {
@@ -1015,6 +1069,19 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
                 path: n.entry.path.clone(),
                 target: target.clone(),
             });
+        }
+        // Attributes belong to the inode, which is the target's: no filesystem holds an
+        // attribute of a name. A member repeating the target's attributes exactly states
+        // nothing new — archive producers exist that write hard-link members that way —
+        // and anything else is refused rather than half-applied. Compared in stored form,
+        // so the same list stated two ways is the same list.
+        if !n.entry.xattrs.is_empty() {
+            let stated = stored_xattrs(&n.entry.path, &n.entry.xattrs)?;
+            if !crate::xattr::same_xattrs(&stated, &inodes[&target_ino].xattrs) {
+                return Err(ModelError::LinkCarriesXattrs {
+                    path: n.entry.path.clone(),
+                });
+            }
         }
         let (parent_ino, name) = resolve_parent(&n.parts, &path_ino, &dirs, &n.entry.path)?;
         let target_inode = inodes
@@ -1134,15 +1201,25 @@ fn check_device(path: &[u8], major: u32, minor: u32) -> Result<(), ModelError> {
 /// order the names sort in. A chain that closes on itself names no inode and is
 /// rejected; the hop count bounds the walk at the number of links, past which a
 /// revisit — and so a cycle — is certain.
+///
+/// `resolved` carries every answer across calls, and every hop of a walk deposits its
+/// own: the caller resolves each link of the source in turn, and without the memo a
+/// source declaring one long chain would walk its tail once per member — quadratic in
+/// the links for the same set of answers.
 fn resolve_link(
     path: &[u8],
     target: &[u8],
     path_ino: &BTreeMap<Vec<u8>, u32>,
     links: &BTreeMap<Vec<u8>, &Normalized>,
+    resolved: &mut HashMap<Vec<u8>, u32>,
 ) -> Result<u32, ModelError> {
+    let mut trail: Vec<Vec<u8>> = Vec::new();
     let mut hop = key(&components(target)?);
     for _ in 0..=links.len() {
-        if let Some(&ino) = path_ino.get(&hop) {
+        if let Some(&ino) = resolved.get(&hop).or_else(|| path_ino.get(&hop)) {
+            for walked in trail {
+                resolved.insert(walked, ino);
+            }
             return Ok(ino);
         }
         let next = links
@@ -1154,7 +1231,8 @@ fn resolve_link(
         let EntryKind::HardLink { target: onward } = &next.entry.kind else {
             unreachable!("only hard links were collected");
         };
-        hop = key(&components(onward)?);
+        let onward = key(&components(onward)?);
+        trail.push(std::mem::replace(&mut hop, onward));
     }
     Err(ModelError::HardlinkCycle {
         path: path.to_vec(),
@@ -1238,9 +1316,12 @@ mod tests {
     #[test]
     fn the_canonical_key_is_the_key_the_model_itself_uses() {
         // `canonical_key` exists so a caller keying entries by path outside the model —
-        // `LayeredSource` — decides "same path" the way the model does. The two are
-        // separate code paths, so this pins them together: for every path the model
-        // accepts, the shared key is the one the model derives for itself.
+        // `LayeredSource` — decides "same path" the way the model does. They normalize
+        // through one function now, so what is left to disagree is the *join*, and this is
+        // what pins it: for every path the model accepts, the shared key is the one the
+        // model derives for itself. The samples still range over each way a path can be
+        // written, because a joining rule that dropped or doubled a separator would only
+        // show on some of them.
         for path in [
             &b"/etc/hostname"[..],
             b"//etc//hostname",
@@ -1252,7 +1333,7 @@ mod tests {
         ] {
             let theirs = key(&components(path).expect("the model accepts this path"));
             assert_eq!(
-                crate::source::canonical_key(path),
+                crate::path::canonical_key(path),
                 theirs,
                 "{}: the shared key must be the model's",
                 String::from_utf8_lossy(path)
@@ -1263,7 +1344,7 @@ mod tests {
         // subtree the whole tree.
         for root in [&b"/"[..], b"", b".", b"./", b"///"] {
             assert!(names_the_root(root));
-            assert!(crate::source::canonical_key(root).is_empty());
+            assert!(crate::path::canonical_key(root).is_empty());
         }
     }
 
@@ -1280,6 +1361,88 @@ mod tests {
         let lf = &m.inodes[&LOST_FOUND_INO];
         assert_eq!(lf.mode, 0o040700);
         assert_eq!(lf.links_count, 2);
+    }
+
+    #[test]
+    fn a_hard_link_stating_attributes_other_than_its_targets_is_refused() {
+        // Attributes belong to the inode and a link is a name for one, so an attribute
+        // stated on the link alone is one no image can carry: applying it to the target
+        // would be guessing, and dropping it would lose what the source stated.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new()
+            .file(
+                b"/target".to_vec(),
+                b"x".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .hardlink(
+                b"/link".to_vec(),
+                b"/target".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .xattr(b"user.note".to_vec(), b"v".to_vec());
+        let err = build_model(src, config()).unwrap_err();
+        assert!(
+            matches!(err, ModelError::LinkCarriesXattrs { .. }),
+            "{err:?}"
+        );
+
+        // A member that repeats the target's attributes exactly states nothing new —
+        // archive producers exist that write hard-link members that way — and builds the
+        // image the target alone describes.
+        let src = TreeBuilder::new()
+            .file(
+                b"/target".to_vec(),
+                b"x".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .xattr(b"user.note".to_vec(), b"v".to_vec())
+            .hardlink(
+                b"/link".to_vec(),
+                b"/target".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .xattr(b"user.note".to_vec(), b"v".to_vec());
+        let m = build_model(src, config()).expect("a repeated set states nothing new");
+        let target = m
+            .inodes
+            .values()
+            .find(|inode| inode.links_count == 2 && !inode.is_dir())
+            .expect("the target has two names");
+        assert_eq!(target.xattrs.len(), 1, "the one attribute, held once");
+    }
+
+    #[test]
+    fn a_mode_carrying_file_type_bits_is_rejected() {
+        // The natural mistake: a raw `st_mode` passed through whole. Accepted, it would
+        // write an inode whose mode says one file type while its directory entry says
+        // another — a filesystem `e2fsck` faults and a kernel misreads — so it is the
+        // typed refusal every other unrepresentable input here gets.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new().file(
+            b"/f".to_vec(),
+            b"x".to_vec(),
+            Metadata::new(0o100_644, time),
+        );
+        let err = build_model(src, config()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModelError::ModeCarriesFileType {
+                    mode: 0o100_644,
+                    ..
+                }
+            ),
+            "expected ModeCarriesFileType, got {err:?}"
+        );
+        // The root entry passes through its own arm of the build, and must be held to
+        // the same rule.
+        let src = TreeBuilder::new().directory(b"/".to_vec(), Metadata::new(0o040_755, time));
+        let err = build_model(src, config()).unwrap_err();
+        assert!(
+            matches!(err, ModelError::ModeCarriesFileType { .. }),
+            "expected ModeCarriesFileType for the root entry, got {err:?}"
+        );
     }
 
     #[test]

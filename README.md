@@ -1,28 +1,33 @@
 # ferrosys
 
 Pure-Rust filesystem tooling: it builds and reads filesystem images in userspace, over
-ordinary byte streams, in safe Rust. Two families — ext2/ext3/ext4 and FAT12/FAT16/FAT32 —
-and a build takes the ones it names.
+ordinary byte streams, in safe Rust. Four families — ext2/ext3/ext4, FAT12/FAT16/FAT32,
+exFAT, and btrfs — and a build takes the ones it names.
 
 This Cargo workspace holds two crates:
 
-- [`ferrosys`](crates/ferrosys) — the library: a formatter and reader per family, each
-  behind a feature of its own, with byte-reproducible on-disk geometry.
+- [`ferrosys`](crates/ferrosys) — the library: a reader and a writer per family, each behind
+  a feature of its own, with byte-reproducible on-disk geometry.
 - [`ferrosys-cli`](crates/ferrosys-cli) — the `ferrosys` binary, which puts the library
-  on the command line and carries every family.
+  on the command line and carries all four families.
 
 Both build on Rust 1.88 or newer.
 
-> **Status:** under active development. The APIs are not yet stable. Following Cargo's
+> **Status:** under active development. Following Cargo's
 > `0.x` semantics, a breaking change bumps the minor version, and a `0.x` requirement
 > resolves only within that minor — so a breaking release reaches no one unasked.
 
 ## Highlights
 
-- **Two families, one at a time or both** — ext2, ext3, and ext4 across one lineage, from
-  the classic direct/indirect block map to extent trees of any depth; FAT12, FAT16, and
-  FAT32 across another, where the type is derived from the cluster count rather than
-  chosen. Each is a feature, so a consumer wanting one filesystem compiles one.
+- **Four families, one at a time or all of them** — ext2, ext3, and ext4 across one
+  lineage, from the classic direct/indirect block map to extent trees of any depth; FAT12,
+  FAT16, and FAT32 across another, where the type is derived from the cluster count rather
+  than chosen; exFAT, which shares a name with FAT and no bytes, with an allocation bitmap
+  of its own and names folded through the up-case table each volume carries; and btrfs, a
+  copy-on-write filesystem of B-trees over a logical address space, where a chunk tree maps
+  that space onto the device and every metadata block carries its own checksum — read in
+  full, and written whole from a source tree, subvolumes included. Each is a feature, so a
+  consumer wanting one filesystem compiles one.
 - **Resize-safe ext geometry** — descriptor backups and reserved GDT blocks, sized by a
   grow reservation, let the image grow in place without relocating its descriptor table.
 - **Byte-reproducible** — the identifiers and timestamps an image carries are inputs, so
@@ -58,17 +63,20 @@ $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 \
 $ ferrosys inspect rootfs.img
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
 
-$ ferrosys format --type fat32 --size auto --from-dir seed/ seed.img
+$ ferrosys format --type fat32 --size auto --volume-id 1a2b3c4d --time 1700000000 \
+      --owner 0:0 --accept-loss all --from-dir seed/ seed.img
 ```
 
 `format` writes a filesystem — of the type `--type` names, from a tar archive, a directory
-tree, or empty, at a size you name or one `--size auto` finds from the contents —
-`inspect` reports on one and says whether it is sound, `extract` reads the contents back
-out as a tar archive, a directory tree, one file's bytes, one path's metadata, or a
-listing, `detect` says which filesystem an image holds, and `identity` changes what one is
-known by. Every command takes any family the binary carries. The identifiers and
-timestamps are inputs, so the same inputs write the same image every time. The exit codes
-mirror `e2fsck`'s. See the guide's
+tree, or empty, at a size you name or, for the ext and FAT families, one `--size auto`
+finds from the contents — `inspect` reports on one and says whether it is sound, `extract`
+reads the contents back out as a tar archive, a directory tree, one file's bytes, one
+path's metadata, or a listing, `detect` says which filesystem an image holds, and
+`identity` re-stamps an existing ext filesystem with a new UUID, label, or checksum seed.
+Every command that reads an image takes any family the binary carries; `identity` writes to
+one family and says so. The identifiers and timestamps are inputs, so
+the same inputs write the same image every time. The exit codes mirror `e2fsck`'s. See the
+guide's
 [command-line chapter](https://gregordinary.github.io/ferrosys/cli.html).
 
 ## Build and test

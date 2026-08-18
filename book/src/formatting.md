@@ -829,6 +829,23 @@ let (_, link) = reader.lookup_no_follow(b"/lib")?;    // the link itself
 assert_eq!(reader.read_symlink(&link)?, b"usr/lib");
 ```
 
+A `..` component ascends to the directory the resolution came from, whether a caller
+wrote it or a symbolic link in the image stores it — `/usr/lib64 -> ../lib` is the shape
+a multiarch root filesystem has, and reaching what it names means leaving `/usr` and
+coming back down. At the root there is nothing to ascend to, so a run of them stays
+there: **every path names something inside the image, and no resolution reaches the host
+that is reading it.**
+
+```rust,ignore
+# extern crate ferrosys;
+let (_, direct) = reader.lookup(b"/usr/lib/modules")?;
+// The same directory, reached by ascending out of `/usr/bin` and back down.
+let (_, ascended) = reader.lookup(b"/usr/bin/../lib/modules")?;
+assert_eq!(direct, ascended);
+// And a run of them at the root stays at the root.
+assert_eq!(reader.lookup(b"/../..")?.0, reader.lookup(b"/")?.0);
+```
+
 `walk` yields the literal tree and does not descend through links, so on a
 merged-`/usr` layout the paths under `/lib` appear only under `/usr/lib`. `lookup` is
 what reaches them by the name a system actually uses.
@@ -858,14 +875,14 @@ record's worth of its own blocks per name, so the source's length bounds how man
 it can describe. Reaching that bound is an error rather than a short list: a caller
 extracting a tree from a truncated walk would write an incomplete one and see success.
 
-A `ScanReport` is ext's own taxonomy, kept typed: an `Anomaly` names the subsystem as a
-`Category` value and its place as a `Location` of group, inode, and block, which is what a
-consumer reasoning about ext4 acts on. `to_report` projects it into the crate's
-`FindingReport`, which is the frame every family shares — a `Severity`, the `Family` that
-found it, that family's own word for the subsystem, the byte offset, and that family's own
-named coordinates — and that is what renders, to JSON, to a fixed-column table, and to a
-SARIF log. There is one document shape and one severity scale however many families a build
-carries.
+An `ext::ScanReport` is the crate's `ScanReport` over ext's own taxonomy, kept typed: an
+`Anomaly` names the subsystem as a `Category` value and its place as a `Location` of group,
+inode, and block, which is what a consumer reasoning about ext4 acts on. `to_report`
+projects it into the crate's `FindingReport`, which is the frame every family shares — a
+`Severity`, the `Family` that found it, that family's own word for the subsystem, the byte
+offset, and that family's own named coordinates — and that is what renders, to JSON, to a
+fixed-column table, and to a SARIF log. There is one document shape and one severity scale
+however many families a build carries.
 
 The JSON document opens with a `schema` field holding `FINDINGS_SCHEMA_VERSION`: a
 downstream parser depends on the emitted shape, and no Rust signature describes it, so the
@@ -914,6 +931,10 @@ begins within the source (a partition offset), the `ReadPolicy` to hold it to, a
 capping what one read may allocate, and a `metadata_csum` seed to verify against when the
 image's stored seed and UUID no longer agree.
 
+The first three are the crate's own `OpenOptions`, held in a `common` field rather than
+restated — so an input every family takes is named in one place and reaches every family at
+once. The builders below set through it, so a caller writes the same thing either way.
+
 ```rust,ignore
 # extern crate ferrosys;
 use ferrosys::ext::{Limits, OpenOptions, ReadPolicy, Reader};
@@ -936,8 +957,16 @@ exists for it is the larger of the two.
 A file past the cap is a `ReadError::FileTooLarge` naming the size and the bound — not a
 short read. A truncated file that looked like a whole one would be the worse outcome by
 far: a caller extracting a tree would write it out, see success, and carry a silently
-incomplete file forward. Where a large file is legitimate, `read_data_to` streams it
-without the cap applying to a buffer that is never allocated.
+incomplete file forward.
+
+The cap governs every whole-file form, in every family: `read_data`, which returns a
+buffer, and `read_data_to`, which streams into a writer of yours and allocates nothing.
+That second one needs the cap most, not least. What it *writes* follows the length the
+image declares, and a region an image says is allocated and unwritten reads back as zeros
+without a block or a cluster being touched — so a length nobody bounded is bytes nobody
+bounded, however small the working buffer producing them. To read part of a large file
+deliberately, read into a buffer of your own: `read_into` is bounded by the buffer and
+reports how much of it was filled, so a partial read is representable rather than silent.
 
 ## Reading a FAT volume
 
@@ -1067,23 +1096,911 @@ cluster, which is a thirty-second of one copy of the table on any volume — and
 held at open to what the type addresses, so that is 32 MiB at the very largest FAT32 there
 is.
 
-A `fat::ScanReport` projects into the same `FindingReport` an ext scan does, through
-`to_report`, so one parser reads both. Its `Category` is FAT's own vocabulary — the boot
-sector, the information sector, the allocation table, a directory — because ext's means
-nothing about a FAT and the reverse.
+A `fat::ScanReport` is the same `ScanReport` an ext scan produces, over FAT's own anomaly —
+so the report itself, its cap, what truncation means, and the `to_report` projection into
+`FindingReport` are one implementation rather than two that agree. What is FAT's own is the
+taxonomy inside it: its `Category` is the boot sector, the information sector, the
+allocation table, a directory, because ext's vocabulary means nothing about a FAT and the
+reverse, and its `Location` is a cluster, a sector, and an entry.
+
+The same is true of the walk underneath both readers. The frontier, the cycle check, and the
+three bounds that keep a hostile tree from running a walk without end are one driver; each
+family supplies what sits on its frontier, what identifies one of its directories, and how a
+name's children are read.
+
+Four smaller rules are shared the same way, and each of them is one a second implementation
+could drift on without ever failing. **Which components a path has** is one rule, so
+`/etc/hostname`, `//etc//hostname`, and `etc/./hostname` are one path to a resolution, to a
+model placing entries, and to a caller keying them outside one. **Which names a directory can
+hold** is one rule with two strengths: a name may never be empty or carry a separator or a
+NUL, and a name about to become a *component of a path* may not be `.` or `..` either. ext
+asks the first, because an ext directory genuinely holds those two as entries and a listing
+without them would not be the directory; a FAT volume and a directory extraction ask the
+second, because by the time either has a resolved name there is no legitimate `.` left.
+**Turning a block or a sector number into a byte offset** is one checked multiplication and
+one checked addition, so a number an image supplied cannot wrap into a small offset and read
+whatever sits there. And **an i/o failure records its kind beside its message** in every error
+type that carries one, so a caller tells a truncated image from an environment failure without
+matching on text.
 
 **A strict read accepts every volume this crate's own writer produces**, at every parameter
 set it accepts. That is the line the severities are drawn against, and it is why an
 undersized FAT32 — which the writer emits on request — is a cosmetic remark rather than a
 refusal.
 
+## Planning an exFAT volume
+
+Behind the `exfat` feature, `ferrosys::exfat` supplies the formatter, the geometry planner,
+the byte-exact on-disk structures, and the classifier that recognizes such a volume.
+`plan_layout` derives every field the format records from three inputs — how large the volume
+is, how large a sector is, and how large an allocation unit should be:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{ClusterSize, PlanRequest, plan_layout};
+
+// A 512 MiB volume, formatted the way convention formats one.
+let layout = plan_layout(&PlanRequest::new(512 << 20))?;
+assert_eq!(layout.bytes_per_cluster, 32 << 10);
+
+// Every field agrees with the others: the heap's clusters end within the volume, and the
+// allocation table has an entry for each of them and for the two reserved numbers.
+let heap = u64::from(layout.cluster_heap_offset) * u64::from(layout.bytes_per_sector);
+let used = heap + u64::from(layout.cluster_count) * u64::from(layout.bytes_per_cluster);
+assert!(used <= layout.total_bytes());
+let entries = u64::from(layout.fat_length) * u64::from(layout.bytes_per_sector) / 4;
+assert!(entries >= u64::from(layout.cluster_count) + 2);
+# Ok::<(), ferrosys::exfat::GeometryError>(())
+```
+
+The layout also says where the three residents a format writes land in the cluster heap —
+the allocation bitmap, the up-case table, and the root directory. Those are not fields the
+boot sector records: a volume's root directory is what names them, and where each sits is a
+function of the cluster size, which is why the root directory's own cluster number moves
+between two volumes of different shapes.
+
+Pinning the allocation unit moves everything behind it:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{ClusterSize, PlanRequest, plan_layout};
+
+let dense = plan_layout(&PlanRequest::new(512 << 20).cluster_size(ClusterSize::Bytes(512)))?;
+assert_eq!(dense.cluster_count, 1_038_336);
+// A bitmap of a million bits spans many clusters, so the up-case table starts well into
+// the heap rather than immediately behind it.
+assert_eq!(dense.upcase_cluster, 256);
+assert_eq!(dense.first_cluster_of_root, 268);
+# Ok::<(), ferrosys::exfat::GeometryError>(())
+```
+
+The other knob is `BoundaryAlign`, which is where the allocation table and the cluster heap
+each begin. It is a placement decision rather than a recorded field — it shows up in the two
+offsets a boot sector *does* record — and it defaults to one mebibyte, which is what aligns
+the regions to the erase block of the medium removable storage usually is. It is a byte
+quantity rather than a sector count: the table begins 2048 sectors into a volume with
+512-byte sectors and 256 sectors into one with 4096-byte sectors, and both are the same
+place.
+
+### Writing an empty volume
+
+`exfat::format` lays down a volume of the planned geometry and hands back the bytes;
+`exfat::format_to` writes the same bytes to any seekable destination without ever holding
+them all, so a volume far larger than memory can be created into a file that stays sparse.
+Only the sectors the filesystem occupies are written, and nothing is read back from the
+destination — which means every byte the destination holds that the format does not write
+must already read as zero. A freshly created file, or one truncated to zero length, satisfies
+that.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, VolumeLabel, format};
+use ferrosys::TreeBuilder;
+
+let options = FormatOptions::new(0x1234_abcd).label(VolumeLabel::new("CARD")?);
+let image = format(TreeBuilder::new(), 64 << 20, options)?;
+
+assert_eq!(image.as_bytes().len(), 64 << 20);
+assert_eq!(image.layout().bytes_per_cluster, 4 << 10);
+
+// Two formats of the same parameters are the same bytes.
+assert_eq!(
+    image.as_bytes(),
+    format(TreeBuilder::new(), 64 << 20, options)?.as_bytes()
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`TreeBuilder::new()` places nothing, which is what makes this an empty volume. Anything that
+implements `Source` goes in the same argument, and the next section is what that looks like.
+
+What a volume records is what was laid down. Both boot regions go out — the main one at
+sector 0 and its backup twelve sectors behind it — each with its own computed checksum sector;
+the allocation table gets the two entries the format reserves and a chain for each of the
+three residents; and the cluster heap gets the allocation bitmap, the up-case table, and the
+root directory describing both.
+
+The root directory's four slots are the volume label, a reserved slot, the allocation bitmap's
+describing entry and the up-case table's, in that order. Two of those are worth knowing about:
+
+- **A volume with no name still carries a label entry**, with a character count of zero.
+  `VolumeLabel::UNNAMED` is that entry, and it is what `FormatOptions` defaults to. exFAT has
+  no state in which the root directory lacks one.
+- **The reserved slot is a volume GUID entry with its in-use bit cleared**, which every
+  implementation writes and which is *not* the end of the directory. An exFAT directory ends
+  at a zero type byte and nowhere else, and the allocation bitmap and the up-case table are
+  behind that slot — so a reader that treated a cleared in-use bit as a terminator would find
+  neither, on a perfectly conformant volume.
+
+Reproducibility costs this family one input. The volume serial number is the only value a
+formatter would conventionally draw from the clock, and it is a `FormatOptions` field; an
+empty exFAT volume records no time anywhere, because a label, a reserved slot, a bitmap and an
+up-case table have no time field between them.
+
+A label is up to eleven UTF-16 *code units*, which is eleven characters only for characters
+the Basic Multilingual Plane holds — an emoji is a surrogate pair and costs two. A label that
+does not fit is refused rather than cut short at a boundary that might fall inside a pair.
+
+### Writing a populated volume
+
+The same call takes a tree. Every file becomes a *set* of directory entries — one file entry,
+one stream extension, and one name entry per fifteen UTF-16 code units — covered by a single
+checksum, so a set that was half written is detectable rather than merely odd.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, VolumeLabel, format};
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_426_325_212);
+let source = TreeBuilder::new()
+    .directory(b"/DCIM".to_vec(), Metadata::new(0o755, time))
+    .file(b"/DCIM/IMG_0001.JPG".to_vec(), b"\xFF\xD8\xFF", Metadata::new(0o644, time))
+    .file(b"/README.TXT".to_vec(), b"hello\n", Metadata::new(0o644, time));
+
+let options = FormatOptions::new(0x1234_abcd).label(VolumeLabel::new("CARD")?);
+let image = format(source, 64 << 20, options)?;
+
+// Root-owned, conventionally moded, and no links: nothing was lost putting it here.
+assert!(image.fidelity().is_faithful());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Three things about that are worth stating, because each is a place exFAT differs from the
+format it shares a name with:
+
+- **A name is stored whole.** Up to 255 UTF-16 code units, in the case it was given, with no
+  second shortened name to derive and no numeric tail to resolve a collision with. A name the
+  format cannot hold — too long, or carrying one of the nine characters a driver interprets
+  rather than stores — is a typed refusal naming the path, never a truncation.
+- **Every stream is contiguous, and says so.** A formatter builds a fresh filesystem in one
+  pass with nothing to allocate around, so each stream sets `NoFatChain` — the flag that tells
+  a reader to follow its clusters in order and not consult the allocation table at all. The
+  table therefore holds chains for three things only: the allocation bitmap, the up-case table,
+  and the root directory, none of which has a flags field to declare anything with. The
+  allocation *bitmap* is what records that a cluster is in use either way, and both come out of
+  one planned allocation rather than being maintained separately.
+- **A time survives to ten milliseconds.** The creation and modification fields each carry a
+  hundredths byte beside their packed date and time, so an odd second is not what a
+  modification time loses; the access field has no such byte and is granular to two seconds.
+  Each of the three carries a zone offset, and a volume this crate writes records that its
+  times are UTC — the alternative encoding means "nobody said", which leaves a reader guessing
+  a locality it has no way to know.
+
+An instant outside 1980–2107 is refused rather than wrapped, for the reason the FAT family
+refuses one: a year that overflowed the field's seven bits would land in the 1980s and look
+entirely plausible.
+
+#### Two names one directory cannot hold
+
+exFAT compares names through the volume's own up-case table, so a source carrying `README` and
+`readme` in one directory describes a directory a driver cannot resolve — a lookup has two
+answers and returns whichever it met first, leaving the other file unreachable by its own name.
+The pair is refused at the model boundary with both paths named.
+
+The comparison is the *volume's* rather than an approximation of it. This crate's writer lays
+down `RECOMMENDED_UPCASE_TABLE` and folds through that same table, so the comparison a driver
+will make is one the writer computed rather than guessed. It matters in both directions: `ß`
+and `ss` fold apart on the volume where a host locale would fold them together, and refusing
+that pair would refuse a directory every driver reading it can resolve.
+
+#### What a volume cannot hold
+
+An exFAT entry set records a name, five attribute bits, three times, and two lengths. It has no
+field for an owner, a group, permission bits, a symbolic link, a second name for a file, a
+device node, or an extended attribute — so a tree carrying one of those loses something on the
+way in, and a build that would lose anything is **refused** until the caller names what it
+accepts:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatError, FormatOptions, FormatPlan, ModelError};
+use ferrosys::{AcceptedLoss, Direction, Metadata, Property, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_426_325_212);
+let source = TreeBuilder::new().file(
+    b"/owned".to_vec(),
+    b"x",
+    Metadata::new(0o644, time).owned_by(1000, 1000),
+);
+
+// Refused by default, and the refusal names the path and the property.
+let refused = FormatPlan::new(source.clone(), 64 << 20, FormatOptions::new(1));
+assert!(matches!(
+    refused,
+    Err(FormatError::Model(ModelError::LossNotAccepted {
+        property: Property::Ownership,
+        ..
+    }))
+));
+
+// Accepted, and what it cost comes back entry by entry.
+let plan = FormatPlan::new(
+    source,
+    64 << 20,
+    FormatOptions::new(1).accepted_loss(AcceptedLoss::NONE.and(Property::Ownership)),
+)?;
+assert_eq!(plan.fidelity().count(Direction::Dropped, Property::Ownership), 1);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A property counts as lost when the value a read hands back is not the value that was stated,
+which is narrower than "the format has no field for it". A root-owned tree with `0644` files
+and `0755` directories goes in and comes back out unchanged — those are exactly the values
+`Synthesis` fills in for a filesystem recording none — so it loses nothing and the report says
+so. The one permission bit the format does carry is read-only, which clears the write bits of
+whatever mode a driver hands back, so a `0444` file survives too.
+
+A hard link is written as a *second copy* of its file rather than refused: the target is named
+inside the same source, so resolving it reads nothing this crate was not already given. What
+that costs is the file's size again, which is why `FormatPlan` exists — the report is readable
+before the destination is touched, so a caller can find out what a build will cost rather than
+discovering it.
+
+### The up-case table
+
+exFAT compares names case-insensitively, and what that means is not a property of Unicode on
+the volume's behalf: it is a mapping the volume itself carries, in the cluster heap, described
+by a directory entry advertising the mapping's checksum. Two implementations agree about
+whether `README` and `readme` are one name exactly when they fold through the same table.
+
+`exfat::ondisk::RECOMMENDED_UPCASE_TABLE` is the mapping the format recommends, which is what
+every current implementation writes and what this crate's formatter lays down. It is checked
+against `RECOMMENDED_UPCASE_CHECKSUM`, a value written down rather than derived — a table
+checked against arithmetic over its own bytes checks out however badly it was transcribed, the
+way a self-signed certificate proves nothing.
+
+### The checksums
+
+Three structures in an exFAT volume carry a checksum and a fourth carries a hash, and
+`exfat::ondisk` holds all four as pure functions: `boot_checksum` over a boot region's own
+first eleven sectors, `upcase_checksum` over the case-folding table a volume carries,
+`entry_set_checksum` over a whole directory entry set, and `name_hash` over an up-cased
+file name. Every one is a rotate-right-and-add over bytes, at 32 bits for the first two and
+16 for the last two.
+
+Two bytes of the boot sector sit deliberately outside its checksum — the volume's state
+flags and how full it is — because a mounted driver rewrites them in place and would
+otherwise have to recompute a checksum over eleven sectors to do it. `BOOT_CHECKSUM_SKIPS`
+names those offsets. They are *stepped over* rather than summed as zero, which is a
+different answer on every volume: the accumulator rotates once per byte consumed, so three
+bytes skipped and three zero bytes summed leave it in different states even where all three
+bytes are zero, which they are on every volume a format produces.
+
+## Reading an exFAT volume
+
+`exfat::Reader` is this family's counterpart to the other two, and reads any conformant
+exFAT volume whatever wrote it. It parses both boot regions and verifies each against its
+own checksum, finds the allocation bitmap and the up-case table by reading the root
+directory, verifies every directory entry set's checksum and every name's hash, follows
+both of the format's run shapes, and streams file contents:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, Reader, Timestamp, format};
+use ferrosys::{Metadata, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .directory(b"/DCIM".to_vec(), Metadata::new(0o755, time))
+    .file(b"/DCIM/IMG_0001.JPG".to_vec(), b"\xff\xd8\xff".to_vec(), Metadata::new(0o644, time));
+let image = format(source, 64 << 20, FormatOptions::new(0x1234_abcd))?;
+
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+let node = reader.lookup(b"/DCIM/IMG_0001.JPG")?;
+assert_eq!(reader.read_data(&node)?, b"\xff\xd8\xff");
+
+// The geometry comes back as the same value the planner produces — including the four
+// fields no boot sector records, which only a reading of the root directory recovers.
+assert_eq!(reader.layout(), image.layout());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A `Node` carries no number, for FAT's reason: exFAT has no inodes and no second name for a
+file. Its `Storage` is the format's two run shapes and nothing else — a run of consecutive
+clusters the allocation table says nothing about, a chain through that table, or no
+allocation at all — and its `times` are an `Option`, the root directory having no entry and
+so no times to read.
+
+### The run shape is declared, and the declaration is binding
+
+A stream's own entry says whether its clusters are consecutive. Where it does, the format
+defines that stream's allocation table entries as meaningless, so a reader must follow the
+clusters in order and must not consult them. That is not a shortcut a reader may decline: a
+volume this crate writes leaves those entries free, so a reader that resolved them anyway
+would follow zeroes.
+
+Both shapes reach one answer. A walk, a `lookup` and a `read_data` never ask which shape a
+file has — the two converge at the point an offset becomes a cluster — so a file written
+contiguously and the same file rewritten as a chain read back identically.
+
+### The two lengths
+
+An entry records how long a file is and how much of it has been written, and the two differ
+on volumes a driver wrote: a driver that extends a file allocates first and writes after.
+This crate's formatter never produces the state, because a format writes every byte it
+allocates — but a card out of a camera routinely carries it, so it is reported at
+`Severity::Cosmetic` and a strict read carries on.
+
+What a read hands back between the two is zeros. That region is allocated and nothing ever
+wrote it, so what is on the medium there is whatever it last held, and handing that back
+would leak it — every driver answers the same way. A written length *past* the declared one
+is the pair contradicting itself rather than a state anything reaches, and that is
+structural.
+
+### What bounds a declared length
+
+Both lengths are 64-bit fields an image supplies, and exFAT is the family where a bound on
+them exists and costs nothing: the format has no holes, so a stream's bytes *are* its
+allocation and the cluster heap is what any of them could occupy. A length past the heap is
+refused as `ReadError::StreamPastHeap`, and under a lenient read the length the reader
+answers with is the heap's — the bound narrows the number, not just the report. Without it,
+a `ValidDataLength` of zero beside a declared length of eight gibibytes is a volume that
+answers eight gibibytes of zeros out of a sixteen-mebibyte image without touching a cluster.
+
+A directory is bounded twice more. `exfat::MAX_DIRECTORY_BYTES` is the cap the format puts
+on one, and the writer is held to the same number. And the traversal stops at the
+end-of-directory marker, which is where the directory ends and where every driver stops —
+so a directory of two entries declaring the rest of the heap costs one cluster to read
+rather than a heap. A length is a number an image supplies; what it costs to believe one is
+not.
+
+The whole-file cap a caller sets applies here as everywhere: `read_data` and `read_data_to`
+both refuse a file past `Limits::max_file_bytes` before a byte is produced.
+
+### The ranges the format states
+
+Beyond the structure — every cluster reference, every chain, every checksum, both run shapes
+— the reader holds each recovered field to the range the format states for it, and reports
+the ones outside it rather than acting on them. A volume is refused under
+`ReadPolicy::Strict` and the deviation is collected under `Lenient`, at the severity the
+fault deserves.
+
+| Field | What the format states | What a volume outside it reads as |
+|---|---|---|
+| `FileSystemRevision` | major 1; a minor above 0 is to be honoured | a major other than 1 is refused where the boot sector is judged, so the classifier and the reader answer together; a minor this reader does not know is `UnknownMinorRevision` |
+| `DataLength` | at most the cluster heap; at most `MAX_DIRECTORY_BYTES` for a directory, and whole clusters | `StreamPastHeap`, `DirectoryTooLong`, `DirectoryLengthNotClusters` |
+| `FirstCluster` with a `DataLength` | a first cluster of zero means a length of zero | `StreamWithoutAllocation` |
+| `FileAttributes` | five bits defined, eleven reserved and zero | `ReservedAttributes` |
+| `AllocationPossible` | set on every stream extension | `AllocationNotPossible` |
+| The three times | a date the calendar has, and hundredths of 0 to 199 | `MalformedTimestamp`, naming which of the three |
+| `CharacterCount` | 0 to 11, and a label carries no `U+0000` | `LabelTooLong`; a label holding a NUL is `LabelNulUnit` and `volume_label` answers `None` rather than a name that is not one |
+| `NameLength` | the set carries exactly the name entries it needs | `IncompleteEntrySet` short of them, `ExcessNameEntries` past them |
+| The root's own entries | one bitmap, one up-case table, one label | `DuplicateRootEntry` inside the root, `MisplacedRootEntry` outside it |
+| `PercentInUse` | 0 to 100, or 255 for "not known" | a value between the two is its own remark, distinct from a percentage that is merely stale |
+| The extended boot signature | `0xAA550000` ending each of the eight sectors | `BadExtendedBootSignature`, once per region |
+| A table entry in a chain | never the bad-cluster mark | `BadClusterInChain`, named as that rather than as a cluster number that is too high |
+
+### Names, and whose idea of case decides them
+
+A name is up to 255 UTF-16 code units, carried fifteen at a time in the entries behind a
+file's stream extension, and reassembled whole. **Every name the reader hands back is one a
+directory can hold**: `.`, `..`, an empty name, a path separator, or a NUL is
+`ReadError::HostileName` rather than an entry in the list, refused at the one place an
+entry's bytes become a name. Nothing about the field rules any of them out — an exFAT name
+is UTF-16 and may spell anything, so a crafted volume can spell `..` in a perfectly
+well-formed set.
+
+Beside the name, the entry records a **hash of its up-cased form**, which a driver compares
+to skip a set without reassembling the name in it. The reader recomputes it. A wrong hash
+costs no data and makes the file invisible to every driver that trusts the field, which is
+worse than corruption for being silent — and it is a failure no checksum covers, since the
+set's own checksum is satisfied by a hash and a name that disagree.
+
+The folding both of those go through is **the volume's own**. `Reader::open` reads the
+up-case table out of the cluster heap, verifies it against the checksum its describing entry
+advertises, decodes its run compression, and folds every comparison and every hash through
+it. A reader that folded through a table of its own would resolve names a driver does not
+and miss names a driver finds — and the difference is real, not theoretical: a volume is
+free to carry a table that folds nothing, and its lookups are then case-sensitive.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, Reader, format};
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .file(b"/README.TXT".to_vec(), b"hello\n".to_vec(), Metadata::new(0o644, time));
+let image = format(source, 64 << 20, FormatOptions::new(1))?;
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+
+// Found through the volume's table, which is the same rule that made `README.TXT` and
+// `readme.txt` a pair no directory could have held.
+assert!(reader.lookup(b"/readme.txt").is_ok());
+assert!(reader.upcase().folded_units() > 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### What a volume must carry, and what is refused outright
+
+The allocation bitmap and the up-case table are found by reading the root directory and
+nowhere else, so a volume describing neither is one nothing can allocate in or look a name
+up in. That is refused by name rather than answered with an empty tree, under either policy
+— a reader that reported a working filesystem there would be wrong in the least visible way.
+
+A volume recording **two allocation tables** is the transaction-safe variant, and is refused
+by name too. Which of the two is live is a flag rather than a convention, so treating such a
+volume as an ordinary one is a coin toss dressed as an answer.
+
+### Checking an exFAT volume
+
+`scan` reads the whole volume under `ReadPolicy::Lenient` and collects every deviation
+rather than stopping at the first: both boot regions against their checksums, the backup
+against the main one, the allocation table's two reserved entries, every entry set's
+checksum and every name's hash, and every cluster the tree occupies held against the
+allocation bitmap **in both directions** — a cluster in use and reached by nothing, and a
+cluster a stream occupies that the bitmap calls free.
+
+The second of those is worth stating, because no checker reaches it. `fsck.exfat` objects
+only when a cluster a file *chains through* is marked free, and a stream declaring
+consecutive clusters chains through nothing — so a bitmap and a tree that disagreed about
+an ordinary file would pass a check on most of a volume.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, Reader, format};
+use ferrosys::{OpenOptions, ReadPolicy, TreeBuilder};
+
+let image = format(TreeBuilder::new(), 64 << 20, FormatOptions::new(1))?;
+let mut reader = Reader::open_with(
+    std::io::Cursor::new(image.as_bytes()),
+    &OpenOptions::new().policy(ReadPolicy::Lenient),
+)?;
+let report = reader.scan();
+assert!(report.is_clean());
+assert!(!report.has_fatal(ReadPolicy::Strict));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Two states a driver leaves behind are reported and are not faults: a volume it had open and
+did not put down, and a medium error it recorded. Both are the format correctly recording
+something that happened, so the volume is well-formed, every field is what a driver is
+supposed to have written, and a strict read of a card somebody pulled out of a reader still
+succeeds. Each message says what the bit means rather than which field held it — "this
+volume was not cleanly unmounted" sends a caller somewhere useful and "`VolumeFlags` is
+`0x0002`" does not.
+
+## Reading a btrfs
+
+Behind the `btrfs` feature, `ferrosys::btrfs` reads the btrfs family. It is a different shape
+of module from the three above, because btrfs is a different shape of format: the others
+address storage directly, where **every address in a btrfs is logical** and something has to
+translate it.
+
+So this family has **two public entry points**, and they are the two layers the format has.
+`Volume` is the address space and the trees on it — which trees are there, what does the chunk
+map say, does every block verify. `Reader` is the filesystem view built on it — what is at this
+path, what does it hold, is it what was written. A caller extracting files wants the second; a
+caller looking at a damaged image wants the first, and folding them into one would hide a layer
+the on-disk format actually draws.
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::btrfs::{Volume, ondisk::objectid};
+
+let mut volume = Volume::open(std::fs::File::open("root.img")?)?;
+let sb = volume.superblock();
+println!("{} bytes, {} KiB blocks", sb.total_bytes, sb.nodesize / 1024);
+
+// Every tree the filesystem has, and how many records each holds.
+for root in volume.tree_roots()? {
+    let name = objectid::name(root.objectid).unwrap_or("subvolume");
+    println!("{name}: {} items", volume.tree(root).count_items()?);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### The bootstrap, and why there is one path and not two
+
+Finding the chunk tree needs the map that reading the chunk tree would build. The format
+breaks the circle in the superblock: the chunk items covering the chunk tree's own address are
+copied into it, as an array of key-and-chunk pairs. So opening a volume loads that array,
+translates the chunk root through it, reads the chunk tree, and has the whole map — which is
+what `ChunkMap` holds and what every read above it goes through.
+
+There is exactly one translation, and the reason is worth stating because the shortcut is
+tempting. On a filesystem a formatter has just written, a chunk's logical start and its
+physical start are often close enough that arithmetic would appear to work. On a filesystem
+that has been balanced they are unrelated numbers. A shortcut would be right on every image
+this crate could produce and wrong on half the images it is pointed at, and the failure is not
+an error — it is a successful read of the wrong bytes.
+
+A chunk whose copies are *pieces* rather than whole copies needs more than the device in hand,
+so a striped profile is refused by name; so is a profile word the format does not define,
+because nothing says what its stripes are. Neither is treated as though the first stripe were
+the chunk.
+
+### The copies of the superblock
+
+The format defines **three** locations — 64 KiB, 64 MiB, and 256 GiB — and writes a copy at
+each one the device holds *all* of. `Volume::mirrors` says what was found at each, and opening
+a volume chooses the copy at the highest generation, which is the filesystem's own rule for
+which is live.
+
+Every copy is judged whether or not it is the one used, and the states are not one state:
+
+| What was found | What it means |
+|---|---|
+| `OutsideDevice` | the device is not long enough to hold this copy, so the format wrote none |
+| `Truncated` | the device's own recorded length reaches it and the image in hand does not |
+| `Absent` | the bytes are readable and are not a superblock |
+| `Damaged` | a superblock whose checksum does not cover it |
+| `Misplaced` | a superblock recording a different location as its own |
+| `Present` | a superblock, at the transaction it records |
+
+`Misplaced` is the one worth dwelling on. A superblock records where it lives, and that field
+is *inside* what its checksum covers — so a copy written somewhere other than where it belongs
+verifies perfectly and still says the wrong thing about itself. That is what an image carved
+out of a disk at the wrong offset looks like, and no checksum can catch it.
+
+Under `ReadPolicy::Strict` a copy the device has room for that is anything but `Present` at the
+live generation is a refusal. Under `ReadPolicy::Lenient` the volume opens through the
+surviving copy and every state is reported, which is the reading a forensic look at a damaged
+filesystem wants.
+
+### Walking a tree
+
+Every tree in a btrfs has the same shape, so there is one engine and every tree is read
+through it: internal nodes of key-and-address pairs over leaves of key-and-data items, sorted
+by a 17-byte key of an object id, a one-byte type, and an offset the type decides the meaning
+of. A search goes straight to a key rather than scanning, which is what makes "the entries of
+this directory" one descent:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::btrfs::{Volume, ondisk::{DiskKey, ItemType, objectid}};
+
+let mut volume = Volume::open(std::fs::File::open("root.img")?)?;
+let root = volume.root_tree();
+
+// Every record of one tree, in key order, with the item's own bytes.
+volume.tree(root).for_each_item(|key, data| {
+    println!("{:?} {} bytes", key.kind.name(), data.len());
+    true
+})?;
+
+// Or straight to one: the first record at or after a key.
+let found = volume.tree(root).find_first(DiskKey::first_of(objectid::FS_TREE, ItemType::ROOT_ITEM))?;
+# let _ = found;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+An item type the format has grown since this release keeps its byte and answers `None` to
+`name`. That is deliberate and it is the *opposite* of what an unknown feature bit gets: a
+feature bit is the format telling a reader in advance that it will not understand what
+follows, and an unrecognized item is a record this reader has no opinion about sitting beside
+records it does. A reader that refused what it could not name would refuse every filesystem
+that has been used.
+
+### What bounds a walk
+
+An image that was crafted rather than formatted can describe a tree that is not one, and each
+way of doing so has its own guard:
+
+- **A count larger than the block holds** — checked against the room the block has, in the
+  units its own level says it holds.
+- **An item whose data escapes its leaf** — a leaf fills from both ends, so the data must
+  begin past the array describing it and end within the block. The arithmetic is 64-bit
+  whatever the target's pointer width is, so a crafted offset behaves the same on a 32-bit
+  machine as on the one this was developed on.
+- **A leaf whose data is not packed** — every item's data abuts its neighbour's. Bounding each
+  item separately does not imply this, and the difference is a defect class: data moved within
+  a leaf, with the offsets moved to match, leaves every item inside the block and every item
+  pointing at bytes that are not its own.
+- **A block reached twice** — every address a descent visits is remembered.
+- **A child at the wrong height** — a child is exactly one level below its parent, so a
+  descent has a decreasing measure independent of the visited set and terminates whatever the
+  addresses say.
+- **Keys out of order** — a tree that is not sorted is not a tree, and a search over one
+  silently misses items rather than failing.
+- **A tree larger than the caller will hold** — `Limits::max_walk_entries` caps what one walk
+  visits.
+
+Beside those, every block carries a checksum over itself, and this crate recomputes each one
+from the bytes that came off the device rather than from a value re-serialized through its own
+types — a structure whose coverage of a format is partial cannot reproduce a foreign tool's
+bytes, and a verifier built on one would report every filesystem it did not write as damaged.
+A block also records its own logical address and the filesystem it belongs to, and both are
+held against what the reader believed when it went to fetch it. Those are checks no checksum
+can make, for the same reason `Misplaced` is: the fields are inside what the checksum covers.
+
+### What it refuses to read at all
+
+Some filesystems are entirely well-formed and beyond this reader, and each is refused by a
+name saying what it would take rather than by an unexpected value:
+
+- an `incompat` feature bit outside `SUPPORTED_INCOMPAT`, named — or, for one the format grew
+  after this release, given as its bit position;
+- a checksum algorithm this crate does not compute, since comparing bytes against a digest it
+  did not produce would report every block of a healthy filesystem as damaged;
+- a filesystem spanning more than one device, since the image in hand is then a part of it
+  rather than the whole;
+- a chunk profile whose stripes are not copies;
+- a file whose bytes are stored in an encoding this build has no decoder for, named by the
+  algorithm.
+
+### Compressed extents
+
+The format stores a file's bytes as DEFLATE, LZO1X, or Zstandard where a mount was told to,
+and each is a Cargo feature: `zlib`, `lzo`, `zstd`. What a build carries decides two different
+things, and the difference is the format's rather than this crate's:
+
+- **A file** stored with an algorithm this build cannot decode is refused by name
+  (`ReadError::UnsupportedCompression`), and every other file on the filesystem reads.
+- **A filesystem** advertising LZO or Zstandard in its `incompat` word cannot be opened at all
+  without that decoder, because the word is the format saying in advance that a reader without
+  it will misread what follows. DEFLATE sets no such bit — every reader of this format has
+  always understood it — so a filesystem using it opens either way.
+
+Verification needs none of them, and the reason is worth knowing: the checksums cover the bytes
+**on the volume**, so `verify_data` checks a compressed extent without expanding it.
+
+A record's declared expansion is a number the image supplied and it is the size of a buffer, so
+it is held to what the format compresses in — 128 KiB — before a byte is allocated for it. A
+record claiming more is refused, and so is a stream that expands to a different length than its
+record declares.
+
+### The filesystem view
+
+`Reader` is the layer that reads those items as files. Opening one reads the volume and then
+the root tree, which is what says how many subvolumes there are and where each one's tree
+begins:
+
+```rust,ignore
+# extern crate ferrosys;
+use ferrosys::btrfs::Reader;
+
+let mut reader = Reader::open(std::fs::File::open("root.img")?)?;
+for sub in reader.subvolumes() {
+    println!("{}: {}", sub.id, String::from_utf8_lossy(&sub.name));
+}
+
+let node = reader.lookup(b"/etc/hostname")?;
+println!("{} bytes, mode {:o}", node.item.size, node.item.mode & 0o7777);
+print!("{}", String::from_utf8_lossy(&reader.read_data(&node)?));
+
+// Held against the checksums the filesystem recorded for it.
+reader.verify_data(&node)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+An inode is **a subvolume and a number together**, which is what `Node` carries. Inode 257
+exists in every subvolume and they are different files, so a reader keyed on the number alone
+would hand back one for the other.
+
+A directory holds every entry twice on purpose — as a `DIR_ITEM` keyed by the hash of the
+name, which is what `lookup` descends to, and as a `DIR_INDEX` keyed by the entry's sequence
+number, which is the order `read_dir` lists in. Each is used for what it is keyed for. There is
+no `.` or `..` entry to filter out: btrfs stores neither.
+
+A directory entry whose location names a `ROOT_ITEM` rather than an inode is **where a
+subvolume is mounted**, and stepping through it continues in another tree entirely. A walk
+crosses those seams, so what it yields is every name in the filesystem rather than every name
+in one tree.
+
+A run of a file that was never written reads back as zeros, and the format spells that two
+ways: with `no-holes` there is no extent record at all and a reader has to notice the absence,
+and without it there is a record whose extent address is zero. A preallocated extent reads back
+as zeros too — handing back what is on the volume there would be handing back another file's
+deleted bytes.
+
+### What data checksums buy
+
+btrfs keeps a crc32c per sector of every data extent in a tree of its own, and
+`Reader::verify_data` is what holds a file's bytes against them. **No other family in this
+crate can make this check**: ext4 checksums its metadata and not its data, and neither FAT nor
+exFAT checksums anything. A file whose bytes decayed on the medium sits under trees that are
+entirely well-formed and verifies perfectly at every level but this one.
+
+Three kinds of run are skipped, each for a reason the format states: a hole and a preallocated
+extent hold nothing to check, and a file whose inode carries `NODATASUM` has no checksums
+recorded at all. A run with no checksum recorded is reported rather than passed — treating a
+missing record as a pass would make the whole check vacuous on the one image it most matters
+for.
+
+### Scanning a whole filesystem
+
+`Reader::scan` walks every tree and reports rather than stopping, which is what a caller asking
+"is anything wrong with this image" wants. Two of what it reports are this family's alone.
+
+**A live log tree.** A filesystem that was not cleanly unmounted has a nonzero `log_root`, and
+the committed trees are stale with respect to it. This crate never replays a log, so what it
+reads is the last committed transaction and the finding says so. It is cosmetic — the image is
+conformant and every byte read is trustworthy — and the message says what is *missing* rather
+than which field held an unexpected value.
+
+**An item type this reader has no opinion about.** Skipped, counted, and named, one finding per
+type with the count. A used filesystem carries thousands of records of a handful of types
+nothing here interprets, and a report with one entry per record is a report nobody reads.
+
+A finding from this family carries no byte offset, and that is deliberate: every address it
+reports is logical, and the byte one sits at is on the far side of the chunk map. A finding
+with no offset is honest; one carrying a logical address multiplied by something would name a
+byte that is nothing in particular.
+
+### Planning a layout
+
+`ferrosys::btrfs::plan_layout` answers, as a pure function, where every chunk of a btrfs of a
+given shape sits. It takes a volume length, a sector and node size, how each kind of block
+group is replicated, the feature words, and how much content the filesystem will be given; it
+returns every chunk in ascending logical order with the device offset of each copy, which
+superblock locations the device has room for, and a bound on the metadata the whole of it may
+spend.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::btrfs::{PlanRequest, Profile, plan_layout, minimum_volume_bytes};
+use ferrosys::btrfs::ondisk::BlockGroupFlags;
+
+let layout = plan_layout(&PlanRequest::new(1 << 30))?;
+
+// Two address spaces, advancing at different rates: a chunk covers its length of logical
+// space and its length times its copy count of the device.
+for chunk in &layout.chunks {
+    println!(
+        "{:#x}..{:#x} in {} cop{}",
+        chunk.logical,
+        chunk.logical_end(),
+        chunk.copies.len(),
+        if chunk.copies.len() == 1 { "y" } else { "ies" },
+    );
+}
+
+// Metadata is replicated by default, so the device gives up twice the logical space for it.
+let metadata: u64 = layout.chunks_of(BlockGroupFlags::METADATA).map(|c| c.length).sum();
+assert!(layout.device_bytes_used() > metadata);
+
+// Whether a device can hold a btrfs at all is a question with an answer before any of this.
+assert!(minimum_volume_bytes(Profile::Dup, Profile::Single) > (100 << 20));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Two things it does that are worth knowing about.
+
+**It refuses a feature whose prerequisites were not asked for.** Recording block groups in a
+tree of their own is defined only for a filesystem that also keeps free space in a tree and
+records holes by their absence. Asking for the first without the other two is a
+`GeometryError::FeatureIncoherent` naming what is missing, rather than a layout quietly built
+without the feature its caller named — a filesystem built without a feature it was described as
+having is a filesystem other than the one that was asked for.
+
+**The first mebibyte holds no chunk, and on a filesystem with replicated metadata neither does
+the span after it.** The first is the format: a superblock lives at 64 KiB. The second is
+unallocated space a driver allocates from later exactly as it allocates from the space past the
+last chunk, and the layout carries it so that a planned filesystem and one the format's own
+tooling produces put the same chunk at the same address.
+
+### Writing one
+
+`ferrosys::btrfs::format` turns a source tree and a plan into bytes. What comes out is a complete
+btrfs: ten trees — the chunk, device, extent, root, filesystem, checksum, UUID, free-space,
+block-group, and data-relocation trees, and one more per subvolume — every block checksummed,
+every allocated block recorded in the extent tree with the tree that owns it, a crc32c beside
+every sector of file data, and every superblock copy the device has room for written last.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+use ferrosys::btrfs::{FormatOptions, GENERATION, Reader, Volume, format};
+
+let time = Timestamp::from_secs(1_700_000_000);
+
+// The five values a formatter would conventionally invent are inputs, so two formats of the
+// same tree at the same parameters are the same bytes.
+let options = FormatOptions::new([0x11; 16], time)
+    .chunk_tree_uuid([0x22; 16])
+    .device_uuid([0x33; 16])
+    .subvolume_uuid([0x44; 16]);
+
+let source = TreeBuilder::new()
+    .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+    .file(b"/etc/hostname".to_vec(), "ferrosys\n", Metadata::new(0o644, time));
+
+let image = format(source.clone(), 1 << 30, options.clone())?;
+assert_eq!(image.as_bytes(), format(source, 1 << 30, options)?.as_bytes());
+
+// btrfs has a field for every property a source states, so nothing was lost on the way in.
+assert!(image.fidelity().is_faithful());
+
+// Read it back. Ten trees: the eight a root item names, and the root tree and chunk tree the
+// superblock points at directly.
+let mut volume = Volume::open(std::io::Cursor::new(image.as_bytes()))?;
+assert_eq!(volume.superblock().generation, GENERATION);
+assert_eq!(volume.tree_roots()?.len(), 10);
+
+// And as a filesystem.
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+let node = reader.lookup(b"/etc/hostname")?;
+assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
+// Every byte of it against the checksum written beside it.
+reader.verify_data(&node)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+An empty filesystem is `TreeBuilder::new()`, which is a source with no entries in it.
+
+`format_to` streams the same bytes into any `Write + Seek` destination instead of collecting
+them. Only the blocks the filesystem occupies are written and nothing is read back, so a file
+destination stays sparse — and an empty btrfs is a few hundred kibibytes of metadata whatever
+the volume's length, so what a format costs beyond the file data does not grow with the volume
+at all.
+
+**One transaction, and nothing is ever rewritten.** A filesystem written here is at
+`btrfs::GENERATION` and stops, which is what makes the whole of it decidable before the first
+byte is placed. Two consequences are visible in the result and are properties rather than
+accidents: every block group is filled from its start and left with a single run of free space,
+and every tree's leaves are packed full in key order.
+
+### Subvolumes
+
+A subvolume is a filesystem tree of its own inside the same address space, and it is the layout
+every distribution that defaults to btrfs expects. A caller names which of the source's
+directories become one, by path:
+
+```rust
+# extern crate ferrosys;
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+use ferrosys::btrfs::{FormatOptions, Reader, SubvolumeRequest, format};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .directory(b"/@".to_vec(), Metadata::new(0o755, time))
+    .file(b"/@/hostname".to_vec(), "ferrosys\n", Metadata::new(0o644, time))
+    .directory(b"/@home".to_vec(), Metadata::new(0o755, time));
+
+let image = format(
+    source,
+    1 << 30,
+    FormatOptions::new([0x11; 16], time)
+        .subvolume(SubvolumeRequest::new(b"/@".to_vec(), [0x55; 16]))
+        .subvolume(SubvolumeRequest::new(b"/@home".to_vec(), [0x66; 16]))
+        // Where a mount that names no subvolume lands.
+        .default_subvolume(b"/@".to_vec()),
+)?;
+
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+// Three: the one every btrfs has, and the two that were asked for.
+assert_eq!(reader.subvolumes().len(), 3);
+assert_eq!(reader.default_subvolume(), reader.subvolumes()[1].id);
+
+// A walk crosses the seam rather than stopping at it, so what it yields is the filesystem.
+let node = reader.lookup(b"/@/hostname")?;
+assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A subvolume root is still a directory: the source declares it as one, and the request says which
+of those directories becomes the root of a tree of its own. A hard link cannot span two of them
+— no btrfs holds one — so a source that names one is refused rather than written as a copy.
+
 ## Opening an image without knowing what it is
 
 `open` classifies a source and hands back the reader for whichever family claimed it,
 already open over the same bytes at the same offset. The result is an enum of concrete
 family readers rather than a common trait, because the readers are genuinely not
-interchangeable — one has inodes, link counts, owners, modes, symbolic links, and extended
-attributes, and the other has none of the six:
+interchangeable — two of them have inodes, link counts, owners, modes, symbolic links, and
+extended attributes, and the other two have none of the six:
 
 ```rust,ignore
 # extern crate ferrosys;
@@ -1092,6 +2009,8 @@ use ferrosys::{FsReader, open};
 match open(file)? {
     FsReader::Ext(mut reader) => { let _ = reader.superblock(); }
     FsReader::Fat(mut reader) => { let _ = reader.layout(); }
+    FsReader::ExFat(mut reader) => { let _ = reader.upcase(); }
+    FsReader::Btrfs(mut reader) => { let _ = reader.subvolumes(); }
     // The enum is `#[non_exhaustive]`: a build compiles in the variants of the families it
     // compiles in, so a match carries a wildcard arm.
     _ => {}
@@ -1106,15 +2025,21 @@ file's bytes, resolve a link — so an extraction needs no `match` at all. `Arch
 family takes: where the filesystem begins, how strictly it is read, and what one read may
 allocate. A knob only one family has — a checksum seed to verify against, a code page to
 read short names under — is on that family's own open, reached by opening its reader
-directly.
+directly. A family that has no such knob takes these options as they are and mints nothing:
+`exfat::Reader::open_with` is `OpenOptions` and no more, because a type identical to it
+would be this family declaring a knob it does not have. A family that does have one *holds*
+this value rather than copying its fields out, so what is handed across is the value either
+way and an input added here reaches every family without a second edit.
 
 ## Saying what an image is
 
 `detect` reads a source and reports the `Filesystem` family it holds — the crate root's own
 vocabulary. Each variant names one family and carries that family's own sub-classification:
 `Filesystem::Ext` carries the `Profile` its feature words classify to, and `Filesystem::Fat`
-carries the `FatType` its cluster count derives to. `detect_with` does the same at an offset
-within the source, for a partition inside a whole-disk image or a region a carver located:
+carries the `FatType` its cluster count derives to. `Filesystem::ExFat` carries nothing,
+because that family has nothing to sub-classify — one revision of the format, recorded in
+every volume. `detect_with` does the same at an offset within the source, for a partition
+inside a whole-disk image or a region a carver located:
 
 ```rust,ignore
 # extern crate ferrosys;
@@ -1139,7 +2064,21 @@ including the master boot record of a disk whose partitions hold something else 
 So a FAT volume is recognized by its whole BIOS parameter block agreeing with itself, and
 never by that signature.
 
+exFAT is the first kind, with a condition the rule has to name. `EXFAT   ` sits at offset 3
+of sector 0, which is exactly where a FAT boot sector keeps eight bytes of arbitrary OEM
+text that no FAT driver reads and no formatter is constrained in — so a FAT volume can spell
+that magic exactly, and claiming it on the magic alone would mean FAT is never tried. An
+exFAT volume is therefore recognized by the magic **and** by the 53 bytes at offset 11 that
+the format requires to be zero: bytes a FAT parameter block uses for its sector size, its
+cluster size, and its media descriptor, and cannot leave empty. Both, or the claim is not
+made. Generally: a family joins the first kind on a magic no other family could write at
+that offset, and where the offset is shared its condition is the magic plus whatever the
+format requires that the collision cannot satisfy.
+
 Detection answers with one family rather than every family that might match, and it asks
 what an image *is*, not whether it is sound: it classifies leniently, so an image with a
 quirk a strict read would refuse still answers here. `Reader` and `scan` are what say
 whether a filesystem is well-formed.
+
+Recognizing a filesystem and reading one are separate capabilities, and a build carries
+both for every family it compiles in: `open` reaches a reader for whatever `detect` names.

@@ -38,6 +38,42 @@ jobs:
       - name: Library lints clean in every configuration it offers
         run: ci/lint-features.sh
 
+      # Two implementations of one concept both work the day they are written and drift
+      # apart later, and nothing about the second one fails until it has been wrong for a
+      # while. These are the two gates that catch it: the first knows which concepts have
+      # been standardized and fails when one is spelled out again, the second knows nothing
+      # and fails when any body resembles another over the recorded baseline.
+      - name: One home per concept
+        run: ci/one-home.sh
+
+      - name: No body written twice
+        run: ci/duplicate-bodies.sh
+
+      # Adding a family fails loudly in the code and silently in the prose: a landing page
+      # that stops at the families it had when it was written keeps rendering, and a reader
+      # has no way to tell the newest one is there. This holds every page a stranger reads
+      # to naming every family the crate defines.
+      - name: Every page that names a family names all of them
+        run: ci/family-coverage.sh
+
+      # A `0.x` requirement resolves only within its minor, so the version the guide tells
+      # a reader to depend on is a pin that goes stale the moment the minor moves. Prose
+      # does not fail to compile, so this is what holds the two together.
+      - name: The guide asks for the version the crate is
+        run: ci/book-version.sh
+
+      # The packages the runner does not carry that the gates below cannot do without.
+      # The archive round-trip gate cross-checks a surviving xattr with `getfattr` and the
+      # btrfs tier sets one with `setfattr` (both the `attr` package), which the
+      # require-env below turns from a soft skip into a hard requirement. exfatprogs links
+      # libblkid unconditionally -- there is no flag to build without it -- so its headers
+      # have to be here before that build runs, and btrfs-progs links libblkid, libuuid
+      # and zlib on the same terms.
+      - name: Install the distribution packages the gates and the oracle builds need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y attr libblkid-dev uuid-dev zlib1g-dev
+
       # The host-tool validation gates (e2fsck, the dumpe2fs differential oracle,
       # the resize2fs matrix) treat e2fsprogs as ground truth, and its geometry
       # defaults and e2fsck strictness are version- and build-dependent. Pin the exact
@@ -126,12 +162,108 @@ jobs:
             assert_banner mtools "$t (GNU mtools) 4.0.49" "$mt/bin/$t" --version
           done
 
-      # The archive round-trip gate cross-checks a surviving xattr with `getfattr`
-      # (the `attr` package), which the require-env below turns from a soft skip into a
-      # hard requirement. Install it so that gate actually runs rather than failing as
-      # a missing tool.
-      - name: Install attr for the getfattr xattr gate
-        run: sudo apt-get update && sudo apt-get install -y attr
+      # The exFAT oracle tier, pinned on the same grounds. `fsck.exfat` decides whether
+      # an exFAT image is acceptable, `mkfs.exfat` is the geometry baseline, and
+      # `tune.exfat` is what pins the one field `mkfs.exfat` draws from the clock, so
+      # that two formats at the same parameters compare byte for byte. `dump.exfat` and
+      # `exfatlabel` are second readings of what a format wrote.
+      - name: Cache pinned exfatprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/exfatprogs
+          key: exfatprogs-${{ hashFiles('ci/build-exfatprogs.sh') }}
+
+      - name: Build exfatprogs, put it on PATH, assert the version
+        run: |
+          bash ci/build-exfatprogs.sh
+          prefix="$(bash ci/build-exfatprogs.sh --print-prefix)"
+          echo "$prefix/sbin" >> "$GITHUB_PATH"
+          # Every binary in this suite answers `-V` with the same line, naming the suite
+          # and not itself, so what a loop establishes is that each name is present and
+          # came from the pinned release. `fsck.exfat` prints its banner and then exits
+          # non-zero for want of a device, which is why the output is read and not the
+          # status -- the same reason the two loops above capture rather than pipe.
+          for t in mkfs.exfat fsck.exfat tune.exfat dump.exfat exfatlabel; do
+            banner="$("$prefix/sbin/$t" -V 2>/dev/null || true)"
+            case "$banner" in
+              *"exfatprogs version : 1.4.2 ("*) ;;
+              *) echo "::error::exfatprogs pin mismatch for $t"; exit 1 ;;
+            esac
+          done
+
+      # The one role `exfatprogs` has no tool for: putting a tree into an exFAT volume.
+      # The reader's gates need an image this crate did not lay out, `mkfs.exfat` writes
+      # no files, and this family has no mtools -- so the second complete implementation
+      # of the format, relan/exfat's libexfat, is what fills one. `ci/exfat-populate.c` is
+      # the command line that library does not ship. It needs a C compiler and nothing
+      # else: no libfuse to build, and at run time no /dev/fuse, no fusermount, no loop
+      # device, no kernel, and no root.
+      - name: Cache the pinned exFAT populator
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/exfat-populate
+          key: exfat-populate-${{ hashFiles('ci/build-exfat-populate.sh', 'ci/exfat-populate.c') }}
+
+      - name: Build the exFAT populator, put it on PATH, assert the version
+        run: |
+          bash ci/build-exfat-populate.sh
+          prefix="$(bash ci/build-exfat-populate.sh --print-prefix)"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          # The binary reports the library release it was linked against rather than one
+          # of its own, because that release is what decides how a volume it fills is laid
+          # out. Its own source is in this repository and has no version to drift from.
+          banner="$("$prefix/bin/exfat-populate" --version 2>/dev/null || true)"
+          case "$banner" in
+            *"exfat-populate (relan/exfat) 1.4.0"*) ;;
+            *) echo "::error::exfat-populate pin mismatch"; exit 1 ;;
+          esac
+
+      # The btrfs oracle tier, pinned on the same grounds and for more of them. `btrfs
+      # check` decides whether a btrfs image is acceptable and `--check-data-csum` is a
+      # second question it answers about the same image; `mkfs.btrfs` is the baseline,
+      # including the `-r` form that fills one from a directory; `btrfs inspect-internal`
+      # renders an image item by item; `btrfstune` changes a built image's identity;
+      # `btrfs-image` produces a metadata-only dump; and `btrfs-corrupt-block` is what
+      # damages a structure so the checker can be watched rejecting it.
+      #
+      # This is the family whose on-disk *defaults* move between upstream releases -- the
+      # pinned one turned `block-group-tree` on by default -- so the pin is not only about
+      # a checker's strictness here. It is what "the baseline" means at all.
+      - name: Cache pinned btrfs-progs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ferrosys/btrfs-progs
+          key: btrfs-progs-${{ hashFiles('ci/build-btrfs-progs.sh') }}
+
+      - name: Build btrfs-progs, put it on PATH, assert the version
+        run: |
+          bash ci/build-btrfs-progs.sh
+          prefix="$(bash ci/build-btrfs-progs.sh --print-prefix)"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          # Four tools name themselves ahead of the suite and the multiplexer is the
+          # suite, so the release is what every one of their banners ends at. Matched at
+          # the end rather than anywhere in the line: upstream ships point releases beside
+          # their parents, and `v7.1` is a prefix of `v7.1.1`. The suite also prints the
+          # switches it was configured with on the next line, which the tier asserts -- a
+          # tarball is half a pin when a tool links what it finds -- so the banner is cut
+          # to its first line before the version is read off the end of it.
+          for t in mkfs.btrfs btrfstune btrfs-image; do
+            banner="$("$prefix/bin/$t" --version 2>/dev/null | head -1 || true)"
+            case "$banner" in
+              *"$t, part of btrfs-progs v7.1") ;;
+              *) echo "::error::btrfs-progs pin mismatch for $t"; exit 1 ;;
+            esac
+          done
+          banner="$("$prefix/bin/btrfs" --version 2>/dev/null | head -1 || true)"
+          case "$banner" in
+            *"btrfs-progs v7.1") ;;
+            *) echo "::error::btrfs-progs pin mismatch for btrfs"; exit 1 ;;
+          esac
+          # The corruptor has no version of its own to check. What is checked is that the
+          # build installed it at all: upstream leaves it out of its install set, so a
+          # missing one is a silently uncalibrated checker rather than a missing feature.
+          test -x "$prefix/bin/btrfs-corrupt-block" \
+            || { echo "::error::btrfs-corrupt-block was not installed"; exit 1; }
 
       # `--all-features` builds the `tar` archive source and the `dir` directory source,
       # so their PAX/xattr/ACL surface is tested, linted, and doc-checked rather than
@@ -175,6 +307,28 @@ jobs:
       # `dir`, and `serde` enables a family.
       - name: Library builds and passes its tests with a family and no ext
         run: cargo test -p ferrosys --no-default-features --features fat,dir --lib
+
+      # One family, alone, and it is the family whose ext-shaped assumptions are least
+      # like ext's: no allocation table shared with a directory, no cluster chain, a
+      # separate bitmap and up-case table. A `#[cfg]` written as "any family" and meaning
+      # "any family shaped like the first one" builds an item nothing can reach here, and
+      # this is the configuration that fails on it rather than leaving it unreached.
+      - name: Library builds and passes its tests with exFAT as the only family
+        run: cargo test -p ferrosys --no-default-features --features exfat --lib
+
+      # The newest family, alone. It is the one family whose reader descends a tree of
+      # its own before it reaches a file, so a `#[cfg]` written as "any family" and meaning
+      # "any family that addresses blocks directly" builds an item nothing can reach --
+      # and this is the configuration that fails on it.
+      - name: Library builds and passes its tests with btrfs as the only family
+        run: cargo test -p ferrosys --no-default-features --features btrfs --lib
+
+      # The same family with the three decoders, which is the only configuration where a
+      # compressed extent is undone rather than declined by name. Both rows run: the one
+      # above is what a build without them refuses, and this is what a build with them
+      # reads, and a change that broke either would leave the other passing.
+      - name: Library builds and passes its tests with btrfs and every decoder
+        run: cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib
 
       # The fuzz package sets its own `[workspace]`, so `cargo test --workspace` never
       # compiles it: a target that stopped matching the reader's API would rot silently
@@ -380,6 +534,11 @@ jobs:
     env:
       # Pinned; bump deliberately. 0.5.x is required for `[rust] edition = 2024`.
       MDBOOK_VERSION: "0.5.4"
+      # And pinned by digest as well as by version, on the same ground cargo-deny is: a
+      # binary whose verdict decides a gate is a binary this workflow executes, and a
+      # version-pinned URL names which release to fetch without saying what its bytes are.
+      MDBOOK_SHA256_X86_64: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+      MDBOOK_SHA256_AARCH64: "753e5c5c363ee8a56972344dcf91466f005a51db84a7aeffe427ae3ef83d6d44"
     steps:
       - uses: actions/checkout@v4
 
@@ -400,15 +559,24 @@ jobs:
         run: |
           mkdir -p "$HOME/.local/bin"
           # As with cargo-deny in the `deny` job: the host architecture decides the asset,
-          # and one with no build named here fails rather than guessing. The two are not
-          # the same triple — mdBook publishes gnu for x86_64 and musl for aarch64.
+          # and one with no digest pinned here fails rather than falling back to one that
+          # would not verify. The two are not the same triple — mdBook publishes gnu for
+          # x86_64 and musl for aarch64.
           case "$(uname -m)" in
-            x86_64)  triple="x86_64-unknown-linux-gnu" ;;
-            aarch64) triple="aarch64-unknown-linux-musl" ;;
-            *) echo "::error::no mdbook build named for $(uname -m)"; exit 1 ;;
+            x86_64)
+              triple="x86_64-unknown-linux-gnu"
+              digest="$MDBOOK_SHA256_X86_64" ;;
+            aarch64)
+              triple="aarch64-unknown-linux-musl"
+              digest="$MDBOOK_SHA256_AARCH64" ;;
+            *) echo "::error::no mdbook digest pinned for $(uname -m)"; exit 1 ;;
           esac
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz" \
-            | tar -xz -C "$HOME/.local/bin"
+          tarball="mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/${tarball}"
+          echo "${digest}  ${tarball}" | sha256sum -c - \
+            || { echo "::error::mdbook tarball digest mismatch"; exit 1; }
+          tar -xzf "$tarball" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # The guide's Rust code blocks link against the crate, so build it first. Every
@@ -416,7 +584,7 @@ jobs:
       # against does not carry makes its examples fail to compile, and marking them
       # uncompiled instead would let them rot.
       - name: Build crate
-        run: cargo build --features fat
+        run: cargo build --features fat,exfat,btrfs
 
       - name: Build book
         run: mdbook build book

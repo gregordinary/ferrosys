@@ -28,9 +28,15 @@ CONFIGS=(
     "no family, no source, no sink|--no-default-features"
     "the default: ext alone|"
     "a family that is not the default one|--no-default-features --features fat"
+    "a family with a classifier and a reader|--no-default-features --features exfat"
+    "the newest family, alone|--no-default-features --features btrfs"
+    "that family with every decoder it can use|--no-default-features --features btrfs,zlib,lzo,zstd"
+    "one decoder of the three, so the other two are absent|--no-default-features --features btrfs,lzo"
     "the derives, no family to derive over|--no-default-features --features serde"
     "both ends of a tree, no family|--no-default-features --features tar,dir"
     "a family and a sink, no ext|--no-default-features --features fat,dir"
+    "two families and no ext|--no-default-features --features fat,exfat"
+    "a family the root dispatches to, beside one it does not|--no-default-features --features fat,btrfs"
     "the default family, both ends|--features tar,dir"
 )
 

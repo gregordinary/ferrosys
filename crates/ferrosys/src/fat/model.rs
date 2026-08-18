@@ -16,10 +16,10 @@
 //! A property is **dropped** when the value a reader gets back is not the value the source
 //! stated, which is a narrower thing than "the format has no field for it". A tree owned by
 //! root with `0644` files and `0755` directories goes into a FAT image and comes back out of
-//! it unchanged, because those are exactly the values [`Synthesis`] hands back for a
+//! it unchanged, because those are exactly the values [`Synthesis`](crate::Synthesis) hands back for a
 //! filesystem that records none — so nothing was lost and the report says so. A file at
 //! `0755` did lose something, and so the build refuses until the caller has said it accepts
-//! that ([`AcceptedLoss`]).
+//! that ([`AcceptedLoss`](crate::AcceptedLoss)).
 //!
 //! Two things are outside that accounting, each for a stated reason:
 //!
@@ -40,30 +40,22 @@
 //! of the tree rather than of the order a source happened to yield it in. Two models of one
 //! tree are the same model.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::fidelity::{AcceptedLoss, Direction, FidelityReport, Property, Synthesis};
-use crate::source::{EntryKind, FileContent, Metadata, SourceEntry, canonical_key};
-use crate::time::Timestamp;
+use crate::fidelity::{Direction, FidelityReport, LossPolicy, Property, WRITE_BITS};
+use crate::path::canonical_key;
+use crate::source::{
+    ClassifyError, EntryKind, FileContent, LinkEnd, LinkStep, Metadata, PathFault, SourceEntry,
+    classify_paths, follow_hard_link,
+};
+use crate::time::{DosTimestamp, Timestamp};
 
 use super::geometry::FatLayout;
 use super::name::{DirNames, NameError, PlacedName, folded};
-use super::ondisk::{
-    Attributes, DIR_ENTRY_SIZE, DosTimestamp, TIME_SECS_MAX, TIME_SECS_MIN, encode_time,
-};
+use super::ondisk::{Attributes, DIR_ENTRY_SIZE};
 
 /// The largest file the format records a length for: the length field is 32 bits.
 pub const MAX_FILE_BYTES: u64 = u32::MAX as u64;
-
-/// Permission bits that make an entry writable. A mode with none of them set is what the
-/// read-only attribute means, and is the one bit of a mode the format carries.
-const WRITE_BITS: u16 = 0o222;
-
-/// The set-user-id, set-group-id, and sticky bits.
-const SPECIAL_BITS: u16 = 0o7000;
-
-/// The permission bits proper.
-const PERMISSION_BITS: u16 = 0o777;
 
 /// Which of an entry's times a range refusal is about, so the message names a field rather
 /// than an instant.
@@ -247,7 +239,7 @@ pub enum ModelError {
     /// The format cannot carry a property this entry states, and the caller has not said it
     /// accepts losing it.
     ///
-    /// Add the property to [`AcceptedLoss`] to build anyway; what was lost then comes back
+    /// Add the property to [`AcceptedLoss`](crate::AcceptedLoss) to build anyway; what was lost then comes back
     /// in the [`FidelityReport`], entry by entry.
     #[error(
         "{}: a FAT volume cannot carry the {} of this entry",
@@ -430,13 +422,10 @@ pub(crate) struct FatModel {
 /// Inputs the model needs beyond the source and the geometry.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ModelConfig {
-    /// Which losses the caller has accepted.
-    pub accepted: AcceptedLoss,
+    /// Which losses the caller has accepted, and what a read would invent in their place.
+    pub loss: LossPolicy,
     /// Whether the volume carries a label, which occupies an entry of the root directory.
     pub has_label: bool,
-    /// What a read of this image would fill a missing owner and mode with, which is what
-    /// makes "the value did not survive" a question with an answer.
-    pub synthesis: Synthesis,
 }
 
 /// Build the model a `source` and a `layout` imply.
@@ -496,7 +485,7 @@ struct Builder<'a> {
     contents: Vec<FileContent>,
     fidelity: FidelityReport,
     /// What every declared path holds, from the classifying pass.
-    classes: HashMap<Vec<u8>, Class>,
+    classes: BTreeMap<Vec<u8>, Class>,
     /// Which directory each declared path is, so a child finds its parent in one lookup.
     dir_of: HashMap<Vec<u8>, usize>,
     /// The short names each directory has handed out.
@@ -519,7 +508,7 @@ impl<'a> Builder<'a> {
             dirs: vec![root],
             contents: Vec::new(),
             fidelity: FidelityReport::new(),
-            classes: HashMap::new(),
+            classes: BTreeMap::new(),
             dir_of: HashMap::from([(Vec::new(), 0usize)]),
             names: vec![DirNames::new()],
             folded: vec![HashMap::new()],
@@ -549,46 +538,41 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Decide what every path holds, and refuse a path used twice.
+    /// Decide what every path holds.
     ///
-    /// Content indices are handed out here, in the sorted order — the placing pass walks the
-    /// same list in the same order and pushes each file's bytes as it reaches them, so the
-    /// two agree by construction.
+    /// The faults a path has whatever format is holding it are the shared pass's. Content
+    /// indices are handed out here, in the sorted order — the placing pass walks the same list
+    /// in the same order and pushes each file's bytes as it reaches them, so the two agree by
+    /// construction.
     fn classify(&mut self, entries: &[SourceEntry]) -> Result<(), ModelError> {
         let mut next_content = 0usize;
-        for entry in entries {
-            let key = canonical_key(&entry.path);
-            if key.split(|&b| b == b'/').any(|part| part == b"..") {
-                return Err(ModelError::InvalidComponent {
-                    path: entry.path.clone(),
-                });
+        self.classes = classify_paths(
+            entries,
+            |entry, _| {
+                Ok(match &entry.kind {
+                    EntryKind::Directory => Class::Dir,
+                    EntryKind::File(content) => {
+                        let size = file_size(content.len(), &entry.path)?;
+                        let content = next_content;
+                        next_content += 1;
+                        Class::File { content, size }
+                    }
+                    EntryKind::HardLink { target } => Class::Link(canonical_key(target)),
+                    _ => Class::Unrepresentable,
+                })
+            },
+            |class| *class == Class::Dir,
+        )
+        .map_err(|e| match e {
+            ClassifyError::Class(e) => e,
+            ClassifyError::Path(PathFault::Traversal, path) => {
+                ModelError::InvalidComponent { path }
             }
-            if self.classes.contains_key(&key) {
-                return Err(ModelError::Duplicate {
-                    path: entry.path.clone(),
-                });
+            ClassifyError::Path(PathFault::Duplicate, path) => ModelError::Duplicate { path },
+            ClassifyError::Path(PathFault::RootNotDirectory, path) => {
+                ModelError::RootNotDirectory { path }
             }
-            let class = match &entry.kind {
-                EntryKind::Directory => Class::Dir,
-                EntryKind::File(content) => {
-                    let size = file_size(content.len(), &entry.path)?;
-                    let content = next_content;
-                    next_content += 1;
-                    Class::File { content, size }
-                }
-                EntryKind::HardLink { target } => Class::Link(canonical_key(target)),
-                _ => Class::Unrepresentable,
-            };
-            // The root is the filesystem rather than an entry in one, and it is a directory
-            // whatever a source says. Anything else there would describe a filesystem that
-            // cannot exist.
-            if key.is_empty() && class != Class::Dir {
-                return Err(ModelError::RootNotDirectory {
-                    path: entry.path.clone(),
-                });
-            }
-            self.classes.insert(key, class);
-        }
+        })?;
         Ok(())
     }
 
@@ -646,7 +630,7 @@ impl<'a> Builder<'a> {
         // bits of whatever mode it hands back, so writing it is what makes a `0444` file
         // read back as one.
         if meta.mode & WRITE_BITS == 0 {
-            attributes = attributes | Attributes::READ_ONLY;
+            attributes |= Attributes::READ_ONLY;
         }
 
         if let Node::Dir(index) = node {
@@ -732,40 +716,29 @@ impl<'a> Builder<'a> {
 
     /// The file a hard link is a second name for, or `None` where what it names is itself
     /// something the format cannot hold.
-    ///
-    /// A link may name another link, so the chain is followed — and a chain that closes on
-    /// itself is refused rather than walked, since neither end of it names a file.
     fn resolve_link(&self, target: &[u8], path: &[u8]) -> Result<Option<(usize, u32)>, ModelError> {
-        let mut at = canonical_key(target);
-        let mut seen = 0usize;
-        loop {
-            match self.classes.get(&at) {
-                Some(Class::File { content, size }) => return Ok(Some((*content, *size))),
-                Some(Class::Dir) => {
-                    return Err(ModelError::HardlinkTargetIsDirectory {
-                        path: path.to_vec(),
-                        target: target.to_vec(),
-                    });
-                }
-                Some(Class::Unrepresentable) => return Ok(None),
-                Some(Class::Link(next)) => {
-                    seen += 1;
-                    // Every step consumes one declared path, so a walk longer than the tree
-                    // has paths is one that has come back to somewhere it has been.
-                    if seen > self.classes.len() {
-                        return Err(ModelError::HardlinkCycle {
-                            path: path.to_vec(),
-                        });
-                    }
-                    at = next.clone();
-                }
-                None => {
-                    return Err(ModelError::HardlinkTargetMissing {
-                        path: path.to_vec(),
-                        target: target.to_vec(),
-                    });
-                }
+        match follow_hard_link(target, self.classes.len(), |key| {
+            match self.classes.get(key) {
+                Some(Class::File { content, size }) => LinkStep::File((*content, *size)),
+                Some(Class::Dir) => LinkStep::Directory,
+                Some(Class::Unrepresentable) => LinkStep::Unrepresentable,
+                Some(Class::Link(next)) => LinkStep::Link(next.clone()),
+                None => LinkStep::Missing,
             }
+        }) {
+            LinkEnd::File(found) => Ok(Some(found)),
+            LinkEnd::Unrepresentable => Ok(None),
+            LinkEnd::Directory => Err(ModelError::HardlinkTargetIsDirectory {
+                path: path.to_vec(),
+                target: target.to_vec(),
+            }),
+            LinkEnd::Missing => Err(ModelError::HardlinkTargetMissing {
+                path: path.to_vec(),
+                target: target.to_vec(),
+            }),
+            LinkEnd::Cycle => Err(ModelError::HardlinkCycle {
+                path: path.to_vec(),
+            }),
         }
     }
 
@@ -856,21 +829,21 @@ impl<'a> Builder<'a> {
         field: TimeField,
         path: &[u8],
     ) -> Result<DosTimestamp, ModelError> {
-        encode_time(time).ok_or_else(|| ModelError::TimeOutOfRange {
+        DosTimestamp::encode(time).ok_or_else(|| ModelError::TimeOutOfRange {
             path: path.to_vec(),
             field,
             secs: time.secs,
-            min: TIME_SECS_MIN,
-            max: TIME_SECS_MAX,
+            min: DosTimestamp::SECS_MIN,
+            max: DosTimestamp::SECS_MAX,
         })
     }
 
     /// Record every property of this entry the format cannot carry, refusing each the caller
     /// has not accepted.
     ///
-    /// A property counts as lost when the value a read gets back is not the value stated. The
-    /// recovery point is [`Synthesis`], which is what a read of a filesystem recording none
-    /// of this fills the field with.
+    /// The accounting itself is shared: this family and the one it shares a name with lose the
+    /// same six things for the same reason, so there is one answer and each wraps its refusal
+    /// in its own wording.
     fn record_losses(
         &mut self,
         meta: &Metadata,
@@ -878,52 +851,26 @@ impl<'a> Builder<'a> {
         is_dir: bool,
         path: &[u8],
     ) -> Result<(), ModelError> {
-        if meta.uid != self.config.synthesis.uid || meta.gid != self.config.synthesis.gid {
-            self.lose(Property::Ownership, path)?;
-        }
-        if meta.mode & SPECIAL_BITS != 0 {
-            self.lose(Property::SpecialBits, path)?;
-        }
-        // The default a read fills in, less the write bits where the entry is read-only —
-        // which is exactly what a driver meeting the attribute hands back.
-        let mut recovered = if is_dir {
-            self.config.synthesis.dir_mode
-        } else {
-            self.config.synthesis.file_mode
-        };
-        if meta.mode & WRITE_BITS == 0 {
-            recovered &= !WRITE_BITS;
-        }
-        if meta.mode & PERMISSION_BITS != recovered & PERMISSION_BITS {
-            self.lose(Property::Permissions, path)?;
-        }
-        // The format has one time per entry to spare, and the modification time has it. A
-        // change time equal to it therefore survives, and one that is not is gone.
-        if meta.ctime != meta.mtime {
-            self.lose(Property::ChangeTime, path)?;
-        }
-        if !xattrs.is_empty() {
-            self.lose(Property::ExtendedAttributes, path)?;
-        }
-        Ok(())
+        self.config
+            .loss
+            .record_losses(&mut self.fidelity, meta, xattrs, is_dir, path)
+            .map_err(|property| ModelError::LossNotAccepted {
+                path: path.to_vec(),
+                property,
+            })
     }
 
-    /// Record a loss, after checking the caller accepted it.
+    /// Record a loss the entry's metadata does not decide — a kind the format has no
+    /// representation for — after checking the caller accepted it.
     fn lose(&mut self, property: Property, path: &[u8]) -> Result<(), ModelError> {
-        self.accept(property, path)?;
+        if !self.config.loss.accepts(property) {
+            return Err(ModelError::LossNotAccepted {
+                path: path.to_vec(),
+                property,
+            });
+        }
         self.fidelity.record(Direction::Dropped, path, property);
         Ok(())
-    }
-
-    /// Refuse unless the caller has said it accepts losing `property`.
-    fn accept(&self, property: Property, path: &[u8]) -> Result<(), ModelError> {
-        if self.config.accepted.contains(property) {
-            return Ok(());
-        }
-        Err(ModelError::LossNotAccepted {
-            path: path.to_vec(),
-            property,
-        })
     }
 }
 
@@ -1128,6 +1075,7 @@ impl FatModel {
 mod tests {
     use super::*;
     use crate::fat::geometry::{FatTypeRequest, PlanRequest, plan_layout};
+    use crate::fidelity::{AcceptedLoss, Synthesis};
     use crate::source::{Source, TreeBuilder};
 
     /// An even second inside the format's range, so nothing under test is also exercising a
@@ -1144,9 +1092,11 @@ mod tests {
 
     fn config(accepted: AcceptedLoss) -> ModelConfig {
         ModelConfig {
-            accepted,
+            loss: LossPolicy {
+                accepted,
+                synthesis: Synthesis::new(),
+            },
             has_label: false,
-            synthesis: Synthesis::new(),
         }
     }
 
@@ -1353,8 +1303,11 @@ mod tests {
         assert!(model.fidelity.is_faithful());
         // And the date it does keep is the access time's own, not the modification time's.
         let times = model.dirs[0].entries[0].times;
-        assert_eq!(times.access_date, encode_time(odd).expect("in range").date);
-        assert_eq!(times.write, encode_time(TIME).expect("in range"));
+        assert_eq!(
+            times.access_date,
+            DosTimestamp::encode(odd).expect("in range").date
+        );
+        assert_eq!(times.write, DosTimestamp::encode(TIME).expect("in range"));
     }
 
     #[test]

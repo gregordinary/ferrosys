@@ -31,6 +31,8 @@
 //! rendering its own body. A later family is a module and a `match` arm, and reshapes
 //! nothing.
 
+mod btrfs;
+mod exfat;
 mod ext;
 mod fat;
 
@@ -46,17 +48,21 @@ use crate::{Error, emit, render};
 /// Built by whichever family answered, so a later family fills in the same five fields and
 /// adds a body rather than reshaping the document.
 pub struct Head {
-    /// The family, as a report names it: `ext` or `fat`.
+    /// The family, as a report names it: `ext`, `fat`, `exfat`, or `btrfs`.
     pub family: &'static str,
     /// The family's own sub-classification: `ext2`, `ext3`, `ext4`, `fat12`, `fat16`,
-    /// `fat32`. The same word `ferrosys detect` prints.
+    /// `fat32`. The same word `ferrosys detect` prints — and for a family with nothing to
+    /// sub-classify it is the family's own word, which is what `exfat` and `btrfs` carry.
     pub variant: &'static str,
     /// The filesystem's size in bytes — what it occupies, not what the file holding it is.
     pub size: u64,
-    /// The unit the family allocates in, in bytes: a block for ext, a cluster for a FAT.
+    /// The unit the family allocates in, in bytes: a block for ext, a cluster for FAT and
+    /// for exFAT, a sector for btrfs data.
     pub allocation_unit: u64,
-    /// What identifies this filesystem: its UUID for ext, its volume serial number for a
-    /// FAT.
+    /// What identifies this filesystem: its UUID for ext, its volume serial number for FAT
+    /// and for exFAT — different fields of different formats that happen to be the same
+    /// width — and its filesystem id for btrfs, the one `blkid` reports and a `UUID=`
+    /// mount names.
     pub identifier: String,
 }
 
@@ -122,6 +128,8 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
     let report = match reader {
         FsReader::Ext(reader) => ext::report(reader, &args, dialect)?,
         FsReader::Fat(reader) => fat::report(reader, &args, dialect)?,
+        FsReader::ExFat(reader) => exfat::report(reader, &args, dialect)?,
+        FsReader::Btrfs(reader) => btrfs::report(reader, &args, dialect)?,
         // A family the library compiled in and this command has no body for. The binary
         // compiles every family the library has, so nothing in this workspace reaches it;
         // it is here because the enum is `#[non_exhaustive]` and a newer library linked
@@ -143,7 +151,7 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
         emit(sarif.as_bytes())?;
         emit(b"\n")?;
     } else if args.json {
-        emit(json(&report).as_bytes())?;
+        emit(json(&report, args.offset).as_bytes())?;
     } else {
         emit(table(&report).as_bytes())?;
     }
@@ -167,27 +175,23 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
 /// The envelope a person reads: the head, then the family's own description, then the
 /// verdict.
 fn table(report: &Report) -> String {
-    let mut s = String::new();
-    for (key, value) in [
-        ("Filesystem family:", report.head.family),
-        ("Filesystem variant:", report.head.variant),
-        ("Filesystem size:", &report.head.size.to_string()),
-        ("Allocation unit:", &report.head.allocation_unit.to_string()),
-        ("Filesystem identifier:", &report.head.identifier),
-    ] {
-        s.push_str(&format!("{key:<28}{value}\n"));
-    }
-    s.push('\n');
-    s.push_str(&report.body);
+    let mut rows = render::Rows::report();
+    rows.row("Filesystem family:", report.head.family);
+    rows.row("Filesystem variant:", report.head.variant);
+    rows.row("Filesystem size:", report.head.size);
+    rows.row("Allocation unit:", report.head.allocation_unit);
+    rows.row("Filesystem identifier:", &report.head.identifier);
+    rows.blank();
+    rows.text(&report.body);
     if let Some(findings) = &report.findings {
-        s.push('\n');
-        s.push_str(&findings.to_table());
+        rows.blank();
+        rows.text(&findings.to_table());
     }
-    s
+    rows.finish()
 }
 
 /// The envelope a machine reads: the head, the findings, then the family's own key.
-fn json(report: &Report) -> String {
+fn json(report: &Report, offset: u64) -> String {
     crate::json::document(|o| {
         // The head: five fields and the findings, all of which mean the same thing whatever
         // family answered. A consumer reading only these never learns what a group is.
@@ -196,6 +200,11 @@ fn json(report: &Report) -> String {
         o.u64("size", report.head.size);
         o.u64("allocation_unit", report.head.allocation_unit);
         o.str("identifier", &report.head.identifier);
+        // Where in the file the filesystem begins -- the same field, spelled the same way,
+        // that `detect --json` carries. A caller scanning a disk correlates the two
+        // documents by it, and a report that dropped the coordinate would make the pair
+        // that describes one partition impossible to line up.
+        o.u64("offset", offset);
         // The findings' own rendering, spliced in as a value: it is already JSON, and
         // escaping a document that is already JSON would turn it into a string of JSON.
         // Absent under `--quick`, where no scan ran and there is no verdict to report.

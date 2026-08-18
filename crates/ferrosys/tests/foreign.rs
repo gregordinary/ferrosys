@@ -62,6 +62,9 @@ fn build_tree(root: &Path) -> std::io::Result<()> {
     // Merged `/usr`: the links that make `/lib/modules` unreachable without following one.
     symlink("usr/lib", root.join("lib"))?;
     symlink("usr/bin", root.join("bin"))?;
+    // A relative link that ascends, which is the shape `/usr/lib64` has on every
+    // multiarch distribution: resolving it means leaving `/usr` and coming back down.
+    symlink("../lib", root.join("usr/lib64"))?;
     // A cycle, so a resolution that does not bound itself hangs instead of failing.
     symlink("loop_b", root.join("loop_a"))?;
     symlink("loop_a", root.join("loop_b"))?;
@@ -260,6 +263,17 @@ fn read_back(reader: &mut Reader<std::fs::File>, what: &str) {
     // and the single most important path on a root filesystem that will not boot.
     expect(reader, b"/lib/modules/6.1.0/ext4.ko", &big_file());
 
+    // And through a relative link that ascends, which is what `/usr/lib64` is on a
+    // multiarch distribution: the target leaves the directory holding the link, so a
+    // resolution that could not ascend would find nothing under any of them.
+    expect(reader, b"/usr/lib64/modules/6.1.0/ext4.ko", &big_file());
+    // The same ascent written by the caller rather than stored in the image.
+    expect(
+        reader,
+        b"/usr/bin/../lib/modules/6.1.0/ext4.ko",
+        &big_file(),
+    );
+
     // The link resolves to the same inode as the path through it.
     let (direct, _) = reader
         .lookup(b"/usr/lib/modules")
@@ -269,6 +283,27 @@ fn read_back(reader: &mut Reader<std::fs::File>, what: &str) {
         direct, linked,
         "{what}: /lib/modules is not /usr/lib/modules"
     );
+
+    // An ascent reaches the same inode whether it came out of a link or out of the path,
+    // and a run of them at the root stays there rather than naming anything outside the
+    // image.
+    for path in [
+        &b"/usr/lib64/modules"[..],
+        b"/usr/bin/../lib/modules",
+        b"/usr/lib/../lib/modules",
+        b"/../usr/lib/modules",
+        b"/usr/lib/modules/../../../usr/lib/modules",
+    ] {
+        let (ascended, _) = reader
+            .lookup(path)
+            .unwrap_or_else(|e| panic!("{what}: lookup({}): {e}", String::from_utf8_lossy(path)));
+        assert_eq!(
+            direct,
+            ascended,
+            "{what}: {} is not /usr/lib/modules",
+            String::from_utf8_lossy(path)
+        );
+    }
 
     // Without following, the link is the link.
     let (_, link) = reader

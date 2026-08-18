@@ -32,6 +32,8 @@
 //! (see `blocks`), so a PAX value carrying any byte — a newline included, which a
 //! binary ACL naming user or group 10 produces — is read intact.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -431,6 +433,11 @@ fn collect_pax(records: &[PaxRecord], path: &[u8]) -> Result<Pax, ArchiveError> 
     // form already carries the value, and only a `LIBARCHIVE` record with no counterpart
     // is a lone attribute this crate cannot represent.
     let mut libarchive_names: Vec<Vec<u8>> = Vec::new();
+    // Where each attribute name landed in `pax.xattrs`, so a repeat and the
+    // reconciliation below are both one lookup. An archive is the documented untrusted
+    // input, and a member may carry any number of records — a scan of the gathered list
+    // per record would hand it a quadratic cost for linear bytes.
+    let mut placed: HashMap<Vec<u8>, usize> = HashMap::new();
     for record in records {
         let key = record.key.as_slice();
         let value = record.value.as_slice();
@@ -455,14 +462,18 @@ fn collect_pax(records: &[PaxRecord], path: &[u8]) -> Result<Pax, ArchiveError> 
             } else if name == Acl::DEFAULT_NAME {
                 pax.acl_default = Some(decode_acl_xattr(value, path)?);
             } else {
-                // Duplicate xattr names last-win: a later record replaces an earlier one,
-                // so the region the model sees never carries a name twice.
-                let name = name.to_vec();
-                pax.xattrs.retain(|x| x.name != name);
-                pax.xattrs.push(Xattr {
-                    name,
-                    value: value.to_vec(),
-                });
+                // Duplicate xattr names last-win: a later record replaces an earlier
+                // one's value, so the region the model sees never carries a name twice.
+                match placed.entry(name.to_vec()) {
+                    Entry::Occupied(at) => pax.xattrs[*at.get()].value = value.to_vec(),
+                    Entry::Vacant(slot) => {
+                        slot.insert(pax.xattrs.len());
+                        pax.xattrs.push(Xattr {
+                            name: name.to_vec(),
+                            value: value.to_vec(),
+                        });
+                    }
+                }
             }
         } else if key == b"SCHILY.acl.access" {
             pax.acl_access = Some(parse_acl_text(value, path)?);
@@ -485,7 +496,7 @@ fn collect_pax(records: &[PaxRecord], path: &[u8]) -> Result<Pax, ArchiveError> 
     // did not is a lone attribute whose value lives only in the base64 LIBARCHIVE record,
     // which this crate does not decode, so it is refused rather than silently dropped.
     for name in libarchive_names {
-        let carried = pax.xattrs.iter().any(|x| x.name == name)
+        let carried = placed.contains_key(&name)
             || (name == Acl::ACCESS_NAME && pax.acl_access.is_some())
             || (name == Acl::DEFAULT_NAME && pax.acl_default.is_some());
         if !carried {

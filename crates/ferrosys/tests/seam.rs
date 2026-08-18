@@ -434,13 +434,26 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
     // it is checked rather than assumed. Written in root vocabulary, which is what lets one
     // case cover every family's seeds: whichever claims an image, the walk is the same four
     // operations.
+    // The corpora and the feature each needs to be read. The directories themselves are
+    // committed files and always present; what varies by build is whether the family that
+    // claims a corpus's images is compiled in, and only that is a reason to skip one — a
+    // corpus that has vanished must fail here, not read as a build without the family.
+    let corpora: &[(&str, bool)] = &[
+        ("reader_scan", true),
+        ("reader_inspect", true),
+        ("fat_reader", cfg!(feature = "fat")),
+        ("exfat_reader", cfg!(feature = "exfat")),
+        ("btrfs_reader", cfg!(feature = "btrfs")),
+    ];
     let mut checked = 0usize;
-    for family in ["reader_scan", "reader_inspect", "fat_reader"] {
-        let dir = std::path::Path::new("fuzz/seeds").join(family);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            // A directory only present in a build that compiles that family in.
+    for &(corpus, compiled) in corpora {
+        if !compiled {
             continue;
-        };
+        }
+        let dir = std::path::Path::new("fuzz/seeds").join(corpus);
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: a committed corpus is unreadable: {e}", dir.display()));
+        let mut in_corpus = 0usize;
         for entry in entries {
             let path = entry.expect("read the seed directory").path();
             if path.extension().is_none_or(|e| e != "img") {
@@ -459,13 +472,26 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
                 FsReader::Ext(mut r) => walk(&mut r).0,
                 #[cfg(feature = "fat")]
                 FsReader::Fat(mut r) => walk(&mut r).0,
+                #[cfg(feature = "exfat")]
+                FsReader::ExFat(mut r) => walk(&mut r).0,
+                #[cfg(feature = "btrfs")]
+                FsReader::Btrfs(mut r) => walk(&mut r).0,
                 _ => panic!("{name}: no compiled-in family claimed a committed seed"),
             };
             assert_eq!(names[0].0, "", "{name}: the root is the walk's first entry");
-            checked += 1;
+            in_corpus += 1;
         }
+        // Per-corpus, so one whole family's seeds cannot vanish inside an aggregate.
+        assert!(
+            in_corpus > 0,
+            "{corpus}: the committed corpus holds no image"
+        );
+        checked += in_corpus;
     }
-    assert!(checked >= 7, "only {checked} seeds were checked");
+    let full = cfg!(all(feature = "fat", feature = "exfat", feature = "btrfs"));
+    if full {
+        assert!(checked >= 20, "only {checked} seeds were checked");
+    }
 }
 
 /// The same claims the cases above make of the ext family, made of the FAT family.
@@ -740,6 +766,268 @@ mod fat {
             assert!(
                 !fidelity.is_faithful(),
                 "a FAT extraction invents an owner and a mode for every node"
+            );
+            assert!(
+                fidelity.count(Direction::Synthesized, Property::Ownership) > 0,
+                "{}",
+                fidelity.to_table()
+            );
+        }
+    }
+}
+
+/// The same claims again, made of the third family.
+///
+/// The second implementation is what turned the surface from a claim into a measurement; the
+/// third is what says the shape held rather than being widened to fit. exFAT records neither
+/// an owner nor a mode nor a link nor an extended attribute, like FAT — and reaches them
+/// through a directory entry set, a name in UTF-16, and an allocation the table may say
+/// nothing about, which is none of FAT's machinery.
+#[cfg(feature = "exfat")]
+mod exfat {
+    use super::{Name, Shared, walk};
+    use ferrosys::{
+        Family, FsReader, FsTree, Metadata, NodeKind, OpenOptions, Property, ReadPolicy, Severity,
+        Synthesis, Timestamp, TreeBuilder, TreeError, open, open_with,
+    };
+    use std::io::Cursor;
+
+    /// The same shape of tree the other fixtures hold, less what the format cannot represent.
+    fn image() -> Vec<u8> {
+        use ferrosys::exfat::{FormatOptions, format};
+
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/etc/hostname".to_vec(),
+                b"ferrosys\n".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .file(
+                b"/etc/issue".to_vec(),
+                b"welcome\n".to_vec(),
+                // Read-only, which is the one permission bit the format holds.
+                Metadata::new(0o444, time),
+            );
+
+        format(source, 16 << 20, FormatOptions::new(0x1234_abcd))
+            .expect("format")
+            .into_bytes()
+    }
+
+    fn reader(bytes: &[u8]) -> ferrosys::exfat::Reader<Cursor<&[u8]>> {
+        match open(Cursor::new(bytes)).expect("open") {
+            FsReader::ExFat(r) => r,
+            _ => panic!("the exFAT family claimed the image"),
+        }
+    }
+
+    #[test]
+    fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
+        let bytes = image();
+        let handle = open(Cursor::new(&bytes)).expect("open");
+        assert_eq!(handle.family(), Family::ExFat);
+        assert_eq!(
+            ferrosys::detect(Cursor::new(&bytes)).expect("detect"),
+            ferrosys::Filesystem::ExFat
+        );
+        // The concrete reader behind the variant is this family's whole surface, not a
+        // narrowed one: the up-case table it folds through is reachable, and no other family
+        // has such a thing to reach.
+        match handle {
+            FsReader::ExFat(r) => assert!(r.upcase().folded_units() > 0),
+            _ => panic!("the exFAT family claimed the image"),
+        }
+    }
+
+    #[test]
+    fn a_walk_yields_the_root_first_and_then_the_tree_in_order() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let (names, shared): (Vec<Name>, Vec<Shared>) = walk(&mut r);
+        let paths: Vec<&str> = names.iter().map(|(p, _)| p.as_str()).collect();
+
+        assert_eq!(paths[0], "", "the root is the walk's first entry");
+        assert_eq!(names[0].1, NodeKind::Directory);
+
+        let etc = paths.iter().position(|p| *p == "/etc").expect("/etc");
+        let hostname = paths
+            .iter()
+            .position(|p| *p == "/etc/hostname")
+            .expect("/etc/hostname");
+        assert!(etc < hostname, "a parent precedes its children: {paths:?}");
+
+        let kind = |path: &str| names.iter().find(|(p, _)| p == path).expect(path).1;
+        assert_eq!(kind("/etc"), NodeKind::Directory);
+        assert_eq!(kind("/etc/hostname"), NodeKind::File { size: 9 });
+
+        // Nothing shares a node, and that is a fact about the format rather than about this
+        // tree: exFAT has no second name for a file.
+        assert!(shared.is_empty(), "{shared:?}");
+    }
+
+    #[test]
+    fn a_stat_is_complete_and_says_exactly_what_was_invented() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let synthesis = Synthesis::new().owner(1000, 1000).modes(0o644, 0o755);
+
+        let mut seen = Vec::new();
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            let attrs = tree.stat(&entry.node, &synthesis)?;
+            seen.push((String::from_utf8_lossy(&entry.path).into_owned(), attrs));
+            Ok(())
+        })
+        .expect("the walk succeeds");
+
+        let at = |path: &str| {
+            &seen
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{path} was walked"))
+                .1
+        };
+
+        let hostname = at("/etc/hostname");
+        assert_eq!((hostname.meta.uid, hostname.meta.gid), (1000, 1000));
+        assert_eq!(hostname.meta.mode, 0o644);
+        assert!(
+            hostname.meta.mtime.secs > 0,
+            "the volume does record a time"
+        );
+        for property in [
+            Property::Ownership,
+            Property::Permissions,
+            Property::ChangeTime,
+        ] {
+            assert!(
+                hostname.synthesized.contains(&property),
+                "{property:?} was invented and not reported: {:?}",
+                hostname.synthesized
+            );
+        }
+        assert_eq!(at("/etc").meta.mode, 0o755);
+        assert_eq!(at("/etc/issue").meta.mode, 0o444);
+        assert!(seen.iter().all(|(_, a)| a.xattrs.is_empty()));
+    }
+
+    #[test]
+    fn a_files_bytes_stream_through_the_shared_surface() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut read: Option<Vec<u8>> = None;
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            if let NodeKind::File { size } = entry.kind
+                && entry.path == b"/etc/hostname"
+            {
+                let mut out = Vec::new();
+                let mut buf = [0u8; 4];
+                let mut offset = 0u64;
+                while offset < size {
+                    let filled = tree.read_bytes(&entry.node, offset, &mut buf)?;
+                    if filled == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..filled]);
+                    offset += filled as u64;
+                }
+                read = Some(out);
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        assert_eq!(read.expect("/etc/hostname was read"), b"ferrosys\n");
+    }
+
+    #[test]
+    fn the_wrong_operation_for_a_node_is_a_typed_error_rather_than_a_wrong_answer() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let root = r.root();
+        let err = r
+            .link_target(&root)
+            .expect_err("an exFAT volume holds no symbolic links");
+        assert!(
+            matches!(
+                err,
+                TreeError::Malformed {
+                    family: Family::ExFat,
+                    ..
+                }
+            ),
+            "expected a malformed-node error, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_scan_projects_into_the_shared_findings_frame() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let report = r.scan().to_report();
+        assert!(report.is_clean(), "{}", report.to_table());
+
+        // Damaged: an entry set whose stored checksum no longer covers its own bytes. Every
+        // family has something that stands for integrity — ext a checksum, FAT a mirror — and
+        // each reaches the shared frame at the same severity.
+        let mut damaged = bytes.clone();
+        let root_at = {
+            let r = reader(&bytes);
+            let layout = r.layout();
+            layout
+                .cluster_start_byte(layout.first_cluster_of_root)
+                .expect("a cluster") as usize
+        };
+        // The attribute word of the first file entry the root holds, which the four the format
+        // writes ahead of the tree are not.
+        let set = root_at + 4 * 32;
+        assert_eq!(damaged[set], 0x85, "the fifth slot opens a file's set");
+        damaged[set + 4] ^= 0x01;
+
+        let FsReader::ExFat(mut r) = open_with(
+            Cursor::new(&damaged),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("open") else {
+            panic!("the exFAT family claimed the image")
+        };
+        let report = r.scan().to_report();
+        assert!(!report.is_clean());
+        let finding = report
+            .findings()
+            .iter()
+            .find(|f| f.severity == Severity::Integrity)
+            .expect("an integrity finding");
+        assert_eq!(finding.family, Family::ExFat);
+        // This family's own subsystem word, which means nothing about either other family.
+        assert_eq!(finding.category, "directory");
+        assert!(report.has_fatal(ReadPolicy::Strict));
+        assert!(report.to_json().contains("\"family\":\"exfat\""));
+        assert!(
+            report
+                .to_sarif(None)
+                .contains("\"ruleId\":\"exfat/directory\"")
+        );
+    }
+
+    #[test]
+    fn an_extraction_from_a_family_that_records_nothing_reports_what_it_invented() {
+        #[cfg(feature = "tar")]
+        {
+            use ferrosys::ArchiveSink;
+            use ferrosys::Direction;
+
+            let bytes = image();
+            let mut r = reader(&bytes);
+            let mut archive = Vec::new();
+            let fidelity = ArchiveSink::new(&mut archive)
+                .synthesis(Synthesis::new().owner(0, 0).modes(0o644, 0o755))
+                .write_tree(&mut r)
+                .expect("write the archive");
+            assert!(!archive.is_empty());
+            assert!(
+                !fidelity.is_faithful(),
+                "an exFAT extraction invents an owner and a mode for every node"
             );
             assert!(
                 fidelity.count(Direction::Synthesized, Property::Ownership) > 0,

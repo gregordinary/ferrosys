@@ -45,6 +45,22 @@ pub enum Filesystem {
     /// three it is, so this is computed rather than read.
     #[cfg(feature = "fat")]
     Fat(crate::fat::FatType),
+    /// An exFAT filesystem.
+    ///
+    /// The variant carries nothing because the family has nothing to sub-classify: there is
+    /// one revision of the format, a volume records it, and every volume in circulation
+    /// records the same one. Where the other two families compute a label the image does not
+    /// hold, this one has no label to compute.
+    #[cfg(feature = "exfat")]
+    ExFat,
+    /// A btrfs filesystem.
+    ///
+    /// The variant carries nothing, because the family has nothing to sub-classify. Everything
+    /// that varies between two btrfs filesystems — which features are on, how large a node is,
+    /// how many subvolumes there are — is a property read out of the superblock rather than a
+    /// label detection could compute from it.
+    #[cfg(feature = "btrfs")]
+    Btrfs,
 }
 
 /// Where to look for a filesystem, and anything else detection needs to be told.
@@ -96,12 +112,9 @@ impl DetectOptions {
 #[non_exhaustive]
 pub enum DetectError {
     /// The source could not be read or sought.
-    ///
-    /// The `kind` is [`std::io::Error`]'s own classification, carried separately so a
-    /// caller can tell a truncated image from an environment failure without matching on
-    /// the message text. It does not appear in the rendered message because `message` is
-    /// the underlying error rendered by [`std::io::Error`], which opens with the kind's
-    /// own description.
+    /// Carried as [`TreeError::Io`](crate::TreeError::Io) describes, which is where the rule
+    /// this crate records an i/o failure by is written out: the kind beside the message, so a
+    /// caller tells a truncated image from an environment failure without matching on text.
     #[error("i/o error: {message}")]
     #[non_exhaustive]
     Io {
@@ -114,6 +127,8 @@ pub enum DetectError {
     #[error("unrecognized filesystem: no compiled-in family claims this image")]
     Unrecognized,
 }
+
+crate::io::io_error!(DetectError);
 
 /// Detect the filesystem family at the start of an image.
 ///
@@ -154,6 +169,29 @@ pub fn detect_with<R: Read + Seek>(
     // magics do not collide, so at most one claims any image.
     #[cfg(feature = "ext")]
     match ext_claim(&mut src, options) {
+        Ok(Some(fs)) => return Ok(fs),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // exFAT is in this tier on a magic that is not exclusively its own, which is the
+    // exception the tier's rule has to name: `"EXFAT   "` sits at the offset a FAT boot
+    // sector keeps eight bytes of arbitrary OEM text at, so the claim is the magic *and* the
+    // 53 bytes the format requires to be zero — bytes a FAT parameter block uses and cannot
+    // leave empty. Both, or the claim is not made and FAT gets its turn below.
+    #[cfg(feature = "exfat")]
+    match crate::exfat::claim(&mut src, options) {
+        Ok(Some(fs)) => return Ok(fs),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // btrfs is in this tier unambiguously: `_BHRfS_M` is eight bytes 64 kibibytes into the
+    // filesystem, at an offset no other format here puts anything at, and the superblock
+    // carrying it also carries a checksum over itself — so the claim is the format's own
+    // answer rather than a signature that might be a coincidence.
+    #[cfg(feature = "btrfs")]
+    match crate::btrfs::claim(&mut src, options) {
         Ok(Some(fs)) => return Ok(fs),
         Ok(None) => {}
         Err(e) => return Err(e),
@@ -238,7 +276,12 @@ mod agnostic_tests {
     /// With no family compiled in there is nothing to recognize an image, and the answer
     /// is the same for every source — which is the whole of what the base build promises,
     /// and is exactly what a build carrying a family cannot check.
-    #[cfg(not(feature = "ext"))]
+    ///
+    /// The condition is every family, not the default one: a build carrying a single
+    /// non-default family does recognize images, so running this there would assert
+    /// something the build does not promise and pass only because the fixtures happen not to
+    /// be that family's.
+    #[cfg(not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")))]
     #[test]
     fn a_build_with_no_family_recognizes_nothing() {
         use super::{DetectError, detect, detect_with};
@@ -263,18 +306,229 @@ mod agnostic_tests {
     }
 }
 
+/// What detection promises whichever family answers it.
+///
+/// Every case here is written in the vocabulary of the classifier rather than of a format,
+/// and each runs against one image per compiled-in family — so the fixtures are the one place
+/// a family is named, and a claim is made once rather than once per family. Written the other
+/// way it drifts: two copies of "detection answers at the offset it is given" is two places to
+/// fix a rule that changed, and the second copy stops being read the day it is written.
+#[cfg(all(
+    test,
+    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")
+))]
+mod every_family {
+    use super::{DetectError, DetectOptions, Filesystem, detect, detect_with};
+    use std::io::Cursor;
+
+    /// One image per compiled-in family, as `(what detection must answer, the bytes)`.
+    ///
+    /// Each is built only where its family is compiled in, which is what lets the cases below
+    /// run unchanged in a build carrying one family, two, or all of them.
+    fn images() -> Vec<(Filesystem, Vec<u8>)> {
+        let mut out = Vec::new();
+        #[cfg(feature = "ext")]
+        out.push((
+            Filesystem::Ext(crate::feature::Profile::Ext4),
+            super::tests::image(),
+        ));
+        #[cfg(feature = "fat")]
+        {
+            use crate::fat::{FormatOptions, format};
+            // An instant inside the range the format's date fields hold: this family refuses
+            // one outside it wherever the value is read, so a fixture cannot use the epoch.
+            let options = FormatOptions::new(
+                0x1234_abcd,
+                crate::time::Timestamp::from_secs(1_426_325_212),
+            );
+            let image = format(crate::source::TreeBuilder::new(), 8 << 20, options)
+                .expect("format a FAT volume");
+            out.push((Filesystem::Fat(image.layout().fat_type), image.into_bytes()));
+        }
+        #[cfg(feature = "exfat")]
+        out.push((
+            Filesystem::ExFat,
+            super::exfat_tests::image(&crate::exfat::PlanRequest::new(8 << 20)),
+        ));
+        #[cfg(feature = "btrfs")]
+        {
+            // The one family with no formatter to build a fixture with, so the fixture is a
+            // filesystem assembled byte by byte. It carries the magic, and the superblock
+            // carrying it carries a checksum over itself — which is what the claim checks.
+            use std::io::Read;
+            let mut src = crate::btrfs::forge::Forge::new().source();
+            let mut bytes = Vec::new();
+            src.read_to_end(&mut bytes).expect("the forged device");
+            out.push((Filesystem::Btrfs, bytes));
+        }
+        assert!(
+            !out.is_empty(),
+            "this module is compiled only where a family is"
+        );
+        out
+    }
+
+    #[test]
+    fn each_compiled_in_family_is_detected_as_itself() {
+        // Which family, and which of that family's formats: an image is classified by what
+        // is in it, so the label is part of the answer rather than a second question.
+        for (want, bytes) in images() {
+            assert_eq!(detect(Cursor::new(bytes)).expect("detect"), want);
+        }
+    }
+
+    #[test]
+    fn detection_answers_at_the_offset_it_is_given() {
+        // "What is at this location" is the question a carving pipeline asks, and a
+        // classifier pinned to the start of its source cannot be asked it. The same bytes
+        // are unrecognized at zero and a filesystem a mebibyte in.
+        const BASE: u64 = 1 << 20;
+        for (want, bytes) in images() {
+            let mut disk = vec![0u8; BASE as usize];
+            disk.extend_from_slice(&bytes);
+
+            assert!(
+                matches!(detect(Cursor::new(&disk)), Err(DetectError::Unrecognized)),
+                "{want:?} was claimed at an offset it does not begin at"
+            );
+            assert_eq!(
+                detect_with(Cursor::new(&disk), &DetectOptions::new().base(BASE)).expect("detect"),
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_filesystem_is_claimed_by_nobody() {
+        // The negative every family owes. A false positive is the one detection failure that
+        // silently misidentifies something, so what is asserted is that *no* compiled-in
+        // family claimed the source, rather than that some particular one did not.
+        for junk in [
+            vec![0u8; 64 << 10],
+            (0..64u32 << 10).map(|i| (i % 251) as u8).collect(),
+        ] {
+            assert!(matches!(
+                detect(Cursor::new(junk)),
+                Err(DetectError::Unrecognized)
+            ));
+        }
+    }
+}
+
+/// What only the exFAT family can be asked, in a build carrying it.
+///
+/// What every family is asked is in [`every_family`] above, once. Here are the cases that
+/// name this format: the geometries its own planner reaches, and the collision its magic
+/// shares an offset with.
+#[cfg(all(test, feature = "exfat"))]
+mod exfat_tests {
+    use super::{Filesystem, detect};
+    use crate::exfat::ondisk::{FILE_SYSTEM_NAME, FILE_SYSTEM_REVISION, MainBootSector};
+    use crate::exfat::{PlanRequest, plan_layout};
+    use std::io::Cursor;
+
+    /// A volume's worth of bytes with a planned boot sector at the front.
+    ///
+    /// Detection reads sector 0 and nothing else, so the rest is zeroes — but it is as long
+    /// as the boot sector says the volume is, because a recorded length the source cannot
+    /// hold is exactly what the classifier refuses.
+    pub(super) fn image(request: &PlanRequest) -> Vec<u8> {
+        let layout = plan_layout(request).expect("plan");
+        let boot = MainBootSector {
+            jump_boot: MainBootSector::JUMP_BOOT,
+            file_system_name: FILE_SYSTEM_NAME,
+            partition_offset: 0,
+            volume_length: layout.volume_length,
+            fat_offset: layout.fat_offset,
+            fat_length: layout.fat_length,
+            cluster_heap_offset: layout.cluster_heap_offset,
+            cluster_count: layout.cluster_count,
+            first_cluster_of_root: layout.first_cluster_of_root,
+            volume_serial: 0x1234_5678,
+            file_system_revision: FILE_SYSTEM_REVISION,
+            volume_flags: 0,
+            bytes_per_sector_shift: layout.bytes_per_sector_shift(),
+            sectors_per_cluster_shift: layout.sectors_per_cluster_shift(),
+            number_of_fats: 1,
+            drive_select: 0x80,
+            percent_in_use: 0,
+            boot_code: [0; 390],
+        };
+        let mut bytes =
+            vec![0u8; usize::try_from(layout.total_bytes()).expect("a test-sized volume")];
+        boot.write_to(&mut bytes).expect("write");
+        bytes
+    }
+
+    #[test]
+    fn a_volume_this_crate_plans_is_detected_as_this_family() {
+        for request in [
+            PlanRequest::new(8 << 20),
+            PlanRequest::new(8 << 20).bytes_per_sector(4096),
+            PlanRequest::new(8 << 20).cluster_size(crate::exfat::ClusterSize::Bytes(512)),
+        ] {
+            assert_eq!(
+                detect(Cursor::new(image(&request))).expect("detect"),
+                Filesystem::ExFat,
+                "{request:?}"
+            );
+        }
+    }
+
+    /// The collision the ordering rule has to name, asserted where both families are
+    /// present — which is the only build that can tell the two answers apart.
+    #[test]
+    #[cfg(feature = "fat")]
+    fn a_fat_volume_whose_oem_name_spells_this_magic_is_still_detected_as_fat() {
+        // `BS_OEMName` is eight bytes of arbitrary text at the offset this family's magic
+        // sits at, and no FAT driver reads it — so a FAT volume can spell `EXFAT   ` and
+        // still be a FAT volume. exFAT is tried first, so a claim on the magic alone would
+        // mean FAT is never tried: a healthy filesystem silently misidentified, which is the
+        // one detection failure the ordering exists to prevent.
+        use crate::fat::{FormatOptions, format};
+        use crate::source::TreeBuilder;
+
+        let mut options = FormatOptions::new(
+            0x1234_abcd,
+            crate::time::Timestamp::from_secs(1_426_325_212),
+        );
+        options.oem_name = *b"EXFAT   ";
+        let mut bytes = format(TreeBuilder::new(), 8 << 20, options)
+            .expect("format a FAT volume")
+            .into_bytes();
+        assert_eq!(
+            &bytes[3..11],
+            b"EXFAT   ",
+            "the fixture must carry the collision"
+        );
+
+        assert!(
+            matches!(detect(Cursor::new(&bytes)), Ok(Filesystem::Fat(_))),
+            "a FAT volume spelling this family's magic was claimed by this family"
+        );
+
+        // And the other direction: with the 53-byte run zeroed as well, the volume is no
+        // longer a FAT one — its parameter block is gone — and this family may have it.
+        bytes[11..64].fill(0);
+        assert_eq!(detect(Cursor::new(&bytes)).ok(), None);
+    }
+}
+
+/// What only the ext family can be asked, in a build carrying it.
+///
+/// What every family is asked is in [`every_family`] above, once.
 #[cfg(all(test, feature = "ext"))]
 mod tests {
     use std::io::Cursor;
 
-    use super::{DetectOptions, Filesystem, detect, detect_with};
+    use super::{DetectError, Filesystem, detect};
     use crate::feature::Profile;
     use crate::materialize::{FormatOptions, format};
     use crate::source::TreeBuilder;
     use crate::time::Timestamp;
 
     /// A formatted image's bytes at the default profile.
-    fn image() -> Vec<u8> {
+    pub(super) fn image() -> Vec<u8> {
         let time = Timestamp::from_secs(1_700_000_000);
         let options = FormatOptions::new([7; 16], time, [0; 16]);
         format(TreeBuilder::new(), 32 << 20, options)
@@ -307,44 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn detect_labels_a_formatted_image_by_its_family() {
-        // detect classifies the image by its feature words: the default profile is ext4.
-        assert_eq!(
-            detect(Cursor::new(image())).expect("detect"),
-            Filesystem::Ext(Profile::Ext4)
-        );
-    }
-
-    #[test]
-    fn detect_rejects_a_non_filesystem_source() {
-        // A buffer with no ext superblock is not recognized rather than opened.
-        let junk = vec![0u8; 64 << 10];
-        assert!(matches!(
-            detect(Cursor::new(junk)),
-            Err(super::DetectError::Unrecognized)
-        ));
-    }
-
-    #[test]
-    fn detection_answers_at_the_offset_it_is_given() {
-        // "What is at this location" is the question a carving pipeline asks, and it cannot
-        // be asked of a classifier pinned to the start of its source. The same bytes are
-        // unrecognized at offset zero and ext4 a mebibyte in.
-        const BASE: u64 = 1 << 20;
-        let mut disk = vec![0u8; BASE as usize];
-        disk.extend_from_slice(&image());
-
-        assert!(matches!(
-            detect(Cursor::new(&disk)),
-            Err(super::DetectError::Unrecognized)
-        ));
-        assert_eq!(
-            detect_with(Cursor::new(&disk), &DetectOptions::new().base(BASE)).expect("detect"),
-            Filesystem::Ext(Profile::Ext4)
-        );
-    }
-
-    #[test]
     fn a_quirk_a_strict_read_refuses_is_still_a_filesystem() {
         // An `incompat` bit this reader does not interpret makes a strict open refuse the
         // image — correctly, since it cannot be sure it reads the format right. It is still
@@ -353,11 +569,9 @@ mod tests {
         let mut bytes = image();
         // s_feature_incompat is at offset 0x60 of the superblock, which begins at 1024.
         let off = 1024 + 0x60;
-        let mut incompat =
-            u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
         // A bit no ext feature defines, so no reader can claim to interpret it.
-        incompat |= 0x8000_0000;
-        bytes[off..off + 4].copy_from_slice(&incompat.to_le_bytes());
+        let incompat = crate::bytes::get_u32(&bytes, off) | 0x8000_0000;
+        crate::bytes::put_u32(&mut bytes, off, incompat);
 
         assert!(
             crate::read::Reader::open(Cursor::new(&bytes)).is_err(),
@@ -367,5 +581,20 @@ mod tests {
             detect(Cursor::new(&bytes)).expect("detection is not strictness"),
             Filesystem::Ext(Profile::Ext4)
         );
+    }
+
+    #[test]
+    fn an_io_failure_records_its_kind_beside_its_message() {
+        // The rule every error in this crate carrying an i/o failure is written by: the kind
+        // is kept as a value, so a caller tells a truncated image from an environment failure
+        // without matching on text. Reached here through `?`, which is what having the
+        // conversion as a trait rather than a private constructor is for.
+        let fault = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no");
+        let err = DetectError::from(fault);
+        let DetectError::Io { kind, message } = &err else {
+            panic!("expected an i/o failure, got {err:?}");
+        };
+        assert_eq!(*kind, std::io::ErrorKind::PermissionDenied);
+        assert!(message.contains("no"), "the message is carried: {message}");
     }
 }

@@ -18,6 +18,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::path::canonical_key;
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
 
@@ -410,6 +411,13 @@ pub struct Metadata {
     pub mtime: Timestamp,
 }
 
+/// The file-type bits of a mode (`S_IFMT`), which [`Metadata::mode`] must not carry: the
+/// entry's [`EntryKind`] supplies them. Every model that writes POSIX modes refuses a
+/// `mode` with any of these set, so a raw `st_mode` passed through whole is a typed error
+/// rather than an inode carrying two file types.
+#[cfg(any(feature = "ext", feature = "btrfs"))]
+pub(crate) const MODE_TYPE_MASK: u16 = 0o170000;
+
 impl Metadata {
     /// Metadata with the given permission bits, owned by root, whose access,
     /// change, and modification times are all `mtime` — the common case where one
@@ -499,28 +507,6 @@ pub struct SourceEntry {
     /// Extended attributes attached to this entry, each a fully-qualified name and
     /// its value in the boundary form [`Xattr`] describes. Empty for an entry with none.
     pub xattrs: Vec<Xattr>,
-}
-
-/// The canonical key for a path: separators and `.` elements carry no meaning, so
-/// `/etc/hostname`, `//etc//hostname`, and `etc/./hostname` are one path and key alike, and
-/// the root keys as the empty slice.
-///
-/// This is the rule a family's own path handling agrees with, so that a caller keying
-/// entries by path outside a model — composing two sources into one, where a later entry
-/// replaces an earlier one at the same path — decides which paths *are* the same the way
-/// the model that consumes them will. Two normalizations that disagree would not fail; they
-/// would quietly leave both entries in the list, and the model would reject the duplicate
-/// or, worse, accept two names it thought were different.
-///
-/// It rejects nothing. A `..` element, an over-long component, or one carrying a NUL keys
-/// as itself and is refused when a model reads the entry, so there is one rejection site
-/// and its error names the path the caller wrote.
-pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
-    let parts: Vec<&[u8]> = path
-        .split(|&b| b == b'/')
-        .filter(|part| !part.is_empty() && *part != b".")
-        .collect();
-    parts.join(&b'/')
 }
 
 /// Something that produces the entries to write into a filesystem.
@@ -829,6 +815,151 @@ impl Source for LayeredSource {
     /// the caller typed.
     fn into_entries(self) -> Vec<SourceEntry> {
         self.entries.into_values().collect()
+    }
+}
+
+/// A fault a path has whatever format is being asked to hold it.
+#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) enum PathFault {
+    /// A component was `..`, which a source may not use — a path is where an entry goes, not a
+    /// traversal to be resolved.
+    Traversal,
+    /// Two entries resolve to one path.
+    Duplicate,
+    /// An entry naming the root is not a directory. The root is a directory, so an entry that
+    /// would place anything else there describes a filesystem that cannot exist.
+    RootNotDirectory,
+}
+
+/// A classification that stopped: at a fault in a path, or at whatever the family decided about
+/// what the entry holds.
+#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) enum ClassifyError<E> {
+    /// A fault in a path, with the path as the caller wrote it — so a message names that rather
+    /// than the canonical form used to compare it.
+    Path(PathFault, Vec<u8>),
+    /// The family refused what the entry holds.
+    Class(E),
+}
+
+/// Decide what every declared path holds, refusing the faults a path has whatever format is
+/// being asked to hold it.
+///
+/// One walk rather than one per family, for the reason the hard-link walk below is one: *which*
+/// faults a path can have, and the rule that decides which components it even has, are
+/// properties of a source rather than of any format. What each path *holds* is the family's, which is what
+/// `class_of` answers — and it is handed the components rather than the path, so a family that
+/// bounds a name checks the components this pass already split rather than splitting them again.
+///
+/// The pass exists because a hard link may name a target that sorts after it: nothing can be
+/// placed until every path is known.
+#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) fn classify_paths<C, E>(
+    entries: &[SourceEntry],
+    mut class_of: impl FnMut(&SourceEntry, &[&[u8]]) -> Result<C, E>,
+    is_directory: impl Fn(&C) -> bool,
+) -> Result<BTreeMap<Vec<u8>, C>, ClassifyError<E>> {
+    let mut classes = BTreeMap::new();
+    for entry in entries {
+        // Split once and key from the same parts, rather than joining a key and taking it apart
+        // again: which components a path has is one rule, and asking it twice is two chances to
+        // disagree about what this path even is.
+        let parts = crate::path::canonical_parts(&entry.path);
+        if parts.iter().any(|part| *part == b"..") {
+            return Err(ClassifyError::Path(
+                PathFault::Traversal,
+                entry.path.clone(),
+            ));
+        }
+        let key = parts.join(&b'/');
+        if classes.contains_key(&key) {
+            return Err(ClassifyError::Path(
+                PathFault::Duplicate,
+                entry.path.clone(),
+            ));
+        }
+        let class = class_of(entry, &parts).map_err(ClassifyError::Class)?;
+        if key.is_empty() && !is_directory(&class) {
+            return Err(ClassifyError::Path(
+                PathFault::RootNotDirectory,
+                entry.path.clone(),
+            ));
+        }
+        classes.insert(key, class);
+    }
+    Ok(classes)
+}
+
+/// What a source declares at one path, as far as following a hard link is concerned.
+///
+/// The file arm carries whatever the caller needs of the file it found, so a walk that ends at
+/// one hands it back rather than leaving the caller to look the path up a second time.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub(crate) enum LinkStep<T> {
+    /// A regular file: the chain ends here, with what the caller keeps of it.
+    File(T),
+    /// A directory, which no filesystem lets a hard link name.
+    Directory,
+    /// Something the target format cannot hold, so there is nothing left to be a second name
+    /// for.
+    Unrepresentable,
+    /// Another hard link, naming this canonical key.
+    Link(Vec<u8>),
+    /// Nothing is declared at this path.
+    Missing,
+}
+
+/// Where a chain of hard links ends.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub(crate) enum LinkEnd<T> {
+    /// A file, with what the caller keeps of it.
+    File(T),
+    /// Something the target format cannot hold.
+    Unrepresentable,
+    /// A directory.
+    Directory,
+    /// Nothing at all.
+    Missing,
+    /// The chain returns to somewhere it has been, so no end of it names a file.
+    Cycle,
+}
+
+/// Follow the chain of hard links beginning at `target` to whatever is at its end.
+///
+/// A link may name another link, so this is a walk rather than a lookup — and one that has to
+/// terminate on a source that names a cycle. `declared` is how many paths the source declares,
+/// which is what bounds it: every step consumes one declared path, so a walk longer than that
+/// has come back to somewhere it has been.
+///
+/// One walk rather than one per family. What a family does with each outcome is its own — the
+/// refusals are that family's error taxonomy, and what it keeps of a file is its own value —
+/// but *which* outcomes there are, and the bound that makes a cycle terminate rather than hang,
+/// are properties of a source and not of any format.
+///
+/// Nothing here reads a file or resolves a path outside the source: `target` names something
+/// the same source declared, which is why a hard link can be written as a second copy at all.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub(crate) fn follow_hard_link<T>(
+    target: &[u8],
+    declared: usize,
+    step: impl Fn(&[u8]) -> LinkStep<T>,
+) -> LinkEnd<T> {
+    let mut at = canonical_key(target);
+    let mut seen = 0usize;
+    loop {
+        match step(&at) {
+            LinkStep::File(found) => return LinkEnd::File(found),
+            LinkStep::Directory => return LinkEnd::Directory,
+            LinkStep::Unrepresentable => return LinkEnd::Unrepresentable,
+            LinkStep::Missing => return LinkEnd::Missing,
+            LinkStep::Link(next) => {
+                seen += 1;
+                if seen > declared {
+                    return LinkEnd::Cycle;
+                }
+                at = next;
+            }
+        }
     }
 }
 

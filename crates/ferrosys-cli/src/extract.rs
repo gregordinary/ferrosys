@@ -52,6 +52,8 @@
 //! filesystem otherwise. The library defaults to no cap, which is right for a caller that
 //! knows what it opened; this tool is most often pointed at an image someone else produced.
 
+mod btrfs;
+mod exfat;
 mod ext;
 mod fat;
 
@@ -71,7 +73,7 @@ use ferrosys::Acl;
 
 use crate::args::{ExtractArgs, ExtractMode, Stream};
 use crate::dest::Destination;
-use crate::json::Obj;
+use crate::json::Object;
 use crate::{Error, emit, render};
 
 /// One name as this tool reports it, in the vocabulary every family answers.
@@ -189,6 +191,8 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
     let outcome = match reader {
         FsReader::Ext(mut reader) => dispatch(&mut reader, ext::Family, args),
         FsReader::Fat(mut reader) => dispatch(&mut reader, fat::Family, args),
+        FsReader::ExFat(mut reader) => dispatch(&mut reader, exfat::Family, args),
+        FsReader::Btrfs(mut reader) => dispatch(&mut reader, btrfs::Family, args),
         // A family the library compiled in and this command cannot read back. The binary
         // compiles in every family the library has, so nothing in this workspace reaches it.
         _ => Err(Error::UnsupportedFamily),
@@ -366,42 +370,47 @@ fn to_dir<R: FsTree>(
     }
     let report = sink.write_tree(reader)?;
 
-    eprintln!("{:<24}{}", "Names written:", report.written);
+    let mut rows = render::Rows::summary();
+    rows.row("Names written:", report.written);
     if report.ownership_dropped {
-        eprintln!(
-            "{:<24}not applied — this process may not set another owner",
-            "Ownership:"
+        rows.row(
+            "Ownership:",
+            "not applied — this process may not set another owner",
         );
     }
     if report.xattrs_dropped {
-        eprintln!(
-            "{:<24}not applied — this process may not set security or trusted attributes",
-            "Attributes:"
+        rows.row(
+            "Attributes:",
+            "not applied — this process may not set security or trusted attributes",
         );
     }
     // What the image never held, as against what this host refused above. An ext filesystem
     // records every property a host file needs, so this says nothing about one; a FAT volume
     // records almost none of them, and this is where it says so.
     for (direction, property, entries) in report.fidelity.summary() {
-        eprintln!(
-            "{:<24}{} ({} {})",
+        rows.row(
             "Assumed:",
-            crate::parse::property_name(property),
-            entries,
-            if entries == 1 { "entry" } else { "entries" }
+            format!(
+                "{} ({entries} {})",
+                crate::parse::property_name(property),
+                if entries == 1 { "entry" } else { "entries" }
+            ),
         );
         let _ = direction;
     }
     for skipped in &report.skipped {
-        eprintln!("{:<24}{}", "Skipped:", render::printable(skipped));
+        rows.row("Skipped:", render::printable(skipped));
     }
     if report.more_skipped {
-        eprintln!(
-            "{:<24}and more, past the {} this report names",
+        rows.row(
             "Skipped:",
-            ferrosys::ExtractReport::MAX_SKIPPED
+            format!(
+                "and more, past the {} this report names",
+                ferrosys::ExtractReport::MAX_SKIPPED
+            ),
         );
     }
+    eprint!("{}", rows.finish());
     Ok(())
 }
 
@@ -423,10 +432,8 @@ fn to_dir<R: FsTree>(
 
 /// One path's metadata as a person reads it: one field per line, attributes last.
 fn stat_table(e: &Described) -> String {
-    let mut s = String::new();
-    let mut line = |k: &str, v: String| {
-        s.push_str(&format!("{k:<24}{v}\n"));
-    };
+    let mut rows = render::Rows::summary();
+    let mut line = |k: &str, v: String| rows.row(k, v);
     line("Path:", render::printable(&e.path));
     if let Some(number) = e.number {
         line("Inode:", number.to_string());
@@ -489,7 +496,7 @@ fn stat_table(e: &Described) -> String {
     if !e.attrs.synthesized.is_empty() {
         line("Assumed:", property_list(&e.attrs.synthesized));
     }
-    s
+    rows.finish()
 }
 
 /// One path's metadata as a machine reads it, attributes included.
@@ -561,7 +568,7 @@ fn list_json(entries: &[Described]) -> String {
 /// A field a family has no answer for is absent rather than null or zero: a FAT volume has no
 /// inode numbers and no link counts, and reporting either would be this tool answering a
 /// question the format never asked.
-fn entry_fields(o: &mut Obj<'_>, e: &Described) {
+fn entry_fields(o: &mut Object<'_>, e: &Described) {
     o.bytes("path", &e.path);
     if let Some(number) = e.number {
         o.u64("inode", number);
@@ -598,7 +605,7 @@ fn entry_fields(o: &mut Obj<'_>, e: &Described) {
 /// An entry's extended attributes, each as a name, a value, and — for a POSIX ACL — the
 /// decoded text form, since the stored bytes are ext's compact encoding rather than anything
 /// a consumer would recognize.
-fn xattr_fields(o: &mut Obj<'_>, xattrs: &[Xattr]) {
+fn xattr_fields(o: &mut Object<'_>, xattrs: &[Xattr]) {
     let mut a = o.arr("xattrs");
     for xattr in xattrs {
         let mut x = a.obj();
@@ -638,7 +645,7 @@ fn acl_text(xattr: &Xattr) -> Option<String> {
 
 /// A timestamp as two integers: the whole seconds, which reach back past the epoch and so
 /// are signed, and the nanoseconds within the second, which do not.
-fn time(o: &mut Obj<'_>, key: &str, t: Timestamp) {
+fn time(o: &mut Object<'_>, key: &str, t: Timestamp) {
     o.i64(key, t.secs);
     o.u64(&format!("{key}_nanos"), u64::from(t.nanos));
 }

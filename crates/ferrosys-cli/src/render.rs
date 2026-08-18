@@ -1,35 +1,102 @@
 //! Rendering values into the forms their readers require.
 //!
 //! Most of what this module renders comes out of an image and is rendered for a person: a
-//! label, a mode, a time. [`uri_reference`] renders for a machine instead — a host path
-//! in the URI dialect a SARIF consumer requires.
+//! label, a mode, a time, and the [`Rows`] every label-and-value table here is built from.
+//! [`uri_reference`] renders for a machine instead — a host path in the URI dialect a SARIF
+//! consumer requires.
 //!
-//! This module is pure and has no calendar of its own: [`iso8601`] computes a civil date
-//! from a count of seconds arithmetically, so a timestamp renders the same everywhere.
-//! Every time this tool prints is UTC, computed rather than looked up.
+//! This module is pure and has no calendar of its own: [`iso8601`] renders a civil date
+//! computed arithmetically, so a timestamp renders the same everywhere. Every time this tool
+//! prints is UTC, computed rather than looked up.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ferrosys::{Acl, AclQualifier};
+use ferrosys::ext::ondisk::unpadded;
+use ferrosys::{Acl, AclQualifier, Timestamp};
 
 use crate::args::os;
 
-/// Seconds in a day.
-const DAY: i64 = 86_400;
-
 /// The canonical dashed form of a 16-byte identifier: the filesystem UUID, and the
 /// directory-hash seed, which is written the same way.
+///
+/// The 8-4-4-4-12 grouping is the only thing here that is a UUID's own; the digits come from
+/// the crate's one hex renderer, so a UUID and the `_hex` field beside a name in a document
+/// are written by the same code.
 #[must_use]
 pub fn uuid(bytes: &[u8; 16]) -> String {
-    let mut out = String::with_capacity(36);
-    for (i, b) in bytes.iter().enumerate() {
-        if matches!(i, 4 | 6 | 8 | 10) {
-            out.push('-');
+    let group = |range: std::ops::Range<usize>| hex(&bytes[range]);
+    format!(
+        "{}-{}-{}-{}-{}",
+        group(0..4),
+        group(4..6),
+        group(6..8),
+        group(8..10),
+        group(10..16)
+    )
+}
+
+/// A label-and-value table being built, one row per line.
+///
+/// Every table this tool prints has the same shape — a label, padding to a fixed column, the
+/// value — and the padding is the whole of the format, so it is decided here rather than at
+/// each `writeln!`. What each table chooses is the column, and there are two:
+/// [`report`](Self::report) for a description of an image and [`summary`](Self::summary) for
+/// an account of what a command did.
+pub struct Rows {
+    out: String,
+    width: usize,
+}
+
+impl Rows {
+    /// A table describing an image, as `inspect` prints one.
+    ///
+    /// The wider column: a description names the field the filesystem itself names, and
+    /// those run long — `Directory hash signedness:` is twenty-six characters.
+    #[must_use]
+    pub fn report() -> Self {
+        Self {
+            out: String::new(),
+            width: 28,
         }
-        let _ = write!(out, "{b:02x}");
     }
-    out
+
+    /// A table accounting for what a command did, as `format` and `extract` print one.
+    ///
+    /// The narrower column: these labels name what was written rather than what a format
+    /// calls it, and none of them reaches the width above.
+    #[must_use]
+    pub fn summary() -> Self {
+        Self {
+            out: String::new(),
+            width: 24,
+        }
+    }
+
+    /// One row: `label`, padded to the column, then `value`.
+    ///
+    /// A label at or past the column still takes one space, so a table that grows a long
+    /// label loses its alignment rather than running the value into the label.
+    pub fn row(&mut self, label: &str, value: impl std::fmt::Display) {
+        let pad = self.width.saturating_sub(label.len()).max(1);
+        let _ = writeln!(self.out, "{label}{:pad$}{value}", "");
+    }
+
+    /// A blank line, separating one section of a table from the next.
+    pub fn blank(&mut self) {
+        self.out.push('\n');
+    }
+
+    /// Text this table carries that is not a row: a column-headed listing, a note.
+    pub fn text(&mut self, text: &str) {
+        self.out.push_str(text);
+    }
+
+    /// The table as it now stands.
+    #[must_use]
+    pub fn finish(self) -> String {
+        self.out
+    }
 }
 
 /// A FAT volume serial number in the form every tool that shows one writes it: two
@@ -43,16 +110,20 @@ pub fn volume_serial(id: u32) -> String {
     format!("{:04X}-{:04X}", id >> 16, id & 0xffff)
 }
 
-/// A volume label as a person reads it: the bytes up to the first NUL, rendered lossily,
-/// or `None` when the label is empty.
+/// An ext volume label as a person reads it: the field's name, rendered lossily, or `None`
+/// when the label is empty.
+///
+/// Where the padding stops is the format's rule, not this tool's, so it comes from the
+/// library — which is also what the caller wanting the *bytes* rather than the rendering
+/// reaches for, so the two never disagree about where a label ends.
 ///
 /// The field is bytes, not guaranteed text, so a non-UTF-8 label renders with the
 /// replacement character rather than failing — the same forensic reading the reader gives
 /// a label it did not write.
 #[must_use]
 pub fn label(name: &[u8; 16]) -> Option<String> {
-    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    (end != 0).then(|| printable(&name[..end]))
+    let name = unpadded(name);
+    (!name.is_empty()).then(|| printable(name))
 }
 
 /// Render image-controlled bytes for a person to read on a terminal, with every character
@@ -67,9 +138,16 @@ pub fn label(name: &[u8; 16]) -> Option<String> {
 /// This is the library's own [`ferrosys::printable`], not a copy of it. The rule is the same
 /// rule — the escaping every message and finding the library renders has already been
 /// through — and a second implementation of it here would be a second place for it to drift.
-/// The JSON projection escapes the same two classes on its own, through
-/// [`crate::json::push_string`], so only the human renderers reach for this.
+/// The JSON projection escapes the same two classes on its own, inside the library's own
+/// writer, so only the human renderers reach for this.
 pub use ferrosys::printable;
+
+/// Bytes as lower-case hexadecimal: the rendering that loses nothing, for a value that is an
+/// identifier rather than text and for a document carrying a name it could not render.
+///
+/// The library's own, like [`printable`] and for the same reason — a document this tool
+/// writes and one the library writes state the same bytes the same way.
+pub use ferrosys::hex;
 
 /// The mode as `ls` writes it: the type letter, then the owner, group, and other
 /// permission triples, with the `setuid`, `setgid`, and sticky bits folded into the
@@ -140,36 +218,15 @@ pub fn uri_reference(path: &Path) -> String {
 
 /// A time as `YYYY-MM-DDTHH:MM:SSZ`, in UTC.
 ///
+/// The calendar is the library's, which is the one the FAT writer encodes a date with — so
+/// what this tool prints and what an image stores are read off the same arithmetic.
+///
 /// ext4 timestamps reach from 1901 to 2446, and a negative count of seconds is a time
 /// before the epoch, so the arithmetic floors rather than truncates: `-1` second is
 /// `1969-12-31T23:59:59Z`, not one second into 1970.
 #[must_use]
 pub fn iso8601(secs: i64) -> String {
-    let days = secs.div_euclid(DAY);
-    let rem = secs.rem_euclid(DAY);
-    let (y, m, d) = civil_from_days(days);
-    let (h, min, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
-}
-
-/// The civil year, month, and day a count of days since 1970-01-01 names, in the
-/// proleptic Gregorian calendar.
-///
-/// The computation shifts the epoch to March 1st of year 0, which puts the leap day at
-/// the end of the year and makes the month lengths a regular sequence; the era is the
-/// 400-year cycle over which the calendar repeats exactly.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    // 719468 days from 0000-03-01 to 1970-01-01.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097); // day of era, 0..=146096
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // 0..=399
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // 0..=365, from March 1st
-    let mp = (5 * doy + 2) / 153; // 0..=11, March is 0
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // 1..=31
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // 1..=12
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
+    Timestamp::from_secs(secs).civil().to_string()
 }
 
 /// A POSIX ACL in `getfacl`'s `tag:qualifier:perms` spelling, entries comma-joined on one

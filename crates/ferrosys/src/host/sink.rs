@@ -73,6 +73,7 @@ use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, Timespec, Timestamps, Uid
 
 use crate::fidelity::{Direction, FidelityReport, Synthesis};
 use crate::host::{HostError, io_at};
+use crate::path::{canonical_parts, is_hostile_component};
 use crate::source::Metadata;
 use crate::time::Timestamp;
 use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
@@ -619,7 +620,15 @@ impl Extraction<'_> {
                 .min(window);
             let filled = tree.read_bytes(&entry.node, offset, &mut buf[..want])?;
             if filled == 0 {
-                break;
+                // Storage ran out with bytes still owed. Stopping quietly here would
+                // leave a host file shorter than the tree records, looking whole —
+                // exactly the tree-that-looks-complete-and-is-not this sink exists to
+                // prevent.
+                return Err(HostError::ShortRead {
+                    path: entry.path.clone(),
+                    size,
+                    got: offset,
+                });
             }
             out.write_all(&buf[..filled])
                 .map_err(|e| self.io(&entry.path, e))?;
@@ -728,6 +737,13 @@ impl Extraction<'_> {
         let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut fd = rustix::fs::openat(&self.sink.root, c".", flags, Mode::empty())
             .map_err(|e| self.io(blame, e.into()))?;
+        // Split here rather than through `canonical_parts`, and this is the one place in the
+        // crate where that is the right thing. A normalization *drops* a `.` element, because
+        // to a path it means nothing; this walk must **refuse** one, because `check_name` is
+        // the gate that decides what may become a name in the destination and a component
+        // silently dropped is a component never checked. Empty pieces are skipped because a
+        // path opens and may close with a separator, which is the split's artefact rather
+        // than anything the image said.
         for component in path.split(|&b| b == b'/') {
             if component.is_empty() {
                 continue;
@@ -1008,15 +1024,13 @@ fn split(path: &[u8]) -> Result<(&[u8], &[u8]), HostError> {
 /// Refuse a name a directory could not hold, so nothing the image says can reach a place the
 /// destination does not contain.
 ///
-/// A separator would traverse, `..` would ascend, `.` would name the directory itself, a NUL
-/// would truncate the name a syscall receives, and an empty name is not a name.
+/// The rule is [`is_hostile_component`], the same one a FAT volume's reader resolves names
+/// under: a separator would traverse, `..` would ascend, `.` would name the directory itself,
+/// a NUL would truncate the name a syscall receives, and an empty name is not a name. It is
+/// asked here as well as where the image was read because a destination must not depend on
+/// which reader filled the tree it is writing.
 fn check_name(name: &[u8], path: &[u8]) -> Result<(), HostError> {
-    let ok = !name.is_empty()
-        && name != b"."
-        && name != b".."
-        && !name.contains(&b'/')
-        && !name.contains(&0);
-    if ok {
+    if !is_hostile_component(name) {
         return Ok(());
     }
     Err(HostError::HostileName {
@@ -1059,10 +1073,8 @@ fn display(bytes: &[u8]) -> &Path {
 /// where it actually wrote.
 fn under_root(root: &Path, path: &[u8]) -> PathBuf {
     let mut out = root.to_path_buf();
-    for component in path.split(|&b| b == b'/') {
-        if !component.is_empty() {
-            out.push(display(component));
-        }
+    for component in canonical_parts(path) {
+        out.push(display(component));
     }
     out
 }

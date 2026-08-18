@@ -11,7 +11,8 @@
 //! there is no `--atomic` here, because an image is rewritten in place rather than produced,
 //! and a sibling temporary file would mean copying every byte of it to change sixteen.
 
-use ferrosys::ext::{IdentityChange, rewrite_identity};
+use ferrosys::ext::{IdentityChange, rewrite_identity_at};
+use ferrosys::{DetectOptions, Filesystem};
 
 use crate::args::IdentityArgs;
 use crate::{Error, emit};
@@ -24,15 +25,40 @@ pub fn run(args: IdentityArgs) -> Result<(), Error> {
         .open(&args.image)
         .map_err(|e| Error::io(&args.image, e))?;
 
+    // Which family the image holds, asked before anything is read for rewriting. This
+    // command rewrites ext identity fields, and pointed at a sound volume of another
+    // family the honest verdict is the one every verb gives an image it cannot act on —
+    // not "a filesystem was read and it is bad", which is what classifying the ext
+    // reader's refusal of foreign bytes would say. An image nothing recognizes gets the
+    // verdict `detect` gives it; one that detects as ext and then does not read is a
+    // damaged ext filesystem, and the rewrite's own errors say so precisely.
+    match ferrosys::detect_with(&mut file, &DetectOptions::new().base(args.offset)) {
+        Ok(Filesystem::Ext(_)) => {}
+        Ok(other) => {
+            let (family, variant) = crate::detect::words(&other);
+            return Err(Error::IdentityNotExt {
+                path: args.image.display().to_string(),
+                holds: variant.unwrap_or(family),
+            });
+        }
+        Err(source) => {
+            return Err(Error::NotDetected {
+                path: args.image.display().to_string(),
+                source,
+            });
+        }
+    }
+
     let mut change = IdentityChange::new();
     change.uuid = args.uuid;
     change.volume_name = args.volume_name;
     change.set_checksum_seed = args.set_checksum_seed;
 
-    let report = rewrite_identity(&mut file, &change).map_err(|source| Error::Identity {
-        path: args.image.display().to_string(),
-        source,
-    })?;
+    let report =
+        rewrite_identity_at(&mut file, &change, args.offset).map_err(|source| Error::Identity {
+            path: args.image.display().to_string(),
+            source,
+        })?;
 
     let text = if args.json {
         crate::json::document(|o| {

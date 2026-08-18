@@ -28,3 +28,23 @@ pub struct Xattr {
     /// The attribute's raw value.
     pub value: Vec<u8>,
 }
+
+/// Whether two attribute lists state the same attributes, in whatever order.
+///
+/// Order-insensitive because a source states attributes in the order its producer
+/// happened to write them, and a set is what an inode holds. Every model that gives one
+/// inode two names asks this question when the second name repeats the first's attributes,
+/// which is the two families with attributes to repeat.
+#[cfg(any(feature = "ext", feature = "btrfs"))]
+pub(crate) fn same_xattrs(a: &[Xattr], b: &[Xattr]) -> bool {
+    fn sorted(list: &[Xattr]) -> Vec<&Xattr> {
+        let mut refs: Vec<&Xattr> = list.iter().collect();
+        refs.sort_by(|x, y| x.name.cmp(&y.name));
+        refs
+    }
+    a.len() == b.len()
+        && sorted(a)
+            .into_iter()
+            .zip(sorted(b))
+            .all(|(x, y)| x.name == y.name && x.value == y.value)
+}

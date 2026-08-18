@@ -1,5 +1,5 @@
-//! `ferrosys` — write, inspect, and read back ext2/3/4 filesystems and FAT12/16/32
-//! volumes.
+//! `ferrosys` — write, inspect, and read back ext2/3/4 filesystems, FAT12/16/32 volumes,
+//! exFAT volumes, and btrfs filesystems.
 //!
 //! The binary is a shell around the `ferrosys` library: it parses a command line,
 //! opens files, and renders results. Every decision about what a filesystem *is* belongs
@@ -36,7 +36,8 @@
 //! # Determinism
 //!
 //! Everything an image's bytes depend on is an input the tool is given. A format's identity
-//! is required — the UUID for ext, the volume serial number for a FAT — its time is required
+//! is required — the UUID for ext, a volume serial number for FAT and for exFAT, and the
+//! filesystem id for btrfs — its time is required for every family whose format records one
 //! (or comes from `SOURCE_DATE_EPOCH`), and ext's hash seed defaults to the UUID's bytes. So
 //! two runs given the same inputs write the same bytes, always.
 
@@ -128,6 +129,19 @@ pub enum Error {
         #[source]
         source: ReadError,
     },
+    /// `identity` was pointed at a sound filesystem of another family.
+    ///
+    /// Its own verdict rather than a read failure: the volume is fine, and the command
+    /// rewrites fields another family does not have — so the classification is the one
+    /// every verb gives a request it cannot carry out, not "a filesystem was read and it
+    /// is bad".
+    #[error("{path}: holds {holds}, and identity rewrites the identity of an ext filesystem")]
+    IdentityNotExt {
+        /// The file that was opened.
+        path: String,
+        /// What the image holds, in the word `detect` prints for it.
+        holds: &'static str,
+    },
     /// The bytes are not a filesystem any compiled-in family reads, or a family recognized
     /// them and its reader then refused them.
     ///
@@ -184,6 +198,23 @@ pub enum Error {
     /// directory entry cannot hold.
     #[error(transparent)]
     FatFormat(#[from] ferrosys::fat::FormatError),
+    /// Writing an exFAT volume failed.
+    ///
+    /// A third variant for the reason the second one is a variant: the two families lose the
+    /// same properties and share the accounting for it, and there the resemblance stops. What
+    /// each format can refuse is a list of its own — a FAT volume runs out of a 32-bit length
+    /// field and an eleven-byte name, and an exFAT volume runs out of clusters.
+    #[error(transparent)]
+    ExFatFormat(#[from] ferrosys::exfat::FormatError),
+    /// Writing a btrfs filesystem failed.
+    ///
+    /// A fourth variant for the reason the third one is a variant, and this family widens the
+    /// point rather than repeating it: what a btrfs format can refuse is a geometry no chunk
+    /// set fits in, a tree a leaf cannot hold, a record larger than a tree block, and a
+    /// metadata reservation the trees outgrew — none of which any of the three above has a
+    /// word for.
+    #[error(transparent)]
+    BtrfsFormat(#[from] ferrosys::btrfs::FormatError),
     /// The source archive could not be read.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -341,11 +372,14 @@ impl Error {
             | Error::NotARegularFile(_)
             | Error::NotDetected { .. }
             | Error::NotExt { .. }
+            | Error::IdentityNotExt { .. }
             | Error::NotAFilesystem { .. }
             | Error::NotForFamily { .. }
             | Error::UnsupportedFamily
             | Error::ExtFormat(_)
             | Error::FatFormat(_)
+            | Error::ExFatFormat(_)
+            | Error::BtrfsFormat(_)
             | Error::Archive(_)
             | Error::ImageIo(_)
             | Error::NoSuchPath(_)
@@ -390,6 +424,40 @@ fn from_fat_read(e: ferrosys::fat::ReadError) -> Error {
         FatError::NotFound { path, .. } | FatError::NotADirectory { path, .. } => {
             Error::NoSuchPath(path)
         }
+        other => Error::from(TreeError::from(other)),
+    }
+}
+
+/// The same again, for a read of an exFAT volume.
+///
+/// One of these per family rather than a generic over them, and the reason is the third arm: a
+/// malformed ext filesystem reaches [`Error::Image`], which carries that family's own error,
+/// where the others go through the shared `TreeError`. A function covering all of them would
+/// take the split as a parameter, which is the whole of what each of these says.
+fn from_exfat_read(e: ferrosys::exfat::ReadError) -> Error {
+    use ferrosys::exfat::ReadError as ExFatError;
+    match e {
+        ExFatError::Io { message, .. } => Error::ImageIo(message),
+        ExFatError::NotFound { path, .. } | ExFatError::NotADirectory { path, .. } => {
+            Error::NoSuchPath(path)
+        }
+        other => Error::from(TreeError::from(other)),
+    }
+}
+
+/// And for a read of a btrfs filesystem.
+///
+/// One arm more than its neighbours have, because this family resolves a path through symbolic
+/// links and the others do not: a chain that does not end is a statement about the path that was
+/// asked for rather than about the filesystem, so it reads as a path that names nothing rather
+/// than as an image that is malformed.
+fn from_btrfs_read(e: ferrosys::btrfs::ReadError) -> Error {
+    use ferrosys::btrfs::ReadError as BtrfsError;
+    match e {
+        BtrfsError::Io { message, .. } => Error::ImageIo(message),
+        BtrfsError::NotFound { path, .. }
+        | BtrfsError::NotADirectory { path, .. }
+        | BtrfsError::SymlinkLoop { path, .. } => Error::NoSuchPath(path),
         other => Error::from(TreeError::from(other)),
     }
 }
@@ -478,7 +546,8 @@ fn help(topic: Topic) -> &'static str {
 }
 
 const GENERAL_HELP: &str = "\
-ferrosys — write, inspect, and read back ext2/3/4 filesystems and FAT12/16/32 volumes
+ferrosys — write, inspect, and read back ext2/3/4, FAT12/16/32, exFAT, and btrfs
+filesystems
 
 usage:
   ferrosys format  [options] OUT.img    write a filesystem
@@ -492,8 +561,15 @@ usage:
 
 filesystems:
   ext2, ext3, ext4      formatted, inspected, and read back
-  fat12, fat16, fat32   the same. `format -t` selects which; every command identifies
-                        whichever family an image turns out to hold
+  fat12, fat16, fat32   the same
+  exfat                 the same. One word rather than three: the format has one revision
+                        and every volume records it, so the family is the finest answer
+                        there is
+  btrfs                 the same, and one word for a different reason: what varies between
+                        two btrfs filesystems is a feature word and a geometry, which are
+                        options rather than a variant to name. `format -t` selects which;
+                        every command identifies whichever family an image turns out to
+                        hold
 
 exit codes (as e2fsck's):
   0   the command did what it was asked
@@ -509,11 +585,14 @@ of its inputs alone: the same inputs write the same bytes.
 ";
 
 const FORMAT_HELP: &str = "\
-ferrosys format — write an ext2, ext3, or ext4 filesystem, or a FAT12/16/32 volume
+ferrosys format — write an ext2/3/4 filesystem, a FAT12/16/32 volume, an exFAT volume, or
+a btrfs filesystem
 
 usage:
   ferrosys format --size SIZE --uuid HEX --time SECS [options] OUT.img
   ferrosys format -t fat32 --size SIZE --volume-id HEX --time SECS [options] OUT.img
+  ferrosys format -t exfat --size SIZE --volume-serial HEX [options] OUT.img
+  ferrosys format -t btrfs --size SIZE --fsid HEX --time SECS [options] OUT.img
 
   ferrosys format --size 512M --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
 
@@ -524,13 +603,18 @@ usage:
     --time \"$(date +%s)\" --owner 0:0 --accept-loss change-time,time-precision \\
     --from-dir esp-staging esp.img
 
--t names the filesystem, and each family takes its own identity and its own options; an
-option of the other family is refused by name rather than passed over. Naming no type
-writes ext4.
+  ferrosys format -t btrfs --size 8G --fsid \"$(uuidgen)\" --time \"$(date +%s)\" \\
+    --subvol \"$(uuidgen):/@\" --subvol \"$(uuidgen):/@home\" --default-subvol /@ \\
+    --owner 0:0 --from-dir staging root.img
 
-An identity and --time are required because an image's bytes are a function of its inputs
-alone: the tool reads neither the clock nor a random source, so the same inputs write the
-same bytes. SOURCE_DATE_EPOCH supplies --time when it is set.
+-t names the filesystem, and each family takes its own identity and its own options; an
+option of a family that was not named is refused by name rather than passed over. Naming
+no type writes ext4.
+
+An identity is required — and --time with it, for every family whose format records an
+instant — because an image's bytes are a function of its inputs alone: the tool reads
+neither the clock nor a random source, so the same inputs write the same bytes.
+SOURCE_DATE_EPOCH supplies --time when it is set.
 
 required:
   --size SIZE|auto     the filesystem's size: a byte count, optionally suffixed K, M, G,
@@ -544,11 +628,21 @@ required:
   --volume-id HEX      (fat) the volume serial number, 8 hex digits, dashed or bare —
                        1A2B-3C4D or 1A2B3C4D. This family's identity field, as the UUID is
                        ext's; it is 32 bits, so it is named rather than cut from a UUID
-  --time SECS          the filesystem's creation time, in seconds since the epoch. Taken
-                       from SOURCE_DATE_EPOCH when the option is absent. A FAT directory
-                       entry represents 1980-01-01 through 2107-12-31 at a two-second
-                       granularity, so a time outside that is refused for one rather than
-                       truncated into a plausible-looking one
+  --volume-serial HEX  (exfat) the same width and a different field of a different format,
+                       so a flag of its own: an exFAT volume records a VolumeSerialNumber
+                       in both of its boot regions, inside the checksum over each
+  --fsid HEX           (btrfs) the filesystem's own id, dashed or bare (32 hex digits) —
+                       what `blkid` reports and what a `UUID=` mount names. The same width
+                       as ext's and a different field of a different format, so a flag of
+                       its own; a btrfs records four more identifiers beside it, under
+                       `identity (btrfs)` below
+  --time SECS          (ext, fat, btrfs) the filesystem's creation time, in seconds since
+                       the epoch. Taken from SOURCE_DATE_EPOCH when the option is absent.
+                       A FAT directory entry represents 1980-01-01 through 2107-12-31 at a
+                       two-second granularity, so a time outside that is refused for one
+                       rather than truncated into a plausible-looking one. An exFAT volume
+                       records no time of its own, so for that family the flag is refused
+                       rather than accepted and ignored
 
 contents (at most one):
   --from-tar FILE|-    populate the filesystem from a tar archive. A named FILE is left on
@@ -573,35 +667,81 @@ contents (at most one):
                        user that built it
 
 labelling:
-  --label NAME         the volume label: up to 16 bytes on ext, and 11 upper-cased bytes
-                       of the OEM character set on a FAT. A label the field cannot hold is
-                       refused rather than truncated
+  --label NAME         the volume label: up to 16 bytes on ext, 11 upper-cased bytes of
+                       the OEM character set on a FAT, up to 11 UTF-16 code units on an
+                       exFAT volume — which is 11 characters rather than 11 bytes for
+                       anything outside ASCII, and must be text for the same reason — and
+                       up to 255 bytes on a btrfs, which records no encoding for them and
+                       so takes them as they come. A label the field cannot hold is refused
+                       rather than truncated
 
 filesystem:
-  -t, --type ext2|ext3|ext4|fat12|fat16|fat32
+  -t, --type ext2|ext3|ext4|fat12|fat16|fat32|exfat|btrfs
                        which filesystem to write (default ext4). For ext it is also the
                        base feature set: -O and the geometry options layer on top, so
                        `-t ext2 -O has_journal` is ext3, and the image is judged by the
                        features it carries rather than the profile it started from. For a
                        FAT it is what the cluster count must derive to — nothing in a FAT
                        volume records its type, so a size that cannot reach the named one
-                       is refused rather than written as something else
+                       is refused rather than written as something else. exFAT names no
+                       variant, and takes the size it is given: --size auto is refused for
+                       it, because the search behind `auto` is a family's own and this one
+                       has none. btrfs names no variant either and has no search either,
+                       and what would have been a variant is `geometry (btrfs)` below
 
-fidelity (fat):
+identity (btrfs):
+  A btrfs records five identifiers where the other three record one, and a filesystem whose
+  bytes you can reproduce is one that states all of them. Only --fsid is required; the rest
+  are zero unless named, which is a legitimate value and an obviously unset one. Nothing
+  here is derived from anything else: a value this tool invented would be a value you could
+  not state.
+
+  --metadata-uuid HEX  the id every tree block is stamped with, where it is to differ from
+                       --fsid. Setting it is what lets the id a person sees be changed
+                       later without rewriting every block, and the filesystem records that
+                       state as a feature bit. Unset, the two ids are one
+  --chunk-tree-uuid HEX   the chunk tree's own id, repeated in every tree block and every
+                       device extent, so that a block belonging to another filesystem says
+                       so
+  --device-uuid HEX    the device's own id, which the device record and every copy of every
+                       chunk name
+  --subvolume-uuid HEX the top-level subvolume's own id, which the UUID tree is keyed by
+
+subvolumes (btrfs):
+  --subvol [ro:]UUID:PATH
+                       make the source directory at PATH the root of a subvolume of its
+                       own. Repeatable, and each needs its own UUID — the UUID tree is
+                       keyed by it, so two subvolumes sharing one would make a tree with a
+                       repeated key. `ro:` in front makes it read-only. The identifier
+                       leads and the path is everything after it, so a path may hold a
+                       colon. A subvolume root is still a directory: this says how to lay
+                       it out, not what it is, so the same source tree feeds every family
+                       unchanged
+  --default-subvol PATH   which subvolume a mount that was told none lands on, named by
+                       the path it was asked for. Without it, a mount lands on the
+                       top-level tree every btrfs starts with, which is what `subvolid=5`
+                       names
+
+fidelity (fat, exfat):
   --accept-loss LIST   which properties of the source this build may lose: `all`, or a
                        comma-separated list of ownership, permissions, special-bits, kind,
                        extended-attributes, access-time, change-time, modification-time,
                        time-precision, name. Without it a build that would lose anything
                        fails and names the entry and the property.
 
-                       A FAT directory entry has no field for an owner, a group,
-                       permission bits, a symbolic link, a second name for a file, a device
-                       number, or an extended attribute — but a property counts as lost
-                       only when the value does not survive, so a root-owned tree of 0644
-                       files and 0755 directories loses nothing by those. A tree walked off
-                       this host always loses two: change-time, which the format has no
-                       field for at all, and time-precision, since it stores a write time
-                       to two seconds and an access time to the day.
+                       Neither format has a field for an owner, a group, permission bits, a
+                       symbolic link, a second name for a file, a device number, or an
+                       extended attribute — but a property counts as lost only when the
+                       value does not survive, so a root-owned tree of 0644 files and 0755
+                       directories loses nothing by those. A tree walked off this host
+                       always loses change-time, which neither format has a field for.
+
+                       Where the two differ is how much time survives, and both lose some.
+                       A FAT volume stores a write time to two seconds and an access time to
+                       the day. exFAT keeps a creation and a modification time to ten
+                       milliseconds, and each of its three times with a zone offset, but its
+                       access time is two-second granular like FAT's — so a host tree loses
+                       time-precision on either format, and loses far less of it here.
 
                        Properties are named one by one on purpose: accepting the loss of
                        permission bits must not silently accept every symbolic link in the
@@ -629,7 +769,7 @@ geometry (ext):
   --reserved-percent P blocks held back for the super-user, from 0 to 50, with up to two
                        decimal places (default 5)
   -O feat,^feat,none   turn features on and off, left to right, over the selected profile.
-                       `none` clears every feature. The names are the on-disk ones:
+                       `none` clears every feature. The names are ext's own on-disk ones:
                        64bit, metadata_csum, has_journal, … . filetype names the directory
                        format this tool always writes, so clearing it is refused. Clearing
                        extent drops to the block-mapped ext2/ext3 family, which then carries
@@ -656,6 +796,34 @@ geometry (ext):
   --errors continue|remount-ro|panic   what the kernel does on a detected filesystem
                        error (`s_errors`): note it and carry on, remount read-only, or
                        panic. Defaults to `continue`, the kernel's own default
+
+geometry (btrfs):
+  --sector-size N|auto the smallest addressable unit of file data: a power of two from 4K
+                       to 64K, or `auto` (the default), which is 4096. Named rather than
+                       taken from this machine's page size, which is what the format's own
+                       tooling does and what makes one command line write two different
+                       filesystems on two machines
+  --node-size N|auto   the size of a tree block: a power of two from the sector size to
+                       64K, or `auto` (the default), which is 16K or the sector size where
+                       that is larger. It decides how much a leaf holds, and so how large
+                       a file may be before it stops fitting inside the metadata
+  --metadata-profile single|dup
+                       how metadata and system block groups are replicated (default dup).
+                       `dup` writes two copies on the one device, which is what protects
+                       the trees against a bad sector; `single` writes one and costs half
+                       as much space
+  --data-profile single|dup
+                       the same for data block groups (default single)
+  -O feat,^feat,none   turn features on and off, left to right, over what this tool writes
+                       when you name none. `none` clears every feature. The names are the
+                       ones the format's own tooling takes and `inspect` prints:
+                       skinny-metadata, no-holes, extref, free-space-tree,
+                       block-group-tree, … . The one most worth naming is
+                       `^block-group-tree`, which is how you write a filesystem a kernel
+                       older than 6.1 can mount. A feature this tool does not write is
+                       refused by name, and so is one whose prerequisites were not asked
+                       for — block-group-tree rests on free-space-tree and no-holes, so
+                       clearing either of those means clearing it in the same list
 
 determinism (ext):
   --fixed-time SECS    force every inode's times to this value, whatever the source says
@@ -836,8 +1004,9 @@ options:
                        optionally suffixed K, M, G, or T
   --json               report as JSON rather than as one word
 
-The answer is one word on the standard output — ext2, ext3, ext4, fat12, fat16, fat32, or
-`unrecognized` — so it reads well in a shell test. It is the same word `format -t` takes.
+The answer is one word on the standard output — ext2, ext3, ext4, fat12, fat16, fat32,
+exfat, btrfs, or `unrecognized` — so it reads well in a shell test. It is the same word
+`format -t` takes.
 An unrecognized image exits 8, since there is no filesystem to have an opinion about. One
 further word, `unknown`, is the answer when the library classifies a family this build has
 no name for: something recognized the image, so calling it unrecognized would be wrong.
@@ -853,6 +1022,8 @@ usage:
   ferrosys identity [--uuid HEX] [--label TEXT] [--set-checksum-seed] [--json] IMAGE
 
 options:
+  --offset N           where the filesystem begins within the file, for a partition inside
+                       a whole-disk image. A byte count, optionally suffixed K, M, G, or T
   --uuid HEX           the new filesystem UUID: 32 hex digits, dashed or bare
   --label TEXT         the new volume label, at most 16 bytes
   --set-checksum-seed  record the seed the current UUID implies and set
@@ -970,13 +1141,7 @@ mod tests {
 
     #[test]
     fn every_help_topic_has_text() {
-        for topic in [
-            Topic::General,
-            Topic::Format,
-            Topic::Inspect,
-            Topic::Extract,
-            Topic::Detect,
-        ] {
+        for topic in TOPICS {
             let text = help(topic);
             assert!(text.starts_with("ferrosys"), "{topic:?} names the tool");
             assert!(text.contains("usage:"), "{topic:?} states its usage");
@@ -986,26 +1151,58 @@ mod tests {
         // command it documents. Asserting what the help *is* keeps it honest without
         // naming anything it must not.
         let general = help(Topic::General);
-        for command in ["format", "inspect", "extract", "detect"] {
+        for (command, topic) in SUBCOMMANDS {
             assert!(
                 general.contains(command),
                 "the general help lists the `{command}` command"
             );
             assert!(
-                help_for(command).contains(command),
+                help(topic).contains(command),
                 "the `{command}` help names its own command"
             );
         }
     }
 
-    /// The help topic for a subcommand name, for the property check above.
-    fn help_for(command: &str) -> &'static str {
-        match command {
-            "format" => help(Topic::Format),
-            "inspect" => help(Topic::Inspect),
-            "extract" => help(Topic::Extract),
-            "detect" => help(Topic::Detect),
-            other => panic!("no help topic for {other}"),
+    /// Every topic there is, and every one that documents a subcommand.
+    ///
+    /// Held as a `match` over a topic rather than as a hand-written list, because a hand
+    /// written list is what let the one topic nothing else reads go unchecked: a topic added
+    /// to the enum fails to compile here until it is named in both.
+    const TOPICS: [Topic; 6] = [
+        Topic::General,
+        Topic::Format,
+        Topic::Inspect,
+        Topic::Extract,
+        Topic::Detect,
+        Topic::Identity,
+    ];
+
+    /// The subcommands a user types, beside the topic that documents each.
+    const SUBCOMMANDS: [(&str, Topic); 5] = [
+        ("format", Topic::Format),
+        ("inspect", Topic::Inspect),
+        ("extract", Topic::Extract),
+        ("detect", Topic::Detect),
+        ("identity", Topic::Identity),
+    ];
+
+    #[test]
+    fn the_topic_list_above_is_every_topic_the_enum_has() {
+        // What makes the two lists complete rather than merely long: the `match` is
+        // exhaustive, so a seventh topic stops the build here, and the count is asserted, so
+        // a topic dropped from the list stops it too. Nothing under `help` can go unread.
+        for topic in TOPICS {
+            let named = match topic {
+                Topic::General => "general",
+                Topic::Format => "format",
+                Topic::Inspect => "inspect",
+                Topic::Extract => "extract",
+                Topic::Detect => "detect",
+                Topic::Identity => "identity",
+            };
+            assert!(!named.is_empty());
         }
+        // And every topic but the general one documents a subcommand a user can type.
+        assert_eq!(SUBCOMMANDS.len(), TOPICS.len() - 1);
     }
 }

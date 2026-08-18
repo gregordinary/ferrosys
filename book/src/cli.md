@@ -1,9 +1,9 @@
 # The `ferrosys` command line
 
 The `ferrosys-cli` crate ships one binary, `ferrosys`, which writes ext2, ext3, and ext4
-filesystems and FAT12, FAT16, and FAT32 volumes, reports on them, reads their contents back
-out, and changes what an ext filesystem is known by. It is the library's surface for anyone
-not writing Rust.
+filesystems, FAT12, FAT16, and FAT32 volumes, exFAT volumes, and btrfs filesystems, reports
+on them, reads their contents back out, and changes what an ext filesystem is known by. It
+is the library's surface for anyone not writing Rust.
 
 ```console
 $ ferrosys format  --size SIZE --uuid HEX --time SECS [options] OUT.img
@@ -29,10 +29,11 @@ Everything an image's bytes depend on is an input you supply, so two runs given 
 inputs write the same image, byte for byte. Reproducibility is the only mode the tool
 has; it is always on.
 
-That has one consequence worth stating plainly: an identity is required and `--time` is
-required. Each family names its own identity — `--uuid` for ext, `--volume-id` for a FAT —
-and the tool mints neither, so pipe one in from a tool that does and pass the time
-explicitly or set `SOURCE_DATE_EPOCH`:
+That has one consequence worth stating plainly: an identity is required, and `--time` is
+required for every family whose format records an instant. Each family names its own
+identity — `--uuid` for ext, `--volume-id` for a FAT, `--volume-serial` for exFAT,
+`--fsid` for btrfs — and the tool mints neither, so pipe one in from a tool that does and
+pass the time explicitly or set `SOURCE_DATE_EPOCH`:
 
 ```console
 $ ferrosys format --size 512M --uuid "$(uuidgen)" --time 1700000000 rootfs.img
@@ -174,13 +175,29 @@ old file carried do not survive the rename. Without it the image is written in p
 two do not combine: `--dry-run` opens no destination, so there is nothing left for `--atomic`
 to decide, and a flag that decides nothing reads as one that worked.
 
+**Geometry the command line names, and geometry it does not.** Where a family's layout is
+decided by more than the size, the choice is spelled out for the family that records it in
+its own superblock and reads it back as identity — btrfs takes `--sector-size`,
+`--node-size`, and the two replication profiles. ext takes `--block-size` and `--inode-size`
+for the same reason. FAT and exFAT derive their cluster size, table count, reserved sectors,
+and root capacity from the volume's size, by the rules their reference formatters use, and
+the command line does not offer to override them. The library does: a caller that must pin a
+cluster size, a sector size, an OEM name, or a boot sector builds a plan request directly and
+formats through the crate. What comes out of either route is the same filesystem.
+
 ### Choosing a filesystem
 
 `-t` (or `--type`) selects which filesystem to write: `ext2`, `ext3`, `ext4` (the default),
-`fat12`, `fat16`, or `fat32`. It names the family as well as the variant, and each family
-takes its own identity and its own options — an option belonging to the other one is refused
-by name rather than passed over, so a line that named both has said two things that cannot
-both be honoured and is told so.
+`fat12`, `fat16`, `fat32`, `exfat`, or `btrfs`. It names the family as well as the variant, and
+each family takes its own identity and its own options — an option belonging to another one is
+refused by name rather than passed over, so a line that named two families has said two
+things that cannot both be honoured and is told so.
+
+`exfat` is one word where the others are three because the format has one revision and every
+volume records it: the family is the finest answer there is, so there is no variant to
+choose between. `btrfs` is one word for a related reason spelled differently — what varies
+between two btrfs filesystems is a feature word and a geometry, and both are options rather
+than a variant a `-t` value could name.
 
 Within the ext family it seeds the whole feature set from that profile's baseline; the `-O`
 list and the geometry options layer on top, exactly as they do for `mke2fs -t`:
@@ -223,10 +240,51 @@ words deny it. `^large_file` at the 4096-byte block size is refused on its own, 
 source is read, because the resize inode a growable filesystem carries is itself a file
 that large.
 
+`-O` reads btrfs's feature words too, in btrfs's own vocabulary — the words its tooling
+takes and `ferrosys inspect` prints back, which are not ext's:
+
+```console
+$ ferrosys format --size 1G --fsid "$(uuidgen)" --time 1700000000 -t btrfs \
+      -O ^block-group-tree old-kernel.img
+```
+
+That is the one most worth naming: a filesystem carrying `block-group-tree` needs a kernel
+of 6.1 or newer to mount, so clearing it is how you write an image for an older one. The
+grammar is the same in both families — a bare word sets a feature, `^` clears it, `none`
+starts from nothing, and the list applies left to right — and the vocabularies are
+disjoint, so a word belonging to the other family is refused rather than quietly ignored.
+A feature this tool does not write is refused by name, and so is one whose prerequisites
+were not asked for: `block-group-tree` rests on `free-space-tree` and `no-holes`, so
+clearing either of those means clearing it in the same list.
+
 `--grow` sizes the reserved descriptor blocks that let the filesystem grow online without
 relocating its descriptor table. It defaults to `max`, which reserves the most the format
 allows; `--grow 4G` reserves exactly enough to reach a known target, and `--grow none`
 reserves nothing.
+
+`--block-size` and `--inode-size` set the two sizes every other ext number is derived from:
+1024, 2048, or 4096 bytes for a block (4096 by default), and a power of two from 128 up to
+the block size for an inode (256 by default). A 128-byte inode holds no nanosecond field and
+no creation time, so it is the choice that decides which times an image can carry.
+
+`--journal` sizes the journal in filesystem blocks, where the default sizes it from the
+filesystem. The journal is a real file and costs its size in free space — four mebibytes of
+a sixteen-mebibyte filesystem — so `-t ext2`, which writes none, is the way to spend that
+space on contents instead.
+
+`--errors` sets what a kernel does when it detects an error in the filesystem: `continue`
+notes it and carries on, `remount-ro` remounts read-only, and `panic` stops the machine. It
+defaults to `continue`, which is the kernel's own default.
+
+`--fixed-time` forces every inode's times to one instant, whatever the source recorded. It
+is for the image whose contents came from a tree whose timestamps are not reproducible;
+`--time` alone stamps the filesystem, and this stamps everything in it.
+
+`--hash` and `--hash-signedness` decide how a directory's names are hashed for its index:
+`half_md4` (the default), `tea`, or `legacy`, and whether a name's bytes are read as signed
+or unsigned. Unsigned by default, which is what makes the hash independent of the host — a
+`char` is signed on one architecture and unsigned on another, and a directory hashed one way
+is not readable by a kernel hashing the other.
 
 `--label` names the filesystem, up to sixteen bytes. A longer label is refused rather than
 truncated, so the name a filesystem carries is the one that was asked for:
@@ -261,7 +319,8 @@ reservation is reproducible to the block.
 
 ```console
 $ ferrosys format --size 64M --uuid "$(uuidgen)" --time 1 --json fs.img
-{"schema":2,"uuid":"f0e17055-...","volume_name":"","created":1,"profile":"ext4",...}
+{"schema":2,"family":"ext","variant":"ext4","uuid":"f0e17055-...","volume_name":"",
+ "created":1,"features":[...],...}
 ```
 
 Every JSON document this tool writes opens with the same `"schema"` field: the shape is a
@@ -290,7 +349,11 @@ is a value you did not choose.
 The type is what the geometry must *derive to*, not what gets written down. Nothing in a
 FAT volume records which of the three it is — every driver counts the clusters and compares
 against two thresholds — so `-t fat32` on a size that cannot reach a FAT32 cluster count is
-refused rather than written as a FAT16 wearing a FAT32 label.
+refused rather than written as a FAT16 wearing a FAT32 label. The command line names a type
+outright; the library additionally offers the type the geometry reaches on its own, and a
+FAT32 volume below the cluster count the specification sets for one — a shape every
+mainstream driver reads and no specification blesses, which is why asking for it is explicit
+and the command line does not ask.
 
 `--label` goes through this family's own rules: eleven bytes, upper-cased, in the OEM
 character set. A label the field cannot hold is refused rather than truncated, as on the ext
@@ -347,6 +410,157 @@ dropped    change-time          4
 A build that lost nothing says `nothing dropped or synthesized` rather than printing an
 empty table, so silence never has to be interpreted.
 
+### Writing an exFAT volume
+
+An SDXC card specifies exFAT, and every current desktop operating system reads one as it
+ships, so this is the family for a card or a stick that has to be read somewhere else:
+
+```console
+$ ferrosys format -t exfat --size 8G \
+      --volume-serial "$(od -An -N4 -tx1 /dev/urandom | tr -d ' ')" \
+      --label MEDIA --owner 0:0 \
+      --accept-loss change-time,time-precision --from-dir card-staging card.img
+```
+
+`--volume-serial` is this family's identity: the `VolumeSerialNumber` both boot regions
+record, taken as eight hex digits in either the bare form or the dashed one every tool
+prints. It is a third option rather than a reuse of `--volume-id` because it is a different
+field of a different format; the two being the same width is a coincidence of the lineage,
+not a shared value.
+
+There is no `--time` here, and the absence is the format's: an exFAT volume records no
+instant of its own anywhere — every time on it belongs to an entry and comes from the
+source that named it. The flag is refused for this family, the way every option of a family
+that was not named is.
+
+`--label` goes through this family's own rules again: up to eleven UTF-16 code units, which
+is eleven *characters* rather than eleven bytes for anything outside ASCII, and text rather
+than bytes — the format stores a label as code units, so there is no encoding to guess for
+bytes that are not text. As everywhere else, a label the field cannot hold is refused rather
+than truncated.
+
+Two things this family does that its neighbour cannot. A **name is stored whole** — up to 255
+UTF-16 code units, in the case it was given, with no second shortened name derived beside it
+— so what goes in is what a listing shows. And a lookup folds through the **volume's own
+up-case table**, so a path in any case reaches the entry a driver reading the same volume
+would reach:
+
+```console
+$ ferrosys extract card.img --cat /DCIM/IMG_0001.JPG
+$ ferrosys extract card.img --cat /dcim/img_0001.jpg   # the same file
+```
+
+The one thing this family does not do is `--size auto`. That search plans candidate sizes and
+places the contents into each until the smallest one that holds them is found, and the search
+is a family's own; this one has none, so `--size auto -t exfat` is refused while the command
+line is being read — before a source is opened, so nothing is walked to say so. Name a size.
+
+#### What an exFAT volume cannot carry
+
+The same six properties a FAT volume cannot, for the same reason: an entry set records a name,
+five attribute bits, three times and two lengths, and has no field for an owner, a group,
+permission bits, a symbolic link, a second name for a file, a device number, or an extended
+attribute. `--accept-loss`, `--assume-owner` and `--assume-modes` mean exactly what they mean
+for FAT, and a build that would lose something you have not named fails and says which entry
+and which property.
+
+What differs is how much *time* survives, and it is worth knowing before choosing between the
+two families. exFAT records a creation and a modification time to ten milliseconds, and each
+of its three times with a UTC offset, where FAT records a write time to two seconds, an access
+time to the day, and no zone at all. A volume this tool writes says its times are UTC rather
+than leaving a reader to guess a locality. A host tree still loses `time-precision`, because
+exFAT's access time is two-second granular like FAT's — but it loses far less of it.
+
+### Writing a btrfs filesystem
+
+Fedora and openSUSE default to btrfs, and both lay out subvolumes rather than one flat tree —
+so this is the family for a distribution root image, and the layout is the point rather than a
+refinement:
+
+```console
+$ ferrosys format -t btrfs --size 8G --fsid "$(uuidgen)" --time 1700000000 \
+      --label fedora --owner 0:0 \
+      --subvol "$(uuidgen):/@" --subvol "$(uuidgen):/@home" --default-subvol /@ \
+      --from-dir root-staging root.img
+```
+
+`--fsid` is this family's identity: the id `blkid` reports and a `UUID=` line in `/etc/fstab`
+names, taken as 32 hex digits in either the bare form or the dashed one. It is a fourth option
+rather than a reuse of `--uuid` because it is a different field of a different format; the two
+being the same width is a coincidence.
+
+**A btrfs records five identifiers**, and the other four have options of their own:
+`--metadata-uuid` is the id every tree block is stamped with where it is to differ from the
+visible one — which is what lets the visible id be changed later without rewriting every block,
+and what a filesystem records as a feature bit when it is in that state. `--chunk-tree-uuid`,
+`--device-uuid`, and `--subvolume-uuid` are the chunk tree's, the device's, and the top-level
+subvolume's. Each defaults to zero, which is a legitimate value and an obviously unset one.
+None of them is derived from another: a filesystem whose bytes you can reproduce is one that
+states all five, and a value this tool invented would be a value you could not state.
+
+`--subvol [ro:]UUID:PATH` makes the source directory at `PATH` the root of a subvolume of its
+own. It is repeatable, and **each needs its own identifier** — the filesystem's UUID tree is
+keyed by them, so two subvolumes sharing one would produce a tree with a repeated key, and the
+command line says so by name rather than letting the writer discover it. `ro:` in front makes
+one read-only. The identifier leads and the path is everything after it, so a path may contain
+a colon.
+
+`--default-subvol PATH` says which subvolume a mount that was told none lands on. Without it a
+mount lands on the top-level tree every btrfs starts with — the one `subvolid=5` names — which
+is rarely what a root image wants:
+
+```console
+# mount -o subvol=@ root.img /mnt        # what --default-subvol /@ makes the default
+```
+
+A subvolume root is still a directory. The source declares it as one and `--subvol` says how to
+lay it out, which is why the same staging tree feeds every family unchanged. A hard link cannot
+span two subvolumes — no btrfs holds one — so a source naming one is refused rather than
+silently written as two files.
+
+`--label` is up to 255 bytes, taken as they come: the superblock's label field records no
+encoding, so what you supply is what every reader of the image sees. A label the field cannot
+hold is refused rather than truncated, as everywhere else.
+
+The geometry is four options. `--sector-size` is the smallest addressable unit of file data
+and `--node-size` the size of a tree block, each a power of two from 4K to 64K, defaulting to
+4096 and 16K. The node size decides how much a leaf holds, and so how large a file may be
+before it stops fitting inside the metadata. `--metadata-profile` and `--data-profile` say how
+each kind of block group is replicated: `dup` writes two copies on the one device, which is
+what protects the trees against a bad sector, and `single` writes one. Metadata defaults to
+`dup` and data to `single`, which is what the format's own tooling does on one device.
+
+Unlike the other three families, **nothing is lost on the way in**. btrfs has a field for every
+property a source states — an owner, a group, a full mode, a link count, a device number, four
+timestamps each to the nanosecond, as many names per object as you give it, and an extended
+attribute as a record of its own — so `--accept-loss` is not an option this family takes and a
+build here never refuses a tree for what it cannot hold. The format summary says so in a line
+rather than by silence.
+
+`--size auto` is refused for this family, as it is for exFAT and for the same reason: the
+search behind it plans candidate sizes and places the contents into each, and that search is a
+family's own. Name a size. The smallest a btrfs can be is 109 MiB at the default profile
+pairing and 45 MiB at `--metadata-profile single`, and a volume below whichever applies is
+refused with the number it would have taken.
+
+#### Two btrfs images from one directory can differ, and it is the directory that changed
+
+Everything above holds the general rule: the same inputs write the same bytes. What is worth
+knowing for this family in particular is what counts as *the same inputs* when the input is a
+host directory tree.
+
+Walking a tree reads its files, and on a filesystem that records access times, reading a file
+updates that file's access time. btrfs is the one family here that stores an access time to the
+nanosecond, so it is the one where that shows: two `--from-dir` builds of one tree, run one
+after the other, can differ by a millisecond in every entry's `atime`. The tool read no clock;
+the tree it was pointed at was not the same tree twice.
+
+If images have to be byte-identical across runs, give the build a source that reading does not
+change — `--from-tar`, whose member times are in the archive — or mount the staging tree
+`noatime`, or stamp the tree's times before each build. Every other input is already fixed:
+`--time` and the five identifiers are values you state, and nothing else in the tool reads
+anything but the source.
+
 ### A small partition
 
 A format's defaults are sized for a general-purpose filesystem, and on a small one they
@@ -387,9 +601,10 @@ no findings
 
 Every report opens with the same five lines, whatever the image holds: which family, which
 variant of it, how large it is, what it allocates in, and what identifies it. Everything
-after them is that family's own — an ext image describes itself in superblock fields and a
-FAT volume in its parameter block — so a tool that only wants to know what an image is and
-whether it is sound reads the head and stops:
+after them is that family's own — an ext image describes itself in superblock fields, a
+FAT volume in its parameter block, an exFAT volume in its boot region, and a btrfs in its
+superblock, its chunk map, and its trees — so a tool that only wants to know what an image is
+and whether it is sound reads the head and stops:
 
 ```console
 $ ferrosys inspect esp.img
@@ -417,11 +632,100 @@ variant was derived from. No driver reads that string — the type follows from 
 count and from nothing else — so a volume whose string disagrees with its geometry is read
 by its geometry, and this is the one place the disagreement is visible.
 
+An exFAT report is the same envelope over a third body, and the four fields it leads with
+are ones no boot sector holds:
+
+```console
+$ ferrosys inspect card.img
+Filesystem family:          exfat
+Filesystem variant:         exfat
+Filesystem size:            8589934592
+Allocation unit:            32768
+Filesystem identifier:      5E71-A10C
+
+Volume label:               MEDIA
+Volume state:               clean
+Percent in use:             3%
+Bytes per cluster:          32768
+Clusters:                   262016
+
+Allocation bitmap at cluster: 2
+Up-case table at cluster:   3
+Root directory at cluster:  4
+...
+
+no findings
+```
+
+Where the allocation bitmap and the up-case table are, and how long each is, are recorded
+nowhere but in the root directory — the format stores them as ordinary directory entries — so
+those lines are what a reading of that directory recovered rather than a field read off the
+boot sector. `Volume state` is the other thing only this family reports: the two flags a
+mounted driver writes, which sit outside the boot checksum precisely so it can. A volume that
+was not cleanly unmounted is reported and is not a fault, so a strict read of a card somebody
+pulled out of a reader still succeeds.
+
+A btrfs report is the same envelope again, over the one body in this tool that describes two
+layers — because the format has two. Above is a logical address space with the trees on it;
+below is a chunk map that translates every address in it onto the device. A filesystem whose
+trees all verify and whose map is missing a range is a different report from one where both
+are sound, so both are there:
+
+```console
+$ ferrosys inspect fedora-root.img
+Filesystem family:          btrfs
+Filesystem variant:         btrfs
+Filesystem size:            8589934592
+Allocation unit:            4096
+Filesystem identifier:      1b4e28ba-2fa1-11d2-883f-0016d3cca427
+
+Label:                      fedora
+Metadata identifier:        1b4e28ba-2fa1-11d2-883f-0016d3cca427
+Generation:                 42
+Bytes used:                 1735983104
+Sector size:                4096
+Tree block size:            16384
+Filesystem features:        free-space-tree free-space-tree-valid block-group-tree ...
+Superblock copies:          present, present, outside the device
+
+Mapped chunks:              5
+Mapped bytes:               2214592512
+
+ROOT_TREE at:               30523392 (level 0)
+CHUNK_TREE at:              22036480 (level 0)
+EXTENT_TREE at:             30507008 (level 1)
+...
+
+Subvolume <top-level>:      id 5
+Subvolume root:             id 256, default
+Subvolume home:             id 257
+
+no findings
+```
+
+The last section is the one nothing else in this tool has. A subvolume is a filesystem tree
+inside the filesystem, with inode numbers of its own, and which ones are on an image — and
+which is the default a mount reaches with no `subvol=` — is the question someone points this
+command at a btrfs to ask. The top-level tree is a subvolume too, and it is the one no
+directory entry names.
+
+`Filesystem features` is one list across the three words the superblock carries, in the words
+`format -O` takes — so a feature read off a report is one that can be typed straight back into
+a format, without translating from the all-capitals spelling the format's own header uses. A
+bit no feature of this crate's own table covers is reported on its own line as the word it
+belongs to and its value, whether or not any is set, so an image carrying something this tool
+does not understand can never read as one it does.
+
+`Superblock copies` is listed one entry at a time rather than counted, because which copy is
+damaged is what a person acts on. The format writes a copy at each of three fixed locations
+the device is long enough to hold all of, so a filesystem smaller than 256 GiB has two and
+that is what it should have.
+
 An option belonging to one family is refused for another rather than passed over.
-`--groups` reports the block-group descriptors of an ext filesystem; a FAT volume has one
-flat cluster heap, so asking for them there is a question with no answer and is told so. A
-report that quietly omitted the section would read as a volume with no groups in it, which
-is a different claim.
+`--groups` reports the block-group descriptors of an ext filesystem; a FAT or exFAT volume
+has one flat cluster heap, and a btrfs is divided by a chunk tree instead, so asking for them
+there is a question with no answer and is told so. A report that quietly omitted the section
+would read as a volume with no groups in it, which is a different claim.
 
 The whole image is scanned by default: every group descriptor, bitmap, inode, extent
 tree, and directory block, with each metadata checksum recomputed. That is what makes a
@@ -467,16 +771,23 @@ whatever the image holds, then a body named for the family:
 ```console
 $ ferrosys inspect --json rootfs.img
 {"schema":2,"family":"ext","variant":"ext4","size":67108864,"allocation_unit":4096,
- "identifier":"f0e17055-...","findings":{"schema":2,"clean":true,"count":0,
+ "identifier":"f0e17055-...","offset":0,"findings":{"schema":2,"clean":true,"count":0,
  "truncated":false,"findings":[]},"ext":{"superblock":{...},"features":{...}}}
 ```
 
-The head is five fields and the findings. The body under `"ext"` carries the superblock,
+The head is six fields and the findings. The body under `"ext"` carries the superblock,
 the feature names split by word, the unknown feature bits (reported whether or not there
 are any, so an image carrying a feature the tool does not know can never read as one it
 understood), and with `--groups` every group descriptor. A consumer that reads only the
 head never learns what a block group is; one that wants ext4's geometry reads the body. A
 later filesystem family adds a body beside `"ext"` rather than reshaping anything above it.
+
+The two dialects differ in one way on purpose. The table omits a row it has nothing to say
+in — an image with no journal grows no journal rows — because a person reading a report
+wants what is there. The JSON body's shape is fixed instead: the same keys are present for
+every image of a family, carrying the value the filesystem holds, so a consumer indexes a
+key without first asking whether this image has one. Which is why the document carries a
+field or two the table does not print.
 
 Every finding carries its severity, the family that found it, that family's own word for
 the subsystem, the byte offset when there is one, and that family's own coordinates —
@@ -505,9 +816,29 @@ a whole-disk image:
 $ ferrosys inspect --offset 1M disk.img
 ```
 
+The JSON document carries that coordinate back as `offset`, the same field `detect --json`
+carries, so a caller that scanned a disk and then described what it found lines the two
+documents up by it.
+
 ## `extract`
 
 Exactly one of five things comes out.
+
+Whatever the family, what comes out is the filesystem rather than one of its parts. On a
+btrfs that is worth saying plainly, because the format has parts a path could stop at and
+does not: a subvolume is a filesystem tree of its own with inode numbers that start again
+from the same value the top-level tree's do, and every mode here crosses that boundary the
+way it crosses a directory. `/home/user/notes` reaches the file whether or not `/home` is a
+subvolume, and a listing of the image names everything in every subvolume once. Symbolic
+links are resolved through as well, so a path continuing through `/bin` on a tree where that
+is a link into `/usr` reaches what it names.
+
+A btrfs also stores a file's bytes compressed where a mount was told to, and every distribution
+that defaults to this filesystem tells it to for at least some of the tree. This binary carries
+the three decoders the format defines — DEFLATE, LZO1X, and Zstandard — so a file stored that
+way comes out as the file rather than as a refusal. The checksums are checked either way: they
+cover the bytes the filesystem stored, so `inspect` verifies a compressed extent without
+expanding it.
 
 **A tar archive.** Ownership, modes, symlinks, hard links, and device and FIFO nodes
 travel in the header; the paths, the ids, the times (to the nanosecond, and negative for
@@ -631,7 +962,8 @@ A run that says nothing read an image it could hold to its format entirely.
 
 `--assume-owner U:G` and `--assume-modes F:D` say what to record where the filesystem being
 read has no field for it. They change nothing about an ext image: ext records an owner, a
-mode, and three times on every entry, so what comes out is what was stored.
+mode, and three times on every entry, so what comes out is what was stored. They change
+nothing about a btrfs either, which records those and a creation time besides.
 
 They exist because a FAT volume does not. A format with no notion of an owner still has
 to become host files with *some* owner, and something has to decide which — every driver
@@ -662,7 +994,11 @@ ferrosys
 
 The path is a path *inside the image*, taken as the bytes you typed — an ext4 name need
 not be text. Symbolic links are followed against the image's own root, so `/lib/modules`
-resolves on a merged-`/usr` tree where `/lib` is a link into `/usr`.
+resolves on a merged-`/usr` tree where `/lib` is a link into `/usr`. A `..` component
+ascends, whether you wrote it or a link in the image stores it — `/usr/lib64 -> ../lib` is
+the shape a multiarch root filesystem has. At the root there is nothing to ascend to, so a
+run of them stays there: every path names something inside the image, and nothing here
+reaches the machine reading it.
 
 **A listing:**
 
@@ -751,6 +1087,14 @@ In a JSON document the `mode` field is the permission bits as a **decimal** numb
 JSON has no octal literal — `509` is `0o775` — and `mode_octal` beside it carries the usual
 spelling.
 
+`--stat` reports more of an entry than `--list` does: a creation time, the extended
+attributes, a device node's numbers, and — where the family records it — how many blocks
+the entry occupies. A listing leaves those out on every family, including the families that
+record them, because reading them costs a read per entry and a listing is the shape a caller
+uses to walk a whole tree. So a field's absence from a listing entry means "a listing does
+not carry this"; a field's absence from `--stat` means "this filesystem does not record it".
+When the question is what one path holds, `--stat` is the answer that leaves nothing out.
+
 ### Reading an image you do not trust
 
 A file's size is the image's own claim about it, and a sparse file legitimately dwarfs the
@@ -777,6 +1121,12 @@ whole would be the worse outcome: a pipeline would carry it forward and never kn
 the cap that stopped a read was the default rather than one you named, the command says so
 on the standard error and says what raises it.
 
+The cap is the same cap in every mode and on every family. `--cat` streams a file into the
+standard output and holds nothing, and it answers to the cap all the same: what a stream
+*writes* follows the length the image declares, so a mode that streamed without the cap
+would be the one way past it — and a flag that meant something different depending on which
+family answered would be the worst of both.
+
 ## `detect`
 
 ```console
@@ -788,11 +1138,12 @@ $ ferrosys detect esp.img
 fat32
 ```
 
-One word on the standard output — `ext2`, `ext3`, `ext4`, `fat12`, `fat16`, `fat32`, or
-`unrecognized` — so it reads well in a shell test, and `--json` for a document. It is the
-same word `format -t` takes, so what `detect` says about an image is what you would type to
-write another like it. `--offset` points it at a partition inside a whole-disk image or a
-region a carver located. One further answer, `unknown`, is what a tool prints when the
+One word on the standard output — `ext2`, `ext3`, `ext4`, `fat12`, `fat16`, `fat32`,
+`exfat`, `btrfs`, or `unrecognized` — so it reads well in a shell test, and `--json` for a
+document. For every family this tool writes it is the same word `format -t` takes, so what
+`detect` says about such an image is what you would type to write another like it; `btrfs` is
+the word for a family it reads. `--offset` points it at a partition inside a whole-disk image
+or a region a carver located. One further answer, `unknown`, is what a tool prints when the
 library classifies a family that build has no name for: something recognized the image, so
 `unrecognized` would be the wrong word for it.
 
@@ -838,6 +1189,12 @@ a checker finds with one it does not.
 
 At least one of `--uuid`, `--label`, and `--set-checksum-seed` is required, since a run
 that would write nothing is a command line that meant to say something.
+
+`--offset` points it at a filesystem inside a whole-disk image, as every image-reading verb
+takes one. This command rewrites ext identity fields, so pointed at a sound volume of
+another family it refuses with the word `detect` prints for what the image holds — the
+volume is fine and the request does not apply to it, which is a different verdict from a
+damaged filesystem and carries a different exit code.
 
 ### When the UUID is the checksum seed
 

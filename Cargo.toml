@@ -50,11 +50,28 @@ rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 # default-features off, `std` + `derive` on: the `Serialize` implementations the `serde`
 # feature adds, and nothing else — no deserialization, no runtime format.
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
+# DEFLATE, behind the `zlib` feature. `#![forbid(unsafe_code)]` throughout, which is this
+# crate's own bar, and `with-alloc` alone: the SIMD checksum path is an optional dependency
+# this build does not take, and the encoder is compiled either way but never called.
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# Zstandard decoding, behind the `zstd` feature. default-features off leaves `std` on and
+# `hash` off, which drops the `twox-hash` dependency along with the frame checksum it
+# verifies: btrfs records its own crc32c over every sector of the compressed bytes, so what
+# a frame's own checksum would cover is already covered by the checksum the reader verifies.
+# It carries `unsafe` in a hand-written ring buffer, which is a departure from this crate's
+# own bar and is stated here rather than left to be discovered. The feature is off by
+# default, so a build that does not ask for Zstandard carries none of it.
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 # The `serde` feature's gate reads what the derives emit, so the shape a consumer sees is
 # asserted rather than assumed. A development dependency only; never shipped.
 serde_json = "1"
 tempfile = "3"
 proptest = "1"
+# A second, independent LZO1X implementation, used only to *produce* streams the decoder in
+# this crate is held against. Compression alone, so what it brings is the encoder; the
+# decoder it also ships is never called, because a decoder checked against itself checks
+# nothing. A development dependency, never shipped.
+lzokay = { version = "2", default-features = false, features = ["compress", "std"] }
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
 # minor is the breaking axis, so `"0.4"` resolves `>=0.4.0, <0.5.0` — the published

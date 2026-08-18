@@ -16,18 +16,28 @@
 #
 # format: <key>|<floor>
 
-# cargo test --workspace --all-features --profile ci --no-fail-fast  (1007 today)
-workspace|1000
+# cargo test --workspace --all-features --profile ci --no-fail-fast  (1582 today)
+workspace|1550
 
 # the same command inside a relatime mount namespace, less the namespace artifacts
-# preflight skips there  (1006 today)
-relatime|1000
+# preflight skips there  (1581 today)
+relatime|1550
 
-# cargo test -p ferrosys --no-default-features --lib  (49 today)
-base-lib|45
+# cargo test -p ferrosys --no-default-features --lib  (61 today)
+base-lib|55
 
-# cargo test -p ferrosys --no-default-features --features fat --lib  (255 today)
-fat-only|250
+# cargo test -p ferrosys --no-default-features --features fat --lib  (290 today)
+fat-only|270
 
-# cargo test -p ferrosys --no-default-features --features fat,dir --lib  (274 today)
-fat-dir|270
+# cargo test -p ferrosys --no-default-features --features fat,dir --lib  (309 today)
+fat-dir|288
+
+# cargo test -p ferrosys --no-default-features --features exfat --lib  (257 today)
+exfat-only|215
+
+# cargo test -p ferrosys --no-default-features --features btrfs --lib  (304 today)
+btrfs-only|300
+
+# the same with every decoder, which is where the compression paths run at all
+# cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib  (321 today)
+btrfs-decoders|315

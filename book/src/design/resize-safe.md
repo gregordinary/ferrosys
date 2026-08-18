@@ -1,5 +1,11 @@
 # Resize-safe geometry
 
+This page is about one family. Growing a filesystem in place is an ext concern: FAT12,
+FAT16, FAT32, and exFAT each fix their allocation tables at format time and are resized by
+rewriting them, and btrfs grows through its own chunk tree under a running kernel. What
+follows is the geometry an ext2, ext3, or ext4 image is written with so that growth is
+safe.
+
 An ext4 filesystem grows by adding block groups, and each new group needs a slot
 in the group-descriptor table. If no room was set aside for that table to grow,
 the kernel converts the filesystem to a distributed descriptor layout the first

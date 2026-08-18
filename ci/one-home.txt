@@ -1,0 +1,120 @@
+# One home per concept: the spellings a shared primitive exists to replace.
+#
+# Every rule here names a concept this crate solved once, the module that holds the answer,
+# and the way of writing it that means someone has written a second answer. The gate greps
+# for that way of writing it outside its home and outside the allowlist, and fails.
+#
+# Why a gate rather than care: the failure this catches is silent. Two implementations of
+# one concept both work on the day they are written, both pass every test, and drift apart
+# later — one gains a clause the other does not, and the two disagree about a name, an
+# offset, or a path in exactly the cases nobody thought to test. Nothing about a second
+# implementation fails until it has been wrong for a while.
+#
+# It is a lexical gate, so it is neither sound nor complete: it cannot see a concept
+# reimplemented in different words, and it flags a spelling that is genuinely something
+# else. Both are handled the same way — a rule catches the spelling that is *worth*
+# catching, and an exception is allowlisted with the reason it is not a copy. An allowlist
+# entry with no reason is not an allowlist entry.
+#
+#   ci/one-home.sh            check
+#   ci/one-home.sh --list     print the rules without running them
+#
+# When a concept is extracted into a shared home, add its rule here in the same commit.
+# That is what makes the extraction stick: the next caller to open-code it fails a gate
+# instead of shipping a second answer.
+#
+# format:  rule|<home>|<scope>|<what to call instead>|<extended regex, runs to end of line>
+#          skip|<path fragment>:<spelling>|<why this one is not a copy>
+#
+# A rule's own home is always exempt. `scope` decides whether test modules are:
+#
+#   all    a behavioural rule — what a path splits into, which names a directory can hold.
+#          A test that reimplements one stops checking it the moment the rule changes,
+#          which is the same drift one module further out.
+#
+#   code   a byte-layout rule. A test that pins an on-disk record asserts raw bytes at
+#          literal offsets on purpose: reading them back through the same accessor the
+#          writer used would make the assertion tautological, and byte-exactness is the
+#          one property this crate cannot afford to check against itself.
+
+# --- addressing and i/o -------------------------------------------------------------
+
+# Seeking to an absolute offset and reading a fixed number of bytes is one operation, and
+# the policy for a short source belongs to the caller rather than to the reading.
+rule|crates/ferrosys/src/io.rs|all|io::read_exact_at, or io::ByteSink::write_at to write|SeekFrom::Start
+# The forged btrfs device *implements* `Seek` so that a volume can be opened over an image
+# held in memory rather than on disk. Matching on `SeekFrom` is what an implementation of
+# the trait does; the rule is about a second way of *calling* it.
+skip|crates/ferrosys/src/btrfs/forge.rs:SeekFrom::Start|the sparse test device implements `Seek`, and this is the match arm every implementation of the trait has
+
+# A byte offset built from a number an image supplied is checked in one place. An unchecked
+# product or sum here is not a read that fails; it is a successful read of the wrong bytes.
+rule|crates/ferrosys/src/io.rs|all|io::offset_of|checked_mul\(.*(block_size|bytes_per_sector|inode_size)
+
+# An i/o failure records the same two things wherever it is carried.
+rule|crates/ferrosys/src/io.rs|all|io::io_fault, written by io::io_error!|\(err\.kind\(\), err\.to_string\(\)\)
+
+# Whether a device holds all of a superblock copy at a given offset is one rule, and the two
+# sides of it are a writer deciding which copies to lay down and a reader deciding which
+# absences are ordinary. A second copy of the comparison does not fail on the day it is
+# written: it fails at one threshold, where one side writes no copy and the other reports one
+# missing, and the volume that reaches the threshold is a quarter of a terabyte long.
+rule|crates/ferrosys/src/btrfs/ondisk/superblock.rs|all|ondisk::holds_mirror|SUPER_INFO_SIZE as u64 <=|checked_add\(SUPER_INFO_SIZE
+
+# --- paths and names ----------------------------------------------------------------
+
+# Which components a path has is one rule. A second splitter does not fail; it keys two
+# entries apart that the model considers one path, and leaves both in the image.
+rule|crates/ferrosys/src/path.rs|all|path::canonical_parts|split\(\|&?b\| \*?b == b'/'\)
+
+# Which names a directory can hold is one rule with two strengths.
+rule|crates/ferrosys/src/path.rs|all|path::is_hostile_component|name == b"\.\." \|\| 
+
+# Resolving a path is one loop. A second one does not fail on the day it is written: it
+# gets a name found and a directory descended, and differs on the parts a lookup of a
+# healthy tree never reaches — where `..` ascends to, whether a run of them can climb out
+# of the filesystem, and how many links it will follow before it stops. These two spellings
+# are the two halves of expanding a symbolic link, which is where a second resolver shows.
+rule|crates/ferrosys/src/resolve.rs|all|resolve::drive, supplying the family's half of resolve::Resolve|push_front\(
+rule|crates/ferrosys/src/resolve.rs|all|resolve::drive, supplying the family's half of resolve::Resolve|starts_with\(b"/"\)
+
+# --- on-disk fields -------------------------------------------------------------------
+
+# A field read out of or written into an on-disk buffer at an offset names its width and
+# byte order once. This catches the indexed form specifically: `x.to_le_bytes()` fed to a
+# checksum is a value being hashed, not a field being placed, and is not this.
+rule|crates/ferrosys/src/bytes.rs|code|bytes::get_u32 / put_u32 and their siblings|(from_le_bytes\(\[[a-z_]+\[|copy_from_slice\(&[a-z_]+\.to_le_bytes)
+
+# --- time -----------------------------------------------------------------------------
+
+# The DOS date and time words are one encoding two families inherited, not one each defines,
+# so the packing has one home. A second copy of it is the failure this whole gate is written
+# around: both work the day they are written, and a later fix to the leap-year rule or to the
+# hundredths clamp reaches one of them, after which two families disagree about what instant
+# an image records. The year shift is what a copy cannot avoid spelling.
+rule|crates/ferrosys/src/time.rs|code|time::DosTimestamp::encode / ::decode|(year - 1980|1980 \+ )
+
+# The one permission bit a DOS-derived format carries, which is a mode's write bits cleared.
+# Both families lose it on the way in and invent the rest back on the way out, and the two
+# directions now share a constant; a fourth spelling of the octal is a fourth thing to keep
+# in step. Scope `code`, because a test asserting an extracted mode names the bits it expects
+# and reading them back through the constant the extraction used would be tautological.
+rule|crates/ferrosys/src/fidelity.rs|code|fidelity::WRITE_BITS|0o222
+
+# --- rendering ------------------------------------------------------------------------
+
+# Bytes that are not text are escaped once, by the rules that cover the control characters
+# and the direction overrides alike.
+rule|crates/ferrosys/src/escape.rs|all|escape::printable / escape::push_json_string|\\\\u\{
+
+# A closed set of variants a caller names states its vocabulary once, in one table.
+rule|crates/ferrosys/src/naming.rs|all|naming::named_choice!|fn from_name
+
+# --- the exceptions -------------------------------------------------------------------
+
+skip|crates/ferrosys/src/source.rs:SeekFrom::Start|a host file's own contents at a caller's offset, not image bytes: FileRange::read opens a named file and reads a range of it, and a short read there is the file having changed rather than a filesystem reference out of range
+skip|crates/ferrosys/src/archive/blocks.rs:SeekFrom::Start|positioning within an archive stream being parsed, where the offsets are the archive's own block boundaries and a seek is how the parser advances rather than how a structure is fetched
+skip|crates/ferrosys/src/identity.rs:SeekFrom::Start|the write half of a rewrite: the planned copies go back to the offsets they came from, which is ByteSink's operation without ByteSink's high-water mark, since every offset here was read before it is written
+skip|crates/ferrosys/src/host/sink.rs:split(|&b| b == b'/')|open_dir must REFUSE a `.` component where a normalization DROPS one: check_name is the gate deciding what may become a name in the destination, and a component silently dropped is a component never checked
+skip|crates/ferrosys/src/json.rs:\\u{|a test asserting what the escaper writes, which has to name the escaped form literally to compare against it
+skip|crates/ferrosys/src/flags.rs:fn from_name|a flag word's own vocabulary rather than a named choice's: this reads the name of one *flag within* a word, any number of which are set at once, where named_choice! reads the name of one variant of a closed set, exactly one of which holds. It is generated once by named_flags! for every word in the crate, which is the same discipline one level over

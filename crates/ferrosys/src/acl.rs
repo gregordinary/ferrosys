@@ -17,6 +17,8 @@
 //! A caller attaches an ACL by encoding it and adding it as the corresponding extended
 //! attribute (see [`Acl::ACCESS_NAME`] and [`Acl::DEFAULT_NAME`]).
 
+use crate::bytes::{get_u16, get_u32};
+
 /// The version of the `posix_acl_xattr` form used at the `getxattr`/`setxattr`
 /// boundary, which is what an archive carries in a binary `system.posix_acl_*`
 /// attribute.
@@ -69,6 +71,14 @@ pub enum AclError {
     InvalidPerm {
         /// The permission field as found, including the bits outside `rwx`.
         perm: u16,
+    },
+    /// A named user or group carries the id the encoding reserves for "nobody in
+    /// particular" (`ACL_UNDEFINED_ID`, `u32::MAX`), which the kernel refuses to parse.
+    #[error("ACL names a {tag} with the reserved undefined id")]
+    #[non_exhaustive]
+    UndefinedId {
+        /// Which kind of entry carried it: `named-user` or `named-group`.
+        tag: &'static str,
     },
     /// The encoded ACL was truncated or its version was not 1.
     #[error("encoded ACL is malformed: {reason}")]
@@ -169,7 +179,8 @@ impl Acl {
     /// # Errors
     ///
     /// An [`AclError`] if a required entry is missing or duplicated, a named user or
-    /// group appears without a mask, or a permission field has stray bits.
+    /// group appears without a mask or carries the reserved undefined id, or a
+    /// permission field has stray bits.
     pub fn new(mut entries: Vec<AclEntry>) -> Result<Self, AclError> {
         for e in &entries {
             if e.perm & !(Self::READ | Self::WRITE | Self::EXEC) != 0 {
@@ -229,6 +240,13 @@ impl Acl {
             match e.who {
                 AclQualifier::User(id) => {
                     named = true;
+                    // The encoding spells "no id" as `u32::MAX`, so a named entry
+                    // carrying it is one the kernel's own parser refuses (`EINVAL`) —
+                    // exactly the ACL-the-kernel-cannot-parse state this type exists to
+                    // make unrepresentable.
+                    if id == ACL_UNDEFINED_ID {
+                        return Err(AclError::UndefinedId { tag: "named-user" });
+                    }
                     if users.contains(&id) {
                         return Err(AclError::Duplicate { tag: "named-user" });
                     }
@@ -236,6 +254,9 @@ impl Acl {
                 }
                 AclQualifier::Group(id) => {
                     named = true;
+                    if id == ACL_UNDEFINED_ID {
+                        return Err(AclError::UndefinedId { tag: "named-group" });
+                    }
                     if groups.contains(&id) {
                         return Err(AclError::Duplicate { tag: "named-group" });
                     }
@@ -311,11 +332,11 @@ impl Acl {
         }
         let mut entries = Vec::with_capacity(body.len() / XATTR_ENTRY_LEN);
         for e in body.chunks_exact(XATTR_ENTRY_LEN) {
-            let tag = u16::from_le_bytes([e[0], e[1]]);
-            let perm = u16::from_le_bytes([e[2], e[3]]);
+            let tag = get_u16(e, 0);
+            let perm = get_u16(e, 2);
             // The id is meaningful only for a named user or group; the other tags carry
             // `ACL_UNDEFINED_ID` here, which the qualifier does not hold.
-            let id = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+            let id = get_u32(e, 4);
             let who = AclQualifier::from_tag(tag, id).ok_or(AclError::Malformed {
                 reason: "unknown tag",
             })?;
@@ -460,6 +481,40 @@ mod tests {
         // back out to a syscall-boundary consumer is the ACL that was stored.
         let acl = sample();
         assert_eq!(Acl::decode(&acl.encode()).unwrap(), acl);
+    }
+
+    #[test]
+    fn a_named_entry_carrying_the_undefined_id_is_refused() {
+        // The encoding spells "no id" as `u32::MAX`, so a named user or group carrying it
+        // would encode indistinguishably from a tag that names nobody — and the kernel's
+        // own parser refuses exactly that with `EINVAL`. This type exists so an ACL the
+        // kernel cannot parse is unrepresentable, which makes the id a refusal here.
+        for who in [AclQualifier::User(u32::MAX), AclQualifier::Group(u32::MAX)] {
+            let err = Acl::new(vec![
+                AclEntry {
+                    who: AclQualifier::UserObj,
+                    perm: Acl::READ | Acl::WRITE,
+                },
+                AclEntry {
+                    who,
+                    perm: Acl::READ,
+                },
+                AclEntry {
+                    who: AclQualifier::GroupObj,
+                    perm: Acl::READ,
+                },
+                AclEntry {
+                    who: AclQualifier::Mask,
+                    perm: Acl::READ,
+                },
+                AclEntry {
+                    who: AclQualifier::Other,
+                    perm: Acl::READ,
+                },
+            ])
+            .expect_err("the reserved id is refused");
+            assert!(matches!(err, AclError::UndefinedId { .. }), "{err:?}");
+        }
     }
 
     #[test]

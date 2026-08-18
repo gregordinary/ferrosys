@@ -19,17 +19,17 @@
 
 use std::io::{Seek, Write};
 
-use crate::fidelity::{AcceptedLoss, FidelityReport, Property, Synthesis};
-use crate::sink::ByteSink;
+use crate::fidelity::{AcceptedLoss, FidelityReport, LossPolicy, Property, Synthesis};
+use crate::io::ByteSink;
 use crate::sizing::Slack;
 use crate::source::Source;
-use crate::time::Timestamp;
+use crate::time::{DosTimestamp, Timestamp};
 
 use super::geometry::{FatLayout, FatType, GeometryError, PlanRequest, plan_layout};
 use super::model::{EntryTimes, FatModel, ModelConfig, ModelError, Node, build_model, place_tree};
 use super::ondisk::{
     Attributes, BootSector, BootSectorTail, DIR_ENTRY_SIZE, DirEntry, EXTENDED_BOOT_SIGNATURE,
-    Fat32Params, FsInfo, ParseError, VolumeInfo, encode_time,
+    Fat32Params, FsInfo, ParseError, VolumeInfo,
 };
 use super::table;
 
@@ -399,9 +399,11 @@ impl FormatOptions {
     /// search over the same options cannot build two different trees from them.
     pub(crate) const fn model_config(&self) -> ModelConfig {
         ModelConfig {
-            accepted: self.accepted_loss,
+            loss: LossPolicy {
+                accepted: self.accepted_loss,
+                synthesis: self.synthesis,
+            },
             has_label: self.label.is_some(),
-            synthesis: self.synthesis,
         }
     }
 
@@ -902,9 +904,8 @@ fn plan(volume_bytes: u64, options: &FormatOptions) -> Result<FatLayout, FormatE
     request.volume_bytes = volume_bytes;
     let layout = plan_layout(&request)?;
 
-    // The two remaining checks depend on the type, which is why they are here rather than on
-    // the options: how much boot code fits is a property of the type's boot sector, and the
-    // time is only written where there is a label entry to write it into.
+    // The boot-code check depends on the type, which is why it is here rather than on the
+    // options: how much fits is a property of the type's boot sector.
     let capacity = BootCode::capacity(layout.fat_type);
     let code = options.boot_code.as_bytes().len();
     if code > capacity {
@@ -913,11 +914,15 @@ fn plan(volume_bytes: u64, options: &FormatOptions) -> Result<FatLayout, FormatE
             limit: capacity,
         });
     }
-    if options.label.is_some() && encode_time(options.time).is_none() {
+    // The format time must be one a directory entry represents, whether or not this volume
+    // has a label entry to stamp with it. On an unlabelled volume nothing consumes the
+    // value — but it is a stated input either way, and an instant accepted here that no
+    // entry of the format could carry reads as one that was written.
+    if DosTimestamp::encode(options.time).is_none() {
         return Err(FormatError::TimeOutOfRange {
             secs: options.time.secs,
-            min: super::ondisk::TIME_SECS_MIN,
-            max: super::ondisk::TIME_SECS_MAX,
+            min: DosTimestamp::SECS_MIN,
+            max: DosTimestamp::SECS_MAX,
         });
     }
     Ok(layout)
@@ -1377,7 +1382,7 @@ fn boot_sector(layout: &FatLayout, options: &FormatOptions) -> BootSector {
 /// the volume attribute says it is not a file, and it owns no cluster and has no length.
 fn label_entry(label: VolumeLabel, time: Timestamp) -> DirEntry {
     // `plan` has already established that the time is one the fields represent.
-    let stamp = encode_time(time).unwrap_or_default();
+    let stamp = DosTimestamp::encode(time).unwrap_or_default();
     DirEntry {
         name: *label.as_bytes(),
         attributes: Attributes::VOLUME_ID,
@@ -1798,12 +1803,22 @@ mod tests {
             format(TreeBuilder::new(), 64 << 20, opts),
             Err(FormatError::TimeOutOfRange { secs: 0, .. })
         ));
-        // With no label there is no entry to stamp, so the time is never consulted and a
-        // volume formats regardless — which is the honest behaviour, since refusing would be
-        // refusing over a field the image does not have.
+        // With no label nothing consumes the value — and it is refused all the same. The
+        // time is a stated input either way, and an instant accepted that no entry of the
+        // format could carry reads as one that was written. On the other side of the range
+        // too, so the check is the field's range and not a lower bound alone.
         let mut unlabelled = options();
         unlabelled.time = Timestamp::from_secs(0);
-        assert!(format(TreeBuilder::new(), 64 << 20, unlabelled).is_ok());
+        assert!(matches!(
+            format(TreeBuilder::new(), 64 << 20, unlabelled),
+            Err(FormatError::TimeOutOfRange { secs: 0, .. })
+        ));
+        let mut late = options();
+        late.time = Timestamp::from_secs(7_258_118_400); // the year 2200
+        assert!(matches!(
+            format(TreeBuilder::new(), 64 << 20, late),
+            Err(FormatError::TimeOutOfRange { .. })
+        ));
     }
 
     #[test]
@@ -2216,7 +2231,8 @@ mod tests {
 
     #[test]
     fn a_hard_link_is_written_as_a_second_copy_of_its_file() {
-        // F16's asymmetry, at the byte level: two entries, two chains, the same bytes.
+        // The hard-link asymmetry at the byte level: the format has no second name for a
+        // file, so a link goes in as a copy — two entries, two chains, the same bytes.
         let meta = crate::source::Metadata::new(0o644, TIME);
         let source = TreeBuilder::new()
             .file(b"/one".to_vec(), b"shared bytes", meta)
@@ -2360,7 +2376,7 @@ mod tests {
         let root =
             layout.root_dir_start_sector().unwrap() as usize * layout.bytes_per_sector as usize;
         let entry = DirEntry::read_from(&image.as_bytes()[root..]).expect("read");
-        let expected = encode_time(opts.time).expect("in range");
+        let expected = DosTimestamp::encode(opts.time).expect("in range");
         assert_eq!(entry.create_date, expected.date);
         assert_eq!(entry.create_time, expected.time);
         assert_eq!(entry.create_time_tenth, 100);

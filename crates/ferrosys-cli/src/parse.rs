@@ -14,12 +14,15 @@ use std::ffi::OsStr;
 use std::num::NonZeroU64;
 
 use ferrosys::Slack;
+use ferrosys::btrfs::ondisk::{CompatRoFlags as BtrfsCompatRo, IncompatFlags as BtrfsIncompat};
+use ferrosys::btrfs::{Profile as BtrfsProfile, SubvolumeRequest, VolumeLabel as BtrfsVolumeLabel};
+use ferrosys::exfat::VolumeLabel as ExFatVolumeLabel;
 use ferrosys::ext::{
     Compat, ErrorBehavior, FeatureSet, GrowReservation, HashSignedness, HashVersion, Incompat,
     InodeCount, JournalSize, Profile, ReservedRatio, RoCompat, Severity,
 };
 use ferrosys::fat::{FatType, FatTypeRequest};
-use ferrosys::{AcceptedLoss, Property};
+use ferrosys::{AcceptedLoss, NamedChoice, Property};
 
 /// Which filesystem a `-t` value names: the family, and which variant of it.
 ///
@@ -31,6 +34,19 @@ pub enum FsType {
     Ext(Profile),
     /// A FAT12, FAT16, or FAT32 volume.
     Fat(FatTypeRequest),
+    /// An exFAT volume.
+    ///
+    /// It carries nothing, where the other two carry a variant, because the family has
+    /// nothing to sub-classify: there is one revision of the format and every volume in
+    /// circulation records it. So `exfat` names the family and the format at once.
+    ExFat,
+    /// A btrfs filesystem.
+    ///
+    /// It carries nothing either, and for a related reason spelled differently: what varies
+    /// between two btrfs filesystems is a feature word and a geometry rather than a revision,
+    /// and neither is a variant a `-t` value could name. So `btrfs` names the family and the
+    /// format at once, and the geometry is options of its own.
+    Btrfs,
 }
 
 /// ext4 is what naming no type at all means, which is what keeps every command line that
@@ -48,6 +64,8 @@ impl FsType {
         match self {
             FsType::Ext(_) => "ext",
             FsType::Fat(_) => "fat",
+            FsType::ExFat => EXFAT,
+            FsType::Btrfs => BTRFS,
         }
     }
 
@@ -55,15 +73,44 @@ impl FsType {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            FsType::Ext(profile) => profile.name(),
+            FsType::Ext(profile) => profile.as_str(),
             FsType::Fat(FatTypeRequest::Exactly(fat)) => fat.as_str(),
             // The value domain names one of the three outright, so nothing on a command
             // line reaches these. They are the family's own word, which is the honest
             // answer for a request that did not name a type.
             FsType::Fat(_) => "fat",
+            FsType::ExFat => EXFAT,
+            FsType::Btrfs => BTRFS,
+        }
+    }
+
+    /// Whether this family can be asked for the smallest filesystem that holds its contents.
+    ///
+    /// A property of the family rather than of the command line: a filesystem's free room
+    /// follows from its size, so the size that just holds a tree is a fixed point that has to
+    /// be searched for by planning candidates and placing into them. Two families have that
+    /// search; the third takes the size it is given.
+    #[must_use]
+    pub fn has_fit(self) -> bool {
+        match self {
+            FsType::Ext(_) | FsType::Fat(_) => true,
+            FsType::ExFat | FsType::Btrfs => false,
         }
     }
 }
+
+/// The one word the exFAT family answers to, as a family and as a format.
+///
+/// A literal here where the other two families' names come from a library type, and the
+/// difference is the family rather than the tool: `Profile` and `FatType` exist because those
+/// formats have variants a caller chooses between, and a `NamedChoice` over one variant would
+/// be a type whose whole content is this string. The word is written once and read from
+/// [`FsType::family`], [`FsType::name`], and the list a refusal offers, so the three cannot
+/// disagree.
+const EXFAT: &str = "exfat";
+
+/// The one word the btrfs family answers to, for the reason [`EXFAT`] is a literal.
+const BTRFS: &str = "btrfs";
 
 /// A value an option cannot take.
 ///
@@ -89,7 +136,11 @@ pub enum ValueError {
         /// What was given.
         value: String,
         /// The names that would have been accepted.
-        expected: &'static str,
+        ///
+        /// Owned rather than static because the list is derived from the type's own name
+        /// table wherever there is one — see [`named`] — so that an option offers exactly
+        /// the words it accepts.
+        expected: String,
     },
     /// The value is not a percentage the reserved-block ratio accepts.
     #[error("{0}: expected a percentage from 0 to 50, with at most two decimal places")]
@@ -106,6 +157,29 @@ pub enum ValueError {
     /// The library's own refusal rides along, because it names both which byte and where.
     #[error(transparent)]
     NotAFatLabel(#[from] ferrosys::fat::LabelError),
+    /// A volume label an exFAT volume cannot record: too long for the eleven code units the
+    /// field holds, or holding a NUL.
+    ///
+    /// The library's own refusal rides along, because it names the limit and what was given.
+    #[error(transparent)]
+    NotAnExFatLabel(#[from] ferrosys::exfat::LabelError),
+    /// A volume label a btrfs filesystem cannot record: longer than the field holds with room
+    /// for its terminator, or holding a NUL.
+    ///
+    /// The library's own refusal rides along, because it names the limit and what was given.
+    #[error(transparent)]
+    NotABtrfsLabel(#[from] ferrosys::btrfs::LabelError),
+    /// A volume label that is not text at all.
+    ///
+    /// An ext label is sixteen bytes of anything and a FAT label is eleven in a character set
+    /// a byte at a time, so both take a label as the argument's bytes. exFAT stores a label as
+    /// UTF-16 code units, so a label that is not text is one the format has no encoding for —
+    /// and guessing an encoding here would write a name no reader spells the way it was typed.
+    #[error("{0}: an exFAT volume label is text, and this is not")]
+    NotTextLabel(String),
+    /// A `--subvol` directive with no path after its identifier.
+    #[error("{0}: expected [ro:]UUID:PATH, a subvolume's own identifier and where it goes")]
+    NotASubvolume(String),
     /// The value is not eight hexadecimal digits.
     #[error("{0}: expected 4 bytes of hex (8 digits; dashes are ignored)")]
     NotHex32(String),
@@ -118,9 +192,19 @@ pub enum ValueError {
     /// The value is not two octal permission modes separated by a colon.
     #[error("{0}: expected FILE:DIR, two octal permission modes (e.g. 644:755)")]
     NotAModePair(String),
-    /// The value named a feature no ext feature word defines.
-    #[error("{0}: not an ext feature name")]
-    UnknownFeature(String),
+    /// The value named a feature no feature word of the named family defines.
+    ///
+    /// The family is part of the message because one option takes two vocabularies: `-O` is
+    /// read in ext's words for an ext format and in btrfs's for a btrfs one, and a name
+    /// unknown to one of them is often a name belonging to the other.
+    #[error("{name}: not a feature name of the {family} family")]
+    #[non_exhaustive]
+    UnknownFeature {
+        /// The word that named no feature.
+        name: String,
+        /// The family whose vocabulary was consulted.
+        family: &'static str,
+    },
     /// A feature list held an empty element, so it names no feature.
     #[error("{0}: a feature list has an empty element")]
     EmptyFeature(String),
@@ -133,7 +217,7 @@ pub enum ValueError {
         /// What was given.
         value: String,
         /// The names the option accepts, as a phrase: `none or max`.
-        names: &'static str,
+        names: String,
         /// The measurement it takes instead, phrased as the other errors phrase theirs.
         measurement: &'static str,
     },
@@ -142,6 +226,30 @@ pub enum ValueError {
 /// The value's text, rendered lossily — what an error message names it by.
 fn shown(v: &OsStr) -> String {
     v.to_string_lossy().into_owned()
+}
+
+/// The variant of a closed choice that `v` names.
+///
+/// The list a refusal offers is the type's own [`NamedChoice::NAMES`], so an option offers
+/// exactly the words it accepts and a name this tool prints can be typed straight back in.
+/// Every named choice the library defines is parsed through here; a choice that adds a
+/// variant reaches every message that lists it without a second edit.
+fn named<T: NamedChoice>(v: &OsStr) -> Result<T, ValueError> {
+    text(v)
+        .and_then(T::from_name)
+        .ok_or_else(|| ValueError::NotOneOf {
+            value: shown(v),
+            expected: names_of::<T>(),
+        })
+}
+
+/// The names a choice accepts, comma-joined as a message lists them.
+fn names_of<T: NamedChoice>() -> String {
+    <T as NamedChoice>::NAMES
+        .iter()
+        .map(|choice| choice.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The value as text, or `None` when it is not text at all. A non-text value cannot be
@@ -297,41 +405,138 @@ pub fn hex16(v: &OsStr) -> Result<[u8; 16], ValueError> {
     Ok(out)
 }
 
+/// The feature words of one filesystem, as a `-O` list operates on them.
+///
+/// Two families advertise features a caller may name, and their words are not the same
+/// words: ext has three of thirty-two bits apiece and btrfs has three of sixty-four, and
+/// each has its own vocabulary. What they share is the *grammar* — a comma-separated list of
+/// names, `^` to clear one, `none` to start from nothing — and a list is read the same way
+/// whichever set of words it is written in.
+///
+/// So [`features`] is written once against this, and each family supplies the two operations
+/// a list needs. A family whose format has no feature words implements none of it: `-O` is
+/// refused for it before a value is parsed.
+pub trait Features: Copy {
+    /// The family whose vocabulary this set's names are written in, for the refusal that
+    /// reports a word none of its features go by.
+    const FAMILY: &'static str;
+
+    /// Every word cleared, which is what `none` names. Anything else the type carries beside
+    /// its feature words — a block size, a geometry — is left exactly as it is, those being
+    /// not features.
+    #[must_use]
+    fn cleared(self) -> Self;
+
+    /// This set with the feature `name` turned on or off, or `None` where no word of this
+    /// family defines a feature by that name.
+    ///
+    /// The word a name belongs to is a property of the name rather than a caller's choice,
+    /// which is what lets a list be written without saying which word each element is in.
+    #[must_use]
+    fn with_feature(self, name: &str, on: bool) -> Option<Self>;
+}
+
+impl Features for FeatureSet {
+    const FAMILY: &'static str = "ext";
+
+    // Field assignment rather than a struct expression: the set is `#[non_exhaustive]`, so a
+    // build outside the library it comes from names the fields it changes and nothing else —
+    // which is also what says the block and inode sizes are untouched here.
+    fn cleared(mut self) -> Self {
+        self.compat = Compat::NONE;
+        self.incompat = Incompat::NONE;
+        self.ro_compat = RoCompat::NONE;
+        self
+    }
+
+    fn with_feature(self, name: &str, on: bool) -> Option<Self> {
+        FeatureSet::with_feature(self, name, on)
+    }
+}
+
+/// The two feature words a btrfs format is planned from.
+///
+/// The library takes them as two arguments to `PlanRequest::features`, which is the shape a
+/// programmatic caller wants: it holds one word or the other and says so. A command line
+/// holds a list of names and does not know which word each belongs to until the name is
+/// resolved, so the pair travels together from the moment `-O` is read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BtrfsFeatures {
+    /// Features whose on-disk form a reader must understand.
+    pub incompat: BtrfsIncompat,
+    /// Features a reader may ignore as long as it never writes.
+    pub compat_ro: BtrfsCompatRo,
+}
+
+impl Features for BtrfsFeatures {
+    const FAMILY: &'static str = BTRFS;
+
+    fn cleared(self) -> Self {
+        Self {
+            incompat: BtrfsIncompat::NONE,
+            compat_ro: BtrfsCompatRo::NONE,
+        }
+    }
+
+    fn with_feature(self, name: &str, on: bool) -> Option<Self> {
+        if let Some(flag) = BtrfsIncompat::from_name(name) {
+            Some(Self {
+                incompat: if on {
+                    self.incompat | flag
+                } else {
+                    self.incompat.without(flag)
+                },
+                ..self
+            })
+        } else {
+            let flag = BtrfsCompatRo::from_name(name)?;
+            Some(Self {
+                compat_ro: if on {
+                    self.compat_ro | flag
+                } else {
+                    self.compat_ro.without(flag)
+                },
+                ..self
+            })
+        }
+    }
+}
+
 /// One `-O` list applied to `base`, left to right: `extent,^has_journal`.
 ///
-/// A bare name turns its feature on; a `^`-prefixed one turns it off; `none` clears all
-/// three feature words at once, and leaves the block and inode sizes — which are not
-/// features — as they are. Applying the list twice, or across two `-O` options, is the
+/// A bare name turns its feature on; a `^`-prefixed one turns it off; `none` clears every
+/// feature word at once, and leaves whatever the family carries beside them — a block size,
+/// an inode size — as it is. Applying the list twice, or across two `-O` options, is the
 /// same as applying the concatenation, because each element is a set operation on the
 /// value it is given.
 ///
-/// The result is not validated: a combination that must never reach disk is rejected by
-/// [`FeatureSet::validate`], which names the exact conflict.
+/// The result is not validated: a combination that must never reach disk is rejected by the
+/// family's own planner, which names the exact conflict.
 ///
 /// # Errors
 ///
-/// [`ValueError::UnknownFeature`] if an element names no feature;
+/// [`ValueError::UnknownFeature`] if an element names no feature of this family;
 /// [`ValueError::EmptyFeature`] if an element is empty.
-pub fn features(base: FeatureSet, v: &OsStr) -> Result<FeatureSet, ValueError> {
-    let s = text(v).ok_or_else(|| ValueError::UnknownFeature(shown(v)))?;
+pub fn features<F: Features>(base: F, v: &OsStr) -> Result<F, ValueError> {
+    let unknown = |name: String| ValueError::UnknownFeature {
+        name,
+        family: F::FAMILY,
+    };
+    let s = text(v).ok_or_else(|| unknown(shown(v)))?;
     let mut set = base;
     for element in s.split(',') {
         if element.is_empty() {
             return Err(ValueError::EmptyFeature(shown(v)));
         }
         if element == "none" {
-            set.compat = Compat::NONE;
-            set.incompat = Incompat::NONE;
-            set.ro_compat = RoCompat::NONE;
+            set = set.cleared();
             continue;
         }
         let (name, on) = match element.strip_prefix('^') {
             Some(rest) => (rest, false),
             None => (element, true),
         };
-        set = set
-            .with_feature(name, on)
-            .ok_or_else(|| ValueError::UnknownFeature(name.to_string()))?;
+        set = Features::with_feature(set, name, on).ok_or_else(|| unknown(name.to_string()))?;
     }
     Ok(set)
 }
@@ -345,20 +550,26 @@ pub fn features(base: FeatureSet, v: &OsStr) -> Result<FeatureSet, ValueError> {
 /// [`ValueError::NotNamedNor`] if the text is neither name nor a byte count.
 pub fn grow(v: &OsStr) -> Result<GrowReservation, ValueError> {
     match text(v) {
-        Some("none") => Ok(GrowReservation::None),
-        Some("max") => Ok(GrowReservation::Max),
+        Some(GROW_NONE) => Ok(GrowReservation::None),
+        Some(GROW_MAX) => Ok(GrowReservation::Max),
         // A well-formed count the suffix pushed past 64 bits keeps its own error: the
         // caller wrote a byte count and the trouble is its magnitude, not the grammar.
         _ => size(v).map(GrowReservation::UpTo).map_err(|e| match e {
             ValueError::NotASize(value) => ValueError::NotNamedNor {
                 value,
-                names: "none or max",
+                names: format!("{GROW_NONE} or {GROW_MAX}"),
                 measurement: "a byte count, optionally suffixed K, M, G, or T",
             },
             other => other,
         }),
     }
 }
+
+// The two words `--grow` takes beside a byte count. `GrowReservation` is not a closed set of
+// names — its third form carries a size, so there is no name table to read — and these are
+// what stand in for one: the match reads them and so does the phrase a refusal offers.
+const GROW_NONE: &str = "none";
+const GROW_MAX: &str = "max";
 
 /// The journal size: `auto` to size it from the filesystem, or a count of filesystem
 /// blocks.
@@ -369,19 +580,24 @@ pub fn grow(v: &OsStr) -> Result<GrowReservation, ValueError> {
 /// [`ValueError::NotNamedNor`] if the text is neither `auto` nor a block count.
 pub fn journal(v: &OsStr) -> Result<JournalSize, ValueError> {
     match text(v) {
-        Some("auto") => Ok(JournalSize::Auto),
+        Some(JOURNAL_AUTO) => Ok(JournalSize::Auto),
         // As for `grow`: a number too large for the field is a magnitude problem, and
         // saying so is more useful than re-offering the grammar.
         _ => count_u32(v).map(JournalSize::Blocks).map_err(|e| match e {
             ValueError::NotANumber(value) => ValueError::NotNamedNor {
                 value,
-                names: "auto",
+                names: JOURNAL_AUTO.to_string(),
                 measurement: "a count of filesystem blocks",
             },
             other => other,
         }),
     }
 }
+
+/// The one word `--journal` takes beside a block count, spelled where both the match and
+/// the refusal read it. [`JournalSize`] is not a closed set of names for the reason
+/// [`GrowReservation`] is not.
+const JOURNAL_AUTO: &str = "auto";
 
 /// The severity at which a scan's findings become a failing verdict, or `None` for
 /// `never` — a scan that reports what it found and fails on none of it.
@@ -390,18 +606,23 @@ pub fn journal(v: &OsStr) -> Result<JournalSize, ValueError> {
 ///
 /// [`ValueError::NotOneOf`] if the text names no severity.
 pub fn fail_on(v: &OsStr) -> Result<Option<Severity>, ValueError> {
-    match text(v) {
-        Some("cosmetic") => Ok(Some(Severity::Cosmetic)),
-        Some("conformance") => Ok(Some(Severity::Conformance)),
-        Some("integrity") => Ok(Some(Severity::Integrity)),
-        Some("structural") => Ok(Some(Severity::Structural)),
-        Some("never") => Ok(None),
-        _ => Err(ValueError::NotOneOf {
-            value: shown(v),
-            expected: "cosmetic, conformance, integrity, structural, never",
-        }),
+    // `never` is this option's own word rather than a point on the scale, so it is the one
+    // name handled here; the four severities come from the scale's own table.
+    if text(v) == Some(NEVER) {
+        return Ok(None);
     }
+    named::<Severity>(v).map(Some).map_err(|e| match e {
+        ValueError::NotOneOf { value, .. } => ValueError::NotOneOf {
+            value,
+            expected: format!("{}, {NEVER}", names_of::<Severity>()),
+        },
+        other => other,
+    })
 }
+
+/// The `--fail-on` value that sets no threshold at all: a scan that reports what it found
+/// and fails on none of it.
+const NEVER: &str = "never";
 
 /// The algorithm a hash-indexed directory orders its names by.
 ///
@@ -409,15 +630,7 @@ pub fn fail_on(v: &OsStr) -> Result<Option<Severity>, ValueError> {
 ///
 /// [`ValueError::NotOneOf`] if the text names no hash.
 pub fn hash_version(v: &OsStr) -> Result<HashVersion, ValueError> {
-    match text(v) {
-        Some("half_md4") => Ok(HashVersion::HalfMd4),
-        Some("tea") => Ok(HashVersion::Tea),
-        Some("legacy") => Ok(HashVersion::Legacy),
-        _ => Err(ValueError::NotOneOf {
-            value: shown(v),
-            expected: "half_md4, tea, legacy",
-        }),
-    }
+    named(v)
 }
 
 /// Whether a name's bytes are read as signed or unsigned when hashed.
@@ -426,14 +639,7 @@ pub fn hash_version(v: &OsStr) -> Result<HashVersion, ValueError> {
 ///
 /// [`ValueError::NotOneOf`] if the text names neither.
 pub fn hash_signedness(v: &OsStr) -> Result<HashSignedness, ValueError> {
-    match text(v) {
-        Some("signed") => Ok(HashSignedness::Signed),
-        Some("unsigned") => Ok(HashSignedness::Unsigned),
-        _ => Err(ValueError::NotOneOf {
-            value: shown(v),
-            expected: "signed, unsigned",
-        }),
-    }
+    named(v)
 }
 
 /// The kernel's error-behavior policy (`s_errors`) by name. The names are the ones
@@ -443,15 +649,7 @@ pub fn hash_signedness(v: &OsStr) -> Result<HashSignedness, ValueError> {
 ///
 /// [`ValueError::NotOneOf`] if the value is not one of the three.
 pub fn error_behavior(v: &OsStr) -> Result<ErrorBehavior, ValueError> {
-    match text(v) {
-        Some("continue") => Ok(ErrorBehavior::Continue),
-        Some("remount-ro") => Ok(ErrorBehavior::RemountReadOnly),
-        Some("panic") => Ok(ErrorBehavior::Panic),
-        _ => Err(ValueError::NotOneOf {
-            value: shown(v),
-            expected: "continue, remount-ro, panic",
-        }),
-    }
+    named(v)
 }
 
 /// Which filesystem `-t` names: the family, and which variant of it.
@@ -464,18 +662,30 @@ pub fn error_behavior(v: &OsStr) -> Result<ErrorBehavior, ValueError> {
 ///
 /// [`ValueError::NotOneOf`] if the text names no filesystem this tool writes.
 pub fn fs_type(v: &OsStr) -> Result<FsType, ValueError> {
-    match text(v) {
-        Some("ext2") => Ok(FsType::Ext(Profile::Ext2)),
-        Some("ext3") => Ok(FsType::Ext(Profile::Ext3)),
-        Some("ext4") => Ok(FsType::Ext(Profile::Ext4)),
-        Some("fat12") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat12))),
-        Some("fat16") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat16))),
-        Some("fat32") => Ok(FsType::Fat(FatTypeRequest::Exactly(FatType::Fat32))),
-        _ => Err(ValueError::NotOneOf {
-            value: shown(v),
-            expected: "ext2, ext3, ext4, fat12, fat16, fat32",
-        }),
+    // Each family answers for its own variants, so the value domain widens when a family
+    // names a format and not when this function is edited. The families are tried in the
+    // order the list offers them.
+    let name = text(v);
+    if let Some(profile) = name.and_then(Profile::from_name) {
+        return Ok(FsType::Ext(profile));
     }
+    if let Some(fat) = name.and_then(FatType::from_name) {
+        return Ok(FsType::Fat(FatTypeRequest::Exactly(fat)));
+    }
+    if name == Some(EXFAT) {
+        return Ok(FsType::ExFat);
+    }
+    if name == Some(BTRFS) {
+        return Ok(FsType::Btrfs);
+    }
+    Err(ValueError::NotOneOf {
+        value: shown(v),
+        expected: format!(
+            "{}, {}, {EXFAT}, {BTRFS}",
+            names_of::<Profile>(),
+            names_of::<FatType>()
+        ),
+    })
 }
 
 /// A 32-bit identifier written as hexadecimal: a FAT volume's serial number.
@@ -514,10 +724,10 @@ pub fn accepted_loss(v: &OsStr) -> Result<AcceptedLoss, ValueError> {
     let Some(s) = text(v) else {
         return Err(ValueError::NotOneOf {
             value: shown(v),
-            expected: ACCEPTED_LOSS_NAMES,
+            expected: accepted_loss_names(),
         });
     };
-    if s == "all" {
+    if s == ACCEPT_ALL {
         return Ok(AcceptedLoss::ALL);
     }
     let mut set = AcceptedLoss::NONE;
@@ -532,7 +742,7 @@ pub fn accepted_loss(v: &OsStr) -> Result<AcceptedLoss, ValueError> {
         else {
             return Err(ValueError::NotOneOf {
                 value: element.to_string(),
-                expected: ACCEPTED_LOSS_NAMES,
+                expected: accepted_loss_names(),
             });
         };
         set = set.and(property);
@@ -573,10 +783,21 @@ const PROPERTY_NAMES: &[(&str, Property)] = &[
     ("name", Property::Name),
 ];
 
+/// The value that accepts every property, including one a later version of the library
+/// names — which is why it cannot be spelled as a property.
+const ACCEPT_ALL: &str = "all";
+
 /// The names [`accepted_loss`] takes, for the message a refused one produces.
-const ACCEPTED_LOSS_NAMES: &str = "all, or a comma-separated list of ownership, permissions, \
-                                   special-bits, kind, extended-attributes, access-time, \
-                                   change-time, modification-time, time-precision, name";
+///
+/// Read off [`PROPERTY_NAMES`] rather than transcribed, so an option that grows a property
+/// offers it in the same edit that makes it acceptable.
+fn accepted_loss_names() -> String {
+    let properties: Vec<&str> = PROPERTY_NAMES.iter().map(|(name, _)| *name).collect();
+    format!(
+        "{ACCEPT_ALL}, or a comma-separated list of {}",
+        properties.join(", ")
+    )
+}
 
 /// A volume label, packed NUL-padded into the sixteen-byte `s_volume_name` field.
 ///
@@ -596,6 +817,120 @@ pub fn label(bytes: &[u8]) -> Result<[u8; 16], ValueError> {
     name[..bytes.len()].copy_from_slice(bytes);
     Ok(name)
 }
+
+/// A volume label an exFAT volume records: up to eleven UTF-16 code units.
+///
+/// The bytes are the argument's own, as every family's label is, and the encoding is where
+/// this one differs: the field holds code units rather than bytes, so the label has to be
+/// text before it can be measured at all — and eleven units is not eleven bytes for anything
+/// outside ASCII.
+///
+/// # Errors
+///
+/// [`ValueError::NotTextLabel`] if the bytes are not UTF-8;
+/// [`ValueError::NotAnExFatLabel`] if they are text the field cannot hold.
+pub fn exfat_label(bytes: &[u8]) -> Result<ExFatVolumeLabel, ValueError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ValueError::NotTextLabel(String::from_utf8_lossy(bytes).into_owned()))?;
+    Ok(ExFatVolumeLabel::new(text)?)
+}
+
+/// A name a btrfs superblock records: up to 255 bytes with no NUL among them.
+///
+/// The bytes are the argument's own and stay bytes, which is where this one differs from the
+/// other two: the field records no encoding, so what a caller supplies is what every reader of
+/// the image sees. Nothing here has to be text.
+///
+/// # Errors
+///
+/// [`ValueError::NotABtrfsLabel`] if the bytes are more than the field holds, or hold a NUL.
+pub fn btrfs_label(bytes: &[u8]) -> Result<BtrfsVolumeLabel, ValueError> {
+    Ok(BtrfsVolumeLabel::from_bytes(bytes)?)
+}
+
+/// A block size a btrfs geometry is stated in: a byte count, or `auto` for the default.
+///
+/// One parser for both the sector size and the node size. The two are separate settings with
+/// separate defaults and a relation between them, and the planner is what knows all of that —
+/// what a command line owes is the number, and `auto` for the caller who wants whatever the
+/// planner would have picked.
+///
+/// # Errors
+///
+/// [`ValueError::OutOfRange`] if the count does not fit in 32 bits;
+/// [`ValueError::NotNamedNor`] if the text is neither `auto` nor a byte count.
+pub fn btrfs_block_size(v: &OsStr) -> Result<Option<u32>, ValueError> {
+    if text(v) == Some(AUTO) {
+        return Ok(None);
+    }
+    let bytes = size(v).map_err(|e| match e {
+        ValueError::NotASize(value) => ValueError::NotNamedNor {
+            value,
+            names: AUTO.to_string(),
+            measurement: "a byte count, optionally suffixed K, M, G, or T",
+        },
+        other => other,
+    })?;
+    u32::try_from(bytes)
+        .map(Some)
+        .map_err(|_| ValueError::OutOfRange(shown(v)))
+}
+
+/// The word a size option takes for "whatever the planner would have picked".
+///
+/// Written once and read by the parser and by the phrase a refusal offers, so an option cannot
+/// come to accept a word it does not offer.
+const AUTO: &str = "auto";
+
+/// How a btrfs block group is replicated: `single` or `dup`.
+///
+/// # Errors
+///
+/// [`ValueError::NotOneOf`] if the text names neither.
+pub fn btrfs_profile(v: &OsStr) -> Result<BtrfsProfile, ValueError> {
+    named(v)
+}
+
+/// One `--subvol` directive: `[ro:]<uuid>:<path>`.
+///
+/// The identifier leads and the path is everything after it, which is what makes the form
+/// unambiguous — a path may hold a colon and a UUID may not, so splitting a fixed number of
+/// fields off the front leaves the rest to be a path of any bytes at all.
+///
+/// The identifier is stated rather than derived, and that is the point rather than an
+/// inconvenience: the UUID tree is keyed by it, so two subvolumes sharing one produce a tree
+/// with a repeated key, and a value this tool invented would be a value a caller could not
+/// reproduce.
+///
+/// # Errors
+///
+/// [`ValueError::NotASubvolume`] if the value has no path after its identifier, and
+/// [`ValueError::NotHex16`] if what leads it is not a UUID.
+pub fn subvolume(v: &OsStr) -> Result<SubvolumeRequest, ValueError> {
+    let bytes = crate::args::os::bytes(v);
+    // `ro:` first, so a read-only subvolume is the same form with one word in front of it.
+    let (bytes, read_only) = match bytes.strip_prefix(READ_ONLY.as_bytes()) {
+        Some(rest) => (rest, true),
+        None => (bytes, false),
+    };
+    let at = bytes
+        .iter()
+        .position(|&byte| byte == b':')
+        .ok_or_else(|| ValueError::NotASubvolume(shown(v)))?;
+    // The identifier is hexadecimal and so is text wherever it is well-formed; the path after
+    // it is bytes and stays bytes, which is why only the first half goes through here.
+    let uuid = std::str::from_utf8(&bytes[..at])
+        .map_err(|_| ValueError::NotHex16(shown(v)))
+        .and_then(|digits| hex16(OsStr::new(digits)))?;
+    let path = &bytes[at + 1..];
+    if path.is_empty() {
+        return Err(ValueError::NotASubvolume(shown(v)));
+    }
+    Ok(SubvolumeRequest::new(path.to_vec(), uuid).read_only(read_only))
+}
+
+/// The prefix that makes a `--subvol` directive read-only, colon included.
+const READ_ONLY: &str = "ro:";
 
 /// A bytes-per-inode ratio: one inode for every this many bytes of filesystem, a byte
 /// count with an optional binary suffix. It must be positive.
@@ -843,7 +1178,7 @@ mod tests {
     fn features_refuse_a_name_no_word_defines() {
         assert!(matches!(
             features(FeatureSet::DEFAULT, os("extents")),
-            Err(ValueError::UnknownFeature(_))
+            Err(ValueError::UnknownFeature { .. })
         ));
         assert!(matches!(
             features(FeatureSet::DEFAULT, os("extent,,64bit")),
@@ -852,8 +1187,67 @@ mod tests {
         // The Rust symbol is not the on-disk name.
         assert!(matches!(
             features(FeatureSet::DEFAULT, os("EXTENTS")),
-            Err(ValueError::UnknownFeature(_))
+            Err(ValueError::UnknownFeature { .. })
         ));
+    }
+
+    /// The btrfs baseline the `-O` tests below layer onto: what the library plans with when
+    /// a caller names no feature at all.
+    fn btrfs_base() -> BtrfsFeatures {
+        BtrfsFeatures {
+            incompat: ferrosys::btrfs::DEFAULT_INCOMPAT,
+            compat_ro: ferrosys::btrfs::DEFAULT_COMPAT_RO,
+        }
+    }
+
+    #[test]
+    fn a_feature_list_is_read_in_the_vocabulary_of_the_family_it_is_for() {
+        // One grammar, two vocabularies. The words are disjoint, so a list written for one
+        // family is refused by the other rather than quietly doing something else — which is
+        // the failure a shared parser over two families invites.
+        let base = btrfs_base();
+        assert!(matches!(
+            features(base, os("has_journal")),
+            Err(ValueError::UnknownFeature {
+                family: "btrfs",
+                ..
+            })
+        ));
+        assert!(matches!(
+            features(FeatureSet::DEFAULT, os("skinny-metadata")),
+            Err(ValueError::UnknownFeature { family: "ext", .. })
+        ));
+        // The format's header spells its features in capitals and its tooling in lowercase
+        // words; a `-O` list is written in the second, which is the one this crate accepts.
+        assert!(matches!(
+            features(base, os("SKINNY_METADATA")),
+            Err(ValueError::UnknownFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn a_btrfs_feature_list_applies_left_to_right_across_both_words() {
+        let base = btrfs_base();
+        // Which of the two words a name belongs to is the name's own property, so one list
+        // moves both without saying which is which.
+        let set = features(base, os("^block-group-tree")).unwrap();
+        assert!(!set.compat_ro.contains(BtrfsCompatRo::BLOCK_GROUP_TREE));
+        assert!(set.compat_ro.contains(BtrfsCompatRo::FREE_SPACE_TREE));
+        assert_eq!(set.incompat, base.incompat);
+
+        let set = features(base, os("^no-holes,^block-group-tree")).unwrap();
+        assert!(!set.incompat.contains(BtrfsIncompat::NO_HOLES));
+        assert!(!set.compat_ro.contains(BtrfsCompatRo::BLOCK_GROUP_TREE));
+
+        // Off, then on again: the last element to name a feature wins.
+        assert_eq!(features(base, os("^no-holes,no-holes")).unwrap(), base);
+
+        // `none` clears both words, and a name after it builds back up from nothing.
+        let set = features(base, os("none")).unwrap();
+        assert!(set.incompat.is_empty() && set.compat_ro.is_empty());
+        let set = features(base, os("none,squota")).unwrap();
+        assert_eq!(set.incompat, BtrfsIncompat::SIMPLE_QUOTA);
+        assert!(set.compat_ro.is_empty());
     }
 
     #[test]
@@ -935,7 +1329,7 @@ mod tests {
         ));
         assert_eq!(
             fs_type(os("xfs")).unwrap_err().to_string(),
-            "xfs: expected one of ext2, ext3, ext4, fat12, fat16, fat32"
+            "xfs: expected one of ext2, ext3, ext4, fat12, fat16, fat32, exfat, btrfs"
         );
     }
 

@@ -40,7 +40,6 @@
 /// recording it at all.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Property {
     /// The owning user and group.
     Ownership,
@@ -103,6 +102,8 @@ impl Property {
     }
 }
 
+crate::naming::serialize_as_name!(Property);
+
 /// Which properties a build may lose without being refused.
 ///
 /// A format into a filesystem that cannot hold everything the source offered fails by
@@ -114,6 +115,14 @@ impl Property {
 /// [`ALL`](Self::ALL) is every property, including any this crate names in a later version:
 /// a caller who has said it accepts whatever the target cannot hold has said that about the
 /// whole class, not about the members of it that existed when the call was written.
+///
+/// This is a set over bits and is deliberately not one of the crate's flag newtypes. Its
+/// element is a typed [`Property`] rather than another instance of itself, so the operations
+/// take a property — [`and`](Self::and), [`without`](Self::without), and
+/// [`contains`](Self::contains) — and `BitOr` between two sets is not an operation a caller
+/// asks for. The bit each property occupies is an implementation detail nothing outside may
+/// depend on, which is the opposite of a flag word, whose whole point is that the bits are
+/// the format's.
 ///
 /// ```
 /// # use ferrosys::{AcceptedLoss, Property};
@@ -170,7 +179,6 @@ impl AcceptedLoss {
 /// Which way a fidelity record runs.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Direction {
     /// The source offered the property and the target filesystem has nowhere to put it, so
     /// what was written does not carry it.
@@ -190,6 +198,8 @@ impl Direction {
         }
     }
 }
+
+crate::naming::serialize_as_name!(Direction);
 
 /// One property that did not survive, and the entry it belonged to.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -418,6 +428,114 @@ impl Default for Synthesis {
     /// The defaults in [`Synthesis::new`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Permission bits that make an entry writable. A mode with none of them set is what a
+/// read-only attribute means, and is the one bit of a mode the formats below carry.
+///
+/// Crate-visible because both directions ask it: this module decides what a mode *loses* on
+/// its way into such a format, and `tree.rs` decides what a read of one hands back. Two
+/// constants would agree today and would be one edit apart from disagreeing.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub(crate) const WRITE_BITS: u16 = 0o222;
+
+/// The set-user-id, set-group-id, and sticky bits.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+const SPECIAL_BITS: u16 = 0o7000;
+
+/// The permission bits proper.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+const PERMISSION_BITS: u16 = 0o777;
+
+/// What a caller accepts losing, and what a read of the image would invent.
+///
+/// The two travel together everywhere, because neither answers anything on its own: whether a
+/// property was *lost* is a comparison against what a read hands back, and whether a loss may
+/// be taken is a comparison against what was accepted.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LossPolicy {
+    /// Which losses the caller has accepted.
+    pub accepted: AcceptedLoss,
+    /// What a read of this image would fill a missing owner and mode with.
+    pub synthesis: Synthesis,
+}
+
+#[cfg(any(feature = "fat", feature = "exfat"))]
+impl LossPolicy {
+    /// Record every property of `meta` and `xattrs` that a format storing no POSIX metadata
+    /// beyond a read-only bit cannot carry, and report the first one the caller has not
+    /// accepted losing.
+    ///
+    /// One accounting rather than one per family, because it is one question. FAT and exFAT
+    /// share no bytes and no structures, and they lose exactly the same six things for exactly
+    /// the same reason: each stores a name, one permission bit, and times, and has nowhere to
+    /// put anything else. A second copy of this would agree today and drift the moment either
+    /// gained a clause, and the drift would be silent — a tree one family refuses and the other
+    /// writes, or worse, a property one of them stops naming.
+    ///
+    /// A property counts as lost when the value a read gets back is not the value stated, which
+    /// is narrower than "the format has no field for it": measured against
+    /// [`synthesis`](Self::synthesis), a root-owned `0644`/`0755` tree loses nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first [`Property`] the format cannot carry that
+    /// [`accepted`](Self::accepted) does not name. The caller wraps it in its own refusal, so
+    /// the path and the family's own wording stay where a message is built.
+    pub(crate) fn record_losses(
+        &self,
+        report: &mut FidelityReport,
+        meta: &crate::source::Metadata,
+        xattrs: &[crate::xattr::Xattr],
+        is_dir: bool,
+        path: &[u8],
+    ) -> Result<(), Property> {
+        let mut lose = |property: Property| -> Result<(), Property> {
+            if !self.accepted.contains(property) {
+                return Err(property);
+            }
+            report.record(Direction::Dropped, path, property);
+            Ok(())
+        };
+
+        if meta.uid != self.synthesis.uid || meta.gid != self.synthesis.gid {
+            lose(Property::Ownership)?;
+        }
+        if meta.mode & SPECIAL_BITS != 0 {
+            lose(Property::SpecialBits)?;
+        }
+        // The default a read fills in, less the write bits where the entry is read-only —
+        // which is exactly what a driver meeting the attribute hands back.
+        let mut recovered = if is_dir {
+            self.synthesis.dir_mode
+        } else {
+            self.synthesis.file_mode
+        };
+        if meta.mode & WRITE_BITS == 0 {
+            recovered &= !WRITE_BITS;
+        }
+        if meta.mode & PERMISSION_BITS != recovered & PERMISSION_BITS {
+            lose(Property::Permissions)?;
+        }
+        // These formats have one time per entry to spare and the modification time has it, so a
+        // change time equal to it survives and one that is not is gone.
+        if meta.ctime != meta.mtime {
+            lose(Property::ChangeTime)?;
+        }
+        if !xattrs.is_empty() {
+            lose(Property::ExtendedAttributes)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the caller has accepted losing `property`.
+    ///
+    /// The families reach this for the one loss that is not a property of an entry's metadata:
+    /// a kind the format has no representation for, which is decided before an entry exists.
+    pub(crate) const fn accepts(&self, property: Property) -> bool {
+        self.accepted.contains(property)
     }
 }
 

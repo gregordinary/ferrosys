@@ -461,6 +461,38 @@ fn a_libarchive_xattr_with_a_schily_twin_is_accepted_and_deduplicated() {
 }
 
 #[test]
+fn a_repeated_xattr_name_keeps_the_last_value_and_appears_once() {
+    // Two records for one name are the archive contradicting itself, and the resolution
+    // is the same one every PAX field takes: a later record replaces an earlier one. The
+    // attribute reaches the filesystem once, holding the later value.
+    let mut b = Builder::new(Vec::new());
+    b.append_pax_extensions([
+        ("SCHILY.xattr.user.note", &b"first"[..]),
+        ("SCHILY.xattr.user.note", &b"second"[..]),
+    ])
+    .unwrap();
+    let data = b"x";
+    let mut h = file_header(0o644, 0, 0, data.len());
+    h.set_path("f").unwrap();
+    h.set_cksum();
+    b.append(&h, &data[..]).unwrap();
+    let tar_bytes = b.into_inner().unwrap();
+
+    let source = ArchiveSource::from_reader(&tar_bytes[..]).expect("a repeated name parses");
+    let image = format(source, 16 * MIB, opts()).expect("format");
+    let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+    let tree = walk_tree(&mut r);
+    let note: Vec<_> = r
+        .xattrs(&tree[&b"/f".to_vec()])
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.name == b"user.note")
+        .collect();
+    assert_eq!(note.len(), 1, "the name survives exactly once: {note:?}");
+    assert_eq!(note[0].value, b"second", "the later record wins");
+}
+
+#[test]
 fn a_lone_libarchive_xattr_is_refused() {
     // A LIBARCHIVE.xattr record with no SCHILY twin carries its value only in base64,
     // which this crate does not decode; refusing it is better than silently losing it.

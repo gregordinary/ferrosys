@@ -32,7 +32,7 @@ out="${CARGO_TARGET_DIR:-$root/target}/public-api"
 bless=0
 [ "${1:-}" = "--bless" ] && bless=1
 
-# The five configurations whose surfaces are pinned separately. `--all-features` is the
+# The seven configurations whose surfaces are pinned separately. `--all-features` is the
 # whole crate; `--no-default-features` is the family-agnostic root, whose narrowness is a
 # deliberate property rather than an accident of what happens to be gated; `default` is
 # what `cargo add ferrosys` gives and so the surface most consumers pin against, and it is
@@ -41,7 +41,13 @@ bless=0
 # feature; `fat` is a build carrying a family that is not the default one, where an item
 # gated on the wrong family feature vanishes without any other configuration noticing; and
 # `fat-dir` is that family with a source and a sink and still no ext, which is where an
-# extraction surface quietly pinned to one family would show up as a type nobody can name.
+# extraction surface quietly pinned to one family would show up as a type nobody can name;
+# `exfat` is a family
+# that arrived as a classifier before it had a reader, which is where an item gated on "a
+# family" rather than on "a family with a reader" is either missing or uninhabited; and
+# `btrfs` is the reverse of that — a family whose reader exists before it is reachable from
+# the root, so it is where an item gated on "any family" and meaning "any family the root
+# dispatches to" shows up as a surface a caller cannot get to.
 config_flags() {
     case "$1" in
         all-features) echo "--all-features" ;;
@@ -49,6 +55,8 @@ config_flags() {
         default) echo "" ;;
         fat) echo "--no-default-features --features fat" ;;
         fat-dir) echo "--no-default-features --features fat,dir" ;;
+        exfat) echo "--no-default-features --features exfat" ;;
+        btrfs) echo "--no-default-features --features btrfs" ;;
         *) echo "unknown configuration: $1" >&2; exit 1 ;;
     esac
 }
@@ -62,7 +70,7 @@ render() {
 }
 
 status=0
-for config in all-features no-default-features default fat fat-dir; do
+for config in all-features no-default-features default fat fat-dir exfat btrfs; do
     committed="$root/ci/public-api-$config.txt"
     actual="$out/public-api-$config.txt"
     mkdir -p "$out"

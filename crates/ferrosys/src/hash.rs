@@ -57,22 +57,19 @@ impl HashVersion {
             _ => None,
         }
     }
-
-    /// The algorithm's name as every ext tool prints it: `legacy`, `half_md4`, or `tea`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::HalfMd4 => "half_md4",
-            Self::Tea => "tea",
-        }
-    }
 }
 
+// The names every ext tool prints and accepts, in the order `mke2fs` documents them.
+crate::naming::named_choice!(HashVersion {
+    HashVersion::HalfMd4 => "half_md4",
+    HashVersion::Tea => "tea",
+    HashVersion::Legacy => "legacy",
+});
+
 impl core::fmt::Display for HashVersion {
-    /// The name in [`HashVersion::name`].
+    /// The name in [`HashVersion::as_str`].
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.name())
+        f.write_str(self.as_str())
     }
 }
 
@@ -107,6 +104,10 @@ impl HashSignedness {
 
     /// Read the choice out of `s_flags`. A superblock that records neither bit
     /// leaves the interpretation to the reader, which takes it as unsigned.
+    ///
+    /// This is the one place the bit becomes the choice. A caller describing a superblock
+    /// asks here rather than testing [`SIGNED_FLAG`](Self::SIGNED_FLAG) itself, so that
+    /// what a report says an image does is what a read of that image does.
     #[must_use]
     pub const fn from_flags(flags: u32) -> Self {
         if flags & Self::SIGNED_FLAG != 0 {
@@ -114,6 +115,19 @@ impl HashSignedness {
         } else {
             Self::Unsigned
         }
+    }
+}
+
+// The two words a `-D` value takes and a report prints.
+crate::naming::named_choice!(HashSignedness {
+    HashSignedness::Signed => "signed",
+    HashSignedness::Unsigned => "unsigned",
+});
+
+impl core::fmt::Display for HashSignedness {
+    /// The name in [`HashSignedness::as_str`].
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

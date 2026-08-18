@@ -35,7 +35,7 @@
 //! after the final block belong to whatever the image sits in, and a reference reaching
 //! them is out of range however much source there is behind it.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::acl::Acl;
@@ -43,16 +43,21 @@ use crate::csum::{Checksummer, Crc32c};
 use crate::extent::{ExtentNode, MAX_EXTENT_DEPTH, parse_node, tail_offset};
 use crate::feature::{FeatureSet, Incompat, LARGE_FILE_MIN_SIZE, Profile};
 use crate::fidelity::Synthesis;
-use crate::finding::{Coordinate, Family, Finding, FindingReport, Severity};
+use crate::finding::{Family, Finding, Findings, Severity};
+use crate::io::{offset_of, read_exact_at};
 use crate::model::ROOT_INO;
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, DIR_TAIL_LEN, DX_CHECKSUM_OFFSET, DX_ENTRY_LEN,
     DX_NODE_COUNT_OFFSET, DX_ROOT_COUNT_OFFSET, DX_TAIL_LEN, DirEntry, EXTENT_ENTRY_SIZE,
     EXTENT_TAIL_LEN, FileType, GOOD_OLD_FIRST_INODE, GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode,
-    InodeFlags, ParseError, SuperBlock, decode_device, dx_tail_offset, get_u16, get_u32,
-    orphan_entries_len, parse_block, parse_inline, put_u16, read_dx_entries, read_dx_root_info,
-    read_orphan_tail,
+    InodeFlags, ParseError, SuperBlock, XATTR_CHECKSUM_OFFSET, decode_device, dx_tail_offset,
+    get_u16, get_u32, orphan_entries_len, parse_block, parse_inline, put_u16, read_dx_entries,
+    read_dx_root_info, read_orphan_tail, superblock_checksum,
 };
+use crate::path::is_hostile_entry;
+// The per-object checksum recipes, aliased because the local binding for a checksummer
+// is itself called `csum`: `recipe::inode(csum, ..)` reads as what it is.
+use crate::csum as recipe;
 use crate::policy::{Limits, ReadPolicy};
 use crate::source::Metadata;
 use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
@@ -156,12 +161,6 @@ const MAP_WINDOW_BLOCKS: usize = 4096;
 /// is valid over a filesystem far smaller than the offset.
 const MAX_LOGICAL_BLOCKS: u64 = 1 << 32;
 
-/// The most symlinks a path resolution will follow before calling it a loop, matching
-/// the kernel's `MAXSYMLINKS`. A cycle (`a -> b -> a`) is the obvious case, but a chain
-/// long enough to be an effective denial of service is the one that matters on an image
-/// this crate did not write.
-pub const MAX_SYMLINK_HOPS: u32 = 40;
-
 use crate::policy::MAX_PATH;
 
 /// The fewest bytes one directory record can occupy: the eight-byte header plus a name of
@@ -177,16 +176,6 @@ use crate::policy::MAX_PATH;
 /// describe — and what makes that bound one no well-formed image reaches.
 pub const MIN_DIRENT_LEN: u64 = 12;
 
-/// Split a path into the components a resolution walks: `/`-separated, with empty
-/// components and `.` dropped. `..` is left in, and resolves through the directory's own
-/// entry for it — which is the only thing that knows where the parent is.
-fn components(path: &[u8]) -> VecDeque<Vec<u8>> {
-    path.split(|&b| b == b'/')
-        .filter(|c| !c.is_empty() && *c != b".")
-        .map(<[u8]>::to_vec)
-        .collect()
-}
-
 /// Whether an inode is a directory (`S_IFDIR`).
 fn is_dir(inode: &Inode) -> bool {
     inode.mode & 0o170000 == 0o040000
@@ -201,32 +190,6 @@ fn is_symlink(inode: &Inode) -> bool {
 /// these alone, which is the same scope the kernel and `e2fsck` apply it in.
 fn is_regular(inode: &Inode) -> bool {
     inode.mode & 0o170000 == 0o100000
-}
-
-/// Whether a directory-entry name is one a real ext4 filesystem could not hold: it
-/// is empty, or contains a path separator or a NUL. The kernel's `ext4_check_dir_entry`
-/// forbids the last two, so either marks a crafted or corrupt image. A name carrying `/`
-/// traverses out of its directory (`../../etc/...`); one carrying a NUL ends early at the
-/// C-string boundary a consumer would build a host path against.
-///
-/// The test is applied where bytes become a name — [`read_dir`](Reader::read_dir) — so one
-/// check covers listing, resolution, walking, and every sink a walk feeds. A strict read
-/// refuses ([`ReadError::HostileName`]), a lenient one leaves the entry out, and a
-/// [`scan`](Reader::scan) reports it wherever it sits in the image.
-///
-/// `.` and `..` are not hostile here, unlike in a FAT directory: they are entries an ext4
-/// directory genuinely holds, `resolve` walks `..` through the one the directory carries,
-/// and a listing that omitted them would not be the directory. It is the *walk* that
-/// declines to descend through them, by name, where a path is built.
-///
-/// An empty name is not a name. `DirEntry::read_from` accepts a zero `name_len` beside a
-/// non-zero inode, so a crafted directory holds one — and the path a walk would build from
-/// it is the *directory's own path* with a trailing separator. Two such siblings produce two
-/// entries at identical paths, which contradicts what a walk promises; and an archive writer
-/// renders one as a member ending in `/`, which every tar reader takes for a directory, so
-/// it collides with the real entry of that name and changes its type.
-fn name_is_hostile(name: &[u8]) -> bool {
-    name.is_empty() || name.contains(&b'/') || name.contains(&0)
 }
 
 /// Whether a symlink stores its target inline in the inode's `i_block` area rather
@@ -269,7 +232,6 @@ fn maps_data(inode: &Inode, block_size: usize) -> bool {
 /// The subsystem a deviation was found in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Category {
     /// The primary or a backup superblock.
     Superblock,
@@ -309,6 +271,8 @@ impl Category {
     }
 }
 
+crate::naming::serialize_as_name!(Category);
+
 /// Where in the image a deviation sits. Every field is optional: a deviation carries
 /// only the coordinates that locate it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -321,6 +285,51 @@ pub struct Location {
     pub group: Option<u32>,
     /// Inode number, when the deviation is inode-addressed.
     pub inode: Option<u32>,
+}
+
+impl Location {
+    /// This location with any coordinate `other` carries that this one does not.
+    ///
+    /// A deviation knows where it is in its own terms — an out-of-range block reference
+    /// knows its block — and the walk that met it knows the rest. Merging rather than
+    /// replacing is what keeps the more specific of the two.
+    #[must_use]
+    pub const fn or(self, other: Self) -> Self {
+        Self {
+            block: match self.block {
+                Some(b) => Some(b),
+                None => other.block,
+            },
+            group: match self.group {
+                Some(g) => Some(g),
+                None => other.group,
+            },
+            inode: match self.inode {
+                Some(i) => Some(i),
+                None => other.inode,
+            },
+        }
+    }
+
+    /// A location naming an inode and nothing else.
+    #[must_use]
+    pub const fn at_inode(inode: u32) -> Self {
+        Self {
+            block: None,
+            group: None,
+            inode: Some(inode),
+        }
+    }
+
+    /// A location naming a group and nothing else.
+    #[must_use]
+    pub const fn at_group(group: u32) -> Self {
+        Self {
+            block: None,
+            group: Some(group),
+            inode: None,
+        }
+    }
 }
 
 /// A typed deviation from what this crate would emit, carrying its severity, the
@@ -344,6 +353,17 @@ pub struct Anomaly {
     pub location: Location,
     /// A human-readable description.
     pub detail: String,
+}
+
+impl crate::Deviation for Anomaly {
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    /// The block size is the addressing unit an ext location is stated in.
+    fn to_finding(&self, unit: u32) -> Finding {
+        Anomaly::to_finding(self, unit)
+    }
 }
 
 impl Anomaly {
@@ -372,36 +392,55 @@ impl Anomaly {
             inode,
         } = *location;
 
-        let mut coordinates: Vec<Coordinate> = Vec::new();
-        if let Some(group) = group {
-            coordinates.push((std::borrow::Cow::Borrowed("group"), u64::from(group)));
-        }
-        if let Some(inode) = inode {
-            coordinates.push((std::borrow::Cow::Borrowed("inode"), u64::from(inode)));
-        }
-        if let Some(block) = block {
-            coordinates.push((std::borrow::Cow::Borrowed("block"), block));
-        }
-
-        Finding {
-            severity: *severity,
-            family: Family::Ext,
-            category: std::borrow::Cow::Borrowed(category.as_str()),
-            // A block number out of an untrusted image can be anything, so the
-            // multiplication is checked: a product that does not fit means the block is not
-            // in the image at all, and there is no offset to name.
-            offset: block.and_then(|b| b.checked_mul(u64::from(block_size))),
-            coordinates,
-            detail: detail.clone(),
-        }
+        crate::finding::project(
+            *severity,
+            Family::Ext,
+            category.as_str(),
+            &[
+                ("group", group.map(u64::from)),
+                ("inode", inode.map(u64::from)),
+                ("block", block),
+            ],
+            // The block is what addresses bytes. A group or an inode number does not: where
+            // each sits depends on the layout rather than on the number alone.
+            block,
+            block_size,
+            detail,
+        )
     }
+}
+
+/// Hold one checksummed object to the word it stores.
+///
+/// Every object under `metadata_csum` has its own recipe — which seed, which identity words
+/// fold into it, which field participates as zero — and those stay where each object is
+/// understood. What is the same for all of them is what happens once a value has been
+/// recomputed: the two words are compared, and a disagreement names the object and its index
+/// so a caller learns *which* group descriptor or *which* inode is self-inconsistent rather
+/// than only that something is. Written once, so no object reports a mismatch differently
+/// from the rest and none forgets to report one at all.
+fn check_checksum(
+    object: &'static str,
+    index: u64,
+    stored: u32,
+    computed: u32,
+) -> Result<(), ReadError> {
+    if stored == computed {
+        return Ok(());
+    }
+    Err(ReadError::ChecksumMismatch {
+        object,
+        index,
+        stored,
+        computed,
+    })
 }
 
 /// Project a [`ReadError`] to an [`Anomaly`] and stamp it with the inode it was found
 /// under, keeping any more specific inode the error already carried.
 fn anomaly_at_inode(err: &ReadError, ino: u32) -> Anomaly {
     let mut a = err.anomaly();
-    a.location.inode.get_or_insert(ino);
+    a.location = a.location.or(Location::at_inode(ino));
     a
 }
 
@@ -429,7 +468,7 @@ fn anomaly_in_mapping(err: &ReadError, ino: u32, category: Category) -> Anomaly 
     let mut a = err.anomaly();
     redirect_block_ref(&mut a, err, category);
     if ino != 0 {
-        a.location.inode.get_or_insert(ino);
+        a.location = a.location.or(Location::at_inode(ino));
     }
     a
 }
@@ -441,7 +480,7 @@ fn anomaly_in_mapping(err: &ReadError, ino: u32, category: Category) -> Anomaly 
 fn anomaly_in_bitmap(err: &ReadError, group: u32, category: Category) -> Anomaly {
     let mut a = err.anomaly();
     redirect_block_ref(&mut a, err, category);
-    a.location.group.get_or_insert(group);
+    a.location = a.location.or(Location::at_group(group));
     a
 }
 
@@ -504,18 +543,9 @@ fn extent_tail_offset(node: &[u8], node_bytes: usize) -> usize {
 #[non_exhaustive]
 pub enum ReadError {
     /// The underlying source could not be read or sought.
-    ///
-    /// The `kind` is [`std::io::Error`]'s own classification, carried separately because
-    /// it is what a caller acts on: a truncated image
-    /// ([`UnexpectedEof`](std::io::ErrorKind::UnexpectedEof)) is a property of the image
-    /// being examined, while a permission failure
-    /// ([`PermissionDenied`](std::io::ErrorKind::PermissionDenied)) is a property of the
-    /// environment, and telling them apart should not require matching on the message.
-    ///
-    /// It does not appear in the rendered message because the message already says it:
-    /// `message` is the underlying error rendered by [`std::io::Error`], which opens with
-    /// the kind's own description. The field is the machine-readable half of a fact the
-    /// text already carries.
+    /// Carried as [`TreeError::Io`] describes, which is where the rule
+    /// this crate records an i/o failure by is written out: the kind beside the message, so a
+    /// caller tells a truncated image from an environment failure without matching on text.
     #[error("i/o error: {message}")]
     #[non_exhaustive]
     Io {
@@ -798,14 +828,7 @@ pub enum ReadError {
     },
 }
 
-impl From<std::io::Error> for ReadError {
-    fn from(e: std::io::Error) -> Self {
-        ReadError::Io {
-            kind: e.kind(),
-            message: e.to_string(),
-        }
-    }
-}
+crate::io::io_error!(ReadError);
 
 impl ReadError {
     /// Classify this error as a typed [`Anomaly`]: its severity, subsystem, and
@@ -1066,128 +1089,14 @@ impl ReadError {
     }
 }
 
-/// The result of a whole-image [`scan`](Reader::scan): every [`Anomaly`] the scan found,
-/// in the order it walked them — the superblock, then each group descriptor, then each
-/// in-use inode and its extent tree.
+/// What a whole-image [`scan`](Reader::scan) found, in ext's own taxonomy.
 ///
-/// A lenient read rejects no image, so an empty report means the image is byte-conformant
-/// to what this crate emits and a non-empty one is a list of findings, not a failure.
-/// [`has_fatal`](Self::has_fatal) applies a [`ReadPolicy`] threshold back to those
-/// findings.
-///
-/// This is ext's own taxonomy, kept typed: an [`Anomaly`] names the subsystem as a
-/// [`Category`] value and its place as a [`Location`] of group, inode, and block, which is
-/// what a consumer reasoning about ext4 wants. Rendering it — as JSON, as SARIF, as a table
-/// — goes through [`to_report`](Self::to_report), which projects into the crate's
-/// family-agnostic [`FindingReport`] so one document shape serves every family.
-///
-/// A report holds at most [`Limits::max_findings`] findings and says so through
-/// [`is_truncated`](Self::is_truncated) when it stopped there.
-#[derive(Clone, PartialEq, Eq, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ScanReport {
-    anomalies: Vec<Anomaly>,
-    truncated: bool,
-    /// The findings cap the scan that produced this report ran under — the
-    /// [`Limits::max_findings`] it was opened with, which a caller may set to anything.
-    /// Kept so a truncation notice names the bound that actually applied rather than the
-    /// default constant, which need not be the same number.
-    ///
-    /// It is not serialized: the cap is a property of the scan that ran, not of the
-    /// report's findings, and `truncated` already says whether it was reached.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    cap: usize,
-    /// The block size of the filesystem scanned, which turns a block-addressed anomaly
-    /// into the byte offset a [`Finding`] carries. Zero for a report no scan produced,
-    /// where there is nothing to convert.
-    ///
-    /// Not serialized for the same reason the cap is not: it describes the filesystem the
-    /// scan ran over rather than any finding in it.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    block_size: u32,
-}
-
-impl Default for ScanReport {
-    /// An empty report from a scan under the default limits.
-    fn default() -> Self {
-        Self {
-            anomalies: Vec::new(),
-            truncated: false,
-            cap: FindingReport::MAX_FINDINGS,
-            block_size: 0,
-        }
-    }
-}
-
-impl ScanReport {
-    /// The anomalies found, in scan order.
-    #[must_use]
-    pub fn anomalies(&self) -> &[Anomaly] {
-        &self.anomalies
-    }
-
-    /// Whether the scan stopped at its findings cap with the image still unfinished.
-    ///
-    /// A truncated report is a floor, not a full accounting: the image holds at least
-    /// these findings, and the scan did not look at the rest of it. Everything derived from
-    /// the report — [`worst_severity`](Self::worst_severity),
-    /// [`has_fatal`](Self::has_fatal) — is likewise a floor, and
-    /// [`is_clean`](Self::is_clean) is `false` whatever the report holds, since a scan that
-    /// stopped short has seen nothing that would let it call an image clean.
-    #[must_use]
-    pub fn is_truncated(&self) -> bool {
-        self.truncated
-    }
-
-    /// Whether the scan looked at the whole image and found nothing.
-    ///
-    /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
-    /// holds. The cap can be set low enough that a scan stops before reporting anything —
-    /// at zero, before reading a single group — and an empty report from a scan that
-    /// stopped is an absence of looking, not an absence of faults.
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        !self.truncated && self.anomalies.is_empty()
-    }
-
-    /// The severity of the most serious anomaly, or `None` when the report is clean.
-    #[must_use]
-    pub fn worst_severity(&self) -> Option<Severity> {
-        self.anomalies.iter().map(|a| a.severity).max()
-    }
-
-    /// Whether any anomaly the scan found is fatal under `policy` — the same threshold
-    /// [`ReadPolicy::Strict`] enforces when opening an image. Under
-    /// [`ReadPolicy::Lenient`] it is always `false`.
-    ///
-    /// This is the scan's verdict, which is not the whole of a strict read. A scan checks
-    /// the metadata a strict read checks — feature support, every checksum, and structural
-    /// placement — but it does not parse every directory entry or follow every path, so a
-    /// fault only a full read reaches (a malformed directory block on an image that carries
-    /// no checksum to catch it, say) leaves the scan clean while the read that reaches it
-    /// still fails.
-    #[must_use]
-    pub fn has_fatal(&self, policy: ReadPolicy) -> bool {
-        self.anomalies.iter().any(|a| policy.is_fatal(a.severity))
-    }
-
-    /// Project the report into the crate's family-agnostic frame, which is what renders.
-    ///
-    /// Each [`Anomaly`] becomes a [`Finding`] carrying the same severity, ext's own
-    /// subsystem word as its category, its group/inode/block coordinates under those names,
-    /// and — where the anomaly is block-addressed — the byte offset that block sits at.
-    /// Truncation and the cap that caused it carry across, so the projected report says the
-    /// same thing about how much of the image was looked at.
-    #[must_use]
-    pub fn to_report(&self) -> FindingReport {
-        let findings = self
-            .anomalies
-            .iter()
-            .map(|a| a.to_finding(self.block_size))
-            .collect();
-        FindingReport::new(findings, self.truncated, self.cap)
-    }
-}
+/// This is the crate's [`ScanReport`](crate::ScanReport) over ext's [`Anomaly`]: an anomaly
+/// names the subsystem as a [`Category`] value and its place as a [`Location`] of group,
+/// inode, and block, which is what a consumer reasoning about an ext filesystem wants. The
+/// addressing unit is the filesystem's block size, so a block-addressed anomaly projects to
+/// the byte offset that block sits at.
+pub type ScanReport = crate::ScanReport<Anomaly>;
 
 /// One resolved directory entry: a name and the inode it points at.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1268,16 +1177,14 @@ pub struct Reader<R> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[non_exhaustive]
 pub struct OpenOptions {
-    /// Byte offset within the source at which the filesystem begins — zero for a bare
-    /// image, the partition's start for one inside a disk image. Every read the reader
-    /// makes is relative to it.
-    pub base: u64,
-    /// How strictly the image is held to the format. Defaults to
-    /// [`ReadPolicy::Strict`].
-    pub policy: ReadPolicy,
-    /// Caps on what one read may allocate, over and above the structural bounds the
-    /// reader always applies.
-    pub limits: Limits,
+    /// Where the filesystem begins, how strictly it is read, and what one read may
+    /// allocate — the crate's [`OpenOptions`](crate::OpenOptions), which mean exactly what
+    /// they mean there.
+    ///
+    /// Held rather than flattened, so an input every family takes is added in one place and
+    /// reaches every family at once. The three builders below set through it, so a caller
+    /// writes `OpenOptions::new().base(..)` either way.
+    pub common: crate::OpenOptions,
     /// The `metadata_csum` seed to verify against, overriding the one the image implies.
     ///
     /// A filesystem's checksums are computed from a seed: the value stored in the
@@ -1294,9 +1201,7 @@ impl OpenOptions {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            base: 0,
-            policy: ReadPolicy::Strict,
-            limits: Limits::new(),
+            common: crate::OpenOptions::new(),
             csum_seed: None,
         }
     }
@@ -1304,21 +1209,28 @@ impl OpenOptions {
     /// Open a filesystem that begins `base` bytes into the source.
     #[must_use]
     pub const fn base(mut self, base: u64) -> Self {
-        self.base = base;
+        self.common = self.common.base(base);
         self
     }
 
     /// Read under `policy`.
     #[must_use]
     pub const fn policy(mut self, policy: ReadPolicy) -> Self {
-        self.policy = policy;
+        self.common = self.common.policy(policy);
         self
     }
 
     /// Cap what one read may allocate.
     #[must_use]
     pub const fn limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
+        self.common = self.common.limits(limits);
+        self
+    }
+
+    /// Take the three shared inputs from `common`, leaving this family's own alone.
+    #[must_use]
+    pub const fn common(mut self, common: crate::OpenOptions) -> Self {
+        self.common = common;
         self
     }
 
@@ -1354,22 +1266,24 @@ impl<R: Read + Seek> Reader<R> {
     /// lenient open accepts such an image so a [`scan`](Self::scan) can report it.
     pub fn open_with(mut src: R, options: &OpenOptions) -> Result<Self, ReadError> {
         let &OpenOptions {
-            base,
-            policy,
-            limits,
+            common:
+                crate::OpenOptions {
+                    base,
+                    policy,
+                    limits,
+                    ..
+                },
             csum_seed,
         } = options;
         // The primary superblock is 1024 bytes into the filesystem. A `base` a caller
         // pushed near the top of the 64-bit range cannot overflow into a small seek: the
         // sum is checked, and an offset that leaves no room for a superblock is reported
         // as out of range rather than wrapped.
-        let sb_offset = base.checked_add(1024).ok_or(ReadError::OutOfRange {
+        let sb_offset = offset_of(base, 1, 1024).ok_or(ReadError::OutOfRange {
             what: "bytes",
             index: base,
         })?;
-        src.seek(SeekFrom::Start(sb_offset))?;
-        let mut sb_bytes = vec![0u8; SuperBlock::SIZE];
-        src.read_exact(&mut sb_bytes)?;
+        let sb_bytes = read_exact_at(&mut src, sb_offset, SuperBlock::SIZE)?;
         let mut sb = SuperBlock::read_from(&sb_bytes)?;
         // A revision-0 filesystem predates the fields that describe an inode's size and
         // the first inode a file may use: the words hold zero and the values are fixed
@@ -1458,6 +1372,30 @@ impl<R: Read + Seek> Reader<R> {
                 value: u64::from(sb.inodes_per_group),
             }));
         }
+        // Two more fields feed the same group count, through the subtraction rather than
+        // the divisor: a block count that leaves nothing past the first data block makes
+        // the addressable span zero — the same every-loop-runs-no-times scan, reported
+        // clean, that the two per-group guards above exist to refuse. The first data block
+        // has exactly one value per block size — the block holding the superblock — and
+        // the family's own library refuses any other before its tools look further, which
+        // is the precedent both refusals follow. The block count is compared against it
+        // rather than against zero, because at a one-kibibyte block the canonical first
+        // data block is one, and a block count of one then scans exactly as little as a
+        // count of zero does.
+        if sb.first_data_block != u32::from(block_size == 1024) {
+            return Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "superblock",
+                field: "s_first_data_block",
+                value: u64::from(sb.first_data_block),
+            }));
+        }
+        if sb.blocks_count <= u64::from(sb.first_data_block) {
+            return Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "superblock",
+                field: "s_blocks_count",
+                value: sb.blocks_count,
+            }));
+        }
         // The `incompat` word is the one an implementation must refuse when it carries a
         // bit it does not recognize: those features change the on-disk format in ways that
         // make unaware access unsafe. A strict read refuses such an image at open; a
@@ -1518,22 +1456,17 @@ impl<R: Read + Seek> Reader<R> {
     fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, ReadError> {
         // A base-relative offset a malformed field pushed past the 64-bit range is an
         // out-of-range reference, not an overflow.
-        let pos = self.base.checked_add(offset).ok_or(ReadError::OutOfRange {
+        let pos = offset_of(self.base, offset, 1).ok_or(ReadError::OutOfRange {
             what: "bytes",
             index: offset,
         })?;
-        self.src.seek(SeekFrom::Start(pos))?;
-        let mut buf = vec![0u8; len];
-        match self.src.read_exact(&mut buf) {
-            Ok(()) => Ok(buf),
+        match read_exact_at(&mut self.src, pos, len) {
+            Ok(buf) => Ok(buf),
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(ReadError::OutOfRange {
                 what: "bytes",
                 index: offset,
             }),
-            Err(e) => Err(ReadError::Io {
-                kind: e.kind(),
-                message: e.to_string(),
-            }),
+            Err(e) => Err(ReadError::from(e)),
         }
     }
 
@@ -1547,12 +1480,12 @@ impl<R: Read + Seek> Reader<R> {
     /// length alone.
     fn block(&mut self, block: u64) -> Result<Vec<u8>, ReadError> {
         self.check_block(block)?;
-        let start = block
-            .checked_mul(self.block_size as u64)
-            .ok_or(ReadError::OutOfRange {
-                what: "block",
-                index: block,
-            })?;
+        // Counted from the filesystem's own first byte; `read_at` is what places that in
+        // the source.
+        let start = offset_of(0, block, self.block_size as u64).ok_or(ReadError::OutOfRange {
+            what: "block",
+            index: block,
+        })?;
         match self.read_at(start, self.block_size) {
             Err(ReadError::OutOfRange { .. }) => Err(ReadError::OutOfRange {
                 what: "block",
@@ -1607,7 +1540,15 @@ impl<R: Read + Seek> Reader<R> {
     fn group_descriptor_raw(&mut self, group: u32) -> Result<Vec<u8>, ReadError> {
         let desc_size = self.desc_size();
         let table = u64::from(self.sb.first_data_block) + 1;
-        let off = table * self.block_size as u64 + u64::from(group) * desc_size as u64;
+        // Both the table's place and the descriptor's place within it come from fields the
+        // image supplies, so both products are checked. Counted from the filesystem's own
+        // first byte; `read_at` is what places that in the source.
+        let off = offset_of(0, table, self.block_size as u64)
+            .and_then(|table| offset_of(table, u64::from(group), desc_size as u64))
+            .ok_or(ReadError::OutOfRange {
+                what: "group",
+                index: u64::from(group),
+            })?;
         // The table's place is set by `s_first_data_block` and its extent by the group
         // number, both of which the image supplies, so the descriptor's bytes are bounded
         // by the filesystem exactly as a block reference is. A table a malformed
@@ -1629,14 +1570,14 @@ impl<R: Read + Seek> Reader<R> {
         }
     }
 
-    /// The number of block groups, derived from the superblock geometry. Zero when
-    /// the geometry is degenerate (`blocks_per_group` of zero, or a first data block
-    /// past the end), so a malformed superblock yields no groups rather than a
-    /// division-by-zero or underflow.
+    /// The number of block groups, derived from the superblock geometry.
     ///
     /// It is the bound to iterate [`group_descriptor`](Self::group_descriptor) over,
-    /// and the guards are why: the same derivation performed on a caller's side would
-    /// divide by a zero `s_blocks_per_group` on a hostile image.
+    /// and the checked arithmetic is why: the same derivation performed on a caller's
+    /// side would divide by a zero `s_blocks_per_group` on a hostile image. Opening
+    /// refuses every superblock whose geometry would make this zero, so on a reader
+    /// that exists it is at least one; the guards stay because this function cannot
+    /// see that refusal from here.
     #[must_use]
     pub fn group_count(&self) -> u32 {
         let bpg = u64::from(self.sb.blocks_per_group);
@@ -1721,12 +1662,6 @@ impl<R: Read + Seek> Reader<R> {
         Ok(out)
     }
 
-    /// The crc32c the primary superblock should carry: `crc32c(!0, ..)` over the
-    /// record's own bytes up to its checksum field.
-    fn superblock_checksum(&self, csum: &Crc32c) -> u32 {
-        csum.crc32c(!0, &self.sb_raw[..SuperBlock::SIZE - 4])
-    }
-
     /// The 16-bit crc32c group descriptor `group` should carry: the filesystem seed
     /// folded with the group number, then the descriptor's own bytes with the checksum
     /// field zeroed.
@@ -1735,10 +1670,7 @@ impl<R: Read + Seek> Reader<R> {
         // `bg_checksum` participates as zero; every other byte participates as it is,
         // including any this crate does not model.
         put_u16(&mut buf, GroupDescriptor::CHECKSUM_OFFSET, 0);
-        let seed = csum.base_seed();
-        let mut c = csum.crc32c(seed, &group.to_le_bytes());
-        c = csum.crc32c(c, &buf);
-        (c & 0xffff) as u16
+        recipe::group_descriptor(csum, group, &buf)
     }
 
     /// The checksum inode `number` should carry, and the stored value to compare it
@@ -1750,7 +1682,7 @@ impl<R: Read + Seek> Reader<R> {
     /// compare a full-width value against. `mke2fs` leaves the reserved inodes in
     /// exactly that state, so on any filesystem it formatted, checking them at full
     /// width rejects seven healthy inodes.
-    fn inode_checksum(&self, number: u32, raw: &[u8], csum: &Crc32c, seed: u32) -> (u32, u32) {
+    fn inode_checksum(&self, number: u32, raw: &[u8], csum: &Crc32c) -> (u32, u32) {
         let inode_size = self.sb.inode_size;
         let extra_isize = if usize::from(inode_size) > GOOD_OLD_INODE_SIZE {
             get_u16(raw, 0x80)
@@ -1775,10 +1707,8 @@ impl<R: Read + Seek> Reader<R> {
             }
         };
 
-        let mut c = csum.crc32c(seed, &number.to_le_bytes());
-        c = csum.crc32c(c, &get_u32(raw, 0x64).to_le_bytes()); // i_generation
-        c = csum.crc32c(c, &buf);
-        let computed = if has_hi { c } else { c & 0xffff };
+        let generation = get_u32(raw, 0x64);
+        let computed = recipe::inode(csum, number, generation, &buf, has_hi);
         (stored, computed)
     }
 
@@ -1809,33 +1739,23 @@ impl<R: Read + Seek> Reader<R> {
             return Ok(());
         }
         let csum = self.checksummer();
-        let seed = csum.base_seed();
 
         // Superblock.
-        let computed = self.superblock_checksum(&csum);
-        if computed != self.sb.checksum {
-            return Err(ReadError::ChecksumMismatch {
-                object: "superblock",
-                index: 0,
-                stored: self.sb.checksum,
-                computed,
-            });
-        }
+        let computed = superblock_checksum(&self.sb_raw);
+        check_checksum("superblock", 0, self.sb.checksum, computed)?;
 
         // Every group descriptor, then its two bitmap checksums.
         for g in 0..self.group_count() {
             let raw = self.group_descriptor_raw(g)?;
             let desc = GroupDescriptor::read_from(&raw, self.desc_size())?;
             let computed = self.descriptor_checksum(g, &raw, &csum);
-            if computed != desc.checksum {
-                return Err(ReadError::ChecksumMismatch {
-                    object: "group descriptor",
-                    index: u64::from(g),
-                    stored: u32::from(desc.checksum),
-                    computed: u32::from(computed),
-                });
-            }
-            self.verify_bitmap_checksums(g, &csum, seed)?;
+            check_checksum(
+                "group descriptor",
+                u64::from(g),
+                u32::from(desc.checksum),
+                u32::from(computed),
+            )?;
+            self.verify_bitmap_checksums(g, &csum)?;
         }
 
         // Every in-use inode, taken from the inode bitmaps: its checksum, its extent
@@ -1855,24 +1775,17 @@ impl<R: Read + Seek> Reader<R> {
                 let raw = self.inode_raw(n)?;
                 let mut inode = Inode::read_from(&raw, self.sb.inode_size)?;
                 self.mask_ungated_halves(&mut inode);
-                let (stored, computed) = self.inode_checksum(n, &raw, &csum, seed);
-                if computed != stored {
-                    return Err(ReadError::ChecksumMismatch {
-                        object: "inode",
-                        index: u64::from(n),
-                        stored,
-                        computed,
-                    });
-                }
+                let (stored, computed) = self.inode_checksum(n, &raw, &csum);
+                check_checksum("inode", u64::from(n), stored, computed)?;
                 self.verify_extent_nodes(n, &inode, &csum)?;
-                self.verify_directory_checksums(n, &inode, &csum, seed)?;
-                self.verify_xattr_block_checksum(&inode, &csum, seed)?;
+                self.verify_directory_checksums(n, &inode, &csum)?;
+                self.verify_xattr_block_checksum(&inode, &csum)?;
             }
         }
         // The journal is a structural object, not a checksummed one under the v2 log
         // this crate reads; a malformed journal superblock surfaces as its own error.
         self.journal_superblock()?;
-        self.verify_orphan_blocks(&csum, seed)?;
+        self.verify_orphan_blocks(&csum)?;
         Ok(())
     }
 
@@ -1897,9 +1810,9 @@ impl<R: Read + Seek> Reader<R> {
     /// two blocks holding the same entries still carry different checksums.
     ///
     /// Without `orphan_file` there is no such file and nothing to check.
-    fn verify_orphan_blocks(&mut self, csum: &Crc32c, seed: u32) -> Result<(), ReadError> {
+    fn verify_orphan_blocks(&mut self, csum: &Crc32c) -> Result<(), ReadError> {
         let mut faults = Vec::new();
-        self.collect_orphan_faults(csum, seed, &mut faults);
+        self.collect_orphan_faults(csum, &mut faults);
         faults.into_iter().next().map_or(Ok(()), Err)
     }
 
@@ -1909,7 +1822,7 @@ impl<R: Read + Seek> Reader<R> {
     /// covers the block's entry array behind the file's identity and the block's own
     /// number so two blocks holding the same entries still checksum differently. Without
     /// `orphan_file` there is no such file and nothing to check.
-    fn collect_orphan_faults(&mut self, csum: &Crc32c, seed: u32, faults: &mut Vec<ReadError>) {
+    fn collect_orphan_faults(&mut self, csum: &Crc32c, faults: &mut Vec<ReadError>) {
         if !self.feature.has_orphan_file() {
             return;
         }
@@ -1969,10 +1882,7 @@ impl<R: Read + Seek> Reader<R> {
                 continue; // no checksums: the magic word is the whole of the format
             }
             let entries = &block[..orphan_entries_len(block.len())];
-            let mut c = csum.crc32c(seed, &ino.to_le_bytes());
-            c = csum.crc32c(c, &generation.to_le_bytes());
-            c = csum.crc32c(c, &phys.to_le_bytes());
-            c = csum.crc32c(c, entries);
+            let c = recipe::orphan_block(csum, ino, generation, phys, entries);
             if c != stored {
                 faults.push(ReadError::ChecksumMismatch {
                     object: "orphan block",
@@ -1996,10 +1906,8 @@ impl<R: Read + Seek> Reader<R> {
         if !inode.flags.contains(InodeFlags::EXTENTS) {
             return Ok(());
         }
-        // Every node in one inode's tree shares a seed: the filesystem seed folded
-        // with the inode's number and generation.
-        let mut seed = csum.crc32c(csum.base_seed(), &ino.to_le_bytes());
-        seed = csum.crc32c(seed, &inode.generation.to_le_bytes());
+        // Every node in one inode's tree shares a seed.
+        let seed = recipe::inode_seed(csum, ino, inode.generation);
         let mut visited = HashSet::new();
         self.verify_extent_subtree(&inode.block, 0, seed, csum, &mut visited)
     }
@@ -2031,14 +1939,7 @@ impl<R: Read + Seek> Reader<R> {
                     .expect("tail slice is exactly EXTENT_TAIL_LEN bytes"),
             );
             let computed = csum.crc32c(seed, &child[..tail]);
-            if stored != computed {
-                return Err(ReadError::ChecksumMismatch {
-                    object: "extent node",
-                    index: idx.leaf,
-                    stored,
-                    computed,
-                });
-            }
+            check_checksum("extent node", idx.leaf, stored, computed)?;
             self.verify_extent_subtree(&child, depth + 1, seed, csum, visited)?;
         }
         Ok(())
@@ -2089,14 +1990,9 @@ impl<R: Read + Seek> Reader<R> {
     /// block seeded from the filesystem seed, stored 32 bits wide under a 64-byte
     /// descriptor and 16 bits wide under a 32-byte one. A bitmap the descriptor marks
     /// uninitialized carries a zero checksum by construction and is not recomputed.
-    fn verify_bitmap_checksums(
-        &mut self,
-        g: u32,
-        csum: &Crc32c,
-        seed: u32,
-    ) -> Result<(), ReadError> {
+    fn verify_bitmap_checksums(&mut self, g: u32, csum: &Crc32c) -> Result<(), ReadError> {
         let mut faults = Vec::new();
-        self.collect_bitmap_faults(g, csum, seed, &mut faults);
+        self.collect_bitmap_faults(g, csum, &mut faults);
         faults.into_iter().next().map_or(Ok(()), Err)
     }
 
@@ -2106,13 +2002,7 @@ impl<R: Read + Seek> Reader<R> {
     /// from the filesystem seed, stored 32 bits wide under a 64-byte descriptor and 16
     /// wide under a 32-byte one. A bitmap the descriptor marks uninitialized carries a
     /// zero checksum by construction and is not recomputed.
-    fn collect_bitmap_faults(
-        &mut self,
-        g: u32,
-        csum: &Crc32c,
-        seed: u32,
-        faults: &mut Vec<ReadError>,
-    ) {
+    fn collect_bitmap_faults(&mut self, g: u32, csum: &Crc32c, faults: &mut Vec<ReadError>) {
         let desc = match self.group_descriptor(g) {
             Ok(desc) => desc,
             Err(e) => {
@@ -2124,10 +2014,10 @@ impl<R: Read + Seek> Reader<R> {
         let fold = |c: u32| if wide { c } else { c & 0xffff };
 
         if desc.flags & BG_BLOCK_UNINIT == 0 {
-            let len = (self.sb.blocks_per_group / 8) as usize;
+            let len = recipe::block_bitmap_len(self.sb.blocks_per_group);
             match self.block(desc.block_bitmap) {
                 Ok(bmp) => {
-                    let computed = fold(csum.crc32c(seed, &bmp[..len.min(bmp.len())]));
+                    let computed = fold(recipe::bitmap(csum, &bmp[..len.min(bmp.len())]));
                     if computed != desc.block_bitmap_csum {
                         faults.push(ReadError::ChecksumMismatch {
                             object: "block bitmap",
@@ -2141,14 +2031,10 @@ impl<R: Read + Seek> Reader<R> {
             }
         }
         if desc.flags & BG_INODE_UNINIT == 0 {
-            // `ext4_inode_bitmap_csum_set` covers `(inodes_per_group + 7) / 8` bytes,
-            // rounding up so a count that is not a multiple of eight still has its final
-            // partial byte covered. The block bitmap above divides exactly, because a
-            // group's block count is always a multiple of eight.
-            let len = self.sb.inodes_per_group.div_ceil(8) as usize;
+            let len = recipe::inode_bitmap_len(self.sb.inodes_per_group);
             match self.block(desc.inode_bitmap) {
                 Ok(bmp) => {
-                    let computed = fold(csum.crc32c(seed, &bmp[..len.min(bmp.len())]));
+                    let computed = fold(recipe::bitmap(csum, &bmp[..len.min(bmp.len())]));
                     if computed != desc.inode_bitmap_csum {
                         faults.push(ReadError::ChecksumMismatch {
                             object: "inode bitmap",
@@ -2174,10 +2060,9 @@ impl<R: Read + Seek> Reader<R> {
         ino: u32,
         inode: &Inode,
         csum: &Crc32c,
-        seed: u32,
     ) -> Result<(), ReadError> {
         let mut faults = Vec::new();
-        self.collect_directory_faults(ino, inode, csum, seed, &mut faults);
+        self.collect_directory_faults(ino, inode, csum, &mut faults);
         faults.into_iter().next().map_or(Ok(()), Err)
     }
 
@@ -2200,17 +2085,13 @@ impl<R: Read + Seek> Reader<R> {
         ino: u32,
         inode: &Inode,
         csum: &Crc32c,
-        seed: u32,
         faults: &mut Vec<ReadError>,
     ) {
         if inode.mode & 0o170000 != 0o040000 {
             return;
         }
         let indexed = inode.flags.contains(InodeFlags::INDEX);
-        let base = {
-            let c = csum.crc32c(seed, &ino.to_le_bytes());
-            csum.crc32c(c, &inode.generation.to_le_bytes())
-        };
+        let base = recipe::inode_seed(csum, ino, inode.generation);
         let blocks = match self.data_blocks(inode) {
             Ok(blocks) => blocks,
             Err(e) => {
@@ -2352,14 +2233,7 @@ impl<R: Read + Seek> Reader<R> {
                 let covered = block.len() - DIR_TAIL_LEN;
                 let computed = csum.crc32c(base, &block[..covered]);
                 let stored = get_u32(block, block.len() - 4);
-                if computed != stored {
-                    return Err(ReadError::ChecksumMismatch {
-                        object: "directory block",
-                        index: phys,
-                        stored,
-                        computed,
-                    });
-                }
+                check_checksum("directory block", phys, stored, computed)?;
             }
             Some(count_offset) => {
                 let limit = usize::from(get_u16(block, count_offset));
@@ -2368,27 +2242,35 @@ impl<R: Read + Seek> Reader<R> {
                 let tail = dx_tail_offset(count_offset, limit);
                 // The checksum sits in the last word of the `DX_TAIL_LEN`-byte tail, read
                 // at `tail + 4` as bytes [tail+4, tail+8), so the block must reach
-                // `tail + DX_TAIL_LEN`. Guarding only `tail + 4` would leave the read of
-                // the checksum word itself unbounded.
+                // `tail + DX_TAIL_LEN`. A stored `limit` or `count` that puts either past
+                // the block is a fault, not a block to wave through: the kernel treats a
+                // tail it cannot place as a verification failure, and a clean answer here
+                // would leave every byte of the block unverified — the one corruption
+                // shape this pass would otherwise never speak to, since the fields that
+                // place the tail are inside what the checksum covers.
                 if covered > block.len() || tail + DX_TAIL_LEN > block.len() {
-                    return Ok(());
+                    let (field, value) = if tail + DX_TAIL_LEN > block.len() {
+                        ("limit", limit)
+                    } else {
+                        ("count", count)
+                    };
+                    return Err(ReadError::Parse(ParseError::InvalidField {
+                        structure: "DxCountLimit",
+                        field,
+                        value: value as u64,
+                    }));
                 }
                 // The tail is folded as its own bytes up to `dt_checksum`, then four
                 // zeros standing in for that field. Only the checksum word is treated as
                 // absent; `dt_reserved` before it is covered as it lies on disk, so an
-                // image that leaves anything there still verifies.
+                // image that leaves anything there still verifies. That is why this is not
+                // one of `csum`'s shared recipes: the writer folds the tail it wrote, and
+                // one function could not be both without rejecting healthy foreign images.
                 let mut c = csum.crc32c(base, &block[..covered]);
                 c = csum.crc32c(c, &block[tail..tail + DX_CHECKSUM_OFFSET]);
                 c = csum.crc32c(c, &[0u8; DX_TAIL_LEN - DX_CHECKSUM_OFFSET]);
                 let stored = get_u32(block, tail + 4);
-                if c != stored {
-                    return Err(ReadError::ChecksumMismatch {
-                        object: "directory block",
-                        index: phys,
-                        stored,
-                        computed: c,
-                    });
-                }
+                check_checksum("directory block", phys, stored, c)?;
             }
         }
         Ok(())
@@ -2403,7 +2285,6 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         inode: &Inode,
         csum: &Crc32c,
-        seed: u32,
     ) -> Result<(), ReadError> {
         let phys = inode.file_acl;
         if phys == 0 {
@@ -2413,18 +2294,10 @@ impl<R: Read + Seek> Reader<R> {
         if block.len() < 20 {
             return Ok(());
         }
-        let stored = get_u32(&block, 16);
-        crate::ondisk::put_u32(&mut block, 16, 0);
-        let mut c = csum.crc32c(seed, &phys.to_le_bytes());
-        c = csum.crc32c(c, &block);
-        if c != stored {
-            return Err(ReadError::ChecksumMismatch {
-                object: "xattr block",
-                index: phys,
-                stored,
-                computed: c,
-            });
-        }
+        let stored = get_u32(&block, XATTR_CHECKSUM_OFFSET);
+        crate::ondisk::put_u32(&mut block, XATTR_CHECKSUM_OFFSET, 0);
+        let c = recipe::xattr_block(csum, phys, &block);
+        check_checksum("xattr block", phys, stored, c)?;
         Ok(())
     }
 
@@ -2446,11 +2319,9 @@ impl<R: Read + Seek> Reader<R> {
     /// path to point at an image that may have been built to be hostile.
     #[must_use]
     pub fn scan(&mut self) -> ScanReport {
-        let mut anomalies = Vec::new();
-        let mut truncated = false;
+        let mut anomalies = Findings::new(self.limits.max_findings);
         let has_csum = self.feature.has_metadata_csum();
         let csum = self.checksummer();
-        let seed = csum.base_seed();
 
         // Bound the walk by the length the source reports, so a count field a bit-flip
         // inflated cannot drive a loop past the end of it.
@@ -2469,7 +2340,7 @@ impl<R: Read + Seek> Reader<R> {
 
         // Superblock checksum.
         if has_csum {
-            let computed = self.superblock_checksum(&csum);
+            let computed = superblock_checksum(&self.sb_raw);
             if computed != self.sb.checksum {
                 anomalies.push(
                     ReadError::ChecksumMismatch {
@@ -2491,8 +2362,7 @@ impl<R: Read + Seek> Reader<R> {
             .min(u64::from(u32::MAX)) as u32;
         let desc_size = self.desc_size();
         for g in 0..self.group_count().min(group_bound) {
-            if anomalies.len() >= self.limits.max_findings {
-                truncated = true;
+            if anomalies.is_full() {
                 break;
             }
             let raw = match self.group_descriptor_raw(g) {
@@ -2527,7 +2397,7 @@ impl<R: Read + Seek> Reader<R> {
                             );
                         }
                         let mut faults = Vec::new();
-                        self.collect_bitmap_faults(g, &csum, seed, &mut faults);
+                        self.collect_bitmap_faults(g, &csum, &mut faults);
                         for e in &faults {
                             anomalies.push(anomaly_in_bitmap(e, g, Category::Bitmap));
                         }
@@ -2562,8 +2432,7 @@ impl<R: Read + Seek> Reader<R> {
             // A report already at its cap collects nothing more, so the walk stops here
             // rather than reading every remaining group's bitmap for findings it would
             // discard.
-            if anomalies.len() >= self.limits.max_findings {
-                truncated = true;
+            if anomalies.is_full() {
                 break;
             }
             let in_use = match self.group_in_use_inodes(g) {
@@ -2577,12 +2446,12 @@ impl<R: Read + Seek> Reader<R> {
                 if examined >= max_inodes {
                     break 'inodes;
                 }
-                // The findings cap is applied between inodes: one inode's checks run to
-                // completion, so a report never holds half an inode's account of itself.
-                // Each contributes at most one finding per distinct block it names, so the
-                // overshoot past the cap is bounded by the blocks the image holds.
-                if anomalies.len() >= self.limits.max_findings {
-                    truncated = true;
+                // The walk stops at the cap between inodes rather than mid-inode, so a
+                // report holds either the whole of what an inode had to say or none of it.
+                // Within one inode the accumulator is what bounds the collection: it drops
+                // what would exceed the cap, so the memory a scan holds never runs past the
+                // report it will produce.
+                if anomalies.is_full() {
                     break 'inodes;
                 }
                 examined += 1;
@@ -2598,7 +2467,7 @@ impl<R: Read + Seek> Reader<R> {
                     Ok(mut inode) => {
                         self.mask_ungated_halves(&mut inode);
                         if has_csum {
-                            let (stored, computed) = self.inode_checksum(n, &raw, &csum, seed);
+                            let (stored, computed) = self.inode_checksum(n, &raw, &csum);
                             if computed != stored {
                                 anomalies.push(
                                     ReadError::ChecksumMismatch {
@@ -2632,11 +2501,11 @@ impl<R: Read + Seek> Reader<R> {
                         self.scan_dirents(n, &inode, &mut anomalies);
                         if has_csum {
                             let mut faults = Vec::new();
-                            self.collect_directory_faults(n, &inode, &csum, seed, &mut faults);
+                            self.collect_directory_faults(n, &inode, &csum, &mut faults);
                             for e in &faults {
                                 anomalies.push(anomaly_in_mapping(e, n, Category::Directory));
                             }
-                            if let Err(e) = self.verify_xattr_block_checksum(&inode, &csum, seed) {
+                            if let Err(e) = self.verify_xattr_block_checksum(&inode, &csum) {
                                 anomalies.push(anomaly_in_mapping(&e, n, Category::Xattr));
                             }
                         }
@@ -2654,24 +2523,13 @@ impl<R: Read + Seek> Reader<R> {
         // image carries them. Its length is fixed by the file itself rather than by any
         // per-inode claim, so it is walked whatever the inode loop found.
         let mut orphan_faults = Vec::new();
-        self.collect_orphan_faults(&csum, seed, &mut orphan_faults);
+        self.collect_orphan_faults(&csum, &mut orphan_faults);
         let orphan_ino = self.sb.orphan_file_inum;
         for e in &orphan_faults {
             anomalies.push(anomaly_in_mapping(e, orphan_ino, Category::Orphan));
         }
 
-        // The cap is a bound on what a report holds, so it is applied to the collected
-        // findings as well as to the walk that gathered them.
-        if anomalies.len() > self.limits.max_findings {
-            anomalies.truncate(self.limits.max_findings);
-            truncated = true;
-        }
-        ScanReport {
-            anomalies,
-            truncated,
-            cap: self.limits.max_findings,
-            block_size: self.block_size as u32,
-        }
+        anomalies.into_report(self.block_size as u32)
     }
 
     /// Collect the anomalies in one inode's block mapping, whichever kind it carries.
@@ -2694,7 +2552,7 @@ impl<R: Read + Seek> Reader<R> {
         has_csum: bool,
         csum: &Crc32c,
         visited: &mut HashSet<u64>,
-        out: &mut Vec<Anomaly>,
+        out: &mut Findings<Anomaly>,
     ) {
         if !inode.flags.contains(InodeFlags::EXTENTS) {
             // A fast symlink's target and a device node's major and minor share the
@@ -2721,13 +2579,10 @@ impl<R: Read + Seek> Reader<R> {
         // `scan_feature_coherence`, which holds every such rule; the tree itself is
         // scanned here whatever that word says.
         //
-        // Every node in one inode's tree shares a seed: the filesystem seed folded
-        // with the inode's number and generation.
-        let mut seed = csum.crc32c(csum.base_seed(), &ino.to_le_bytes());
-        seed = csum.crc32c(seed, &inode.generation.to_le_bytes());
+        // Every node in one inode's tree shares a seed.
         let ctx = ExtentScanCtx {
             ino,
-            seed,
+            seed: recipe::inode_seed(csum, ino, inode.generation),
             has_csum,
             csum,
         };
@@ -2750,7 +2605,7 @@ impl<R: Read + Seek> Reader<R> {
     /// correctly either way — for the size and for a directory's flag, what is missing is
     /// the word that should advertise it; for the flag on anything but a directory, the
     /// flag itself describes an organization that file does not have.
-    fn scan_feature_coherence(&self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
+    fn scan_feature_coherence(&self, ino: u32, inode: &Inode, out: &mut Findings<Anomaly>) {
         if inode.flags.contains(InodeFlags::EXTENTS) && !self.feature.has_extents() {
             out.push(ReadError::ExtentFlagWithoutFeature { inode: ino }.anomaly());
         }
@@ -2799,7 +2654,7 @@ impl<R: Read + Seek> Reader<R> {
     /// Only the malformed-ACL failure is reported. Every other way reading the attributes
     /// can fail is the attribute region's own, and the scan reports those where it walks
     /// the region.
-    fn scan_acl_values(&mut self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
+    fn scan_acl_values(&mut self, ino: u32, inode: &Inode, out: &mut Findings<Anomaly>) {
         if let Err(e @ ReadError::MalformedAcl { .. }) = self.xattrs(inode) {
             out.push(anomaly_at_inode(&e, ino));
         }
@@ -2814,7 +2669,7 @@ impl<R: Read + Seek> Reader<R> {
     /// disagrees with them, and an image crafted to carry either recomputes its checksums
     /// over it.
     ///
-    /// A hostile name carries a path separator or a NUL (see [`name_is_hostile`]) and is
+    /// A hostile name carries a path separator or a NUL (see [`is_hostile_entry`]) and is
     /// impossible on a kernel-checked filesystem. A reference past `s_inodes_count` names
     /// an inode that cannot exist, which is what `e2fsck` reports as an entry with an
     /// invalid inode number. [`read_dir`](Self::read_dir) refuses both, and reporting them
@@ -2831,7 +2686,7 @@ impl<R: Read + Seek> Reader<R> {
     /// whole directory, so a crafted map cannot make one inode's finding into thousands.
     /// The walk carries on past a fault it has reported, since the records after it may
     /// hold the other kind, and stops once both have been found.
-    fn scan_dirents(&mut self, ino: u32, inode: &Inode, out: &mut Vec<Anomaly>) {
+    fn scan_dirents(&mut self, ino: u32, inode: &Inode, out: &mut Findings<Anomaly>) {
         if !is_dir(inode) {
             return;
         }
@@ -2864,7 +2719,7 @@ impl<R: Read + Seek> Reader<R> {
                 // A zero inode is an unused slot: it holds neither a reference nor a name
                 // the directory carries.
                 if entry.inode != 0 {
-                    if !bad_name && name_is_hostile(&entry.name) {
+                    if !bad_name && is_hostile_entry(&entry.name) {
                         out.push(anomaly_at_inode(
                             &ReadError::HostileName { inode: entry.inode },
                             ino,
@@ -2890,7 +2745,7 @@ impl<R: Read + Seek> Reader<R> {
         node: &[u8],
         depth: u16,
         visited: &mut HashSet<u64>,
-        out: &mut Vec<Anomaly>,
+        out: &mut Findings<Anomaly>,
     ) {
         if depth > MAX_EXTENT_DEPTH {
             out.push(anomaly_at_inode(&ReadError::BadExtentTree, ctx.ino));
@@ -2973,7 +2828,8 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// Drop the high half of the two inode fields whose upper bytes are another field
-    /// entirely when the feature that defines them is clear.
+    /// entirely when the feature that defines them is clear, and fold the block count's
+    /// per-inode unit into the one every consumer here counts in.
     ///
     /// The byte layer joins both halves unconditionally, because whether the upper bytes are
     /// a high half at all is a question about the *feature words*, which the byte layer does
@@ -2990,6 +2846,13 @@ impl<R: Read + Seek> Reader<R> {
     fn mask_ungated_halves(&self, inode: &mut Inode) {
         if !self.feature.has_huge_file() {
             inode.blocks &= u64::from(u32::MAX);
+        } else if inode.flags.contains(InodeFlags::HUGE_FILE) {
+            // Under the feature, the per-inode flag moves the field's unit from 512-byte
+            // sectors to filesystem blocks. Every consumer here counts sectors — the
+            // fast-symlink discount most of all, where a unit read wrong classifies the
+            // target as a block map — so the unit is folded away where the halves are,
+            // which is what the kernel's own accessor does.
+            inode.blocks = inode.blocks.saturating_mul(self.block_size as u64 / 512);
         }
         if !self.feature.is_64bit() {
             inode.file_acl &= u64::from(u32::MAX);
@@ -3020,14 +2883,15 @@ impl<R: Read + Seek> Reader<R> {
         // The inode table block comes from the group descriptor, so a malformed one
         // can push the byte offset past the 64-bit range: treat that as out of range
         // rather than overflowing. `index * isize` is bounded by the group geometry.
-        let off = desc
-            .inode_table
-            .checked_mul(self.block_size as u64)
-            .and_then(|base| base.checked_add(index * isize as u64))
-            .ok_or(ReadError::OutOfRange {
-                what: "inode",
-                index: u64::from(number),
-            })?;
+        let off = offset_of(
+            index * isize as u64,
+            desc.inode_table,
+            self.block_size as u64,
+        )
+        .ok_or(ReadError::OutOfRange {
+            what: "inode",
+            index: u64::from(number),
+        })?;
         // The table is placed by a group descriptor, so these bytes are a reference like
         // any other and must lie inside the filesystem. What is bounded is the inode's
         // whole byte range, through the block its last byte falls in rather than the block
@@ -3847,6 +3711,26 @@ impl<R: Read + Seek> Reader<R> {
     pub fn read_dir(&mut self, inode: &Inode) -> Result<Vec<Entry>, ReadError> {
         let cap = self.limits.max_walk_entries.min(self.max_names());
         let mut entries = Vec::new();
+        self.for_each_dir_entry(inode, |entry| {
+            if entries.len() >= cap {
+                return Err(ReadError::WalkTooLarge { limit: cap });
+            }
+            entries.push(entry);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(entries)
+    }
+
+    /// Walk every live entry of a directory, calling `visit` until it answers `Break`.
+    ///
+    /// The one place directory bytes become names and references: `read_dir` collects
+    /// through it, and a path resolution stops through it — so resolving a component reads
+    /// a large directory only as far as the name it is after, rather than materializing
+    /// every entry to use one.
+    fn for_each_dir_entry<F>(&mut self, inode: &Inode, mut visit: F) -> Result<(), ReadError>
+    where
+        F: FnMut(Entry) -> Result<std::ops::ControlFlow<()>, ReadError>,
+    {
         let mut seen_blocks = HashSet::new();
         for phys in self.data_blocks(inode)? {
             // A directory block a mapping does not name holds no entries, and one it names
@@ -3884,7 +3768,7 @@ impl<R: Read + Seek> Reader<R> {
                     // Both checks sit here because this is where bytes become a name and a
                     // reference: one check covers listing, resolution, the walk, and every
                     // sink a walk feeds, and no later caller has to remember either.
-                    let fault = if name_is_hostile(&entry.name) {
+                    let fault = if is_hostile_entry(&entry.name) {
                         Some(ReadError::HostileName { inode: entry.inode })
                     } else {
                         self.check_dir_entry_inode(entry.inode).err()
@@ -3896,19 +3780,19 @@ impl<R: Read + Seek> Reader<R> {
                         off += rec_len;
                         continue;
                     }
-                    if entries.len() >= cap {
-                        return Err(ReadError::WalkTooLarge { limit: cap });
-                    }
-                    entries.push(Entry {
+                    let keep = visit(Entry {
                         name: entry.name,
                         inode: entry.inode,
                         file_type: entry.file_type,
-                    });
+                    })?;
+                    if keep.is_break() {
+                        return Ok(());
+                    }
                 }
                 off += rec_len;
             }
         }
-        Ok(entries)
+        Ok(())
     }
 
     /// Resolve a path to its inode number and inode, following symbolic links.
@@ -3916,7 +3800,8 @@ impl<R: Read + Seek> Reader<R> {
     /// The path is resolved against *this filesystem's* root, never the host's — an
     /// absolute link target restarts at inode 2 of this image, and nothing here can name
     /// a file outside it. A leading `/` is optional, `.` and empty components are
-    /// skipped, and `..` resolves through the directory's own entry for it.
+    /// skipped, and `..` ascends to the directory the resolution descended from, staying
+    /// at the root where there is nothing to ascend to.
     ///
     /// Symbolic links in the path are followed, including in the final component.
     /// This is not a nicety on a Linux root filesystem: a merged-`/usr` distribution
@@ -3924,7 +3809,7 @@ impl<R: Read + Seek> Reader<R> {
     /// first place to look when a kernel boots without drivers — is unreachable without
     /// following one.
     ///
-    /// Resolution follows at most [`MAX_SYMLINK_HOPS`] links, so a cycle terminates.
+    /// Resolution follows at most [`MAX_SYMLINK_HOPS`](crate::MAX_SYMLINK_HOPS) links, so a cycle terminates.
     ///
     /// # Errors
     ///
@@ -3953,63 +3838,7 @@ impl<R: Read + Seek> Reader<R> {
     /// links before it always are, because a path cannot continue through a link
     /// without going where it points.
     fn resolve(&mut self, path: &[u8], follow_final: bool) -> Result<(u32, Inode), ReadError> {
-        let mut pending: VecDeque<Vec<u8>> = components(path);
-        let mut number = ROOT_INO;
-        let mut inode = self.inode(number)?;
-        let mut hops = 0u32;
-
-        while let Some(name) = pending.pop_front() {
-            if !is_dir(&inode) {
-                return Err(ReadError::NotADirectory {
-                    path: path.to_vec(),
-                });
-            }
-            let entry = self
-                .read_dir(&inode)?
-                .into_iter()
-                .find(|e| e.name == name)
-                .ok_or_else(|| ReadError::NotFound {
-                    path: path.to_vec(),
-                })?;
-            let next = self.inode(entry.inode)?;
-
-            let final_component = pending.is_empty();
-            if is_symlink(&next) && (follow_final || !final_component) {
-                hops += 1;
-                if hops > MAX_SYMLINK_HOPS {
-                    return Err(ReadError::SymlinkLoop {
-                        path: path.to_vec(),
-                    });
-                }
-                // A target longer than a path can be is refused before it is read, so a
-                // crafted `i_size` cannot make one link allocate the whole image.
-                if next.size > MAX_PATH as u64 {
-                    return Err(ReadError::NotFound {
-                        path: path.to_vec(),
-                    });
-                }
-                let target = self.read_symlink(&next)?;
-                if target.is_empty() {
-                    return Err(ReadError::NotFound {
-                        path: path.to_vec(),
-                    });
-                }
-                // An absolute target restarts at this filesystem's root; a relative one
-                // continues from the directory holding the link, which `inode` still is,
-                // because the walk did not descend into the link.
-                if target.starts_with(b"/") {
-                    number = ROOT_INO;
-                    inode = self.inode(number)?;
-                }
-                for c in components(&target).into_iter().rev() {
-                    pending.push_front(c);
-                }
-                continue;
-            }
-            number = entry.inode;
-            inode = next;
-        }
-        Ok((number, inode))
+        crate::resolve::drive(self, path, follow_final)
     }
 
     /// Walk the whole tree, yielding one [`WalkEntry`] per name below the root.
@@ -4095,12 +3924,116 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         mut visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>,
     ) -> Result<(), E> {
-        let cap = self.limits.max_walk_entries.min(self.max_names());
-        let mut seen = 0usize;
-        let root = self.inode(ROOT_INO).map_err(E::from)?;
+        crate::walk::drive(self, |reader, entry| visit(reader, entry))
+    }
+}
+
+/// The ext family's half of the shared resolution: a directory listing to find a name in, and
+/// an inode number to come back to a directory by.
+impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
+    /// An inode number, not an inode: the descent holds one per component, and an [`Inode`]
+    /// carries its inline attribute region — the same reason the walk's frontier holds a
+    /// number. The inode is read again on the way back up, which happens once per `..`.
+    type Ancestor = u32;
+
+    /// The number and the inode both, which is what a lookup hands back: a caller that has
+    /// resolved a path has the inode it named without reading it a second time.
+    type Node = (u32, Inode);
+
+    type Error = ReadError;
+
+    fn root_node(&mut self) -> Result<Self::Node, ReadError> {
+        Ok((ROOT_INO, self.inode(ROOT_INO)?))
+    }
+
+    fn ancestor_of(&self, node: &Self::Node) -> u32 {
+        node.0
+    }
+
+    fn node_at(&mut self, ancestor: u32) -> Result<Self::Node, ReadError> {
+        Ok((ancestor, self.inode(ancestor)?))
+    }
+
+    fn is_directory(&self, node: &Self::Node) -> bool {
+        is_dir(&node.1)
+    }
+
+    fn find_name(
+        &mut self,
+        dir: &Self::Node,
+        name: &[u8],
+    ) -> Result<Option<Self::Node>, ReadError> {
+        // Streamed with an early stop rather than listed and searched: a resolution asks
+        // for one name, and a large directory read whole per component would cost every
+        // entry's allocation to use one of them.
+        let mut found = None;
+        self.for_each_dir_entry(&dir.1, |e| {
+            Ok(if e.name == name {
+                found = Some(e.inode);
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            })
+        })?;
+        match found {
+            Some(ino) => Ok(Some((ino, self.inode(ino)?))),
+            None => Ok(None),
+        }
+    }
+
+    fn read_link(&mut self, node: &Self::Node, path: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
+        if !is_symlink(&node.1) {
+            return Ok(None);
+        }
+        // A target longer than a path can be is refused before it is read, so a crafted
+        // `i_size` cannot make one link allocate the whole image.
+        if node.1.size > MAX_PATH as u64 {
+            return Err(self.not_found(path));
+        }
+        Ok(Some(self.read_symlink(&node.1)?))
+    }
+
+    fn not_found(&self, path: &[u8]) -> ReadError {
+        ReadError::NotFound {
+            path: path.to_vec(),
+        }
+    }
+
+    fn not_a_directory(&self, _node: &Self::Node, path: &[u8]) -> ReadError {
+        ReadError::NotADirectory {
+            path: path.to_vec(),
+        }
+    }
+
+    fn too_many_links(&self, path: &[u8]) -> ReadError {
+        ReadError::SymlinkLoop {
+            path: path.to_vec(),
+        }
+    }
+}
+
+/// The ext family's half of the shared walk: an inode number on the frontier, an inode
+/// number as the cycle key, and a directory listing as the children.
+impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
+    /// A path and an inode number, not an inode: an [`Inode`] carries its inline attribute
+    /// region, which is the inode size less 128 bytes, and holding one per pending name
+    /// would make the frontier cost what the whole tree does. The inode is read at the pop
+    /// instead, which is the same one read per name the listing would have done — moved,
+    /// not added.
+    type Pending = (Vec<u8>, u32);
+    type Entry = WalkEntry;
+    type Key = u32;
+    type Error = ReadError;
+
+    fn cap(&mut self) -> usize {
+        self.limits.max_walk_entries.min(self.max_names())
+    }
+
+    fn seed(&mut self) -> Result<crate::walk::Seed<Self>, ReadError> {
+        let root = self.inode(ROOT_INO)?;
         // The root is descended into like any other directory, so it is checked to be one
-        // like any other. It was the single descent that was not: every child below is
-        // guarded, and so is each component `resolve` walks through.
+        // like any other — as every child below it is, and as each component `resolve`
+        // walks through is.
         //
         // What an unguarded root costs is not a wrong listing. A directory's logical length
         // is bounded by the blocks it could materially hold; a regular file's is not, because
@@ -4109,72 +4042,37 @@ impl<R: Read + Seek> Reader<R> {
         // single entry exists to read — tens of gigabytes from an image of a few kilobytes,
         // reached by a plain `walk()` with no sink involved.
         if !is_dir(&root) {
-            return Err(E::from(ReadError::NotADirectory {
+            return Err(ReadError::NotADirectory {
                 path: b"/".to_vec(),
-            }));
+            });
         }
-        // Track the directory inodes descended into: a well-formed tree reaches each
-        // exactly once, so declining to re-descend a repeat bounds the walk against a
-        // directory cycle or a hard-linked directory rather than fanning out.
-        let mut visited = HashSet::new();
-        visited.insert(ROOT_INO);
-        // An explicit stack of the names reached and not yet visited, rather than recursion,
-        // so a tree nested arbitrarily deep is walked without a call-stack bound. The root
-        // has no name, so the walk seeds from its children. Children are pushed in reverse
-        // name order, so popping yields them in order and a directory's whole subtree is
-        // emitted before its next sibling — the documented depth-first, names-sorted order
-        // the recursion produced.
-        //
-        // Each element is a path and an inode number, not an inode: an `Inode` carries its
-        // inline attribute block, which is the inode size less 128 bytes, and holding one per
-        // pending name would make the frontier cost what the whole tree does. The inode is
-        // read at the pop instead, which is the same one read per name the listing would
-        // have done — moved, not added.
-        let mut stack = self.walk_children(&root, &[]).map_err(E::from)?;
-        // The root's own children are the first frontier, and answer to the bound below
-        // like every later one.
-        if stack.len() > cap {
-            return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-        }
-        while let Some((path, number)) = stack.pop() {
-            if seen >= cap {
-                return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-            }
-            seen += 1;
-            let inode = self.inode(number).map_err(E::from)?;
-            // Descend into a subdirectory only the first time its inode is reached; a
-            // repeat is a directory cycle or hard link, so re-descending would not
-            // terminate.
-            if is_dir(&inode) && visited.insert(number) {
-                let children = self.walk_children(&inode, &path).map_err(E::from)?;
-                // The cap bounds the names *pushed*, not only the names popped. Each
-                // iteration may push a whole directory's worth of children, and distinct
-                // directory inodes may map the same data blocks, so bounding pops alone
-                // would leave the stack bounded by the cap times a directory's fan-out
-                // rather than by the cap. Every name pushed is a name this walk must yield,
-                // so a frontier that already exceeds what is left of the cap is a walk that
-                // has exceeded it — reported here rather than after the memory is spent.
-                if seen
-                    .saturating_add(stack.len())
-                    .saturating_add(children.len())
-                    > cap
-                {
-                    return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-                }
-                stack.extend(children);
-            }
-            visit(
-                self,
-                WalkEntry {
-                    path,
-                    number,
-                    inode,
-                },
-            )?;
-        }
-        Ok(())
+        let children = self.walk_children(&root, &[])?;
+        Ok((children, vec![ROOT_INO]))
     }
 
+    fn resolve(&mut self, (path, number): Self::Pending) -> Result<WalkEntry, ReadError> {
+        let inode = self.inode(number)?;
+        Ok(WalkEntry {
+            path,
+            number,
+            inode,
+        })
+    }
+
+    fn descend_key(&self, entry: &WalkEntry) -> Option<u32> {
+        is_dir(&entry.inode).then_some(entry.number)
+    }
+
+    fn children(&mut self, entry: &WalkEntry) -> Result<Vec<Self::Pending>, ReadError> {
+        self.walk_children(&entry.inode, &entry.path)
+    }
+
+    fn too_large(limit: usize) -> ReadError {
+        ReadError::WalkTooLarge { limit }
+    }
+}
+
+impl<R: Read + Seek> Reader<R> {
     /// The names below directory `inode`, each as a path and an inode number, in reverse
     /// name order so a stack pops them in name order. `.` and `..` are skipped.
     ///
@@ -4194,15 +4092,11 @@ impl<R: Read + Seek> Reader<R> {
             // below it, so no path is built from either. A name no directory could hold
             // needs no test here: `read_dir` above either refused it or left it out, so
             // one never reaches this loop.
-            if e.name == b"." || e.name == b".." {
+            if crate::path::is_dot_entry(&e.name) {
                 continue;
             }
-            let mut path = prefix.to_vec();
-            path.push(b'/');
-            path.extend_from_slice(&e.name);
-            if path.len() > MAX_PATH {
-                return Err(ReadError::PathTooLong { limit: MAX_PATH });
-            }
+            let path = crate::walk::child_path(prefix, &e.name)
+                .ok_or(ReadError::PathTooLong { limit: MAX_PATH })?;
             children.push((path, e.inode));
         }
         Ok(children)
@@ -4243,6 +4137,14 @@ impl From<ReadError> for TreeError {
 /// stats and then reads a file costs no second lookup of it.
 impl<R: Read + Seek> FsTree for Reader<R> {
     type Node = Inode;
+
+    fn family(&self) -> Family {
+        Family::Ext
+    }
+
+    fn max_file_bytes(&self) -> u64 {
+        self.limits.max_file_bytes
+    }
 
     fn walk_tree<E, F>(&mut self, mut visit: F) -> Result<(), E>
     where
@@ -4320,32 +4222,13 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         }
         Ok(self.read_symlink(node)?)
     }
-
-    fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
-        let cap = self.limits.max_file_bytes;
-        if size > cap {
-            return Err(TreeError::LimitExceeded {
-                family: Family::Ext,
-                detail: format!(
-                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read \
-                     is held to",
-                    crate::escape::printable(path)
-                ),
-            });
-        }
-        Ok(())
-    }
 }
 
-/// Either failure a walk through the shared surface can have: the filesystem's, which
-/// `walk_with` produces, or the visitor's, which is the sink's own.
-enum WalkFail<E> {
-    Read(ReadError),
-    /// A node the walk reached that the shared frame cannot describe.
-    Tree(TreeError),
-    Visitor(E),
-}
+/// The shared walk failure over this family's read error.
+type WalkFail<E> = crate::tree::WalkFail<ReadError, E>;
 
+/// What makes `?` on a [`ReadError`] work inside a walk through the shared surface. Written
+/// per family because a blanket implementation would collide with the reflexive one.
 impl<E> From<ReadError> for WalkFail<E> {
     fn from(err: ReadError) -> Self {
         WalkFail::Read(err)
@@ -4950,7 +4833,7 @@ mod tests {
 
         let report = r.scan();
         let found = report
-            .anomalies
+            .anomalies()
             .iter()
             .find(|a| a.category == Category::Xattr && a.location.inode == Some(ino))
             .expect("the scan names the inode holding it");
@@ -5028,6 +4911,69 @@ mod tests {
         assert_eq!(at % 4096, 0, "the image ends on a block boundary");
         bytes.extend_from_slice(block);
         (at / 4096) as u64
+    }
+
+    #[test]
+    fn a_superblock_whose_geometry_would_scan_nothing_is_refused_at_open() {
+        // `group_count` is the addressable span over `s_blocks_per_group`, rounded up,
+        // and every scan loop runs once per group — so a field that makes the count zero
+        // makes every verdict "clean" without a byte being examined. The divisor fields
+        // have been refused at open for exactly that reason; these are the two fields of
+        // the subtraction, which reach the same zero through the other side. Lenient,
+        // because the forensic caller a scan verdict serves opens leniently.
+        let image = format(TreeBuilder::new(), 64 * MIB, opts_no_csum())
+            .unwrap()
+            .into_bytes();
+        // Offsets into the primary superblock at byte 1024: `s_blocks_count_lo` at 0x04,
+        // `s_first_data_block` at 0x14.
+        for (field, offset, value) in [
+            ("s_blocks_count", 0x04usize, 0u32),
+            ("s_first_data_block", 0x14, 0xffff_ffff),
+        ] {
+            let mut mangled = image.clone();
+            crate::ondisk::put_u32(&mut mangled[1024..], offset, value);
+            let refused = Reader::open_with(
+                std::io::Cursor::new(&mangled),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .map(|_| ());
+            assert!(
+                matches!(
+                    &refused,
+                    Err(ReadError::Parse(ParseError::InvalidField { field: f, .. }))
+                        if *f == field
+                ),
+                "{field}: {refused:?}"
+            );
+        }
+
+        // The subtraction's other zero: at a one-kibibyte block the canonical first data
+        // block is one, so a block count of one passes a zero check and a first-data-block
+        // check while the addressable span is still nothing. The refusal has to compare
+        // the two fields, not each against a constant.
+        let mut small = opts_no_csum();
+        small.feature = small.feature.with_block_size(1024);
+        let image = format(TreeBuilder::new(), 16 * MIB, small)
+            .unwrap()
+            .into_bytes();
+        let mut mangled = image.clone();
+        crate::ondisk::put_u32(&mut mangled[1024..], 0x04, 1);
+        let refused = Reader::open_with(
+            std::io::Cursor::new(&mangled),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .map(|_| ());
+        assert!(
+            matches!(
+                &refused,
+                Err(ReadError::Parse(ParseError::InvalidField {
+                    field: "s_blocks_count",
+                    value: 1,
+                    ..
+                }))
+            ),
+            "one block at a one-kibibyte block size scans nothing: {refused:?}"
+        );
     }
 
     #[test]
@@ -5910,9 +5856,9 @@ mod tests {
                 .expect("a well-formed image verifies clean");
             let report = r.scan();
             assert!(
-                report.anomalies.is_empty(),
+                report.anomalies().is_empty(),
                 "a clean image scans clean, got {:?}",
-                report.anomalies
+                report.anomalies()
             );
         }
 
@@ -5952,7 +5898,7 @@ mod tests {
         ));
         assert!(
             r.scan()
-                .anomalies
+                .anomalies()
                 .iter()
                 .any(|a| a.category == Category::Bitmap),
             "scan reports a Bitmap anomaly"
@@ -5970,7 +5916,7 @@ mod tests {
         ));
         assert!(
             r.scan()
-                .anomalies
+                .anomalies()
                 .iter()
                 .any(|a| a.category == Category::Directory),
             "scan reports a Directory anomaly"
@@ -5988,7 +5934,7 @@ mod tests {
         ));
         assert!(
             r.scan()
-                .anomalies
+                .anomalies()
                 .iter()
                 .any(|a| a.category == Category::Xattr),
             "scan reports an Xattr anomaly"
@@ -6037,9 +5983,9 @@ mod tests {
         r.verify_checksums()
             .expect("a well-formed two-level htree verifies clean");
         assert!(
-            r.scan().anomalies.is_empty(),
+            r.scan().anomalies().is_empty(),
             "a clean two-level htree scans clean, got {:?}",
-            r.scan().anomalies
+            r.scan().anomalies()
         );
 
         // And every name survives the index the checksum pass just walked past.
@@ -6051,6 +5997,57 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names.len(), 800, "every name survives the two-level index");
+    }
+
+    #[test]
+    fn an_index_block_whose_limit_cannot_place_its_tail_is_a_fault_not_a_clean_block() {
+        // The fields that place an index block's checksum tail are inside what the
+        // checksum covers, so a crafted `limit` that pushes the tail past the block is
+        // the one corruption shape that could turn the whole block invisible to
+        // verification: with the tail unplaceable there is nothing to compare, and a
+        // clean answer would bless every byte of the block unread. The kernel fails
+        // verification on exactly this shape, and so must this pass.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut src = TreeBuilder::new().directory(b"/bigdir".to_vec(), Metadata::new(0o755, time));
+        for i in 0..200u32 {
+            let mut name = format!("/bigdir/entry-{i:04}").into_bytes();
+            name.resize(b"/bigdir/".len() + 100, b'x');
+            src = src.file(name, Vec::new(), Metadata::new(0o644, time));
+        }
+        let mut bytes = format(src, 64 * MIB, opts()).unwrap().into_bytes();
+
+        let root_off = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let (_, dir) = r.lookup(b"/bigdir").expect("the directory is present");
+            assert!(
+                dir.flags.contains(InodeFlags::INDEX),
+                "a 200-entry directory must be hash-indexed"
+            );
+            r.verify_checksums().expect("clean before the edit");
+            let bs = 1024usize << r.superblock().log_block_size;
+            usize::try_from(r.extent_leaves(&dir).unwrap()[0].start).unwrap() * bs
+        };
+
+        // The root's stored capacity. 0xffff places the tail far past the block, so the
+        // verifier that trusted it would find nothing to compare and wave the block
+        // through — with every other byte of the block free to differ.
+        put_u16(&mut bytes[root_off..], DX_ROOT_COUNT_OFFSET, 0xffff);
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let err = r
+            .verify_checksums()
+            .expect_err("an unplaceable tail is a fault");
+        assert!(
+            matches!(
+                err,
+                ReadError::Parse(ParseError::InvalidField {
+                    structure: "DxCountLimit",
+                    field: "limit",
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -6082,7 +6079,7 @@ mod tests {
         {
             let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
             r.verify_checksums().expect("the orphan tails verify");
-            assert!(r.scan().anomalies.is_empty());
+            assert!(r.scan().anomalies().is_empty());
         }
 
         let bs = 4096u64;
@@ -6106,7 +6103,7 @@ mod tests {
         ));
         assert!(
             r.scan()
-                .anomalies
+                .anomalies()
                 .iter()
                 .any(|a| a.category == Category::Orphan),
             "scan reports an Orphan anomaly"
@@ -6127,7 +6124,7 @@ mod tests {
         let mut r = Reader::open(std::io::Cursor::new(&c)).unwrap();
         assert!(
             r.scan()
-                .anomalies
+                .anomalies()
                 .iter()
                 .any(|a| a.category == Category::Orphan),
             "a feature with no file behind it is an Orphan anomaly"
@@ -6623,7 +6620,7 @@ mod tests {
         );
         assert_eq!(
             report.anomalies().len(),
-            FindingReport::MAX_FINDINGS,
+            crate::FindingReport::MAX_FINDINGS,
             "a truncated report holds exactly the cap"
         );
         // The truncation reaches every projection: a consumer of any of them must be able
@@ -7936,8 +7933,8 @@ mod tests {
 
     /// A report of two anomalies at a 4 KiB block, for the golden document tests.
     fn golden_report() -> ScanReport {
-        ScanReport {
-            anomalies: vec![
+        ScanReport::new(
+            vec![
                 Anomaly {
                     severity: Severity::Integrity,
                     category: Category::Inode,
@@ -7955,10 +7952,10 @@ mod tests {
                     detail: "note".to_string(),
                 },
             ],
-            truncated: false,
-            cap: FindingReport::MAX_FINDINGS,
-            block_size: 4096,
-        }
+            false,
+            crate::FindingReport::MAX_FINDINGS,
+            4096,
+        )
     }
 
     #[test]
@@ -8033,17 +8030,17 @@ mod tests {
         );
 
         // Without an artifact URI and with no coordinates, a result carries no `locations`.
-        let bare = ScanReport {
-            anomalies: vec![Anomaly {
+        let bare = ScanReport::new(
+            vec![Anomaly {
                 severity: Severity::Conformance,
                 category: Category::Superblock,
                 location: Location::default(),
                 detail: "x".to_string(),
             }],
-            truncated: false,
-            cap: FindingReport::MAX_FINDINGS,
-            block_size: 4096,
-        };
+            false,
+            crate::FindingReport::MAX_FINDINGS,
+            4096,
+        );
         assert!(bare.to_report().to_sarif(None).contains(
             "\"ruleId\":\"ext/superblock\",\"level\":\"warning\",\"message\":{\"text\":\"x\"},\
              \"properties\":{\"severity\":\"conformance\",\"family\":\"ext\",\"category\":\"superblock\"}"
@@ -8305,6 +8302,9 @@ mod tests {
                 b"/usr/lib/modules".to_vec(),
                 m(0o777),
             )
+            // The other shape a distribution's tree has: a relative target that ascends out
+            // of the directory holding the link before it descends again.
+            .symlink(b"/usr/lib64".to_vec(), b"../lib".to_vec(), m(0o777))
             // A cycle, and a link to nowhere.
             .symlink(b"/loop_a".to_vec(), b"loop_b".to_vec(), m(0o777))
             .symlink(b"/loop_b".to_vec(), b"loop_a".to_vec(), m(0o777))
@@ -8335,6 +8335,54 @@ mod tests {
 
         // The root is the root.
         assert_eq!(r.lookup(b"/").unwrap().0, 2);
+    }
+
+    #[test]
+    fn a_parent_component_ascends_whether_a_caller_wrote_it_or_a_link_stored_it() {
+        let image = format(merged_usr(), 64 * MIB, opts()).unwrap();
+        let mut r = Reader::open(std::io::Cursor::new(image.as_bytes())).unwrap();
+        let (direct, _) = r.lookup(b"/usr/lib/modules").expect("/usr/lib/modules");
+
+        for path in [
+            // Written by the caller.
+            &b"/usr/lib/../lib/modules"[..],
+            b"/etc/../usr/lib/modules",
+            // Stored in the image, which is the case a distribution's `/usr/lib64` is: the
+            // target ascends out of `/usr` and comes back down into it.
+            b"/usr/lib64/modules",
+            // And an ascent out of an expansion rather than out of what the caller wrote —
+            // the link is reached through another link.
+            b"/lib/modules/../modules",
+        ] {
+            assert_eq!(
+                r.lookup(path).map(|(number, _)| number),
+                Ok(direct),
+                "{}",
+                String::from_utf8_lossy(path)
+            );
+        }
+
+        // At the root there is nothing to ascend to, so a run of them stays there rather
+        // than naming anything outside the image — however many a caller writes, and
+        // whether the resolution started there or climbed back to it.
+        for path in [&b"/.."[..], b"/../..", b"..", b"/usr/lib/../../../.."] {
+            assert_eq!(
+                r.lookup(path).map(|(number, _)| number),
+                Ok(ROOT_INO),
+                "{}",
+                String::from_utf8_lossy(path)
+            );
+        }
+        assert_eq!(r.lookup(b"/../etc/fstab").map(|(n, _)| n), {
+            r.lookup(b"/etc/fstab").map(|(n, _)| n)
+        });
+
+        // An ascent is a component like any other, so one below a file is the same refusal
+        // any other component below one gets.
+        assert!(matches!(
+            r.lookup(b"/etc/fstab/.."),
+            Err(ReadError::NotADirectory { .. })
+        ));
     }
 
     #[test]
@@ -8402,15 +8450,15 @@ mod tests {
             let csum = r.checksummer();
             (table, r.superblock().inode_size as usize, csum)
         };
-        let seed = csum.base_seed();
         let off = table * 4096; // inode 1 is the first entry
 
         // Zero the extra area, so the inode declares none and carries no high half.
         bytes[off + 0x80..off + inode_size].fill(0);
         put_u16(&mut bytes[off..], Inode::CHECKSUM_LO_OFFSET, 0);
-        let mut c = csum.crc32c(seed, &1u32.to_le_bytes());
-        c = csum.crc32c(c, &0u32.to_le_bytes()); // i_generation
-        c = csum.crc32c(c, &bytes[off..off + inode_size]);
+        // Stamped through the same recipe the writer and the reader use, so what this
+        // fixture asserts is the reader's handling of a missing high half rather than this
+        // test's own transcription of the fold.
+        let c = recipe::inode(&csum, 1, 0, &bytes[off..off + inode_size], false);
         put_u16(&mut bytes[off..], Inode::CHECKSUM_LO_OFFSET, c as u16);
 
         let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
@@ -8444,16 +8492,13 @@ mod tests {
             let csum = r.checksummer();
             (table, r.superblock().inode_size as usize, csum)
         };
-        let seed = csum.base_seed();
         // Inode 2, the root.
         let off = table * 4096 + inode_size;
 
         crate::ondisk::put_u32(&mut bytes[off..], 0x24, 0xdead_beef); // l_i_version
         put_u16(&mut bytes[off..], Inode::CHECKSUM_LO_OFFSET, 0);
         put_u16(&mut bytes[off..], Inode::CHECKSUM_HI_OFFSET, 0);
-        let mut c = csum.crc32c(seed, &2u32.to_le_bytes());
-        c = csum.crc32c(c, &0u32.to_le_bytes());
-        c = csum.crc32c(c, &bytes[off..off + inode_size]);
+        let c = recipe::inode(&csum, 2, 0, &bytes[off..off + inode_size], true);
         put_u16(&mut bytes[off..], Inode::CHECKSUM_LO_OFFSET, c as u16);
         put_u16(
             &mut bytes[off..],

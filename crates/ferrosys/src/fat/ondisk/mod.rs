@@ -32,7 +32,6 @@
 
 mod boot;
 mod dirent;
-mod time;
 
 pub use boot::{
     BOOT_SIGNATURE, BootSector, BootSectorTail, EXTENDED_BOOT_SIGNATURE, FSINFO_LEAD_SIGNATURE,
@@ -42,9 +41,36 @@ pub use dirent::{
     Attributes, DIR_ENTRY_SIZE, DirEntry, LFN_CHARS_PER_ENTRY, LFN_LAST_ENTRY, LFN_MAX_ENTRIES,
     LFN_PADDING, LfnEntry, NAME_DELETED, NAME_END, NAME_LEADING_E5, lfn_checksum,
 };
-pub use time::{
-    DosTimestamp, TIME_SECS_MAX, TIME_SECS_MIN, decode_time, encode_time, time_is_representable,
-};
+
+/// The name a space-padded FAT text field holds: its bytes up to the trailing padding.
+///
+/// Every fixed-width text field FAT defines — the eleven-byte short name, the eleven-byte
+/// volume label, the eight-byte OEM name, the eight-byte type string — is padded on the
+/// right with spaces, so the field is not the name: `FAT32   ` is a five-character string in
+/// an eight-byte field. Every consumer that reads one of those fields wants the name, and
+/// this is where the padding rule is stated.
+///
+/// Only the right end is trimmed. A leading space is a byte the field actually holds, and a
+/// name trimmed at both ends would not be the name on the volume. A NUL is not this format's
+/// padding either, so it survives — which is what keeps a field a foreign tool filled with
+/// something other than spaces reported as it stands.
+///
+/// ```
+/// # use ferrosys::fat::ondisk::unpadded;
+/// assert_eq!(unpadded(b"FAT32   "), b"FAT32");
+/// assert_eq!(unpadded(b"        "), b"");
+/// // The left end is untouched, and a NUL is not padding here.
+/// assert_eq!(unpadded(b" MSDOS5.0"), b" MSDOS5.0");
+/// assert_eq!(unpadded(b"ab\0     "), b"ab\0");
+/// ```
+#[must_use]
+pub fn unpadded(field: &[u8]) -> &[u8] {
+    let end = field
+        .iter()
+        .rposition(|&b| b != b' ')
+        .map_or(0, |last| last + 1);
+    &field[..end]
+}
 
 /// A failure recovering an on-disk structure from bytes.
 ///

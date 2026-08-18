@@ -87,8 +87,8 @@ pub fn decode_acl(bytes: &[u8]) -> Result<Acl, AclError> {
                 reason: "truncated entry",
             });
         }
-        let tag = u16::from_le_bytes([rest[0], rest[1]]);
-        let perm = u16::from_le_bytes([rest[2], rest[3]]);
+        let tag = get_u16(rest, 0);
+        let perm = get_u16(rest, 2);
         rest = &rest[4..];
         // Only the two tags that name somebody store an id, so how far this entry reaches
         // depends on the tag it opened with.
@@ -98,7 +98,7 @@ pub fn decode_acl(bytes: &[u8]) -> Result<Acl, AclError> {
                     reason: "truncated entry id",
                 });
             }
-            let id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+            let id = get_u32(rest, 0);
             rest = &rest[4..];
             id
         } else {
@@ -117,6 +117,10 @@ const IBODY_HEADER_LEN: usize = 4;
 /// The external block header (`struct ext4_xattr_header`): magic, refcount, block
 /// count, hash, checksum, and three reserved words.
 const BLOCK_HEADER_LEN: usize = 32;
+
+/// Byte offset of `h_checksum` within an attribute block's header. The field participates in
+/// its own checksum as four zero bytes, which is how [`encode_block`] leaves it.
+pub(crate) const CHECKSUM_OFFSET: usize = 16;
 /// The fixed part of one entry (`struct ext4_xattr_entry`) before its name.
 const ENTRY_HEADER_LEN: usize = 16;
 
@@ -422,7 +426,7 @@ pub(crate) fn encode_block(attrs: &[Xattr], block_size: usize, signed: bool) -> 
     put_u32(&mut buf, 4, 1); // h_refcount: this inode alone
     put_u32(&mut buf, 8, 1); // h_blocks: one block
     put_u32(&mut buf, 12, block_hash(&hashes));
-    // h_checksum (offset 16) stays zero: written through the checksum seam only
+    // h_checksum stays zero here: it is written through the checksum seam only
     // when metadata checksums are on.
     buf
 }

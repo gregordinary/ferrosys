@@ -22,6 +22,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use crate::detect::{DetectError, DetectOptions, Filesystem};
 use crate::fat::geometry::{FatType, layout_from_boot};
 use crate::fat::ondisk::BootSector;
+use crate::io::read_exact_at;
 
 /// Whether the FAT family claims the image, and as what.
 ///
@@ -33,27 +34,19 @@ pub(crate) fn claim<R: Read + Seek>(
     mut src: R,
     options: &DetectOptions,
 ) -> Result<Option<Filesystem>, DetectError> {
-    let end = src.seek(SeekFrom::End(0)).map_err(io)?;
+    let end = src.seek(SeekFrom::End(0))?;
     let Some(available) = end.checked_sub(options.base) else {
         return Ok(None);
     };
-    if src.seek(SeekFrom::Start(options.base)).is_err() {
-        return Ok(None);
-    }
-    let mut sector = [0u8; BootSector::SIZE];
-    match src.read_exact(&mut sector) {
-        Ok(()) => {}
+    let sector = match read_exact_at(&mut src, options.base, BootSector::SIZE) {
+        Ok(sector) => sector,
+        // A source too short to hold a boot sector is an answer about the image rather than
+        // a failure of the environment, so the family declines to claim it and detection
+        // carries on to the next.
         Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(io(e)),
-    }
+        Err(e) => return Err(e.into()),
+    };
     Ok(classify(&sector, available).map(Filesystem::Fat))
-}
-
-fn io(e: std::io::Error) -> DetectError {
-    DetectError::Io {
-        kind: e.kind(),
-        message: e.to_string(),
-    }
 }
 
 /// The type a boot sector classifies to, or `None` where the sector is not a FAT volume's.
@@ -68,7 +61,7 @@ fn io(e: std::io::Error) -> DetectError {
 /// makes "the sector count fits" answerable. A volume may be smaller than the region it sits
 /// in — a partition is usually larger than its filesystem — so the test is that the count
 /// fits, not that it matches.
-fn classify(sector: &[u8; BootSector::SIZE], available: u64) -> Option<FatType> {
+fn classify(sector: &[u8], available: u64) -> Option<FatType> {
     let boot = BootSector::read_from(sector).ok()?;
     layout_from_boot(&boot, available).ok().map(|l| l.fat_type)
 }

@@ -38,11 +38,19 @@ esac
 
 PREFIX="${1:-${FERROSYS_E2FSPROGS_PREFIX:-$HOME/.cache/ferrosys/e2fsprogs/$VERSION}}"
 
+# What a tool answers its version with. Every one of these takes `-V` and prints its
+# banner on the standard error, and `resize2fs` exits non-zero after printing it -- so
+# the banner is read and the status is dropped. Reading a probe's output rather than
+# its exit status is what keeps the fast path fast: under `pipefail` a status of 1 here
+# fails the whole probe, and a cache that never reports itself complete is a cache that
+# rebuilds from source on every run.
+banner() { "$1" -V 2>&1 || true; }
+
 # Caching fast path: the install is complete only when *every* tool reports the
 # pinned version. A cancelled build that installed only some tools is not trusted.
 complete=1
 for t in "${TOOLS[@]}"; do
-    if ! { [ -x "$PREFIX/sbin/$t" ] && "$PREFIX/sbin/$t" -V 2>&1 | grep -qF "$t $VERSION "; }; then
+    if ! { [ -x "$PREFIX/sbin/$t" ] && banner "$PREFIX/sbin/$t" | grep -qF "$t $VERSION "; }; then
         complete=0
         break
     fi

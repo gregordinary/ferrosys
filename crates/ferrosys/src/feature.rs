@@ -38,174 +38,20 @@ pub(crate) const fn resize_inode_size(block_size: u32) -> u64 {
     block_size as u64 * (12 + apb + apb * apb)
 }
 
-/// Generates a typed feature-word newtype over a `u32` bitfield.
-///
-/// Each generated type wraps the little-endian on-disk feature word for one
-/// superblock feature category. Flags are associated constants; set operations are
-/// `BitOr`/`BitOrAssign`/`without`, and `contains` tests membership.
-///
-/// Each flag is declared with the on-disk name it is known by outside this crate —
-/// `EXTENTS("extent")` — so one table carries both. The Rust symbol renders
-/// [`Debug`](fmt::Debug), which keeps a diagnostic legible without a lookup table;
-/// the on-disk name drives `names` and `from_name`, which is the vocabulary a user
-/// and every other ext4 tool speak.
-macro_rules! feature_word {
-    (
-        $(#[$ty_doc:meta])*
-        $name:ident {
-            $(
-                $(#[$flag_doc:meta])*
-                $flag:ident($on_disk:literal) = $value:expr
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$ty_doc])*
-        #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
-        // A feature word serializes as the raw on-disk word it wraps, which is what
-        // `bits()` returns and what a superblock holds. The names are a projection of it
-        // (`FeatureSet::names`), not a second encoding of the same fact.
-        #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-        pub struct $name(u32);
+use crate::flags::named_flags;
 
-        impl $name {
-            /// The empty set — no features present.
-            pub const NONE: Self = Self(0);
-
-            $(
-                $(#[$flag_doc])*
-                pub const $flag: Self = Self($value);
-            )*
-
-            /// The (Rust symbol, on-disk name, bit) table for every flag this type
-            /// defines, in ascending bit order. It renders [`Debug`](fmt::Debug),
-            /// resolves on-disk names, and detects bits outside the known set.
-            const FLAGS: &'static [(&'static str, &'static str, u32)] = &[
-                $((stringify!($flag), $on_disk, $value),)*
-            ];
-
-            /// The raw little-endian on-disk feature word.
-            #[must_use]
-            pub const fn bits(self) -> u32 {
-                self.0
-            }
-
-            /// Wrap a raw on-disk feature word read from a superblock.
-            #[must_use]
-            pub const fn from_bits(bits: u32) -> Self {
-                Self(bits)
-            }
-
-            /// True when every flag set in `other` is also set in `self`.
-            #[must_use]
-            pub const fn contains(self, other: Self) -> bool {
-                self.0 & other.0 == other.0
-            }
-
-            /// True when no flags are set.
-            #[must_use]
-            pub const fn is_empty(self) -> bool {
-                self.0 == 0
-            }
-
-            /// `self` with every flag set in `other` cleared.
-            #[must_use]
-            pub const fn without(self, other: Self) -> Self {
-                Self(self.0 & !other.0)
-            }
-
-            /// The bits set in `self` that this type does not name — features an
-            /// implementation does not recognize. A non-empty result on an
-            /// `incompat` word means the image cannot be safely handled.
-            #[must_use]
-            pub const fn unknown_bits(self) -> u32 {
-                let mut known = 0u32;
-                let mut i = 0;
-                while i < Self::FLAGS.len() {
-                    known |= Self::FLAGS[i].2;
-                    i += 1;
-                }
-                self.0 & !known
-            }
-
-            /// The on-disk names of the flags set in `self`, in ascending bit order —
-            /// the names every ext4 tool prints and accepts, and the ones
-            /// [`FeatureSet::with_feature`] resolves.
-            ///
-            /// A bit this type does not name contributes no name;
-            /// [`unknown_bits`](Self::unknown_bits) is what reports those, so a set
-            /// carrying an unrecognized feature is never described as if it were
-            /// understood.
-            #[must_use]
-            pub fn names(self) -> Vec<&'static str> {
-                Self::FLAGS
-                    .iter()
-                    .filter(|(_, _, bit)| *bit != 0 && self.0 & bit == *bit)
-                    .map(|(_, name, _)| *name)
-                    .collect()
-            }
-
-            /// The single flag this word knows by the on-disk `name`, or `None` when the
-            /// name is not one of its own. The match is exact and lowercase, as the name
-            /// is written on disk and printed.
-            #[must_use]
-            pub fn from_name(name: &str) -> Option<Self> {
-                Self::FLAGS
-                    .iter()
-                    .find(|(_, on_disk, _)| *on_disk == name)
-                    .map(|(_, _, bit)| Self(*bit))
-            }
-        }
-
-        impl core::ops::BitOr for $name {
-            type Output = Self;
-            fn bitor(self, rhs: Self) -> Self {
-                Self(self.0 | rhs.0)
-            }
-        }
-
-        impl core::ops::BitOrAssign for $name {
-            fn bitor_assign(&mut self, rhs: Self) {
-                self.0 |= rhs.0;
-            }
-        }
-
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, concat!(stringify!($name), "("))?;
-                let mut first = true;
-                for (name, _, bit) in Self::FLAGS {
-                    if self.0 & bit == *bit && *bit != 0 {
-                        if !first {
-                            write!(f, " | ")?;
-                        }
-                        write!(f, "{name}")?;
-                        first = false;
-                    }
-                }
-                let unknown = self.unknown_bits();
-                if unknown != 0 {
-                    if !first {
-                        write!(f, " | ")?;
-                    }
-                    write!(f, "{unknown:#x}")?;
-                    first = false;
-                }
-                if first {
-                    write!(f, "NONE")?;
-                }
-                write!(f, ")")
-            }
-        }
-    };
-}
-
-feature_word! {
+named_flags! {
     /// The `compat` feature word (`s_feature_compat`, superblock offset `0x5C`).
     ///
     /// An implementation may read and write a filesystem carrying `compat` features
     /// it does not recognize; the flags advertise optional structures whose absence
     /// of support is harmless.
-    Compat {
+    #[derive(Default, Hash)]
+    // A feature word serializes as the raw on-disk word it wraps, which is what `bits()`
+    // returns and what a superblock holds. The names are a projection of it
+    // (`FeatureSet::names`), not a second encoding of the same fact.
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    Compat: u32 {
         /// `has_journal` (`0x0004`) — a jbd2 journal is present in the journal inode
         /// (inode 8), and `s_journal_inum` points at it.
         HAS_JOURNAL("has_journal") = 0x0004,
@@ -230,13 +76,15 @@ feature_word! {
     }
 }
 
-feature_word! {
+named_flags! {
     /// The `incompat` feature word (`s_feature_incompat`, superblock offset `0x60`).
     ///
     /// An implementation must refuse to touch a filesystem carrying an `incompat`
     /// feature it does not recognize: these change the on-disk format in ways that
     /// make unaware access unsafe.
-    Incompat {
+    #[derive(Default, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    Incompat: u32 {
         /// `filetype` (`0x0002`) — directory entries carry a file-type byte, so a
         /// reader need not fetch each inode to learn its type.
         FILETYPE("filetype") = 0x0002,
@@ -264,14 +112,16 @@ feature_word! {
     }
 }
 
-feature_word! {
+named_flags! {
     /// The `ro_compat` feature word (`s_feature_ro_compat`, superblock offset
     /// `0x64`).
     ///
     /// An implementation that does not recognize a `ro_compat` feature may still
     /// mount the filesystem read-only; writing without understanding the feature
     /// would corrupt the structures it governs.
-    RoCompat {
+    #[derive(Default, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    RoCompat: u32 {
         /// `sparse_super` (`0x0001`) — superblock and group-descriptor backups are
         /// kept only in group 0, group 1, and groups that are powers of 3, 5, or 7,
         /// rather than in every group.
@@ -1018,7 +868,6 @@ fn push_pin_word(out: &mut String, label: &str, bits: u32, names: &[&str], unkno
 /// result `mke2fs -t ext4 -O ^extent` produces. A profile seeds a format; it does not
 /// constrain what the image becomes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Profile {
     /// ext2: files mapped through the classic indirect-block scheme, with no journal. Its
     /// baseline is [`FeatureSet::EXT2`].
@@ -1065,22 +914,21 @@ impl Profile {
             Profile::Ext2
         }
     }
-
-    /// The `mke2fs -t` name for this profile: `"ext2"`, `"ext3"`, or `"ext4"`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Profile::Ext2 => "ext2",
-            Profile::Ext3 => "ext3",
-            Profile::Ext4 => "ext4",
-        }
-    }
 }
 
+// The `mke2fs -t` names, in the order the lineage runs.
+crate::naming::named_choice!(Profile {
+    Profile::Ext2 => "ext2",
+    Profile::Ext3 => "ext3",
+    Profile::Ext4 => "ext4",
+});
+
+crate::naming::serialize_as_name!(Profile);
+
 impl fmt::Display for Profile {
-    /// The `mke2fs -t` name: `ext2`, `ext3`, or `ext4`.
+    /// The name in [`Profile::as_str`]: `ext2`, `ext3`, or `ext4`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        f.write_str(self.as_str())
     }
 }
 
@@ -1326,9 +1174,9 @@ mod tests {
 
     #[test]
     fn profile_names_are_the_mke2fs_t_vocabulary() {
-        assert_eq!(Profile::Ext2.name(), "ext2");
-        assert_eq!(Profile::Ext3.name(), "ext3");
-        assert_eq!(Profile::Ext4.name(), "ext4");
+        assert_eq!(Profile::Ext2.as_str(), "ext2");
+        assert_eq!(Profile::Ext3.as_str(), "ext3");
+        assert_eq!(Profile::Ext4.as_str(), "ext4");
         // Display renders the same name.
         assert_eq!(Profile::Ext4.to_string(), "ext4");
         assert_eq!(format!("{}", Profile::Ext2), "ext2");

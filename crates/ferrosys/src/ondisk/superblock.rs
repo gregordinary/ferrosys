@@ -18,6 +18,56 @@ use super::{get_arr, get_u8, get_u16, get_u32, join64, put_arr, put_u8, put_u16,
 /// The ext4 superblock magic (`s_magic`): `0xEF53`.
 pub const SUPERBLOCK_MAGIC: u16 = 0xef53;
 
+/// The name a NUL-padded superblock text field holds: its bytes up to the first NUL.
+///
+/// ext writes `s_volume_name` and `s_last_mounted` into fixed-width fields and pads what is
+/// left with NULs, so the field is not the name — a sixteen-byte volume field holding
+/// `rootfs` carries ten bytes that are not part of the label. Every consumer that reads one
+/// of those fields wants the name, and this is where the padding rule is stated.
+///
+/// The result is bytes, not text: a label is whatever the formatter that wrote it put there,
+/// so rendering it for a person goes through [`printable`](crate::printable) afterwards.
+///
+/// ```
+/// # use ferrosys::ext::ondisk::unpadded;
+/// assert_eq!(unpadded(b"rootfs\0\0\0\0\0\0\0\0\0\0"), b"rootfs");
+/// // A field filled to its width has no terminator, and is all name.
+/// assert_eq!(unpadded(b"0123456789abcdef"), b"0123456789abcdef");
+/// // An empty field is no name at all.
+/// assert_eq!(unpadded(&[0u8; 16]), b"");
+/// ```
+#[must_use]
+pub fn unpadded(field: &[u8]) -> &[u8] {
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    &field[..end]
+}
+
+/// The crc32c a superblock's bytes compute to: over the record up to its own checksum field
+/// at [`SuperBlock::CHECKSUM_OFFSET`].
+///
+/// Unlike every other metadata object, ext4 seeds this from `!0` rather than from the
+/// filesystem seed — so it does not go through the checksum seam, takes no per-filesystem
+/// state, and is the same function for the writer stamping a copy, the reader verifying one,
+/// and a re-identification recomputing one after moving the UUID. Whether the field is
+/// written at all is a question about the feature set, and stays with each caller.
+///
+/// The checksum covers the bytes an object *has*, so this takes the record's own bytes rather
+/// than a re-serialized [`SuperBlock`]: the format carries fields no formatter is obliged to
+/// leave zero and this crate does not model, and recomputing from a parsed record would
+/// silently zero every one of them.
+///
+/// # Panics
+///
+/// If `bytes` is shorter than [`SuperBlock::SIZE`].
+#[must_use]
+pub fn superblock_checksum(bytes: &[u8]) -> u32 {
+    assert!(
+        bytes.len() >= SuperBlock::SIZE,
+        "a whole superblock record is needed"
+    );
+    crate::crc32c::crc32c(!0, &bytes[..SuperBlock::CHECKSUM_OFFSET])
+}
+
 /// The `64bit` bit of `s_feature_incompat`, the feature that gives the block counts
 /// their high halves. Parsing consults it in the raw word rather than through the
 /// typed feature set, so the superblock stays decodable from its bytes alone.
@@ -176,6 +226,27 @@ impl SuperBlock {
     /// On-disk size of the superblock record.
     pub const SIZE: usize = 1024;
 
+    // The offsets of the fields something outside this module reaches by address rather than
+    // through the parsed record: identifying an image from its bytes, patching an identity in
+    // place, and checksumming the record all work on the raw 1024 bytes. Every other field's
+    // offset is named in its own documentation and written only here, because nothing else
+    // addresses it.
+
+    /// Byte offset of `s_magic`, which is what identifies the record as a superblock at all.
+    pub const MAGIC_OFFSET: usize = 0x38;
+    /// Byte offset of `s_feature_incompat`.
+    pub const FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+    /// Byte offset of `s_uuid`, sixteen bytes.
+    pub const UUID_OFFSET: usize = 0x68;
+    /// Byte offset of `s_volume_name`, sixteen bytes.
+    pub const VOLUME_NAME_OFFSET: usize = 0x78;
+    /// Byte offset of `s_checksum_seed`.
+    pub const CHECKSUM_SEED_OFFSET: usize = 0x270;
+    /// Byte offset of `s_checksum`, the last word of the record — and so the length of what
+    /// its checksum covers, which is why the two are one constant rather than
+    /// [`SIZE`](Self::SIZE)` - 4` in one place and `0x3fc` in another.
+    pub const CHECKSUM_OFFSET: usize = Self::SIZE - 4;
+
     /// A superblock with every field zero and the magic set. The materializer fills
     /// in geometry and features.
     #[must_use]
@@ -261,7 +332,7 @@ impl SuperBlock {
         put_u32(&mut b, 0x30, self.wtime);
         put_u16(&mut b, 0x34, self.mnt_count);
         put_u16(&mut b, 0x36, self.max_mnt_count);
-        put_u16(&mut b, 0x38, self.magic);
+        put_u16(&mut b, Self::MAGIC_OFFSET, self.magic);
         put_u16(&mut b, 0x3a, self.state);
         put_u16(&mut b, 0x3c, self.errors);
         put_u16(&mut b, 0x3e, self.minor_rev_level);
@@ -275,10 +346,10 @@ impl SuperBlock {
         put_u16(&mut b, 0x58, self.inode_size);
         put_u16(&mut b, 0x5a, self.block_group_nr);
         put_u32(&mut b, 0x5c, self.feature_compat);
-        put_u32(&mut b, 0x60, self.feature_incompat);
+        put_u32(&mut b, Self::FEATURE_INCOMPAT_OFFSET, self.feature_incompat);
         put_u32(&mut b, 0x64, self.feature_ro_compat);
-        put_arr(&mut b, 0x68, &self.uuid);
-        put_arr(&mut b, 0x78, &self.volume_name);
+        put_arr(&mut b, Self::UUID_OFFSET, &self.uuid);
+        put_arr(&mut b, Self::VOLUME_NAME_OFFSET, &self.volume_name);
         put_arr(&mut b, 0x88, &self.last_mounted);
         put_u16(&mut b, 0xce, self.reserved_gdt_blocks);
         put_u32(&mut b, 0xe0, self.journal_inum);
@@ -304,9 +375,9 @@ impl SuperBlock {
         put_u32(&mut b, 0x178, kb_lo);
         put_u32(&mut b, 0x17c, kb_hi);
         put_u32(&mut b, 0x248, self.overhead_clusters);
-        put_u32(&mut b, 0x270, self.checksum_seed);
+        put_u32(&mut b, Self::CHECKSUM_SEED_OFFSET, self.checksum_seed);
         put_u32(&mut b, 0x280, self.orphan_file_inum);
-        put_u32(&mut b, 0x3fc, self.checksum);
+        put_u32(&mut b, Self::CHECKSUM_OFFSET, self.checksum);
         b
     }
 
@@ -324,7 +395,7 @@ impl SuperBlock {
                 got: buf.len(),
             });
         }
-        let magic = get_u16(buf, 0x38);
+        let magic = get_u16(buf, Self::MAGIC_OFFSET);
         if magic != SUPERBLOCK_MAGIC {
             return Err(ParseError::BadMagic {
                 structure: "SuperBlock",
@@ -338,7 +409,7 @@ impl SuperBlock {
         // 32-bit filesystem's size — and with it every bound derived from it. The
         // feature word decides, read from the buffer being parsed.
         let hi = |off| {
-            if get_u32(buf, 0x60) & INCOMPAT_64BIT != 0 {
+            if get_u32(buf, Self::FEATURE_INCOMPAT_OFFSET) & INCOMPAT_64BIT != 0 {
                 get_u32(buf, off)
             } else {
                 0
@@ -374,10 +445,10 @@ impl SuperBlock {
             inode_size: get_u16(buf, 0x58),
             block_group_nr: get_u16(buf, 0x5a),
             feature_compat: get_u32(buf, 0x5c),
-            feature_incompat: get_u32(buf, 0x60),
+            feature_incompat: get_u32(buf, Self::FEATURE_INCOMPAT_OFFSET),
             feature_ro_compat: get_u32(buf, 0x64),
-            uuid: get_arr(buf, 0x68),
-            volume_name: get_arr(buf, 0x78),
+            uuid: get_arr(buf, Self::UUID_OFFSET),
+            volume_name: get_arr(buf, Self::VOLUME_NAME_OFFSET),
             last_mounted: get_arr(buf, 0x88),
             reserved_gdt_blocks: get_u16(buf, 0xce),
             journal_inum: get_u32(buf, 0xe0),
@@ -402,9 +473,9 @@ impl SuperBlock {
             checksum_type: get_u8(buf, 0x175),
             kbytes_written: join64(get_u32(buf, 0x178), get_u32(buf, 0x17c)),
             overhead_clusters: get_u32(buf, 0x248),
-            checksum_seed: get_u32(buf, 0x270),
+            checksum_seed: get_u32(buf, Self::CHECKSUM_SEED_OFFSET),
             orphan_file_inum: get_u32(buf, 0x280),
-            checksum: get_u32(buf, 0x3fc),
+            checksum: get_u32(buf, Self::CHECKSUM_OFFSET),
         })
     }
 }

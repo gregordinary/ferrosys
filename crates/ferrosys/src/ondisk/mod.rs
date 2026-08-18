@@ -51,10 +51,11 @@ pub(crate) use inode::{decode_device, encode_device};
 pub use orphan::{
     ORPHAN_BLOCK_MAGIC, ORPHAN_TAIL_LEN, orphan_entries_len, orphan_tail_bytes, read_orphan_tail,
 };
-pub use superblock::{SUPERBLOCK_MAGIC, SuperBlock};
+pub use superblock::{SUPERBLOCK_MAGIC, SuperBlock, superblock_checksum, unpadded};
 pub(crate) use xattr::{
-    block_len as xattr_block_len, encode_block, encode_inline, has_empty_name, longest_stored_name,
-    parse_block, parse_inline, split_for_storage,
+    CHECKSUM_OFFSET as XATTR_CHECKSUM_OFFSET, block_len as xattr_block_len, encode_block,
+    encode_inline, has_empty_name, longest_stored_name, parse_block, parse_inline,
+    split_for_storage,
 };
 pub use xattr::{decode_acl, encode_acl};
 

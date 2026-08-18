@@ -14,10 +14,11 @@
 //! from. An image whose string disagrees with its geometry is read by its geometry, and this
 //! is where that disagreement is visible.
 
-use std::fmt::Write as _;
 use std::fs::File;
 
-use ferrosys::fat::ondisk::{BootSector, BootSectorTail, EXTENDED_BOOT_SIGNATURE, FsInfo};
+use ferrosys::fat::ondisk::{
+    BootSector, BootSectorTail, EXTENDED_BOOT_SIGNATURE, FsInfo, unpadded,
+};
 use ferrosys::fat::{FatLayout, ReadError, Reader};
 
 use crate::args::InspectArgs;
@@ -119,10 +120,8 @@ fn table(
     label: Result<&Option<Vec<u8>>, &ReadError>,
     info: Result<&Option<FsInfo>, &ReadError>,
 ) -> String {
-    let mut s = String::new();
-    let mut line = |k: &str, v: String| {
-        let _ = writeln!(s, "{k:<28}{v}");
-    };
+    let mut rows = render::Rows::report();
+    let mut line = |k: &str, v: String| rows.row(k, v);
 
     let volume = match boot.tail {
         BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => volume,
@@ -135,10 +134,7 @@ fn table(
     );
     // The volume's own claim about its type, beside the count the envelope's variant was
     // derived from. No driver reads it, and a disagreement is visible here alone.
-    line(
-        "Type string:",
-        render::printable(trim_spaces(&volume.fs_type)),
-    );
+    line("Type string:", render::printable(unpadded(&volume.fs_type)));
     if volume.ext_boot_signature != EXTENDED_BOOT_SIGNATURE {
         // Without it the label, the serial number, and the type string are not fields at
         // all: they are whatever bytes happen to sit there. Legal, and ancient.
@@ -151,7 +147,7 @@ fn table(
             ),
         );
     }
-    line("OEM name:", render::printable(trim_spaces(&boot.oem_name)));
+    line("OEM name:", render::printable(unpadded(&boot.oem_name)));
     line("Media descriptor:", format!("0x{:02x}", boot.media));
     line("Bytes per sector:", layout.bytes_per_sector.to_string());
     line(
@@ -179,10 +175,8 @@ fn table(
     // The four structures only FAT32 has: a root that is a chain rather than a region, the
     // free-space hint, and the two backups.
     if let (Some(fat32), BootSectorTail::Fat32 { params, .. }) = (layout.fat32, boot.tail) {
-        s.push('\n');
-        let mut line = |k: &str, v: String| {
-            let _ = writeln!(s, "{k:<28}{v}");
-        };
+        rows.blank();
+        let mut line = |k: &str, v: String| rows.row(k, v);
         line("Root directory cluster:", fat32.root_cluster.to_string());
         line("Information sector:", fat32.fs_info_sector.to_string());
         line(
@@ -210,7 +204,7 @@ fn table(
             Err(_) => line("Free-space hints:", "<unreadable>".to_string()),
         }
     }
-    s
+    rows.finish()
 }
 
 /// A reserved sector a structure sits in, or `<none>` where the reserved region had no room
@@ -238,7 +232,7 @@ fn json(
     };
 
     let mut out = String::new();
-    let mut fat = crate::json::Obj::new(&mut out);
+    let mut fat = crate::json::Object::new(&mut out);
 
     let mut b = fat.obj("boot");
     match label {
@@ -249,15 +243,15 @@ fn json(
         Ok(None) | Err(_) => b.raw("volume_label", "null"),
     }
     b.bool("volume_label_readable", label.is_ok());
-    b.u64("volume_id", u64::from(volume.volume_id));
+    b.u64("volume_serial_number", u64::from(volume.volume_id));
     b.str("volume_serial", &render::volume_serial(volume.volume_id));
-    b.bytes("type_string", trim_spaces(&volume.fs_type));
+    b.bytes("type_string", unpadded(&volume.fs_type));
     b.bool(
         "extended_boot_record",
         volume.ext_boot_signature == EXTENDED_BOOT_SIGNATURE,
     );
     b.u64("drive_number", u64::from(volume.drive_number));
-    b.bytes("oem_name", trim_spaces(&boot.oem_name));
+    b.bytes("oem_name", unpadded(&boot.oem_name));
     b.u64("media", u64::from(boot.media));
     b.u64("bytes_per_sector", u64::from(layout.bytes_per_sector));
     b.u64("sectors_per_cluster", u64::from(layout.sectors_per_cluster));
@@ -328,35 +322,9 @@ fn json(
     out
 }
 
-/// A space-padded on-disk name, as the bytes before its trailing padding.
-///
-/// The padding is spaces rather than NULs on every field FAT pads, so a name is trimmed at
-/// the right rather than cut at the first zero — and only at the right, since a leading
-/// space is a byte the field actually holds.
-fn trim_spaces(bytes: &[u8]) -> &[u8] {
-    let end = bytes
-        .iter()
-        .rposition(|&b| b != b' ')
-        .map_or(0, |last| last + 1);
-    &bytes[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_padded_name_keeps_every_byte_but_its_trailing_spaces() {
-        assert_eq!(trim_spaces(b"mkfs.fat"), b"mkfs.fat");
-        assert_eq!(trim_spaces(b"FAT32   "), b"FAT32");
-        assert_eq!(trim_spaces(b"        "), b"");
-        // Only the right: a leading space is a byte the field holds, and a name trimmed at
-        // both ends would be a different name from the one on the volume.
-        assert_eq!(trim_spaces(b" MSDOS5.0"), b" MSDOS5.0");
-        // A NUL is not padding here, so it survives — which is what keeps a field that a
-        // foreign tool filled with something other than spaces reported as it stands.
-        assert_eq!(trim_spaces(b"ab\0     "), b"ab\0");
-    }
 
     #[test]
     fn mirroring_names_which_copies_are_live() {

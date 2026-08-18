@@ -3,3 +3,5 @@
 /book/book
 # Assembled Pages site (mdbook guide + rustdoc), produced only in CI
 /site
+# Bytecode the interpreter caches beside the consistency gates' scanners
+/ci/__pycache__

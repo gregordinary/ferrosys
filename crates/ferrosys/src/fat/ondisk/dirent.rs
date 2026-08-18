@@ -46,11 +46,11 @@ pub const LFN_PADDING: u16 = 0xFFFF;
 /// invisible to every driver that predates long names — a read-only hidden system volume
 /// label is not something any of them will act on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Attributes(pub u8);
+pub struct Attributes(u8);
+
+crate::flags::flag_set!(Attributes: u8);
 
 impl Attributes {
-    /// No attributes: an ordinary file.
-    pub const NONE: Self = Self(0x00);
     /// `ATTR_READ_ONLY`. A driver refuses to open the file for writing.
     pub const READ_ONLY: Self = Self(0x01);
     /// `ATTR_HIDDEN`. Omitted from an ordinary listing.
@@ -69,18 +69,6 @@ impl Attributes {
     /// `ATTR_LONG_NAME`: the four low bits together, marking a long-name entry.
     pub const LFN: Self = Self(0x0F);
 
-    /// The raw attribute byte.
-    #[must_use]
-    pub const fn bits(self) -> u8 {
-        self.0
-    }
-
-    /// True when every attribute in `other` is set.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
     /// True when the entry is a long-name entry rather than a real one.
     ///
     /// The test is equality over the six low bits and not
@@ -91,13 +79,6 @@ impl Attributes {
     #[must_use]
     pub const fn is_long_name(self) -> bool {
         self.0 & 0x3F == Self::LFN.0
-    }
-}
-
-impl core::ops::BitOr for Attributes {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
     }
 }
 
@@ -168,7 +149,7 @@ impl DirEntry {
         }
         Ok(Self {
             name: get_arr::<11>(buf, 0),
-            attributes: Attributes(get_u8(buf, 11)),
+            attributes: Attributes::from_bits(get_u8(buf, 11)),
             case_flags: get_u8(buf, 12),
             create_time_tenth: get_u8(buf, 13),
             create_time: get_u16(buf, 14),

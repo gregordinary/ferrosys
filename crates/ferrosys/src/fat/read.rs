@@ -58,16 +58,17 @@
 //! The handle opens over any [`Read`] + [`Seek`] source at an arbitrary byte offset, so it
 //! reads a volume inside a partitioned disk image as readily as a bare one.
 
-use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 
-use crate::fidelity::{Property, Synthesis};
-use crate::finding::{Coordinate, Family, Finding, FindingReport, Severity};
+use crate::bytes::get_u16;
+use crate::fidelity::Synthesis;
+use crate::finding::{Family, Finding, Findings, Severity};
+use crate::io::{offset_of, read_exact_at};
+use crate::path::is_hostile_component;
 use crate::policy::MAX_PATH;
 use crate::policy::{Limits, ReadPolicy};
-use crate::source::Metadata;
-use crate::time::Timestamp;
+use crate::time::{DosTimestamp, Timestamp};
 use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
 
 use super::charset::ShortNameCharset;
@@ -75,9 +76,9 @@ use super::geometry::{
     FatLayout, FatType, MAX_CLUSTERS_FAT12, MIN_CLUSTERS_FAT16, layout_from_boot,
 };
 use super::ondisk::{
-    self, Attributes as DirAttributes, BootSector, BootSectorTail, DIR_ENTRY_SIZE, DirEntry,
-    DosTimestamp, FsInfo, LFN_CHARS_PER_ENTRY, LFN_LAST_ENTRY, LFN_MAX_ENTRIES, LfnEntry,
-    NAME_DELETED, NAME_END, NAME_LEADING_E5, ParseError,
+    Attributes as DirAttributes, BootSector, BootSectorTail, DIR_ENTRY_SIZE, DirEntry, FsInfo,
+    LFN_CHARS_PER_ENTRY, LFN_LAST_ENTRY, LFN_MAX_ENTRIES, LfnEntry, NAME_DELETED, NAME_END,
+    NAME_LEADING_E5, ParseError,
 };
 use super::table;
 
@@ -88,7 +89,6 @@ use super::table;
 /// reason a category stays with its family rather than hoisting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Category {
     /// The boot sector and its BIOS parameter block, or the backup copy of it.
     BootSector,
@@ -112,6 +112,8 @@ impl Category {
         }
     }
 }
+
+crate::naming::serialize_as_name!(Category);
 
 /// Where in the volume a deviation sits. Every field is optional: a deviation carries only
 /// the coordinates that locate it.
@@ -166,6 +168,17 @@ pub struct Anomaly {
     pub detail: String,
 }
 
+impl crate::Deviation for Anomaly {
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    /// The sector size is the addressing unit a FAT location is stated in.
+    fn to_finding(&self, unit: u32) -> Finding {
+        Anomaly::to_finding(self, unit)
+    }
+}
+
 impl Anomaly {
     /// Project this anomaly into the crate's family-agnostic [`Finding`], resolving a
     /// sector-addressed location to the byte offset that sector sits at under
@@ -192,24 +205,21 @@ impl Anomaly {
             entry,
         } = *location;
 
-        let mut coordinates: Vec<Coordinate> = Vec::new();
-        for (name, value) in [("cluster", cluster), ("sector", sector), ("entry", entry)] {
-            if let Some(value) = value {
-                coordinates.push((std::borrow::Cow::Borrowed(name), u64::from(value)));
-            }
-        }
-
-        Finding {
-            severity: *severity,
-            family: Family::Fat,
-            category: std::borrow::Cow::Borrowed(category.as_str()),
-            // A sector number out of an untrusted image can be anything, so the
-            // multiplication is checked: a product that does not fit means the sector is not
-            // in the image at all, and there is no offset to name.
-            offset: sector.and_then(|s| u64::from(s).checked_mul(u64::from(bytes_per_sector))),
-            coordinates,
-            detail: detail.clone(),
-        }
+        crate::finding::project(
+            *severity,
+            Family::Fat,
+            category.as_str(),
+            &[
+                ("cluster", cluster.map(u64::from)),
+                ("sector", sector.map(u64::from)),
+                ("entry", entry.map(u64::from)),
+            ],
+            // The sector is what addresses bytes. A cluster number does not: where it sits
+            // depends on the layout rather than on the number alone.
+            sector.map(u64::from),
+            bytes_per_sector,
+            detail,
+        )
     }
 }
 
@@ -226,12 +236,15 @@ impl Anomaly {
 #[non_exhaustive]
 pub enum ReadError {
     /// The underlying source could not be read or sought.
+    /// Carried as [`TreeError::Io`] describes, which is where the rule
+    /// this crate records an i/o failure by is written out: the kind beside the message, so a
+    /// caller tells a truncated image from an environment failure without matching on text.
     #[error("i/o error: {message}")]
     #[non_exhaustive]
     Io {
         /// How the underlying [`std::io::Error`] classified itself.
         kind: std::io::ErrorKind,
-        /// The error rendered as text.
+        /// The error rendered as text, for a message a person reads.
         message: String,
     },
     /// An on-disk structure could not be recovered from its bytes.
@@ -274,6 +287,31 @@ pub enum ReadError {
         /// The cluster named.
         cluster: u32,
     },
+    /// A structure names a sector past the volume's own sector count.
+    #[error("sector {sector} is past the volume's {total_sectors} sectors")]
+    #[non_exhaustive]
+    SectorOutOfRange {
+        /// The first sector the read would have needed.
+        sector: u32,
+        /// The sectors the volume describes.
+        total_sectors: u32,
+    },
+    /// A long name holds more UTF-16 units than the format defines for one.
+    ///
+    /// Twenty entries of thirteen units can carry 260, and the format caps a name at 255 —
+    /// this crate's own writer refuses a longer one. The name is still read, so the tree
+    /// stays enumerable under a lenient read; what could not happen is writing the name
+    /// back to a volume of this family.
+    #[error(
+        "the long name ending at entry {index} holds {units} UTF-16 units, past the format's 255"
+    )]
+    #[non_exhaustive]
+    LongNameTooLong {
+        /// The entry the run ended at.
+        index: u32,
+        /// The units the run holds.
+        units: usize,
+    },
     /// A chain's table entry holds a value no chain may contain: free, reserved, or the
     /// bad-cluster mark.
     #[error("the table entry for cluster {cluster} is {entry:#x}, which no chain may contain")]
@@ -298,14 +336,16 @@ pub enum ReadError {
     /// FAT has no sparse files: a length is a claim about clusters, and a chain that stops
     /// short means the length and the allocation disagree. Handing back a short buffer would
     /// report success for a file that is not all there.
-    #[error("a chain from cluster {start} holds {read} bytes and its entry records {size}")]
+    #[error("a chain from cluster {start} ends before byte {read} of the {size} its entry records")]
     #[non_exhaustive]
     ChainTooShort {
         /// The chain's first cluster.
         start: u32,
         /// The length the directory entry records.
         size: u64,
-        /// Bytes the chain actually holds.
+        /// The file byte offset the read required and the chain ends before. A read from
+        /// an offset reports the offset it needed, not a walk of the whole chain — the
+        /// chain may end earlier still.
         read: u64,
     },
     /// A copy of the file allocation table differs from the first.
@@ -405,6 +445,24 @@ pub enum ReadError {
         /// The short entry's index within its directory.
         index: u32,
     },
+    /// One of an entry's three times holds a value the encoding does not define.
+    ///
+    /// A month of zero, a day of 31 in February, a twenty-fifth hour, or a hundredths byte
+    /// past 199. A read reports the instant the arithmetic reaches, which is what every driver
+    /// does; this is the judgment that says the field was never an instant.
+    ///
+    /// The creation and access times are the format's optional ones, and a wholly zero field
+    /// is how it records that they were not kept — so a zero field is not reported. Nothing
+    /// short of the whole field is that record: a date of zero beside a time that is not is a
+    /// field that was written and not a field that was skipped.
+    #[error("the {field} at entry {index} holds a value the encoding does not define")]
+    #[non_exhaustive]
+    MalformedTimestamp {
+        /// The entry's index within its directory.
+        index: u32,
+        /// Which of the three times, in the format's own words.
+        field: &'static str,
+    },
     /// A short name carries a byte above ASCII and no code page was named, so what
     /// character it stands for is not something the volume records.
     ///
@@ -439,6 +497,20 @@ pub enum ReadError {
     HostileName {
         /// The entry's index within its directory, counting 32-byte slots from zero.
         index: u32,
+    },
+    /// An entry records a length and no first cluster.
+    ///
+    /// FAT has no holes — a file's bytes are its chain — so a length is a claim about clusters
+    /// and a first cluster of zero says there are none. An entry making both claims describes
+    /// contents no read can reach, and the incoherence surfaces halfway through an extraction
+    /// rather than at the entry that carries it.
+    #[error("the entry at {index} records {size} bytes and no first cluster")]
+    #[non_exhaustive]
+    SizeWithoutAllocation {
+        /// The entry's index within its directory.
+        index: u32,
+        /// The length the directory entry records.
+        size: u32,
     },
     /// A subdirectory's `.` or `..` entry is missing, out of place, or does not point where
     /// the format requires.
@@ -523,14 +595,7 @@ pub enum ReadError {
     },
 }
 
-impl From<std::io::Error> for ReadError {
-    fn from(e: std::io::Error) -> Self {
-        ReadError::Io {
-            kind: e.kind(),
-            message: e.to_string(),
-        }
-    }
-}
+crate::io::io_error!(ReadError);
 
 impl ReadError {
     /// How this failure classifies as a deviation from what this crate emits.
@@ -570,6 +635,11 @@ impl ReadError {
                 Severity::Structural,
                 Category::AllocationTable,
                 at(None, Some(*cluster), None),
+            ),
+            ReadError::SectorOutOfRange { sector, .. } => (
+                Severity::Structural,
+                Category::BootSector,
+                at(Some(*sector), None, None),
             ),
             ReadError::BadChainEntry { cluster, .. } => (
                 Severity::Structural,
@@ -613,10 +683,20 @@ impl ReadError {
                 Category::Directory,
                 at(None, None, Some(*index)),
             ),
+            // The name reads back whole and unambiguously; what it violates is the
+            // format's own cap, which is a matter of conformance rather than of damage.
+            ReadError::LongNameTooLong { index, .. } => (
+                Severity::Conformance,
+                Category::Directory,
+                at(None, None, Some(*index)),
+            ),
             // A name a directory cannot hold is not a matter of form: no driver creates one
             // and this crate's writer refuses one, so an entry carrying it describes a tree
             // that does not exist rather than one written to a different convention.
-            ReadError::HostileName { index } => (
+            //
+            // A length with no clusters behind it is the same kind of fault one field along:
+            // an entry describing bytes that are not there.
+            ReadError::HostileName { index } | ReadError::SizeWithoutAllocation { index, .. } => (
                 Severity::Structural,
                 Category::Directory,
                 at(None, None, Some(*index)),
@@ -624,6 +704,9 @@ impl ReadError {
             ReadError::IllFormedLongName { index }
             | ReadError::UninterpretedShortName { index, .. }
             | ReadError::EntriesAfterEnd { index }
+            // A recovered field outside the range the format states for it. The entry reads
+            // back whole and one field of it means nothing.
+            | ReadError::MalformedTimestamp { index, .. }
             | ReadError::MisplacedVolumeLabel { index } => (
                 Severity::Conformance,
                 Category::Directory,
@@ -661,6 +744,115 @@ impl ReadError {
     }
 }
 
+/// The FAT family's half of the shared path resolution: a directory listing to find a name in,
+/// matched the way a driver matches one.
+///
+/// The link half of the trait is defaulted, because the format has none: an entry is a file, a
+/// directory, or the volume label, and a path through this volume goes exactly where its
+/// components say.
+impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
+    /// The node itself. There is nothing to re-read on the way back up: a FAT [`Node`] is four
+    /// fixed-size fields, so a locator would cost as much as the node — the same reason the
+    /// walk's frontier holds one.
+    type Ancestor = Node;
+    type Node = Node;
+    type Error = ReadError;
+
+    fn root_node(&mut self) -> Result<Node, ReadError> {
+        Ok(self.root())
+    }
+
+    fn ancestor_of(&self, node: &Node) -> Node {
+        *node
+    }
+
+    fn node_at(&mut self, ancestor: Node) -> Result<Node, ReadError> {
+        Ok(ancestor)
+    }
+
+    fn is_directory(&self, node: &Node) -> bool {
+        node.is_dir()
+    }
+
+    fn find_name(&mut self, dir: &Node, name: &[u8]) -> Result<Option<Node>, ReadError> {
+        // One pass answers both questions: an exact match wins outright, and the first
+        // case-folded match is remembered in case none is exact. Two passes would read
+        // the whole listing twice for every component that resolves case-insensitively.
+        let entries = self.read_dir(dir)?;
+        let mut folded = None;
+        for e in &entries {
+            if e.name == name {
+                return Ok(Some(e.node));
+            }
+            if folded.is_none() && e.name.eq_ignore_ascii_case(name) {
+                folded = Some(e.node);
+            }
+        }
+        Ok(folded)
+    }
+
+    fn not_found(&self, path: &[u8]) -> ReadError {
+        ReadError::NotFound {
+            path: path.to_vec(),
+        }
+    }
+
+    fn not_a_directory(&self, _node: &Node, path: &[u8]) -> ReadError {
+        ReadError::NotADirectory {
+            path: path.to_vec(),
+        }
+    }
+}
+
+/// The FAT family's half of the shared walk: a resolved entry on the frontier, a first
+/// cluster as the cycle key, and a directory listing as the children.
+impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
+    /// A whole entry. Unlike the ext family, there is nothing to re-read at the pop: a FAT
+    /// [`Node`] is four fixed-size fields, so a locator would cost as much as the node.
+    type Pending = WalkEntry;
+    type Entry = WalkEntry;
+    /// The directory's first cluster. The root region has none and is entered once by
+    /// construction, so it needs no key.
+    type Key = u32;
+    type Error = ReadError;
+
+    fn cap(&mut self) -> usize {
+        self.limits.max_walk_entries.min(self.max_names())
+    }
+
+    fn seed(&mut self) -> Result<crate::walk::Seed<Self>, ReadError> {
+        let root = self.root();
+        let occupied = match root.storage {
+            Storage::Chain(start) => vec![start],
+            Storage::None | Storage::RootRegion => Vec::new(),
+        };
+        Ok((self.walk_children(&root, &[])?, occupied))
+    }
+
+    fn resolve(&mut self, pending: WalkEntry) -> Result<WalkEntry, ReadError> {
+        Ok(pending)
+    }
+
+    fn descend_key(&self, entry: &WalkEntry) -> Option<u32> {
+        if !entry.node.is_dir() {
+            return None;
+        }
+        match entry.node.storage {
+            Storage::Chain(start) => Some(start),
+            // A directory entry naming no cluster has no storage to descend into.
+            Storage::None | Storage::RootRegion => None,
+        }
+    }
+
+    fn children(&mut self, entry: &WalkEntry) -> Result<Vec<WalkEntry>, ReadError> {
+        self.walk_children(&entry.node, &entry.path)
+    }
+
+    fn too_large(limit: usize) -> ReadError {
+        ReadError::WalkTooLarge { limit }
+    }
+}
+
 /// How a read failure classifies in the crate's family-agnostic frame.
 impl From<ReadError> for TreeError {
     fn from(err: ReadError) -> Self {
@@ -680,87 +872,14 @@ impl From<ReadError> for TreeError {
     }
 }
 
-/// What the whole-volume [`scan`](Reader::scan) found.
+/// What a whole-volume [`scan`](Reader::scan) found, in FAT's own taxonomy.
 ///
-/// A lenient read rejects no image, so an empty report means the volume is conformant to
-/// what this crate's writer emits and a non-empty one is a list of findings, not a failure.
-#[derive(Clone, PartialEq, Eq, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ScanReport {
-    anomalies: Vec<Anomaly>,
-    truncated: bool,
-    /// The findings cap the scan ran under. Not serialized: it is a property of the scan
-    /// rather than of its findings, and `truncated` already says whether it was reached.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    cap: usize,
-    /// The sector size of the volume scanned, which turns a sector-addressed anomaly into
-    /// the byte offset a [`Finding`] carries. Zero for a report no scan produced.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    bytes_per_sector: u32,
-}
-
-impl Default for ScanReport {
-    /// An empty report from a scan under the default limits.
-    fn default() -> Self {
-        Self {
-            anomalies: Vec::new(),
-            truncated: false,
-            cap: FindingReport::MAX_FINDINGS,
-            bytes_per_sector: 0,
-        }
-    }
-}
-
-impl ScanReport {
-    /// The anomalies found, in scan order.
-    #[must_use]
-    pub fn anomalies(&self) -> &[Anomaly] {
-        &self.anomalies
-    }
-
-    /// Whether the scan stopped at its findings cap with the volume still unfinished.
-    ///
-    /// A truncated report is a floor rather than a full accounting, and everything derived
-    /// from it is likewise a floor.
-    #[must_use]
-    pub fn is_truncated(&self) -> bool {
-        self.truncated
-    }
-
-    /// Whether the scan looked at the whole volume and found nothing.
-    ///
-    /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
-    /// holds: an empty report from a scan that stopped is an absence of looking rather than
-    /// an absence of faults.
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        !self.truncated && self.anomalies.is_empty()
-    }
-
-    /// The severity of the most serious anomaly, or `None` when the report is clean.
-    #[must_use]
-    pub fn worst_severity(&self) -> Option<Severity> {
-        self.anomalies.iter().map(|a| a.severity).max()
-    }
-
-    /// Whether any anomaly the scan found is fatal under `policy` — the same threshold
-    /// [`ReadPolicy::Strict`] enforces when opening a volume.
-    #[must_use]
-    pub fn has_fatal(&self, policy: ReadPolicy) -> bool {
-        self.anomalies.iter().any(|a| policy.is_fatal(a.severity))
-    }
-
-    /// Project the report into the crate's family-agnostic frame, which is what renders.
-    #[must_use]
-    pub fn to_report(&self) -> FindingReport {
-        let findings = self
-            .anomalies
-            .iter()
-            .map(|a| a.to_finding(self.bytes_per_sector))
-            .collect();
-        FindingReport::new(findings, self.truncated, self.cap)
-    }
-}
+/// This is the crate's [`ScanReport`](crate::ScanReport) over FAT's [`Anomaly`]: an anomaly
+/// names the subsystem as a [`Category`] value and its place as a [`Location`] of cluster,
+/// sector, and entry, which is what a consumer reasoning about a FAT volume wants. The
+/// addressing unit is the volume's sector size, so a sector-addressed anomaly projects to the
+/// byte offset that sector sits at.
+pub type ScanReport = crate::ScanReport<Anomaly>;
 
 /// Where a node's bytes are.
 ///
@@ -849,6 +968,12 @@ pub struct Entry {
     /// rather than an implementation detail: a foreign tool listing the tree shows both
     /// columns, and a name that is already its own short name shows one of them empty.
     ///
+    /// **The safety promise above belongs to [`name`](Self::name) alone.** This field shows
+    /// the stored bytes, and where a long name is what the entry is found under, these
+    /// eleven bytes go unchecked: a crafted volume can put a path separator, a NUL, or a
+    /// dot-name here beside a clean long name. Build paths from `name`; treat this as a
+    /// display column.
+    ///
     /// A byte above ASCII here is not itself a deviation. What
     /// [`UninterpretedShortName`](ReadError::UninterpretedShortName) is about is a name the
     /// reader cannot say the meaning of and is handing back as the name anyway — so it
@@ -899,14 +1024,14 @@ pub struct WalkEntry {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[non_exhaustive]
 pub struct OpenOptions {
-    /// Byte offset within the source at which the volume begins — zero for a bare image,
-    /// the partition's start for one inside a disk image. Every read is relative to it.
-    pub base: u64,
-    /// How strictly the volume is held to the format. Defaults to [`ReadPolicy::Strict`].
-    pub policy: ReadPolicy,
-    /// Caps on what one read may allocate, over and above the structural bounds the reader
-    /// always applies.
-    pub limits: Limits,
+    /// Where the volume begins, how strictly it is read, and what one read may allocate —
+    /// the crate's [`OpenOptions`](crate::OpenOptions), which mean exactly what they mean
+    /// there.
+    ///
+    /// Held rather than flattened, so an input every family takes is added in one place and
+    /// reaches every family at once. The three builders below set through it, so a caller
+    /// writes `OpenOptions::new().base(..)` either way.
+    pub common: crate::OpenOptions,
     /// How the bytes of a short name above ASCII are interpreted. Defaults to
     /// [`ShortNameCharset::Verbatim`], which interprets nothing.
     ///
@@ -924,9 +1049,7 @@ impl OpenOptions {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            base: 0,
-            policy: ReadPolicy::Strict,
-            limits: Limits::new(),
+            common: crate::OpenOptions::new(),
             charset: ShortNameCharset::Verbatim,
         }
     }
@@ -934,21 +1057,28 @@ impl OpenOptions {
     /// Open a volume that begins `base` bytes into the source.
     #[must_use]
     pub const fn base(mut self, base: u64) -> Self {
-        self.base = base;
+        self.common = self.common.base(base);
         self
     }
 
     /// Read under `policy`.
     #[must_use]
     pub const fn policy(mut self, policy: ReadPolicy) -> Self {
-        self.policy = policy;
+        self.common = self.common.policy(policy);
         self
     }
 
     /// Cap what one read may allocate.
     #[must_use]
     pub const fn limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
+        self.common = self.common.limits(limits);
+        self
+    }
+
+    /// Take the three shared inputs from `common`, leaving this family's own alone.
+    #[must_use]
+    pub const fn common(mut self, common: crate::OpenOptions) -> Self {
+        self.common = common;
         self
     }
 
@@ -994,37 +1124,6 @@ pub struct Reader<R> {
     chain_cursor: Option<(u32, u64, u32)>,
 }
 
-/// A bounded accumulator of anomalies, which is what a scan collects into.
-struct Findings {
-    anomalies: Vec<Anomaly>,
-    cap: usize,
-    truncated: bool,
-}
-
-impl Findings {
-    fn new(cap: usize) -> Self {
-        Self {
-            anomalies: Vec::new(),
-            cap,
-            truncated: false,
-        }
-    }
-
-    fn push(&mut self, anomaly: Anomaly) {
-        if self.anomalies.len() >= self.cap {
-            self.truncated = true;
-        } else {
-            self.anomalies.push(anomaly);
-        }
-    }
-
-    /// Whether the cap has been reached, so a scan may stop looking rather than keep
-    /// producing findings it will discard.
-    fn is_full(&self) -> bool {
-        self.truncated || self.anomalies.len() >= self.cap
-    }
-}
-
 /// What a directory parse does with a deviation it meets.
 ///
 /// One parser serves both dispositions, which is what makes a scan describe a fault exactly
@@ -1033,7 +1132,7 @@ enum OnDeviation<'a> {
     /// An ordinary read: fatal under the policy, and otherwise passed over.
     Policy(ReadPolicy),
     /// A scan: every deviation collected, none fatal.
-    Collect(&'a mut Findings),
+    Collect(&'a mut Findings<Anomaly>),
 }
 
 impl OnDeviation<'_> {
@@ -1081,10 +1180,8 @@ impl<R: Read + Seek> Reader<R> {
     /// As [`open`](Self::open).
     pub fn open_with(mut src: R, options: &OpenOptions) -> Result<Self, ReadError> {
         let end = src.seek(SeekFrom::End(0))?;
-        let available = end.saturating_sub(options.base);
-        src.seek(SeekFrom::Start(options.base))?;
-        let mut sector = [0u8; BootSector::SIZE];
-        src.read_exact(&mut sector)?;
+        let available = end.saturating_sub(options.common.base);
+        let sector = read_exact_at(&mut src, options.common.base, BootSector::SIZE)?;
         let boot = BootSector::read_from(&sector)?;
         let layout = layout_from_boot(&boot, available).map_err(|d| ReadError::BadBootSector {
             field: d.field,
@@ -1102,7 +1199,7 @@ impl<R: Read + Seek> Reader<R> {
             let err = ReadError::AmbiguousClusterCount {
                 clusters: layout.clusters,
             };
-            if options.policy.is_fatal(err.anomaly().severity) {
+            if options.common.policy.is_fatal(err.anomaly().severity) {
                 return Err(err);
             }
             open_anomalies.push(err.anomaly());
@@ -1110,11 +1207,11 @@ impl<R: Read + Seek> Reader<R> {
 
         Ok(Self {
             src,
-            base: options.base,
+            base: options.common.base,
             boot,
             layout,
-            policy: options.policy,
-            limits: options.limits,
+            policy: options.common.policy,
+            limits: options.common.limits,
             charset: options.charset,
             open_anomalies,
             fat_window: None,
@@ -1238,7 +1335,7 @@ impl<R: Read + Seek> Reader<R> {
             Ok(ControlFlow::Continue(()))
         })?;
         if let Some(name) = found {
-            return Ok(Some(self.charset.decode(&trim_label(&name))));
+            return Ok(Some(self.charset.decode(&volume_label(&name))));
         }
         let stored = match self.boot.tail {
             BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => {
@@ -1248,7 +1345,7 @@ impl<R: Read + Seek> Reader<R> {
         if stored == super::ondisk::VolumeInfo::NO_NAME {
             return Ok(None);
         }
-        let trimmed = trim_label(&stored);
+        let trimmed = volume_label(&stored);
         if trimmed.is_empty() {
             return Ok(None);
         }
@@ -1257,9 +1354,25 @@ impl<R: Read + Seek> Reader<R> {
 
     // -- byte-level access ------------------------------------------------------------
 
-    /// The byte offset of `sector` within the source.
-    const fn sector_offset(&self, sector: u32) -> u64 {
-        self.base + sector as u64 * self.layout.bytes_per_sector as u64
+    /// The byte offset of `sector` within the source, or [`None`] where it leaves the 64-bit
+    /// range.
+    ///
+    /// Checked, for the reason every address in this crate is: `base` is the caller's and a
+    /// sector number is the volume's, so a sum near the top of the range wraps into a small
+    /// offset — which is not a read that fails but a successful read of the wrong bytes.
+    ///
+    /// What makes it unreachable today is `layout_from_boot`, which refuses a volume whose
+    /// sectors do not fit the bytes the source holds from `base` onward: every sector this is
+    /// asked for is therefore inside a source that already ends at or below `u64::MAX`. The
+    /// check remains because that is a bound another function applies, held on the far side
+    /// of the parameter block, and nothing here should depend on it — an overflow in a
+    /// filesystem's addressing is silent, and the only cost of refusing one is a branch.
+    fn sector_offset(&self, sector: u32) -> Option<u64> {
+        offset_of(
+            self.base,
+            u64::from(sector),
+            u64::from(self.layout.bytes_per_sector),
+        )
     }
 
     /// `count` sectors from `first`, refusing a range the volume does not describe.
@@ -1267,19 +1380,21 @@ impl<R: Read + Seek> Reader<R> {
     /// The bound is the volume's own sector count, so a structure naming a sector past the
     /// filesystem is answered rather than read out of whatever follows it in the source.
     fn read_sectors(&mut self, first: u32, count: u32) -> Result<Vec<u8>, ReadError> {
+        // The refusal names the sector asked for and the volume's own bound: which
+        // structure named the sector varies by caller, so pinning the message to one
+        // parameter-block field would blame a field whose value may be fine.
+        let out_of_range = || ReadError::SectorOutOfRange {
+            sector: first,
+            total_sectors: self.layout.total_sectors,
+        };
         let end = first
             .checked_add(count)
             .filter(|end| *end <= self.layout.total_sectors)
-            .ok_or(ReadError::BadBootSector {
-                field: "BPB_TotSec32",
-                value: u64::from(first),
-            })?;
+            .ok_or_else(out_of_range)?;
         debug_assert!(end <= self.layout.total_sectors);
+        let offset = self.sector_offset(first).ok_or_else(out_of_range)?;
         let len = count as usize * self.layout.bytes_per_sector as usize;
-        let mut buf = vec![0u8; len];
-        self.src.seek(SeekFrom::Start(self.sector_offset(first)))?;
-        self.src.read_exact(&mut buf)?;
-        Ok(buf)
+        Ok(read_exact_at(&mut self.src, offset, len)?)
     }
 
     /// How many sectors a read must cover to hold the whole entry at `sector_in_table`,
@@ -1345,7 +1460,7 @@ impl<R: Read + Seek> Reader<R> {
                 // twelve bits of the pair there, which is the even-cluster packing. An odd
                 // FAT12 cluster owns the high twelve of the same pair.
                 if fat_type == FatType::Fat12 && cluster & 1 == 1 {
-                    let pair = u32::from(u16::from_le_bytes([buf[within], buf[within + 1]]));
+                    let pair = u32::from(get_u16(buf, within));
                     Ok(pair >> 4)
                 } else {
                     Ok(raw)
@@ -1498,7 +1613,10 @@ impl<R: Read + Seek> Reader<R> {
         // moves on, so the cost is paid afresh for every directory. A 32 MiB volume can
         // spend gigabytes that way. A repeat is a cycle whatever it costs, so it ends the
         // chain the moment it is seen.
-        let mut visited: HashSet<u32> = HashSet::new();
+        //
+        // The set is the volume's own domain, one bit per cluster, which is the answer this
+        // file gives that question everywhere it is asked.
+        let mut visited = ClusterSet::new(self.layout.clusters);
         if let Storage::Chain(start) = node.storage {
             visited.insert(start);
         }
@@ -1608,6 +1726,7 @@ impl<R: Read + Seek> Reader<R> {
         let mut pending = LongName::default();
         let mut ended = false;
         let mut reported_after_end = false;
+        let mut last_slot = None;
 
         self.for_each_slot::<ReadError>(node, |reader, slot| {
             let index = slot.index;
@@ -1616,6 +1735,7 @@ impl<R: Read + Seek> Reader<R> {
                 cluster: None,
                 entry: Some(index),
             };
+            last_slot = Some((at, index));
             let entry = slot.entry;
             let first = entry.name[0];
 
@@ -1632,16 +1752,30 @@ impl<R: Read + Seek> Reader<R> {
                 return Ok(ControlFlow::Continue(()));
             }
             if first == NAME_END {
+                // A run still in flight at the end marker decorated nothing: the marker
+                // says the names are over, so the run's slots are storage no driver reads
+                // a name out of.
+                if !matches!(pending.take(), LongRun::None) {
+                    deviations.record(at, ReadError::OrphanedLongName { index })?;
+                }
                 ended = true;
                 return Ok(ControlFlow::Continue(()));
             }
             if first == NAME_DELETED {
-                pending.clear();
+                // The classic shape of this corruption: the short entry was deleted and
+                // its long-name slots were not, so the run in flight belongs to nothing.
+                if !matches!(pending.take(), LongRun::None) {
+                    deviations.record(at, ReadError::OrphanedLongName { index })?;
+                }
                 return Ok(ControlFlow::Continue(()));
             }
             if entry.attributes.is_long_name() {
                 let lfn = LfnEntry::read_from(&raw_bytes(&entry))?;
-                pending.accept(&lfn);
+                if pending.accept(&lfn) {
+                    // A fresh sequence start wiped a run still being assembled, whose
+                    // slots now belong to nothing.
+                    deviations.record(at, ReadError::OrphanedLongName { index })?;
+                }
                 return Ok(ControlFlow::Continue(()));
             }
 
@@ -1653,14 +1787,24 @@ impl<R: Read + Seek> Reader<R> {
                 if !is_root {
                     deviations.record(at, ReadError::MisplacedVolumeLabel { index })?;
                 }
-                // The label is not a name in the tree under any circumstances.
+                // A run in front of the label belongs to nothing: the format hangs a long
+                // name off an ordinary entry alone, and the label is not a name in the
+                // tree under any circumstances.
+                if !matches!(run, LongRun::None) {
+                    deviations.record(at, ReadError::OrphanedLongName { index })?;
+                }
                 return Ok(ControlFlow::Continue(()));
             }
             // The dot entries, recognized by the field the format defines them in. A run of
-            // long-name entries in front of one is discarded with it: what the format says
-            // sits in these two slots is a directory's link to itself and to its parent, and
-            // a name hung off one of them is not an entry the directory holds.
-            if short_name == b"." || short_name == b".." {
+            // long-name entries in front of one decorates nothing: what the format says
+            // sits in these two slots is a directory's link to itself and to its parent,
+            // and a name hung off one of them is not an entry the directory holds. The
+            // *name* is rightly dropped; the slots are the same debris they are in front
+            // of the label one arm above, and are reported the same way.
+            if crate::path::is_dot_entry(&short_name) {
+                if !matches!(run, LongRun::None) {
+                    deviations.record(at, ReadError::OrphanedLongName { index })?;
+                }
                 return Ok(ControlFlow::Continue(()));
             }
 
@@ -1683,6 +1827,19 @@ impl<R: Read + Seek> Reader<R> {
                             },
                         )?;
                     } else {
+                        // Twenty entries carry up to 260 units and the format caps a name
+                        // at 255, so a run can be whole and still hold a name no volume of
+                        // this family should carry — one this crate's own writer refuses.
+                        // The name is read anyway, so the tree stays enumerable.
+                        if units.len() > super::name::MAX_NAME_UNITS {
+                            deviations.record(
+                                at,
+                                ReadError::LongNameTooLong {
+                                    index,
+                                    units: units.len(),
+                                },
+                            )?;
+                        }
                         let (decoded, ill_formed) = decode_utf16(&units);
                         if ill_formed {
                             deviations.record(at, ReadError::IllFormedLongName { index })?;
@@ -1730,9 +1887,29 @@ impl<R: Read + Seek> Reader<R> {
             // belongs to an ordinary short entry and is well-formed in every other way.
             // Refusing it here keeps the four names out of every surface at once — the entry
             // list, a walk's paths, and an archive built from them.
-            if name_is_hostile(&name) {
+            if is_hostile_component(&name) {
                 deviations.record(at, ReadError::HostileName { index })?;
                 return Ok(ControlFlow::Continue(()));
+            }
+
+            check_times(&entry, index, at, deviations)?;
+
+            // The two fields an entry describes its contents with, held against each other
+            // where they are read. FAT has no holes, so a length is a claim about clusters and
+            // a first cluster below two says there are none — and the disagreement is invisible
+            // to everything downstream: the storage the node carries is the same `None` a
+            // legitimately empty file has, so the scan's size-against-chain comparison has no
+            // chain to make it against and a read fails much later, at the cluster it cannot
+            // follow.
+            let node = node_of(&entry, reader.layout.fat_type);
+            if node.size != 0 && matches!(node.storage, Storage::None) {
+                deviations.record(
+                    at,
+                    ReadError::SizeWithoutAllocation {
+                        index,
+                        size: node.size,
+                    },
+                )?;
             }
 
             if out.len() >= cap {
@@ -1742,10 +1919,18 @@ impl<R: Read + Seek> Reader<R> {
                 name,
                 short_name: charset.decode(&short_name),
                 has_long_name,
-                node: node_of(&entry, reader.layout.fat_type),
+                node,
             });
             Ok(ControlFlow::Continue(()))
         })?;
+        // The fifth way a run can end: the storage itself runs out, on a directory whose
+        // every slot is used and whose last slots are the run. The finding sits at the
+        // run's last slot, which is the last slot there was.
+        if !matches!(pending.take(), LongRun::None)
+            && let Some((at, index)) = last_slot
+        {
+            deviations.record(at, ReadError::OrphanedLongName { index })?;
+        }
         Ok(out)
     }
 
@@ -1757,37 +1942,18 @@ impl<R: Read + Seek> Reader<R> {
     /// driver requires a caller to reproduce. Bytes above ASCII are compared as they stand,
     /// because folding them would need the code page the volume does not record.
     ///
+    /// A `..` component ascends to the directory the resolution descended from, staying at the
+    /// root where there is nothing to ascend to — so nothing outside the volume can be named.
+    /// It is an ascent rather than a lookup of the entry of that name, which a FAT
+    /// subdirectory carries and this reader refuses as a name.
+    ///
     /// # Errors
     ///
     /// [`ReadError::NotFound`] where no component matches, [`ReadError::NotADirectory`]
     /// where the path traverses through a file, and the read errors of the directories along
     /// the way.
     pub fn lookup(&mut self, path: &[u8]) -> Result<Node, ReadError> {
-        let mut node = self.root();
-        for component in path.split(|b| *b == b'/') {
-            if component.is_empty() || component == b"." {
-                continue;
-            }
-            if !node.is_dir() {
-                return Err(ReadError::NotADirectory {
-                    path: path.to_vec(),
-                });
-            }
-            let entries = self.read_dir(&node)?;
-            let found = entries
-                .iter()
-                .find(|e| e.name == component)
-                .or_else(|| {
-                    entries
-                        .iter()
-                        .find(|e| e.name.eq_ignore_ascii_case(component))
-                })
-                .ok_or_else(|| ReadError::NotFound {
-                    path: path.to_vec(),
-                })?;
-            node = found.node;
-        }
-        Ok(node)
+        crate::resolve::drive(self, path, true)
     }
 
     // -- file contents ----------------------------------------------------------------
@@ -1826,11 +1992,14 @@ impl<R: Read + Seek> Reader<R> {
             let within = (at % bytes_per_cluster) as usize;
             let Some(cluster) = self.cluster_at(start, index)? else {
                 // The chain ran out with bytes still to come, which is the length and the
-                // allocation disagreeing.
+                // allocation disagreeing. What is reported is the byte this read needed:
+                // a read from an offset lands here without walking the earlier clusters,
+                // so where exactly the chain ends is not known — only that it ends before
+                // the byte that was asked for.
                 return Err(ReadError::ChainTooShort {
                     start,
                     size,
-                    read: index * bytes_per_cluster,
+                    read: at,
                 });
             };
             let bytes = self.read_cluster(cluster)?;
@@ -1841,12 +2010,35 @@ impl<R: Read + Seek> Reader<R> {
         Ok(done)
     }
 
+    /// A file's length as a whole-file read sees it: the length its directory entry records,
+    /// held to [`Limits::max_file_bytes`].
+    ///
+    /// Every whole-file form goes through this, so the cap governs what a read hands back and
+    /// what a stream into a caller's writer produces alike. Nothing accumulates in the second
+    /// of those, which is exactly why it needs the cap named here: what it *writes* follows
+    /// the length the image declares rather than the working memory it uses.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::FileTooLarge`] if the length exceeds the cap.
+    fn whole_file_len(&self, node: &Node) -> Result<u64, ReadError> {
+        let size = u64::from(node.size);
+        if size > self.limits.max_file_bytes {
+            return Err(ReadError::FileTooLarge {
+                size,
+                limit: self.limits.max_file_bytes,
+            });
+        }
+        Ok(size)
+    }
+
     /// Stream a file's whole contents into `out`, returning how many bytes were written.
     ///
     /// Nothing accumulates, so a file of any size costs one cluster of working memory.
     ///
     /// # Errors
     ///
+    /// [`ReadError::FileTooLarge`] where the length exceeds [`Limits::max_file_bytes`],
     /// [`ReadError`] variants where the chain cannot be followed,
     /// [`ReadError::ChainTooShort`] where it ends before the length the entry records, and
     /// whatever `out` returns.
@@ -1854,7 +2046,7 @@ impl<R: Read + Seek> Reader<R> {
         if node.is_dir() || node.is_volume_label() {
             return Ok(0);
         }
-        let size = u64::from(node.size);
+        let size = self.whole_file_len(node)?;
         let mut buf = vec![0u8; self.layout.bytes_per_cluster() as usize];
         let mut done = 0u64;
         while done < size {
@@ -1887,13 +2079,6 @@ impl<R: Read + Seek> Reader<R> {
     /// [`Limits::max_file_bytes`], and the errors of
     /// [`read_data_to`](Self::read_data_to).
     pub fn read_data(&mut self, node: &Node) -> Result<Vec<u8>, ReadError> {
-        let size = u64::from(node.size);
-        if size > self.limits.max_file_bytes {
-            return Err(ReadError::FileTooLarge {
-                size,
-                limit: self.limits.max_file_bytes,
-            });
-        }
         let mut out = Vec::new();
         self.read_data_to(node, &mut out)?;
         Ok(out)
@@ -1936,56 +2121,7 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         mut visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>,
     ) -> Result<(), E> {
-        let cap = self.limits.max_walk_entries.min(self.max_names());
-        let mut seen = 0usize;
-        // Track the directories descended into by their first cluster: a well-formed tree
-        // reaches each once, so declining to re-descend a repeat bounds the walk against a
-        // cycle rather than fanning out. The root region has no cluster and is entered once
-        // by construction.
-        let mut visited: HashSet<u32> = HashSet::new();
-        if let Storage::Chain(start) = self.root().storage {
-            visited.insert(start);
-        }
-        let root = self.root();
-        let mut stack = self.walk_children(&root, &[]).map_err(E::from)?;
-        if stack.len() > cap {
-            return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-        }
-        while let Some(entry) = stack.pop() {
-            if seen >= cap {
-                return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-            }
-            seen += 1;
-            if entry.node.is_dir() {
-                let descend = match entry.node.storage {
-                    Storage::Chain(start) => visited.insert(start),
-                    // A directory entry naming no cluster has no storage to descend into.
-                    Storage::None | Storage::RootRegion => false,
-                };
-                if descend {
-                    let children = self
-                        .walk_children(&entry.node, &entry.path)
-                        .map_err(E::from)?;
-                    // The cap bounds the names *pushed*, not only the names popped. Each
-                    // iteration may push a whole directory's worth of children, so bounding
-                    // pops alone would leave the stack bounded by the cap times a
-                    // directory's fan-out rather than by the cap. Every name pushed is a
-                    // name this walk must yield, so a frontier already past what is left of
-                    // the cap is a walk past it — reported here rather than after the memory
-                    // is spent.
-                    if seen
-                        .saturating_add(stack.len())
-                        .saturating_add(children.len())
-                        > cap
-                    {
-                        return Err(E::from(ReadError::WalkTooLarge { limit: cap }));
-                    }
-                    stack.extend(children);
-                }
-            }
-            visit(self, entry)?;
-        }
-        Ok(())
+        crate::walk::drive(self, |reader, entry| visit(reader, entry))
     }
 
     /// The child entries of `node` in reverse name order, so a stack pops them in order.
@@ -1998,12 +2134,8 @@ impl<R: Read + Seek> Reader<R> {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let mut children = Vec::new();
         for e in entries.iter().rev() {
-            let mut path = prefix.to_vec();
-            path.push(b'/');
-            path.extend_from_slice(&e.name);
-            if path.len() > MAX_PATH {
-                return Err(ReadError::PathTooLong { limit: MAX_PATH });
-            }
+            let path = crate::walk::child_path(prefix, &e.name)
+                .ok_or(ReadError::PathTooLong { limit: MAX_PATH })?;
             children.push(WalkEntry { path, node: e.node });
         }
         Ok(children)
@@ -2074,10 +2206,18 @@ impl<R: Read + Seek> Reader<R> {
             ) else {
                 continue;
             };
-            for s in 0..sectors {
-                let a = self.read_sectors(first_start + s, 1)?;
-                let b = self.read_sectors(copy_start + s, 1)?;
+            // Compared a batch of sectors at a time rather than one: the copies of a
+            // maximal FAT32 table span megabytes, and a seek and an allocation per
+            // 512-byte sector on each side turns one comparison into millions of round
+            // trips. A mebibyte per side bounds the memory whatever the table's size.
+            let batch = (1u32 << 20) / bytes_per_sector.max(1);
+            let mut s = 0u32;
+            while s < sectors {
+                let count = batch.clamp(1, sectors - s);
+                let a = self.read_sectors(first_start + s, count)?;
+                let b = self.read_sectors(copy_start + s, count)?;
                 if a == b {
+                    s += count;
                     continue;
                 }
                 let base = u64::from(s) * u64::from(bytes_per_sector);
@@ -2085,10 +2225,11 @@ impl<R: Read + Seek> Reader<R> {
                     .iter()
                     .zip(b.iter())
                     .position(|(x, y)| x != y)
-                    .expect("the sectors differ") as u64
+                    .expect("the batches differ") as u64
                     + base;
                 if at >= live_bytes {
                     padding_only = true;
+                    s += count;
                     continue;
                 }
                 // The cluster whose entry that byte belongs to. Every width divides the
@@ -2172,7 +2313,7 @@ impl<R: Read + Seek> Reader<R> {
         let raw = table::read_entry(fat_type, &bytes[within..], 0)
             .ok_or(ReadError::ClusterOutOfRange { cluster })?;
         if fat_type == FatType::Fat12 && cluster & 1 == 1 {
-            Ok(u32::from(u16::from_le_bytes([bytes[within], bytes[within + 1]])) >> 4)
+            Ok(u32::from(get_u16(&bytes, within)) >> 4)
         } else {
             Ok(raw)
         }
@@ -2241,16 +2382,11 @@ impl<R: Read + Seek> Reader<R> {
         if let Some(reached) = reached {
             self.scan_lost(&mut findings, &reached);
         }
-        ScanReport {
-            anomalies: findings.anomalies,
-            truncated: findings.truncated,
-            cap: findings.cap,
-            bytes_per_sector: self.layout.bytes_per_sector,
-        }
+        findings.into_report(self.layout.bytes_per_sector)
     }
 
     /// The backup boot sector and the information sector, on the type that has them.
-    fn scan_reserved(&mut self, findings: &mut Findings) {
+    fn scan_reserved(&mut self, findings: &mut Findings<Anomaly>) {
         let Some(fat32) = self.layout.fat32 else {
             return;
         };
@@ -2294,7 +2430,7 @@ impl<R: Read + Seek> Reader<R> {
         if let Ok(bytes) = self.read_sectors(info_sector, 1)
             && let Some(low) = bytes
                 .get(FsInfo::TRAIL_OFFSET..FsInfo::TRAIL_OFFSET + 2)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .map(|b| get_u16(b, 0))
             && low != 0
         {
             findings.push(Anomaly {
@@ -2356,7 +2492,7 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// The reserved entries of the table, and every copy against the first.
-    fn scan_tables(&mut self, findings: &mut Findings) {
+    fn scan_tables(&mut self, findings: &mut Findings<Anomaly>) {
         let fat_type = self.layout.fat_type;
         let expected_media = table::media_entry(fat_type, self.boot.media);
         let expected_tail = table::tail_entry(fat_type);
@@ -2422,9 +2558,13 @@ impl<R: Read + Seek> Reader<R> {
     /// walk bound was — in which case the lost-cluster question has no answer, since every
     /// cluster the walk never got to would look unreachable. A count derived from a partial
     /// traversal reads as a fact and is not one, so it is not produced at all.
-    fn scan_tree(&mut self, findings: &mut Findings) -> Option<ClusterSet> {
+    fn scan_tree(&mut self, findings: &mut Findings<Anomaly>) -> Option<ClusterSet> {
         let mut reached = ClusterSet::new(self.layout.clusters);
-        let mut visited: HashSet<u32> = HashSet::new();
+        // The directories this walk has descended into, in the same set the clusters it has
+        // claimed are held in: both questions are "which clusters has this been to", over the
+        // volume's own cluster numbers, and a second structure over them would be a second
+        // answer to keep in step.
+        let mut visited = ClusterSet::new(self.layout.clusters);
         let mut queue = vec![(Vec::new(), self.root())];
         if let Storage::Chain(start) = self.root().storage {
             visited.insert(start);
@@ -2483,7 +2623,9 @@ impl<R: Read + Seek> Reader<R> {
                 }
             } else if let Some(chain_bytes) = claimed {
                 // A file's length is a claim about its clusters, and FAT has no holes, so
-                // the two disagreeing is worth saying even where every cluster reads.
+                // the two disagreeing is worth saying even where every cluster reads. This
+                // compares a length against a chain and so needs one: the shape with no chain
+                // at all is `SizeWithoutAllocation`, raised where the entry is parsed.
                 let size = u64::from(node.size);
                 let bpc = u64::from(self.layout.bytes_per_cluster());
                 let need = size.div_ceil(bpc.max(1)) * bpc;
@@ -2511,15 +2653,33 @@ impl<R: Read + Seek> Reader<R> {
         node: &Node,
         path: &[u8],
         reached: &mut ClusterSet,
-        findings: &mut Findings,
+        findings: &mut Findings<Anomaly>,
     ) -> Option<u64> {
         let Storage::Chain(start) = node.storage else {
             return None;
         };
         let mut current = start;
         let mut count = 0u64;
+        let mut own = std::collections::HashSet::new();
         loop {
             if !reached.insert(current) {
+                // Whose claim is repeated decides what the finding says: a cluster this
+                // walk already stepped through is the chain looping onto itself, and one
+                // another walk claimed is two chains sharing storage. Blaming "another
+                // chain" for a loop would send a reader hunting for a second file that
+                // does not exist.
+                let detail = if own.contains(&current) {
+                    format!(
+                        "{}: the chain from cluster {start} returns to cluster {current}, \
+                         and a chain that loops never ends",
+                        crate::escape::printable(path)
+                    )
+                } else {
+                    format!(
+                        "{}: cluster {current} is already part of another chain",
+                        crate::escape::printable(path)
+                    )
+                };
                 findings.push(Anomaly {
                     severity: Severity::Structural,
                     category: Category::AllocationTable,
@@ -2527,13 +2687,11 @@ impl<R: Read + Seek> Reader<R> {
                         cluster: Some(current),
                         ..Location::default()
                     },
-                    detail: format!(
-                        "{}: cluster {current} is already part of another chain",
-                        crate::escape::printable(path)
-                    ),
+                    detail,
                 });
                 return None;
             }
+            own.insert(current);
             count += 1;
             if count > u64::from(self.layout.clusters) {
                 findings.push(
@@ -2558,7 +2716,7 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// A subdirectory's `.` and `..`, which the format requires as its first two entries.
-    fn check_dots(&mut self, node: &Node, path: &[u8], findings: &mut Findings) {
+    fn check_dots(&mut self, node: &Node, path: &[u8], findings: &mut Findings<Anomaly>) {
         if path.is_empty() {
             return; // the root has neither, on any type
         }
@@ -2603,7 +2761,7 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// Clusters the table marks allocated that no chain reached.
-    fn scan_lost(&mut self, findings: &mut Findings, reached: &ClusterSet) {
+    fn scan_lost(&mut self, findings: &mut Findings<Anomaly>, reached: &ClusterSet) {
         let fat_type = self.layout.fat_type;
         let bad = table::bad_cluster(fat_type);
         let mut count = 0u32;
@@ -2642,6 +2800,11 @@ struct Slot {
 /// fit in the source, so the widest set this reaches is
 /// [`MAX_CLUSTERS_FAT32`](super::geometry::MAX_CLUSTERS_FAT32) bits — a thirty-second of the
 /// one copy of the table such a volume must carry to describe those clusters at all.
+///
+/// This is the one answer to "which clusters has this been to", and every question of that
+/// shape asks it: the chain a directory follows, the directories a scan has descended into,
+/// and the clusters a scan has claimed. The domain is the same in all three — a cluster number
+/// of this volume — and a second structure over it would be a second answer to keep in step.
 struct ClusterSet {
     bits: Vec<u64>,
     clusters: u32,
@@ -2707,27 +2870,41 @@ impl LongName {
         self.broken = false;
     }
 
-    fn accept(&mut self, entry: &LfnEntry) {
+    /// Fold one entry into the run, answering whether a run still being assembled was
+    /// discarded to start over.
+    ///
+    /// The last-in-sequence flag opens a new run whatever preceded it, so one arriving
+    /// mid-run wipes what was in flight — slots that then belong to nothing, which is the
+    /// caller's to report since only it knows where they sit.
+    fn accept(&mut self, entry: &LfnEntry) -> bool {
         let ordinal = usize::from(entry.order & !LFN_LAST_ENTRY);
+        let mut discarded = false;
         if entry.order & LFN_LAST_ENTRY != 0 {
             // The last in the sequence starts a new run, whatever preceded it.
+            discarded = self.is_live();
             self.clear();
             if ordinal == 0 || ordinal > LFN_MAX_ENTRIES {
                 self.broken = true;
-                return;
+                return discarded;
             }
             self.chunks = vec![None; ordinal];
             self.checksum = Some(entry.checksum);
         }
         if ordinal == 0 || ordinal > self.chunks.len() || self.checksum != Some(entry.checksum) {
             self.broken = true;
-            return;
+            return discarded;
         }
         if self.chunks[ordinal - 1].is_some() {
             self.broken = true;
-            return;
+            return discarded;
         }
         self.chunks[ordinal - 1] = Some(entry.name);
+        discarded
+    }
+
+    /// Whether a run is being assembled: entries accepted and not yet taken.
+    fn is_live(&self) -> bool {
+        !self.chunks.is_empty() || self.broken
     }
 
     fn take(&mut self) -> LongRun {
@@ -2816,26 +2993,15 @@ fn render_short(name: &[u8; 11], case_flags: u8) -> Vec<u8> {
     }
 }
 
-/// Whether a name is one no directory can hold.
+/// The volume label an eleven-byte name field holds.
 ///
-/// `.` and `..` name a directory rather than something inside it, a path separator would
-/// traverse out of the tree, and a NUL would truncate the path a consumer forms from the
-/// name. The test is on the name as a caller receives it, after a long name is decoded and a
-/// short one is read under the volume's code page, because that is the byte string a path is
-/// built from.
-///
-/// An empty name is not a name either, and two paths reach one: an eleven-byte name field of
-/// spaces renders to nothing, and a long-name run whose first code unit is zero decodes to
-/// nothing. The path built from one is the directory's own with a trailing separator, which
-/// no entry in that directory is.
-fn name_is_hostile(name: &[u8]) -> bool {
-    name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0)
-}
-
-/// The eleven-byte name field, trimmed of its trailing padding, as a volume label.
-///
-/// A label has no dot and no extension: the eleven bytes are one field.
-fn trim_label(name: &[u8; 11]) -> Vec<u8> {
+/// Three things separate this from the field's plain padding rule
+/// ([`unpadded`](crate::fat::ondisk::unpadded)), which is why it is its own function rather
+/// than a call to that one. A label has no dot and no extension, so the eleven bytes are one
+/// field rather than a base and a three-byte tail. A NUL is trimmed here as well as a space,
+/// because a formatter that filled the field with either wrote the same label. And the
+/// leading-byte substitution is undone.
+fn volume_label(name: &[u8; 11]) -> Vec<u8> {
     let mut end = name.len();
     while end > 0 && (name[end - 1] == b' ' || name[end - 1] == 0) {
         end -= 1;
@@ -2869,6 +3035,68 @@ fn decode_utf16(units: &[u16]) -> (Vec<u8>, bool) {
     (text.into_bytes(), ill_formed)
 }
 
+/// Judge the three times a directory entry records, each against the range the encoding
+/// defines for its fields.
+///
+/// A read hands back the instant the arithmetic reaches, which is what every driver does and
+/// what [`DosTimestamp::decode`] documents deferring. This is the site it defers to: month
+/// zero, day 31 of February, a twenty-fifth hour and a hundredths byte past 199 are each a
+/// field no encoder produces and an image may carry.
+///
+/// The write time is the one the format requires. The creation and access times are optional,
+/// and a wholly zero field is how the format records that an implementation did not keep them
+/// — so a zero field is passed over rather than reported as the month-zero date it spells.
+/// Nothing short of the whole field counts: a zero date beside a time that is not zero is a
+/// field that was written, and written wrongly.
+///
+/// The access field is a date and no time, and the write field has no hundredths byte, so each
+/// is judged with zero in place of what the format does not give it.
+fn check_times(
+    entry: &DirEntry,
+    index: u32,
+    at: Location,
+    deviations: &mut OnDeviation<'_>,
+) -> Result<(), ReadError> {
+    let optional = [
+        (
+            "creation time",
+            DosTimestamp {
+                date: entry.create_date,
+                time: entry.create_time,
+                tenth: entry.create_time_tenth,
+            },
+        ),
+        (
+            "access time",
+            DosTimestamp {
+                date: entry.access_date,
+                time: 0,
+                tenth: 0,
+            },
+        ),
+    ];
+    for (field, stamp) in optional {
+        if stamp != DosTimestamp::default() && !stamp.is_well_formed() {
+            deviations.record(at, ReadError::MalformedTimestamp { index, field })?;
+        }
+    }
+    let write = DosTimestamp {
+        date: entry.write_date,
+        time: entry.write_time,
+        tenth: 0,
+    };
+    if !write.is_well_formed() {
+        deviations.record(
+            at,
+            ReadError::MalformedTimestamp {
+                index,
+                field: "modification time",
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// The node a directory entry describes.
 fn node_of(entry: &DirEntry, fat_type: FatType) -> Node {
     // The high half of the first cluster number is not part of it on FAT12 and FAT16, where
@@ -2889,21 +3117,24 @@ fn node_of(entry: &DirEntry, fat_type: FatType) -> Node {
         attributes: entry.attributes,
         size: entry.size,
         times: Some(Times {
-            create: ondisk::decode_time(DosTimestamp {
+            create: DosTimestamp {
                 date: entry.create_date,
                 time: entry.create_time,
                 tenth: entry.create_time_tenth,
-            }),
-            access: ondisk::decode_time(DosTimestamp {
+            }
+            .decode(),
+            access: DosTimestamp {
                 date: entry.access_date,
                 time: 0,
                 tenth: 0,
-            }),
-            modify: ondisk::decode_time(DosTimestamp {
+            }
+            .decode(),
+            modify: DosTimestamp {
                 date: entry.write_date,
                 time: entry.write_time,
                 tenth: 0,
-            }),
+            }
+            .decode(),
         }),
     }
 }
@@ -2914,6 +3145,14 @@ fn node_of(entry: &DirEntry, fat_type: FatType) -> Node {
 /// reads a file costs no second lookup of it.
 impl<R: Read + Seek> FsTree for Reader<R> {
     type Node = Node;
+
+    fn family(&self) -> Family {
+        Family::Fat
+    }
+
+    fn max_file_bytes(&self) -> u64 {
+        self.limits.max_file_bytes
+    }
 
     fn walk_tree<E, F>(&mut self, mut visit: F) -> Result<(), E>
     where
@@ -2942,56 +3181,25 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         match outcome {
             Ok(()) => Ok(()),
             Err(WalkFail::Read(e)) => Err(E::from(TreeError::from(e))),
+            // Nothing above produces one: a FAT node is a directory or a file, and both are
+            // kinds the shared frame has. The arm is here because the failure is the shared
+            // surface's rather than this family's, so a later kind that cannot be described
+            // reports through it.
+            Err(WalkFail::Tree(e)) => Err(E::from(e)),
             Err(WalkFail::Visitor(e)) => Err(e),
         }
     }
 
     fn stat(&mut self, node: &Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> {
-        // A FAT volume records an owner for nothing and a mode for nothing, so both are the
-        // caller's values — and both are named as invented even though one bit of the mode
-        // is not. `ATTR_READ_ONLY` is the single permission bit the format holds, and it
-        // clears the write bits of whatever mode the caller named; the other eight bits
-        // still came from the caller and nothing in the volume speaks to them.
-        let mut mode = if node.is_dir() {
-            synthesis.dir_mode
-        } else {
-            synthesis.file_mode
-        };
-        if node.attributes.contains(DirAttributes::READ_ONLY) {
-            mode &= !0o222;
-        }
-        let (atime, ctime, mtime) = match node.times {
-            // The format has no change time, so the modification time stands for it: it is
-            // the closest thing the volume records, and the alternative is a value invented
-            // out of nothing.
-            Some(times) => (times.access, times.modify, times.modify),
-            // The root directory has no entry and so no times at all.
-            None => {
-                let zero = Timestamp::from_secs(0);
-                (zero, zero, zero)
-            }
-        };
-        let mut synthesized = vec![
-            Property::Ownership,
-            Property::Permissions,
-            Property::ChangeTime,
-        ];
-        if node.times.is_none() {
-            synthesized.push(Property::AccessTime);
-            synthesized.push(Property::ModificationTime);
-        }
-        Ok(Attributes {
-            meta: Metadata {
-                mode,
-                uid: synthesis.uid,
-                gid: synthesis.gid,
-                atime,
-                ctime,
-                mtime,
-            },
-            xattrs: Vec::new(),
-            synthesized,
-        })
+        // A FAT volume's whole record of a node is a read-only bit and two times, which is
+        // exFAT's too — so what a read of one invents has a single home, beside the one that
+        // says what a write of one loses.
+        Ok(Attributes::from_read_only_bit(
+            synthesis,
+            node.is_dir(),
+            node.attributes.contains(DirAttributes::READ_ONLY),
+            node.times.map(|t| (t.access, t.modify)),
+        ))
     }
 
     fn read_bytes(&mut self, node: &Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> {
@@ -3006,30 +3214,13 @@ impl<R: Read + Seek> FsTree for Reader<R> {
             detail: "a FAT volume holds no symbolic links".to_string(),
         })
     }
-
-    fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
-        let cap = self.limits.max_file_bytes;
-        if size > cap {
-            return Err(TreeError::LimitExceeded {
-                family: Family::Fat,
-                detail: format!(
-                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read \
-                     is held to",
-                    crate::escape::printable(path)
-                ),
-            });
-        }
-        Ok(())
-    }
 }
 
-/// Either failure a walk through the shared surface can have: the volume's, which
-/// `walk_with` produces, or the visitor's, which is the sink's own.
-enum WalkFail<E> {
-    Read(ReadError),
-    Visitor(E),
-}
+/// The shared walk failure over this family's read error.
+type WalkFail<E> = crate::tree::WalkFail<ReadError, E>;
 
+/// What makes `?` on a [`ReadError`] work inside a walk through the shared surface. Written
+/// per family because a blanket implementation would collide with the reflexive one.
 impl<E> From<ReadError> for WalkFail<E> {
     fn from(err: ReadError) -> Self {
         WalkFail::Read(err)
@@ -3043,6 +3234,7 @@ mod tests {
         BootCode, ClusterSize, FatTypeRequest, FormatOptions, Image, MEDIA_REMOVABLE, PlanRequest,
         ReservedSectors, VolumeLabel, format,
     };
+    use crate::path::canonical_parts;
     use crate::source::{Metadata, TreeBuilder};
     use std::io::Cursor;
 
@@ -3239,9 +3431,9 @@ mod tests {
 
     #[test]
     fn a_short_name_is_kept_beside_the_name_and_says_whether_a_long_one_was_used() {
-        // This is F18 observed from the reading side: a name that is already its own short
-        // name has no long-name run, and one that is not does. A writer that used the
-        // reserved case byte instead would show `has_long_name` false for `readme.txt`.
+        // The case-byte decision observed from the reading side: a name that is already its
+        // own short name has no long-name run, and one that is not does. A writer that used
+        // the reserved case byte instead would show `has_long_name` false for `readme.txt`.
         for (what, image) in each_type() {
             let mut r = reader(&image);
             let root = r.root();
@@ -3278,8 +3470,8 @@ mod tests {
 
     #[test]
     fn the_case_flags_are_honoured_on_reading_and_never_written() {
-        // The writer leaves byte 12 zero on every entry (F18), so nothing in an image this
-        // crate wrote depends on it.
+        // The writer leaves byte 12 zero on every entry, so nothing in an image this crate
+        // wrote depends on it.
         for (what, image) in each_type() {
             let mut r = reader(&image);
             let root = r.root();
@@ -3397,14 +3589,14 @@ mod tests {
             (
                 "earliest time",
                 Box::new(|mut o: FormatOptions| {
-                    o.time = Timestamp::from_secs(super::super::ondisk::TIME_SECS_MIN);
+                    o.time = Timestamp::from_secs(DosTimestamp::SECS_MIN);
                     o
                 }),
             ),
             (
                 "latest time",
                 Box::new(|mut o: FormatOptions| {
-                    o.time = Timestamp::from_secs(super::super::ondisk::TIME_SECS_MAX);
+                    o.time = Timestamp::from_secs(DosTimestamp::SECS_MAX);
                     o
                 }),
             ),
@@ -3448,8 +3640,8 @@ mod tests {
             synthesis: _,
         } = options();
 
-        // Every media descriptor the format defines, which is the field M6 was about: the
-        // writer refuses the rest, and the reader accepts exactly these.
+        // Every media descriptor the format defines: the writer refuses the rest, and the
+        // reader accepts exactly these.
         for media in (0xF8u8..=0xFF).chain([MEDIA_REMOVABLE]) {
             variants.push((
                 "media",
@@ -3486,9 +3678,9 @@ mod tests {
 
     #[test]
     fn an_undersized_fat32_is_remarked_on_and_not_refused() {
-        // F9's volume: below the format's own cluster minimum, written on request, and read
-        // as FAT32 by every mainstream driver. This crate emits it, so a strict read must
-        // accept it.
+        // The opt-in small FAT32 volume: below the format's own cluster minimum, written on
+        // request, and read as FAT32 by every mainstream driver. This crate emits it, so a
+        // strict read must accept it.
         let opts = options().plan(
             PlanRequest::new(0)
                 .cluster_size(ClusterSize::Sectors(1))
@@ -3545,17 +3737,32 @@ mod tests {
     fn a_lookup_finds_a_name_however_its_letters_are_cased() {
         let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
         let mut r = reader(&image);
+        // Two rules meet in these spellings, and they are separate. The separators and `.`
+        // elements carry no meaning to *any* path in this crate, so a volume drops them
+        // because it splits through the one shared rule rather than because this reader
+        // reimplemented it — asserted here against `canonical_key`, so a splitter that
+        // drifted would make a model key an entry at a path this reader could no longer
+        // reach. The case of the letters is FAT's own business, which is why the shared key
+        // does not fold it and this assertion uppercases before comparing.
         for path in [
             &b"/EFI/BOOT/BOOTX64.EFI"[..],
             b"/efi/boot/bootx64.efi",
             b"/EFI/boot/BootX64.efi",
             b"//EFI//BOOT//BOOTX64.EFI",
             b"/./EFI/BOOT/BOOTX64.EFI",
+            b"/EFI/BOOT/BOOTX64.EFI/",
+            b"EFI/BOOT/BOOTX64.EFI",
         ] {
             let node = r
                 .lookup(path)
                 .unwrap_or_else(|e| panic!("{}: {e}", String::from_utf8_lossy(path)));
             assert_eq!(node.size, 4);
+            assert_eq!(
+                crate::path::canonical_key(path).to_ascii_uppercase(),
+                b"EFI/BOOT/BOOTX64.EFI",
+                "{}: one path to a model as well as to a lookup",
+                String::from_utf8_lossy(path)
+            );
         }
         assert!(matches!(
             r.lookup(b"/EFI/BOOT/NOPE"),
@@ -3565,6 +3772,44 @@ mod tests {
             r.lookup(b"/readme.txt/deeper"),
             Err(ReadError::NotADirectory { .. })
         ));
+    }
+
+    #[test]
+    fn a_parent_component_ascends_though_no_entry_of_that_name_is_ever_handed_back() {
+        // This family is where the two questions the one spelling asks came apart. A FAT
+        // subdirectory genuinely stores `.` and `..` entries, and none of them reaches a
+        // caller: the format's own are identified by their short-name field and filtered
+        // there, and a long name spelling either is refused as a name. So there is no entry
+        // an ascent could be a lookup of, and it has to be the descent walked back.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let mut r = reader(&image);
+        let boot = r.lookup(b"/EFI/BOOT").expect("lookup");
+        let listed = r.read_dir(&boot).expect("read the subdirectory");
+        // Asked through the shared rule rather than by spelling the two names again, so a
+        // clause added to what no path component may carry reaches this assertion too.
+        assert!(
+            !listed
+                .iter()
+                .any(|e| is_hostile_component(&e.name) || is_hostile_component(&e.short_name)),
+            "a name no path component may carry reached a caller: {:?}",
+            listed.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        // The volume stores them all the same, which is what makes the filtering the claim
+        // rather than an accident of this fixture.
+        assert_eq!(listed.len(), 1);
+
+        // And the component resolves, through a directory whose listing has nothing of that
+        // name in it.
+        let want = r.lookup(b"/EFI/BOOT/BOOTX64.EFI").expect("lookup");
+        assert_eq!(
+            r.lookup(b"/EFI/BOOT/../BOOT/BOOTX64.EFI")
+                .map(|node| node.storage),
+            Ok(want.storage)
+        );
+        assert_eq!(
+            r.lookup(b"/EFI/..").map(|n| n.storage),
+            Ok(r.root().storage)
+        );
     }
 
     #[test]
@@ -3596,10 +3841,94 @@ mod tests {
                 limit: 1024
             })
         ));
+        // A stream into a caller's own writer answers to it too, and it has to: nothing
+        // accumulates there, so the memory it costs says nothing about the bytes it
+        // produces — and an extraction's `--cat` is exactly that stream.
+        assert!(matches!(
+            r.read_data_to(&node, std::io::sink()),
+            Err(ReadError::FileTooLarge {
+                size: 5000,
+                limit: 1024
+            })
+        ));
         // A read into a caller's own buffer is bounded by the buffer and says how much of
         // it was filled, so a partial read stays representable.
         let mut buf = [0u8; 64];
         assert_eq!(r.read_into(&node, 0, &mut buf).expect("read"), 64);
+    }
+
+    #[test]
+    fn a_time_the_encoding_does_not_define_is_named_where_the_entry_is_read() {
+        // `DosTimestamp::decode` reports the instant the arithmetic reaches and says a scan
+        // is what judges it. This is that scan, and it is the write time that is judged
+        // unconditionally: the format requires it, where the creation and access times are
+        // optional and a wholly zero field is how it records that they were not kept.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let entry = entry_of(&image, b"EMPTY      ");
+
+        // Day 31 of February, which is a date the calendar does not have and the arithmetic
+        // reads as the third of March.
+        let mut bytes = image.as_bytes().to_vec();
+        let odd = ((2035u16 - 1980) << 9) | (2 << 5) | 31;
+        bytes[entry + 24..entry + 26].copy_from_slice(&odd.to_le_bytes());
+        let err = Reader::open(Cursor::new(bytes.as_slice()))
+            .expect("open")
+            .walk()
+            .expect_err("a strict read refuses it");
+        assert!(
+            matches!(
+                err,
+                ReadError::MalformedTimestamp {
+                    field: "modification time",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+
+        // The creation time zeroed whole, which is the format recording that nothing kept
+        // it — so it is passed over rather than reported as the month-zero date it spells.
+        let mut bytes = image.as_bytes().to_vec();
+        bytes[entry + 13] = 0;
+        bytes[entry + 14..entry + 18].copy_from_slice(&0u32.to_le_bytes());
+        Reader::open(Cursor::new(bytes.as_slice()))
+            .expect("open")
+            .walk()
+            .expect("a field the format calls optional and absent stops no read");
+
+        // Nothing short of the whole field is that record: a zero date beside a time that is
+        // not zero is a field that was written, and written wrongly.
+        let mut bytes = image.as_bytes().to_vec();
+        bytes[entry + 16..entry + 18].copy_from_slice(&0u16.to_le_bytes());
+        let err = Reader::open(Cursor::new(bytes.as_slice()))
+            .expect("open")
+            .walk()
+            .expect_err("a strict read refuses it");
+        assert!(
+            matches!(
+                err,
+                ReadError::MalformedTimestamp {
+                    field: "creation time",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// Where the directory entry whose short name is `name` begins, as a byte offset into
+    /// `image`.
+    ///
+    /// Found by scanning the root region for the eleven-byte field rather than computed, so a
+    /// case that patches an entry stays correct when the order a directory is written in
+    /// changes.
+    fn entry_of(image: &Image, name: &[u8; 11]) -> usize {
+        let bytes = image.as_bytes();
+        bytes
+            .chunks_exact(DIR_ENTRY_SIZE)
+            .position(|slot| &slot[..11] == name)
+            .map(|n| n * DIR_ENTRY_SIZE)
+            .unwrap_or_else(|| panic!("no entry is named {}", String::from_utf8_lossy(name)))
     }
 
     #[test]
@@ -3652,9 +3981,15 @@ mod tests {
         }
 
         // And every slot in the data region is an entry, so nothing stops the parse early.
+        // Each carries a real write time, because the bound under test is the entry cap and
+        // an entry whose date the calendar does not have is a deviation that would stop the
+        // parse first — on a fixture where the times were never the point.
         let mut slot = [0u8; DIR_ENTRY_SIZE];
         slot[..11].copy_from_slice(b"FILLER  TXT");
         slot[11] = 0x20; // archive, which is what an ordinary file carries
+        let stamp = DosTimestamp::encode(Timestamp::from_secs(1_426_325_212)).expect("in range");
+        slot[22..24].copy_from_slice(&stamp.time.to_le_bytes());
+        slot[24..26].copy_from_slice(&stamp.date.to_le_bytes());
         let data = at(&layout, layout.first_data_sector);
         for chunk in bytes[data..].chunks_exact_mut(DIR_ENTRY_SIZE) {
             chunk.copy_from_slice(&slot);
@@ -4211,6 +4546,58 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_recording_a_length_and_no_first_cluster_is_named_where_it_is_read() {
+        // FAT has no holes, so a length is a claim about clusters and a first cluster of zero
+        // says there are none. Nothing downstream can see the two disagree: the storage such
+        // an entry yields is the same `None` a legitimately empty file has, so the scan's
+        // size-against-chain comparison has no chain to make it against — a volume `fsck.fat`
+        // truncates the file on scanned clean, and the read refused halfway through an
+        // extraction.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let entry = entry_of(&image, b"EMPTY      ");
+        let mut bytes = image.into_bytes();
+        bytes[entry + 28..entry + 32].copy_from_slice(&10u32.to_le_bytes());
+
+        let err = Reader::open(Cursor::new(bytes.as_slice()))
+            .expect("open")
+            .walk()
+            .expect_err("a strict read refuses it");
+        assert!(
+            matches!(err, ReadError::SizeWithoutAllocation { size: 10, .. }),
+            "{err}"
+        );
+
+        // And the scan says it, at the severity that stops an `inspect`: this is the one
+        // finding the volume carries, so nothing else could be standing in for it.
+        let mut r = Reader::open_with(
+            Cursor::new(bytes.as_slice()),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("a lenient open");
+        let report = r.scan();
+        let found: Vec<_> = report
+            .anomalies()
+            .iter()
+            .filter(|a| a.detail.contains("no first cluster"))
+            .collect();
+        assert_eq!(found.len(), 1, "{:#?}", report.anomalies());
+        assert_eq!(found[0].severity, Severity::Structural);
+        assert!(!report.is_clean());
+
+        // And the read objects too: the scan says so first and the read says so again, so a
+        // caller reaching this entry either way is told.
+        let node = r.lookup(b"/empty").expect("lookup");
+        assert!(matches!(
+            r.read_data(&node),
+            Err(ReadError::ChainTooShort {
+                start: 0,
+                size: 10,
+                read: 0
+            })
+        ));
+    }
+
+    #[test]
     fn a_backup_boot_sector_that_has_drifted_is_reported() {
         // It exists to be used when sector 0 cannot be read, so a copy that no longer
         // matches would restore a geometry the volume does not have.
@@ -4400,6 +4787,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_orphaned_long_name_run_is_reported_however_the_run_ends() {
+        // A long-name run belongs to the ordinary short entry that follows it, and that
+        // entry is only one of the ways a run can end. The others leave the run belonging
+        // to nothing — an end marker, a deleted entry, a volume label, a fresh sequence
+        // start — and each must be a finding: the classic corruption here is a short
+        // entry deleted with its long-name slots left behind, and a scan that reported
+        // the orphan at one terminal state and not the others would go quiet on exactly
+        // that shape.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let layout = *image.layout();
+        let bytes = image.into_bytes();
+        let root = at(
+            &layout,
+            layout.root_dir_start_sector().expect("a root region"),
+        );
+
+        // The slot of the short entry a single-entry run belongs to.
+        let short_off = (0..layout.root_entries as usize)
+            .map(|slot| root + slot * DIR_ENTRY_SIZE)
+            .find(|&off| {
+                bytes[off + 11] == DirAttributes::LFN.bits() && bytes[off] == LFN_LAST_ENTRY | 1
+            })
+            .map(|off| off + DIR_ENTRY_SIZE)
+            .expect("the fixture holds a single-entry long-name run");
+
+        let orphans_of = |edit: &dyn Fn(&mut [u8])| -> usize {
+            let mut edited = bytes.clone();
+            edit(&mut edited[short_off..short_off + DIR_ENTRY_SIZE]);
+            let mut r = Reader::open_with(
+                Cursor::new(edited.as_slice()),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .expect("open");
+            r.scan()
+                .anomalies()
+                .iter()
+                .filter(|a| a.detail.contains("do not form a complete run"))
+                .count()
+        };
+
+        // The untouched fixture holds no orphan, so each count below is the edit's.
+        assert_eq!(orphans_of(&|_| {}), 0, "the fixture is clean");
+        // The run ends at the directory's end marker.
+        assert_eq!(
+            orphans_of(&|slot| slot[0] = NAME_END),
+            1,
+            "at the end marker"
+        );
+        // The short entry was deleted and the run's slots were not.
+        assert_eq!(
+            orphans_of(&|slot| slot[0] = NAME_DELETED),
+            1,
+            "at a deleted entry"
+        );
+        // The run ends at the volume label, which is not a name in the tree.
+        assert_eq!(
+            orphans_of(&|slot| slot[11] = DirAttributes::VOLUME_ID.bits()),
+            1,
+            "at the volume label"
+        );
+        // A fresh last-in-sequence entry starts over, wiping the run in flight; whatever
+        // ends the second run may be an orphan of its own, so the bound here is at least.
+        assert!(
+            orphans_of(&|slot| {
+                slot[0] = LFN_LAST_ENTRY | 1;
+                slot[11] = DirAttributes::LFN.bits();
+            }) >= 1,
+            "at a second sequence start"
+        );
+        // The run ends at a dot entry, whose two slots hold a directory's link to itself
+        // and to its parent and never carry a long name. The name is dropped there like
+        // the label's is, and the debris is a finding there like the label's is.
+        assert_eq!(
+            orphans_of(&|slot| {
+                slot[..11].copy_from_slice(b".          ");
+                slot[11] = DirAttributes::DIRECTORY.bits();
+            }),
+            1,
+            "at a dot entry"
+        );
+    }
+
     /// Format a volume and rewrite the first single-entry long-name run in its root region to
     /// spell `name`.
     ///
@@ -4491,17 +4961,15 @@ mod tests {
         let root_node = lenient.root();
         for entry in lenient.read_dir(&root_node).expect("a lenient read") {
             assert!(
-                !name_is_hostile(&entry.name),
+                !is_hostile_component(&entry.name),
                 "{what}: read_dir handed back {:?}",
                 String::from_utf8_lossy(&entry.name)
             );
         }
         for entry in lenient.walk().expect("a lenient walk") {
-            // A path opens with the separator, so splitting it yields one empty leading
-            // piece that is an artefact of the split rather than a name in the tree.
-            for component in entry.path.split(|b| *b == b'/').skip(1) {
+            for component in canonical_parts(&entry.path) {
                 assert!(
-                    !name_is_hostile(component),
+                    !is_hostile_component(component),
                     "{what}: the walk built {:?}",
                     String::from_utf8_lossy(&entry.path)
                 );
@@ -4577,7 +5045,7 @@ mod tests {
             .expect("the archive lists its members")
         {
             let path = entry.expect("a member").path_bytes().to_vec();
-            for component in path.split(|b| *b == b'/') {
+            for component in canonical_parts(&path) {
                 assert_ne!(
                     component,
                     b"..",
@@ -4692,6 +5160,28 @@ mod tests {
     }
 
     #[test]
+    fn a_scan_that_never_looked_is_not_a_clean_verdict() {
+        // A cap of zero stops the scan before it reads a sector. The report is empty, and it
+        // is *not* clean: an absence of findings from a scan that never looked is an absence
+        // of looking, and a caller acting on `is_clean` must not read it as a verdict. This
+        // is the ext reader's rule too, and it is one rule — both scans collect through the
+        // same bounded accumulator, which is what records that reaching the cap stopped it.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let mut r = Reader::open_with(
+            Cursor::new(image.as_bytes()),
+            &OpenOptions::new()
+                .policy(ReadPolicy::Lenient)
+                .limits(Limits::new().max_findings(0)),
+        )
+        .expect("open");
+        let report = r.scan();
+        assert!(report.anomalies().is_empty());
+        assert!(report.is_truncated());
+        assert!(!report.is_clean(), "a truncated report claimed a verdict");
+        assert!(report.to_report().to_json().contains("\"clean\":false"));
+    }
+
+    #[test]
     fn a_chain_that_loops_is_bounded_rather_than_followed() {
         // Nothing in a table says a chain ends, so a chain that points back at itself would
         // be followed forever. The bound is the volume's own cluster count, which a chain
@@ -4785,6 +5275,63 @@ mod tests {
 
         // And the scan says what it is rather than running forever.
         assert!(!r.scan().is_clean());
+    }
+
+    #[test]
+    fn a_chain_looping_onto_itself_is_told_apart_from_a_cluster_two_chains_share() {
+        // Whose claim is repeated decides what the scan says: a cluster this walk already
+        // stepped through is the chain looping onto itself, and blaming "another chain"
+        // for it would send a reader hunting for a second file that does not exist. The
+        // chain's second cluster is pointed back at its first, so the walk returns to
+        // where it began.
+        let image = image(64, FatTypeRequest::Exactly(FatType::Fat16));
+        let layout = *image.layout();
+        let mut bytes = image.into_bytes();
+        let start = {
+            let mut r = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
+            let node = r.lookup(b"/a-long-file-name.text").expect("lookup");
+            match node.storage {
+                Storage::Chain(start) => start,
+                _ => panic!("the fixture's multi-cluster file owns no chain"),
+            }
+        };
+        for copy in 0..layout.fats {
+            let off = at(&layout, layout.fat_start_sector(copy).expect("a table"))
+                + table::entry_offset(FatType::Fat16, start + 1) as usize;
+            bytes[off..off + 2].copy_from_slice(&(start as u16).to_le_bytes());
+        }
+
+        let mut r = Reader::open_with(
+            Cursor::new(bytes.as_slice()),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("open");
+        let report = r.scan();
+        let said = report
+            .anomalies()
+            .iter()
+            .find(|a| a.detail.contains("loops"))
+            .unwrap_or_else(|| panic!("no loop finding: {}", report.to_report().to_table()))
+            .detail
+            .clone();
+        assert!(
+            said.contains(&format!(
+                "the chain from cluster {start} returns to cluster {start}"
+            )),
+            "{said}"
+        );
+        assert!(
+            said.contains("a-long-file-name.text"),
+            "the owning path rides along: {said}"
+        );
+        assert!(
+            !report
+                .anomalies()
+                .iter()
+                .any(|a| a.detail.contains("another chain")),
+            "a loop is not a cross-link: {}",
+            report.to_report().to_table()
+        );
     }
 
     #[test]

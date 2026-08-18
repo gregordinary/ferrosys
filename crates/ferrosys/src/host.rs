@@ -138,6 +138,25 @@ pub enum HostError {
         /// The failure the reader reported.
         source: crate::tree::TreeError,
     },
+    /// A file's storage yielded fewer bytes than the length the image records for it, so
+    /// the file written to the host would be shorter than the tree says.
+    ///
+    /// A tree that looks complete and is not is the failure an extraction exists to
+    /// prevent, so the file is not left behind looking whole: the short entry is a
+    /// refusal naming both lengths.
+    #[error(
+        "{}: the image records {size} bytes and its storage yielded {got}",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    ShortRead {
+        /// The entry's path within the image.
+        path: Vec<u8>,
+        /// The length the image records.
+        size: u64,
+        /// The bytes its storage yielded.
+        got: u64,
+    },
     /// The directory an extraction is to write into already holds something.
     ///
     /// An extraction states what the filesystem holds, so a name already in the destination

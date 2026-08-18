@@ -29,6 +29,7 @@
 #[non_exhaustive] pub ferrosys::AclError::InvalidPerm
 #[non_exhaustive] pub ferrosys::AclError::Malformed
 #[non_exhaustive] pub ferrosys::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::AclError::UndefinedId
 #[non_exhaustive] pub ferrosys::DetectError::Io
 #[non_exhaustive] pub ferrosys::OpenError::Refused
 #[non_exhaustive] pub ferrosys::TreeError::Io
@@ -91,12 +92,16 @@
 #[non_exhaustive] pub ferrosys::fat::ReadError::IllFormedLongName
 #[non_exhaustive] pub ferrosys::fat::ReadError::Io
 #[non_exhaustive] pub ferrosys::fat::ReadError::LongNameChecksum
+#[non_exhaustive] pub ferrosys::fat::ReadError::LongNameTooLong
 #[non_exhaustive] pub ferrosys::fat::ReadError::LostClusters
+#[non_exhaustive] pub ferrosys::fat::ReadError::MalformedTimestamp
 #[non_exhaustive] pub ferrosys::fat::ReadError::MisplacedVolumeLabel
 #[non_exhaustive] pub ferrosys::fat::ReadError::NotADirectory
 #[non_exhaustive] pub ferrosys::fat::ReadError::NotFound
 #[non_exhaustive] pub ferrosys::fat::ReadError::OrphanedLongName
 #[non_exhaustive] pub ferrosys::fat::ReadError::PathTooLong
+#[non_exhaustive] pub ferrosys::fat::ReadError::SectorOutOfRange
+#[non_exhaustive] pub ferrosys::fat::ReadError::SizeWithoutAllocation
 #[non_exhaustive] pub ferrosys::fat::ReadError::TableMismatch
 #[non_exhaustive] pub ferrosys::fat::ReadError::TablePaddingMismatch
 #[non_exhaustive] pub ferrosys::fat::ReadError::UninterpretedShortName
@@ -104,6 +109,7 @@
 #[non_exhaustive] pub ferrosys::fat::ondisk::ParseError::BadMagic
 #[non_exhaustive] pub ferrosys::fat::ondisk::ParseError::TooShort
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::DetectOptions
 #[non_exhaustive] pub struct ferrosys::FidelityRecord
 #[non_exhaustive] pub struct ferrosys::Finding
@@ -123,15 +129,18 @@
 #[non_exhaustive] pub struct ferrosys::fat::Times
 #[non_exhaustive] pub struct ferrosys::fat::WalkEntry
 impl BitOr for ferrosys::fat::ondisk::Attributes
+impl BitOrAssign for ferrosys::fat::ondisk::Attributes
 impl Clone for ferrosys::AcceptedLoss
 impl Clone for ferrosys::Acl
 impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Civil
 impl Clone for ferrosys::DetectError
 impl Clone for ferrosys::DetectOptions
 impl Clone for ferrosys::Direction
+impl Clone for ferrosys::DosTimestamp
 impl Clone for ferrosys::EntryKind
 impl Clone for ferrosys::Family
 impl Clone for ferrosys::FidelityRecord
@@ -149,6 +158,7 @@ impl Clone for ferrosys::OpenError
 impl Clone for ferrosys::OpenOptions
 impl Clone for ferrosys::Property
 impl Clone for ferrosys::ReadPolicy
+impl Clone for ferrosys::ScanReport
 impl Clone for ferrosys::Severity
 impl Clone for ferrosys::Slack
 impl Clone for ferrosys::SourceEntry
@@ -179,7 +189,6 @@ impl Clone for ferrosys::fat::PlanRequest
 impl Clone for ferrosys::fat::ReadError
 impl Clone for ferrosys::fat::ReservedSectors
 impl Clone for ferrosys::fat::RootEntries
-impl Clone for ferrosys::fat::ScanReport
 impl Clone for ferrosys::fat::ShortNameCharset
 impl Clone for ferrosys::fat::Storage
 impl Clone for ferrosys::fat::TimeField
@@ -191,7 +200,6 @@ impl Clone for ferrosys::fat::ondisk::Attributes
 impl Clone for ferrosys::fat::ondisk::BootSector
 impl Clone for ferrosys::fat::ondisk::BootSectorTail
 impl Clone for ferrosys::fat::ondisk::DirEntry
-impl Clone for ferrosys::fat::ondisk::DosTimestamp
 impl Clone for ferrosys::fat::ondisk::Fat32Params
 impl Clone for ferrosys::fat::ondisk::FsInfo
 impl Clone for ferrosys::fat::ondisk::LfnEntry
@@ -200,8 +208,10 @@ impl Clone for ferrosys::fat::ondisk::VolumeInfo
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
+impl Copy for ferrosys::DosTimestamp
 impl Copy for ferrosys::Family
 impl Copy for ferrosys::Filesystem
 impl Copy for ferrosys::Limits
@@ -240,7 +250,6 @@ impl Copy for ferrosys::fat::ondisk::Attributes
 impl Copy for ferrosys::fat::ondisk::BootSector
 impl Copy for ferrosys::fat::ondisk::BootSectorTail
 impl Copy for ferrosys::fat::ondisk::DirEntry
-impl Copy for ferrosys::fat::ondisk::DosTimestamp
 impl Copy for ferrosys::fat::ondisk::Fat32Params
 impl Copy for ferrosys::fat::ondisk::FsInfo
 impl Copy for ferrosys::fat::ondisk::LfnEntry
@@ -252,9 +261,11 @@ impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Civil
 impl Debug for ferrosys::DetectError
 impl Debug for ferrosys::DetectOptions
 impl Debug for ferrosys::Direction
+impl Debug for ferrosys::DosTimestamp
 impl Debug for ferrosys::EntryKind
 impl Debug for ferrosys::Family
 impl Debug for ferrosys::FidelityRecord
@@ -272,6 +283,7 @@ impl Debug for ferrosys::OpenError
 impl Debug for ferrosys::OpenOptions
 impl Debug for ferrosys::Property
 impl Debug for ferrosys::ReadPolicy
+impl Debug for ferrosys::ScanReport
 impl Debug for ferrosys::Severity
 impl Debug for ferrosys::Slack
 impl Debug for ferrosys::SourceEntry
@@ -303,7 +315,6 @@ impl Debug for ferrosys::fat::PlanRequest
 impl Debug for ferrosys::fat::ReadError
 impl Debug for ferrosys::fat::ReservedSectors
 impl Debug for ferrosys::fat::RootEntries
-impl Debug for ferrosys::fat::ScanReport
 impl Debug for ferrosys::fat::ShortNameCharset
 impl Debug for ferrosys::fat::Storage
 impl Debug for ferrosys::fat::TimeField
@@ -315,7 +326,6 @@ impl Debug for ferrosys::fat::ondisk::Attributes
 impl Debug for ferrosys::fat::ondisk::BootSector
 impl Debug for ferrosys::fat::ondisk::BootSectorTail
 impl Debug for ferrosys::fat::ondisk::DirEntry
-impl Debug for ferrosys::fat::ondisk::DosTimestamp
 impl Debug for ferrosys::fat::ondisk::Fat32Params
 impl Debug for ferrosys::fat::ondisk::FsInfo
 impl Debug for ferrosys::fat::ondisk::LfnEntry
@@ -323,12 +333,14 @@ impl Debug for ferrosys::fat::ondisk::ParseError
 impl Debug for ferrosys::fat::ondisk::VolumeInfo
 impl Default for ferrosys::AcceptedLoss
 impl Default for ferrosys::DetectOptions
+impl Default for ferrosys::DosTimestamp
 impl Default for ferrosys::FidelityReport
 impl Default for ferrosys::FindingReport
 impl Default for ferrosys::LayeredSource
 impl Default for ferrosys::Limits
 impl Default for ferrosys::OpenOptions
 impl Default for ferrosys::ReadPolicy
+impl Default for ferrosys::ScanReport
 impl Default for ferrosys::Slack
 impl Default for ferrosys::Synthesis
 impl Default for ferrosys::Timestamp
@@ -340,12 +352,12 @@ impl Default for ferrosys::fat::Location
 impl Default for ferrosys::fat::OpenOptions
 impl Default for ferrosys::fat::ReservedSectors
 impl Default for ferrosys::fat::RootEntries
-impl Default for ferrosys::fat::ScanReport
 impl Default for ferrosys::fat::ShortNameCharset
 impl Default for ferrosys::fat::Timestamp
 impl Default for ferrosys::fat::ondisk::Attributes
-impl Default for ferrosys::fat::ondisk::DosTimestamp
+impl Deviation for ferrosys::fat::Anomaly
 impl Display for ferrosys::AclError
+impl Display for ferrosys::Civil
 impl Display for ferrosys::DetectError
 impl Display for ferrosys::OpenError
 impl Display for ferrosys::TreeError
@@ -364,9 +376,11 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Civil
 impl Eq for ferrosys::DetectError
 impl Eq for ferrosys::DetectOptions
 impl Eq for ferrosys::Direction
+impl Eq for ferrosys::DosTimestamp
 impl Eq for ferrosys::EntryKind
 impl Eq for ferrosys::Family
 impl Eq for ferrosys::FidelityRecord
@@ -383,6 +397,7 @@ impl Eq for ferrosys::OpenError
 impl Eq for ferrosys::OpenOptions
 impl Eq for ferrosys::Property
 impl Eq for ferrosys::ReadPolicy
+impl Eq for ferrosys::ScanReport
 impl Eq for ferrosys::Severity
 impl Eq for ferrosys::Slack
 impl Eq for ferrosys::SourceEntry
@@ -411,7 +426,6 @@ impl Eq for ferrosys::fat::PlanRequest
 impl Eq for ferrosys::fat::ReadError
 impl Eq for ferrosys::fat::ReservedSectors
 impl Eq for ferrosys::fat::RootEntries
-impl Eq for ferrosys::fat::ScanReport
 impl Eq for ferrosys::fat::ShortNameCharset
 impl Eq for ferrosys::fat::Storage
 impl Eq for ferrosys::fat::TimeField
@@ -423,7 +437,6 @@ impl Eq for ferrosys::fat::ondisk::Attributes
 impl Eq for ferrosys::fat::ondisk::BootSector
 impl Eq for ferrosys::fat::ondisk::BootSectorTail
 impl Eq for ferrosys::fat::ondisk::DirEntry
-impl Eq for ferrosys::fat::ondisk::DosTimestamp
 impl Eq for ferrosys::fat::ondisk::Fat32Params
 impl Eq for ferrosys::fat::ondisk::FsInfo
 impl Eq for ferrosys::fat::ondisk::LfnEntry
@@ -445,6 +458,7 @@ impl From<&[u8]> for ferrosys::FileContent
 impl From<&str> for ferrosys::FileContent
 impl From<DetectError> for ferrosys::DetectError
 impl From<DetectError> for ferrosys::OpenError
+impl From<Error> for ferrosys::DetectError
 impl From<Error> for ferrosys::fat::FormatError
 impl From<Error> for ferrosys::fat::ReadError
 impl From<FileRange> for ferrosys::FileContent
@@ -467,6 +481,8 @@ impl Hash for ferrosys::Family
 impl Hash for ferrosys::Filesystem
 impl Hash for ferrosys::Property
 impl Hash for ferrosys::fat::FatType
+impl NamedChoice for ferrosys::Severity
+impl NamedChoice for ferrosys::fat::FatType
 impl Ord for ferrosys::Severity
 impl Ord for ferrosys::fat::FatType
 impl PartialEq for ferrosys::AcceptedLoss
@@ -475,9 +491,11 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::DetectError
 impl PartialEq for ferrosys::DetectOptions
 impl PartialEq for ferrosys::Direction
+impl PartialEq for ferrosys::DosTimestamp
 impl PartialEq for ferrosys::EntryKind
 impl PartialEq for ferrosys::Family
 impl PartialEq for ferrosys::FidelityRecord
@@ -494,6 +512,7 @@ impl PartialEq for ferrosys::OpenError
 impl PartialEq for ferrosys::OpenOptions
 impl PartialEq for ferrosys::Property
 impl PartialEq for ferrosys::ReadPolicy
+impl PartialEq for ferrosys::ScanReport
 impl PartialEq for ferrosys::Severity
 impl PartialEq for ferrosys::Slack
 impl PartialEq for ferrosys::SourceEntry
@@ -522,7 +541,6 @@ impl PartialEq for ferrosys::fat::PlanRequest
 impl PartialEq for ferrosys::fat::ReadError
 impl PartialEq for ferrosys::fat::ReservedSectors
 impl PartialEq for ferrosys::fat::RootEntries
-impl PartialEq for ferrosys::fat::ScanReport
 impl PartialEq for ferrosys::fat::ShortNameCharset
 impl PartialEq for ferrosys::fat::Storage
 impl PartialEq for ferrosys::fat::TimeField
@@ -534,7 +552,6 @@ impl PartialEq for ferrosys::fat::ondisk::Attributes
 impl PartialEq for ferrosys::fat::ondisk::BootSector
 impl PartialEq for ferrosys::fat::ondisk::BootSectorTail
 impl PartialEq for ferrosys::fat::ondisk::DirEntry
-impl PartialEq for ferrosys::fat::ondisk::DosTimestamp
 impl PartialEq for ferrosys::fat::ondisk::Fat32Params
 impl PartialEq for ferrosys::fat::ondisk::FsInfo
 impl PartialEq for ferrosys::fat::ondisk::LfnEntry
@@ -551,15 +568,22 @@ pub const ferrosys::Acl::DEFAULT_NAME: &'static [u8]
 pub const ferrosys::Acl::EXEC: u16
 pub const ferrosys::Acl::READ: u16
 pub const ferrosys::Acl::WRITE: u16
+pub const ferrosys::DosTimestamp::MAX_TENTH: u8
+pub const ferrosys::DosTimestamp::SECS_MAX: i64
+pub const ferrosys::DosTimestamp::SECS_MIN: i64
 pub const ferrosys::FINDINGS_SCHEMA_VERSION: u32
 pub const ferrosys::FidelityReport::MAX_RECORDS: usize
 pub const ferrosys::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::MAX_SYMLINK_HOPS: u32
+pub const ferrosys::NamedChoice::NAMES: &'static [Self]
+pub const ferrosys::Severity::NAMES: &'static [Self]
 pub const ferrosys::Slack::MAX_SHARE: u16
 pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
 pub const ferrosys::fat::BootCode::MAX_BYTES: usize
 pub const ferrosys::fat::BootCode::MAX_BYTES_FAT32: usize
 pub const ferrosys::fat::BootCode::NONE: Self
 pub const ferrosys::fat::DEFAULT_OEM_NAME: [u8; 8]
+pub const ferrosys::fat::FatType::NAMES: &'static [Self]
 pub const ferrosys::fat::MAX_BYTES_PER_CLUSTER: u32
 pub const ferrosys::fat::MAX_CLUSTERS_FAT12: u32
 pub const ferrosys::fat::MAX_CLUSTERS_FAT16: u32
@@ -600,8 +624,6 @@ pub const ferrosys::fat::ondisk::LfnEntry::SIZE: usize
 pub const ferrosys::fat::ondisk::NAME_DELETED: u8
 pub const ferrosys::fat::ondisk::NAME_END: u8
 pub const ferrosys::fat::ondisk::NAME_LEADING_E5: u8
-pub const ferrosys::fat::ondisk::TIME_SECS_MAX: i64
-pub const ferrosys::fat::ondisk::TIME_SECS_MIN: i64
 pub const ferrosys::fat::ondisk::VolumeInfo::NO_NAME: [u8; 11]
 pub const ferrosys::fat::ondisk::VolumeInfo::SIZE: usize
 pub const ferrosys::fat::table::FREE: u32
@@ -609,9 +631,14 @@ pub const fn ferrosys::AcceptedLoss::and(self, property: Property) -> Self
 pub const fn ferrosys::AcceptedLoss::contains(self, property: Property) -> bool
 pub const fn ferrosys::AcceptedLoss::is_empty(self) -> bool
 pub const fn ferrosys::AcceptedLoss::without(self, property: Property) -> Self
+pub const fn ferrosys::Civil::at_secs(secs: i64) -> Self
+pub const fn ferrosys::Civil::to_secs(self) -> i64
 pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
 pub const fn ferrosys::DetectOptions::new() -> Self
 pub const fn ferrosys::Direction::as_str(self) -> &'static str
+pub const fn ferrosys::DosTimestamp::decode(self) -> Timestamp
+pub const fn ferrosys::DosTimestamp::is_well_formed(self) -> bool
+pub const fn ferrosys::DosTimestamp::represents(time: Timestamp) -> bool
 pub const fn ferrosys::Family::as_str(self) -> &'static str
 pub const fn ferrosys::FileRange::is_empty(&self) -> bool
 pub const fn ferrosys::FileRange::len(&self) -> u64
@@ -629,6 +656,7 @@ pub const fn ferrosys::Severity::as_str(self) -> &'static str
 pub const fn ferrosys::Synthesis::modes(self, file_mode: u16, dir_mode: u16) -> Self
 pub const fn ferrosys::Synthesis::new() -> Self
 pub const fn ferrosys::Synthesis::owner(self, uid: u32, gid: u32) -> Self
+pub const fn ferrosys::Timestamp::civil(self) -> Civil
 pub const fn ferrosys::Timestamp::from_secs(secs: i64) -> Self
 pub const fn ferrosys::fat::BootCode::capacity(fat_type: FatType) -> usize
 pub const fn ferrosys::fat::Category::as_str(self) -> &'static str
@@ -658,6 +686,7 @@ pub const fn ferrosys::fat::Node::is_dir(&self) -> bool
 pub const fn ferrosys::fat::Node::is_volume_label(&self) -> bool
 pub const fn ferrosys::fat::OpenOptions::base(self, base: u64) -> Self
 pub const fn ferrosys::fat::OpenOptions::charset(self, charset: ShortNameCharset) -> Self
+pub const fn ferrosys::fat::OpenOptions::common(self, common: crate::OpenOptions) -> Self
 pub const fn ferrosys::fat::OpenOptions::limits(self, limits: Limits) -> Self
 pub const fn ferrosys::fat::OpenOptions::new() -> Self
 pub const fn ferrosys::fat::OpenOptions::policy(self, policy: ReadPolicy) -> Self
@@ -676,12 +705,15 @@ pub const fn ferrosys::fat::Reader::policy(&self) -> ReadPolicy
 pub const fn ferrosys::fat::ShortNameCharset::as_str(self) -> &'static str
 pub const fn ferrosys::fat::ShortNameCharset::table(self) -> Option<&'static [char; 128]>
 pub const fn ferrosys::fat::TimeField::as_str(self) -> &'static str
+pub const fn ferrosys::fat::Timestamp::civil(self) -> Civil
 pub const fn ferrosys::fat::Timestamp::from_secs(secs: i64) -> Self
 pub const fn ferrosys::fat::VolumeLabel::as_bytes(&self) -> &[u8; 11]
 pub const fn ferrosys::fat::ondisk::Attributes::bits(self) -> u8
 pub const fn ferrosys::fat::ondisk::Attributes::contains(self, other: Self) -> bool
+pub const fn ferrosys::fat::ondisk::Attributes::from_bits(bits: u8) -> Self
+pub const fn ferrosys::fat::ondisk::Attributes::is_empty(self) -> bool
 pub const fn ferrosys::fat::ondisk::Attributes::is_long_name(self) -> bool
-pub const fn ferrosys::fat::ondisk::time_is_representable(time: crate::time::Timestamp) -> bool
+pub const fn ferrosys::fat::ondisk::Attributes::without(self, other: Self) -> Self
 pub const fn ferrosys::fat::table::bad_cluster(fat_type: crate::fat::FatType) -> u32
 pub const fn ferrosys::fat::table::end_of_chain(fat_type: crate::fat::FatType) -> u32
 pub const fn ferrosys::fat::table::entry_mask(fat_type: crate::fat::FatType) -> u32
@@ -705,6 +737,7 @@ pub ferrosys::AclError::InvalidPerm::perm: u16
 pub ferrosys::AclError::Malformed::reason: &'static str
 pub ferrosys::AclError::MaskRequired
 pub ferrosys::AclError::MissingRequired::tag: &'static str
+pub ferrosys::AclError::UndefinedId::tag: &'static str
 pub ferrosys::AclQualifier::Group(u32)
 pub ferrosys::AclQualifier::GroupObj
 pub ferrosys::AclQualifier::Mask
@@ -714,12 +747,21 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Civil::day: u32
+pub ferrosys::Civil::hour: u32
+pub ferrosys::Civil::minute: u32
+pub ferrosys::Civil::month: u32
+pub ferrosys::Civil::second: u32
+pub ferrosys::Civil::year: i64
 pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
 pub ferrosys::DetectError::Io::message: String
 pub ferrosys::DetectError::Unrecognized
 pub ferrosys::DetectOptions::base: u64
 pub ferrosys::Direction::Dropped
 pub ferrosys::Direction::Synthesized
+pub ferrosys::DosTimestamp::date: u16
+pub ferrosys::DosTimestamp::tenth: u8
+pub ferrosys::DosTimestamp::time: u16
 pub ferrosys::EntryKind::BlockDevice
 pub ferrosys::EntryKind::BlockDevice::major: u32
 pub ferrosys::EntryKind::BlockDevice::minor: u32
@@ -953,10 +995,8 @@ pub ferrosys::fat::Node::attributes: super::ondisk::Attributes
 pub ferrosys::fat::Node::size: u32
 pub ferrosys::fat::Node::storage: Storage
 pub ferrosys::fat::Node::times: Option<Times>
-pub ferrosys::fat::OpenOptions::base: u64
 pub ferrosys::fat::OpenOptions::charset: super::charset::ShortNameCharset
-pub ferrosys::fat::OpenOptions::limits: crate::policy::Limits
-pub ferrosys::fat::OpenOptions::policy: crate::policy::ReadPolicy
+pub ferrosys::fat::OpenOptions::common: crate::OpenOptions
 pub ferrosys::fat::PlanRequest::bytes_per_sector: u32
 pub ferrosys::fat::PlanRequest::fat_type: FatTypeRequest
 pub ferrosys::fat::PlanRequest::fats: u32
@@ -991,14 +1031,22 @@ pub ferrosys::fat::ReadError::Io::message: String
 pub ferrosys::fat::ReadError::LongNameChecksum::expected: u8
 pub ferrosys::fat::ReadError::LongNameChecksum::found: u8
 pub ferrosys::fat::ReadError::LongNameChecksum::index: u32
+pub ferrosys::fat::ReadError::LongNameTooLong::index: u32
+pub ferrosys::fat::ReadError::LongNameTooLong::units: usize
 pub ferrosys::fat::ReadError::LostClusters::count: u32
 pub ferrosys::fat::ReadError::LostClusters::first: u32
+pub ferrosys::fat::ReadError::MalformedTimestamp::field: &'static str
+pub ferrosys::fat::ReadError::MalformedTimestamp::index: u32
 pub ferrosys::fat::ReadError::MisplacedVolumeLabel::index: u32
 pub ferrosys::fat::ReadError::NotADirectory::path: Vec<u8>
 pub ferrosys::fat::ReadError::NotFound::path: Vec<u8>
 pub ferrosys::fat::ReadError::OrphanedLongName::index: u32
 pub ferrosys::fat::ReadError::Parse(super::ondisk::ParseError)
 pub ferrosys::fat::ReadError::PathTooLong::limit: usize
+pub ferrosys::fat::ReadError::SectorOutOfRange::sector: u32
+pub ferrosys::fat::ReadError::SectorOutOfRange::total_sectors: u32
+pub ferrosys::fat::ReadError::SizeWithoutAllocation::index: u32
+pub ferrosys::fat::ReadError::SizeWithoutAllocation::size: u32
 pub ferrosys::fat::ReadError::TableMismatch::cluster: u32
 pub ferrosys::fat::ReadError::TableMismatch::copy: u32
 pub ferrosys::fat::ReadError::TableMismatch::first: u32
@@ -1062,9 +1110,6 @@ pub ferrosys::fat::ondisk::DirEntry::name: [u8; 11]
 pub ferrosys::fat::ondisk::DirEntry::size: u32
 pub ferrosys::fat::ondisk::DirEntry::write_date: u16
 pub ferrosys::fat::ondisk::DirEntry::write_time: u16
-pub ferrosys::fat::ondisk::DosTimestamp::date: u16
-pub ferrosys::fat::ondisk::DosTimestamp::tenth: u8
-pub ferrosys::fat::ondisk::DosTimestamp::time: u16
 pub ferrosys::fat::ondisk::Fat32Params::backup_boot_sector: u16
 pub ferrosys::fat::ondisk::Fat32Params::ext_flags: u16
 pub ferrosys::fat::ondisk::Fat32Params::fat_sectors: u32
@@ -1092,6 +1137,9 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
+pub fn ferrosys::Deviation::to_finding(&self, unit: u32) -> Finding /* required */
+pub fn ferrosys::DosTimestamp::encode(time: Timestamp) -> Option<Self>
 pub fn ferrosys::FidelityReport::count(&self, direction: Direction, property: Property) -> u64
 pub fn ferrosys::FidelityReport::is_faithful(&self) -> bool
 pub fn ferrosys::FidelityReport::is_truncated(&self) -> bool
@@ -1117,8 +1165,10 @@ pub fn ferrosys::FindingReport::to_sarif(&self, artifact_uri: Option<&str>) -> S
 pub fn ferrosys::FindingReport::to_table(&self) -> String
 pub fn ferrosys::FindingReport::worst_severity(&self) -> Option<Severity>
 pub fn ferrosys::FsReader::family(&self) -> crate::finding::Family
-pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> /* required */
+pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
+pub fn ferrosys::FsTree::family(&self) -> Family /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
@@ -1129,7 +1179,16 @@ pub fn ferrosys::LayeredSource::new() -> Self
 pub fn ferrosys::Metadata::new(mode: u16, mtime: Timestamp) -> Self
 pub fn ferrosys::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
 pub fn ferrosys::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::NamedChoice::as_str(self) -> &'static str /* required */
+pub fn ferrosys::NamedChoice::from_name(name: &str) -> Option<Self> /* required */
 pub fn ferrosys::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ScanReport::anomalies(&self) -> &[A]
+pub fn ferrosys::ScanReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
+pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
 pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
@@ -1150,6 +1209,7 @@ pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) ->
 pub fn ferrosys::fat::Anomaly::to_finding(&self, bytes_per_sector: u32) -> Finding
 pub fn ferrosys::fat::BootCode::as_bytes(&self) -> &[u8]
 pub fn ferrosys::fat::BootCode::new(code: &[u8]) -> Result<Self, FormatError>
+pub fn ferrosys::fat::FatType::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::fat::FormatPlan::fidelity(&self) -> &FidelityReport
 pub fn ferrosys::fat::FormatPlan::fit(source: impl Source, options: FormatOptions, slack: Slack) -> Result<Self, FormatError>
 pub fn ferrosys::fat::FormatPlan::layout(&self) -> &FatLayout
@@ -1176,12 +1236,6 @@ pub fn ferrosys::fat::Reader::verify_tables(&mut self) -> Result<(), ReadError>
 pub fn ferrosys::fat::Reader::volume_label(&mut self) -> Result<Option<Vec<u8>>, ReadError>
 pub fn ferrosys::fat::Reader::walk(&mut self) -> Result<Vec<WalkEntry>, ReadError>
 pub fn ferrosys::fat::Reader::walk_with<E: From<ReadError>>(&mut self, visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>) -> Result<(), E>
-pub fn ferrosys::fat::ScanReport::anomalies(&self) -> &[Anomaly]
-pub fn ferrosys::fat::ScanReport::has_fatal(&self, policy: ReadPolicy) -> bool
-pub fn ferrosys::fat::ScanReport::is_clean(&self) -> bool
-pub fn ferrosys::fat::ScanReport::is_truncated(&self) -> bool
-pub fn ferrosys::fat::ScanReport::to_report(&self) -> FindingReport
-pub fn ferrosys::fat::ScanReport::worst_severity(&self) -> Option<Severity>
 pub fn ferrosys::fat::ShortNameCharset::decode(self, name: &[u8]) -> Vec<u8>
 pub fn ferrosys::fat::VolumeLabel::from_bytes(name: &[u8]) -> Result<Self, LabelError>
 pub fn ferrosys::fat::VolumeLabel::new(name: &str) -> Result<Self, LabelError>
@@ -1198,12 +1252,27 @@ pub fn ferrosys::fat::ondisk::FsInfo::read_from(buf: &[u8]) -> Result<Self, Pars
 pub fn ferrosys::fat::ondisk::FsInfo::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
 pub fn ferrosys::fat::ondisk::LfnEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
 pub fn ferrosys::fat::ondisk::LfnEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
-pub fn ferrosys::fat::ondisk::decode_time(stamp: DosTimestamp) -> crate::time::Timestamp
-pub fn ferrosys::fat::ondisk::encode_time(time: crate::time::Timestamp) -> Option<DosTimestamp>
 pub fn ferrosys::fat::ondisk::lfn_checksum(name: &[u8; 11]) -> u8
+pub fn ferrosys::fat::ondisk::unpadded(field: &[u8]) -> &[u8]
 pub fn ferrosys::fat::plan_layout(request: &PlanRequest) -> Result<FatLayout, GeometryError>
 pub fn ferrosys::fat::table::read_entry(fat_type: crate::fat::FatType, table: &[u8], cluster: u32) -> Option<u32>
 pub fn ferrosys::fat::table::write_entry(fat_type: crate::fat::FatType, table: &mut [u8], cluster: u32, value: u32) -> bool
+pub fn ferrosys::hex(bytes: &[u8]) -> String
+pub fn ferrosys::json::Array::end(self)
+pub fn ferrosys::json::Array::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Array::obj(&mut self) -> Object<'_>
+pub fn ferrosys::json::Object::arr(&mut self, key: &str) -> Array<'_>
+pub fn ferrosys::json::Object::bool(&mut self, key: &str, value: bool)
+pub fn ferrosys::json::Object::bytes(&mut self, key: &str, value: &[u8])
+pub fn ferrosys::json::Object::end(self)
+pub fn ferrosys::json::Object::i64(&mut self, key: &str, value: i64)
+pub fn ferrosys::json::Object::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Object::obj(&mut self, key: &str) -> Object<'_>
+pub fn ferrosys::json::Object::raw(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::str(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::strings(&mut self, key: &str, values: &[&str])
+pub fn ferrosys::json::Object::u64(&mut self, key: &str, value: u64)
+pub fn ferrosys::json::Object::u64s(&mut self, key: &str, values: &[u64])
 pub fn ferrosys::open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError>
 pub fn ferrosys::open_with<R: Read + Seek>(src: R, options: &crate::policy::OpenOptions) -> Result<FsReader<R>, OpenError>
 pub fn ferrosys::printable(bytes: &[u8]) -> String
@@ -1212,14 +1281,17 @@ pub mod ferrosys
 pub mod ferrosys::fat
 pub mod ferrosys::fat::ondisk
 pub mod ferrosys::fat::table
+pub mod ferrosys::json
 pub struct ferrosys::AcceptedLoss(/* private */)
 pub struct ferrosys::Acl { /* private fields */ }
 pub struct ferrosys::AclEntry
+pub struct ferrosys::DosTimestamp
 pub struct ferrosys::FidelityReport { /* private fields */ }
 pub struct ferrosys::FileRange { /* private fields */ }
 pub struct ferrosys::FindingReport { /* private fields */ }
 pub struct ferrosys::LayeredSource { /* private fields */ }
 pub struct ferrosys::Metadata
+pub struct ferrosys::ScanReport<A> { /* private fields */ }
 pub struct ferrosys::SourceEntry
 pub struct ferrosys::Timestamp
 pub struct ferrosys::TreeBuilder { /* private fields */ }
@@ -1228,18 +1300,21 @@ pub struct ferrosys::fat::BootCode { /* private fields */ }
 pub struct ferrosys::fat::FormatPlan { /* private fields */ }
 pub struct ferrosys::fat::Image { /* private fields */ }
 pub struct ferrosys::fat::Reader<R> { /* private fields */ }
-pub struct ferrosys::fat::ScanReport { /* private fields */ }
 pub struct ferrosys::fat::Timestamp
 pub struct ferrosys::fat::VolumeLabel(/* private */)
-pub struct ferrosys::fat::ondisk::Attributes(u8)
+pub struct ferrosys::fat::ondisk::Attributes(/* private */)
 pub struct ferrosys::fat::ondisk::BootSector
 pub struct ferrosys::fat::ondisk::DirEntry
-pub struct ferrosys::fat::ondisk::DosTimestamp
 pub struct ferrosys::fat::ondisk::Fat32Params
 pub struct ferrosys::fat::ondisk::FsInfo
 pub struct ferrosys::fat::ondisk::LfnEntry
 pub struct ferrosys::fat::ondisk::VolumeInfo
+pub struct ferrosys::json::Array<'a> { /* private fields */ }
+pub struct ferrosys::json::Object<'a> { /* private fields */ }
+pub trait ferrosys::Deviation
 pub trait ferrosys::FsTree
+pub trait ferrosys::NamedChoice: Copy + Sized + 'static
 pub trait ferrosys::Source
 pub type ferrosys::Coordinate = (std::borrow::Cow<'static, str>, u64)
 pub type ferrosys::FsTree::Node
+pub type ferrosys::fat::ScanReport = crate::ScanReport<Anomaly>

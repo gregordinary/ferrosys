@@ -2,7 +2,7 @@
 name = "ferrosys"
 # Every format is spelled in full: a registry search for `ext4` or `fat32` matches this
 # line word for word, and `ext2/3/4` is no word at all.
-description = "Pure-Rust filesystem formatter and reader: ext4, ext3, ext2, FAT32, FAT16, FAT12 — rootless, in userspace, byte-reproducible"
+description = "Pure-Rust filesystem formatter and reader: ext4, ext3, ext2, FAT32, FAT16, FAT12, exFAT, and btrfs — rootless, in userspace, byte-reproducible"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,15 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 # Five is the registry's limit, so each family gets the name someone searches for rather
-# than one entry per format. The lineages the two cover — ext2 and ext3, FAT12 and FAT16 —
-# are in the description, which the registry's own search reads.
-keywords = ["ext4", "fat32", "filesystem", "mkfs", "disk-image"]
+# than one entry per format. The lineages they cover — ext2 and ext3, FAT12 and FAT16 — are
+# in the description, which the registry's own search reads; exFAT has no lineage to spell,
+# being one revision of one format, and neither has btrfs. Four families leave one slot, and
+# `mkfs` has it: it is the word someone types when they want a formatter, and it is the one
+# word here that names what the crate does rather than what it does it to. `filesystem` and
+# `disk-image` are absent because every word of both is already in the description or in
+# `categories`, which the registry's search reads too.
+
+keywords = ["ext4", "fat32", "exfat", "btrfs", "mkfs"]
 # `virtualization` because a microVM root disk is a filesystem image built by a program
 # rather than by a person, which is this crate's shape of consumer.
 categories = ["filesystem", "os", "virtualization"]
@@ -36,6 +42,16 @@ ext = []
 # block, a directory format, and a cluster heap, differing only in the width of a FAT entry
 # and in where the root directory sits.
 fat = []
+# The exFAT family, reached through the `exfat` module. Off by default, for the reason `fat`
+# is. It is a family of its own rather than a member of that one: the two share the word
+# "cluster" and no bytes — a different boot region, a different directory entry format, a
+# different name encoding, and an allocation bitmap FAT has no concept of.
+exfat = []
+# The btrfs family, reached through the `btrfs` module. Off by default, for the reason `fat`
+# is. It shares no structure with any of the three above: a copy-on-write filesystem built
+# out of B-trees over a logical address space, where a chunk tree maps that space onto the
+# device and every metadata block carries its own checksum.
+btrfs = []
 # The tar/PAX archive `Source` and `Sink`. Off by default so the base build carries only
 # `thiserror`; enabling it pulls in the `tar` crate (no default features, so no
 # host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
@@ -50,6 +66,29 @@ tar = ["dep:tar"]
 # Linux extended attributes, so they are present on Linux. Like `tar`, neither end names a
 # family.
 dir = ["dep:rustix"]
+# The three ways a filesystem stores a run of bytes in fewer of them, each behind its own
+# feature and each off by default. A build carrying one reads a file whose extents are
+# encoded that way; a build without it reports such a file as one it does not decode, naming
+# the algorithm, rather than handing back the bytes on the volume as though they were the
+# file's. Verification is unaffected either way — the checksums a filesystem records cover
+# the bytes it stored, so they are checked without any of this.
+#
+# Named for the algorithm rather than for a family, as `tar` and `dir` are named for what
+# they are: an encoding is a property of a run of bytes and not of the format around it, and
+# the decoder is at the crate root beside `crc32c` for the same reason. Today the btrfs
+# family is what reads them, so a build wanting one wants `btrfs` beside it.
+#
+# DEFLATE, as `zlib` frames it. The dependency is `#![forbid(unsafe_code)]`, which is this
+# crate's own bar.
+zlib = ["dep:miniz_oxide"]
+# LZO1X, in the block form btrfs frames it with. It takes no dependency: the decoder is
+# small, well-specified, and written here in safe Rust, which is what this crate does with
+# `crc32c` and the directory hashes for the same reasons.
+lzo = []
+# Zstandard. The dependency decodes only, and carries `unsafe` in a ring buffer of its own —
+# the one place this crate's dependency graph departs from its own bar, taken because the
+# alternative for this format is a C library.
+zstd = ["dep:ruzstd"]
 # `Serialize` on the values a consumer embeds in a report of its own: the findings taxonomy
 # (`Finding`, `FindingReport`, `Severity`, `Coordinate`), each family's planned geometry
 # (`Layout`, `GroupLayout`, `BlockRange`; `FatLayout`, `Fat32Layout`, `FatType`), and the ext
@@ -68,6 +107,10 @@ thiserror = { workspace = true }
 tar = { workspace = true, optional = true }
 # The `Serialize` derives, behind the `serde` feature.
 serde = { workspace = true, optional = true }
+# The DEFLATE and Zstandard decoders, behind the `zlib` and `zstd` features. LZO needs no
+# entry here: its decoder is in this crate.
+miniz_oxide = { workspace = true, optional = true }
+ruzstd = { workspace = true, optional = true }
 
 # The host-directory source and sink's dependency, on the platform whose trees they walk
 # and create.
@@ -89,6 +132,10 @@ tar = { workspace = true }
 proptest = { workspace = true }
 # Reading back what the `serde` feature's derives emit; exercised with `--features serde`.
 serde_json = { workspace = true }
+# The compressor behind the LZO decoder's round-trip gate: a second implementation of the
+# format, so what the decoder is held against is a stream this crate had no hand in
+# producing. Never shipped.
+lzokay = { workspace = true }
 
 [package.metadata.docs.rs]
 # Document the archive and directory sources on docs.rs.

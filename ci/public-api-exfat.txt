@@ -1,0 +1,1338 @@
+#[non_exhaustive] pub enum ferrosys::AclError
+#[non_exhaustive] pub enum ferrosys::DetectError
+#[non_exhaustive] pub enum ferrosys::Direction
+#[non_exhaustive] pub enum ferrosys::EntryKind
+#[non_exhaustive] pub enum ferrosys::Family
+#[non_exhaustive] pub enum ferrosys::FileContent
+#[non_exhaustive] pub enum ferrosys::Filesystem
+#[non_exhaustive] pub enum ferrosys::FsReader<R>
+#[non_exhaustive] pub enum ferrosys::NodeKind
+#[non_exhaustive] pub enum ferrosys::OpenError
+#[non_exhaustive] pub enum ferrosys::Property
+#[non_exhaustive] pub enum ferrosys::TreeError
+#[non_exhaustive] pub enum ferrosys::exfat::BootDefect
+#[non_exhaustive] pub enum ferrosys::exfat::BoundaryAlign
+#[non_exhaustive] pub enum ferrosys::exfat::Category
+#[non_exhaustive] pub enum ferrosys::exfat::ClusterSize
+#[non_exhaustive] pub enum ferrosys::exfat::FormatError
+#[non_exhaustive] pub enum ferrosys::exfat::GeometryError
+#[non_exhaustive] pub enum ferrosys::exfat::LabelError
+#[non_exhaustive] pub enum ferrosys::exfat::ModelError
+#[non_exhaustive] pub enum ferrosys::exfat::NameError
+#[non_exhaustive] pub enum ferrosys::exfat::ReadError
+#[non_exhaustive] pub enum ferrosys::exfat::TimeField
+#[non_exhaustive] pub enum ferrosys::exfat::ondisk::ParseError
+#[non_exhaustive] pub ferrosys::AclError::Duplicate
+#[non_exhaustive] pub ferrosys::AclError::InvalidPerm
+#[non_exhaustive] pub ferrosys::AclError::Malformed
+#[non_exhaustive] pub ferrosys::AclError::MissingRequired
+#[non_exhaustive] pub ferrosys::AclError::UndefinedId
+#[non_exhaustive] pub ferrosys::DetectError::Io
+#[non_exhaustive] pub ferrosys::OpenError::Refused
+#[non_exhaustive] pub ferrosys::TreeError::Io
+#[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
+#[non_exhaustive] pub ferrosys::TreeError::Malformed
+#[non_exhaustive] pub ferrosys::TreeError::Unsupported
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::ClusterShift
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::FileSystemRevision
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::RegionOutsideVolume
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::RootOutsideHeap
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::SectorShift
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::TableTooShort
+#[non_exhaustive] pub ferrosys::exfat::BootDefect::VolumeLength
+#[non_exhaustive] pub ferrosys::exfat::FormatError::ClusterOutsideVolume
+#[non_exhaustive] pub ferrosys::exfat::FormatError::DirectoryOverflowsItsClusters
+#[non_exhaustive] pub ferrosys::exfat::FormatError::ImageTooLargeInMemory
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::BoundaryAlignUnsupported
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::ClusterSizeUnsupported
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::ClusterTooLarge
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::HeapTooSmall
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::NoClusterHeap
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::SectorSizeUnsupported
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::TooManyClusters
+#[non_exhaustive] pub ferrosys::exfat::GeometryError::VolumeTooSmall
+#[non_exhaustive] pub ferrosys::exfat::LabelError::NulUnit
+#[non_exhaustive] pub ferrosys::exfat::LabelError::TooLong
+#[non_exhaustive] pub ferrosys::exfat::ModelError::DirectoryTooLarge
+#[non_exhaustive] pub ferrosys::exfat::ModelError::Duplicate
+#[non_exhaustive] pub ferrosys::exfat::ModelError::HardlinkCycle
+#[non_exhaustive] pub ferrosys::exfat::ModelError::HardlinkTargetIsDirectory
+#[non_exhaustive] pub ferrosys::exfat::ModelError::HardlinkTargetMissing
+#[non_exhaustive] pub ferrosys::exfat::ModelError::Indistinguishable
+#[non_exhaustive] pub ferrosys::exfat::ModelError::InvalidComponent
+#[non_exhaustive] pub ferrosys::exfat::ModelError::LossNotAccepted
+#[non_exhaustive] pub ferrosys::exfat::ModelError::Name
+#[non_exhaustive] pub ferrosys::exfat::ModelError::ParentMissing
+#[non_exhaustive] pub ferrosys::exfat::ModelError::ParentNotDir
+#[non_exhaustive] pub ferrosys::exfat::ModelError::RootNotDirectory
+#[non_exhaustive] pub ferrosys::exfat::ModelError::TimeOutOfRange
+#[non_exhaustive] pub ferrosys::exfat::ModelError::VolumeFull
+#[non_exhaustive] pub ferrosys::exfat::NameError::ForbiddenCharacter
+#[non_exhaustive] pub ferrosys::exfat::NameError::TooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::AllocationNotPossible
+#[non_exhaustive] pub ferrosys::exfat::ReadError::AllocationWithoutLength
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BackupBootRegionDiffers
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BadBootSector
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BadChainEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BadClusterInChain
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BadExtendedBootSignature
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BadReservedEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BitmapWrongSize
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BootChecksumMismatch
+#[non_exhaustive] pub ferrosys::exfat::ReadError::BootChecksumSectorSplit
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ChainTooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ClusterNotAllocated
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ClusterOutOfRange
+#[non_exhaustive] pub ferrosys::exfat::ReadError::CrossLinkedCluster
+#[non_exhaustive] pub ferrosys::exfat::ReadError::DirectoryLengthNotClusters
+#[non_exhaustive] pub ferrosys::exfat::ReadError::DirectoryTooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::DirectoryWithoutAllocation
+#[non_exhaustive] pub ferrosys::exfat::ReadError::DuplicateRootEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::EntriesAfterEnd
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ExcessNameEntries
+#[non_exhaustive] pub ferrosys::exfat::ReadError::FatCount
+#[non_exhaustive] pub ferrosys::exfat::ReadError::FileTooLarge
+#[non_exhaustive] pub ferrosys::exfat::ReadError::HostileName
+#[non_exhaustive] pub ferrosys::exfat::ReadError::IllFormedName
+#[non_exhaustive] pub ferrosys::exfat::ReadError::IncompleteEntrySet
+#[non_exhaustive] pub ferrosys::exfat::ReadError::Io
+#[non_exhaustive] pub ferrosys::exfat::ReadError::LabelTooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::LostClusters
+#[non_exhaustive] pub ferrosys::exfat::ReadError::MalformedTimestamp
+#[non_exhaustive] pub ferrosys::exfat::ReadError::MisplacedRootEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::MissingResident
+#[non_exhaustive] pub ferrosys::exfat::ReadError::NameHashMismatch
+#[non_exhaustive] pub ferrosys::exfat::ReadError::NotADirectory
+#[non_exhaustive] pub ferrosys::exfat::ReadError::NotFound
+#[non_exhaustive] pub ferrosys::exfat::ReadError::PathTooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::PercentInUseOutOfRange
+#[non_exhaustive] pub ferrosys::exfat::ReadError::PercentInUseStale
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ReservedAttributes
+#[non_exhaustive] pub ferrosys::exfat::ReadError::SetChecksumMismatch
+#[non_exhaustive] pub ferrosys::exfat::ReadError::StraySecondaryEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::StreamPastHeap
+#[non_exhaustive] pub ferrosys::exfat::ReadError::StreamTooShort
+#[non_exhaustive] pub ferrosys::exfat::ReadError::StreamWithoutAllocation
+#[non_exhaustive] pub ferrosys::exfat::ReadError::UnknownCriticalEntry
+#[non_exhaustive] pub ferrosys::exfat::ReadError::UnknownMinorRevision
+#[non_exhaustive] pub ferrosys::exfat::ReadError::UpcaseChecksumMismatch
+#[non_exhaustive] pub ferrosys::exfat::ReadError::UpcaseTooLong
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ValidLengthPastEnd
+#[non_exhaustive] pub ferrosys::exfat::ReadError::ValidLengthTrails
+#[non_exhaustive] pub ferrosys::exfat::ReadError::WalkTooLarge
+#[non_exhaustive] pub ferrosys::exfat::ondisk::ParseError::BadMagic
+#[non_exhaustive] pub ferrosys::exfat::ondisk::ParseError::TooShort
+#[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Civil
+#[non_exhaustive] pub struct ferrosys::DetectOptions
+#[non_exhaustive] pub struct ferrosys::FidelityRecord
+#[non_exhaustive] pub struct ferrosys::Finding
+#[non_exhaustive] pub struct ferrosys::Limits
+#[non_exhaustive] pub struct ferrosys::OpenOptions
+#[non_exhaustive] pub struct ferrosys::Synthesis
+#[non_exhaustive] pub struct ferrosys::TreeEntry<N>
+#[non_exhaustive] pub struct ferrosys::exfat::Anomaly
+#[non_exhaustive] pub struct ferrosys::exfat::Entry
+#[non_exhaustive] pub struct ferrosys::exfat::ExfatLayout
+#[non_exhaustive] pub struct ferrosys::exfat::FormatOptions
+#[non_exhaustive] pub struct ferrosys::exfat::Location
+#[non_exhaustive] pub struct ferrosys::exfat::Node
+#[non_exhaustive] pub struct ferrosys::exfat::PlanRequest
+#[non_exhaustive] pub struct ferrosys::exfat::Times
+#[non_exhaustive] pub struct ferrosys::exfat::WalkEntry
+impl BitOr for ferrosys::exfat::ondisk::FileAttributes
+impl BitOrAssign for ferrosys::exfat::ondisk::FileAttributes
+impl Clone for ferrosys::AcceptedLoss
+impl Clone for ferrosys::Acl
+impl Clone for ferrosys::AclEntry
+impl Clone for ferrosys::AclError
+impl Clone for ferrosys::AclQualifier
+impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Civil
+impl Clone for ferrosys::DetectError
+impl Clone for ferrosys::DetectOptions
+impl Clone for ferrosys::Direction
+impl Clone for ferrosys::DosTimestamp
+impl Clone for ferrosys::EntryKind
+impl Clone for ferrosys::Family
+impl Clone for ferrosys::FidelityRecord
+impl Clone for ferrosys::FidelityReport
+impl Clone for ferrosys::FileContent
+impl Clone for ferrosys::FileRange
+impl Clone for ferrosys::Filesystem
+impl Clone for ferrosys::Finding
+impl Clone for ferrosys::FindingReport
+impl Clone for ferrosys::LayeredSource
+impl Clone for ferrosys::Limits
+impl Clone for ferrosys::Metadata
+impl Clone for ferrosys::NodeKind
+impl Clone for ferrosys::OpenError
+impl Clone for ferrosys::OpenOptions
+impl Clone for ferrosys::Property
+impl Clone for ferrosys::ReadPolicy
+impl Clone for ferrosys::ScanReport
+impl Clone for ferrosys::Severity
+impl Clone for ferrosys::SourceEntry
+impl Clone for ferrosys::Synthesis
+impl Clone for ferrosys::Timestamp
+impl Clone for ferrosys::TreeBuilder
+impl Clone for ferrosys::TreeEntry
+impl Clone for ferrosys::TreeError
+impl Clone for ferrosys::Xattr
+impl Clone for ferrosys::exfat::Anomaly
+impl Clone for ferrosys::exfat::BootDefect
+impl Clone for ferrosys::exfat::BoundaryAlign
+impl Clone for ferrosys::exfat::Category
+impl Clone for ferrosys::exfat::ClusterSize
+impl Clone for ferrosys::exfat::Entry
+impl Clone for ferrosys::exfat::ExfatLayout
+impl Clone for ferrosys::exfat::FormatOptions
+impl Clone for ferrosys::exfat::GeometryError
+impl Clone for ferrosys::exfat::LabelError
+impl Clone for ferrosys::exfat::Location
+impl Clone for ferrosys::exfat::ModelError
+impl Clone for ferrosys::exfat::NameError
+impl Clone for ferrosys::exfat::Node
+impl Clone for ferrosys::exfat::PlanRequest
+impl Clone for ferrosys::exfat::ReadError
+impl Clone for ferrosys::exfat::Storage
+impl Clone for ferrosys::exfat::TimeField
+impl Clone for ferrosys::exfat::Times
+impl Clone for ferrosys::exfat::Timestamp
+impl Clone for ferrosys::exfat::VolumeLabel
+impl Clone for ferrosys::exfat::WalkEntry
+impl Clone for ferrosys::exfat::ondisk::AllocationBitmapEntry
+impl Clone for ferrosys::exfat::ondisk::DirEntry
+impl Clone for ferrosys::exfat::ondisk::EntryType
+impl Clone for ferrosys::exfat::ondisk::FileAttributes
+impl Clone for ferrosys::exfat::ondisk::FileEntry
+impl Clone for ferrosys::exfat::ondisk::FileNameEntry
+impl Clone for ferrosys::exfat::ondisk::MainBootSector
+impl Clone for ferrosys::exfat::ondisk::ParseError
+impl Clone for ferrosys::exfat::ondisk::StreamExtensionEntry
+impl Clone for ferrosys::exfat::ondisk::UpcaseTable
+impl Clone for ferrosys::exfat::ondisk::UpcaseTableEntry
+impl Clone for ferrosys::exfat::ondisk::VolumeLabelEntry
+impl Copy for ferrosys::AcceptedLoss
+impl Copy for ferrosys::AclEntry
+impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Civil
+impl Copy for ferrosys::DetectOptions
+impl Copy for ferrosys::Direction
+impl Copy for ferrosys::DosTimestamp
+impl Copy for ferrosys::Family
+impl Copy for ferrosys::Filesystem
+impl Copy for ferrosys::Limits
+impl Copy for ferrosys::Metadata
+impl Copy for ferrosys::NodeKind
+impl Copy for ferrosys::OpenOptions
+impl Copy for ferrosys::Property
+impl Copy for ferrosys::ReadPolicy
+impl Copy for ferrosys::Severity
+impl Copy for ferrosys::Synthesis
+impl Copy for ferrosys::Timestamp
+impl Copy for ferrosys::exfat::BootDefect
+impl Copy for ferrosys::exfat::BoundaryAlign
+impl Copy for ferrosys::exfat::Category
+impl Copy for ferrosys::exfat::ClusterSize
+impl Copy for ferrosys::exfat::ExfatLayout
+impl Copy for ferrosys::exfat::FormatOptions
+impl Copy for ferrosys::exfat::GeometryError
+impl Copy for ferrosys::exfat::LabelError
+impl Copy for ferrosys::exfat::Location
+impl Copy for ferrosys::exfat::Node
+impl Copy for ferrosys::exfat::PlanRequest
+impl Copy for ferrosys::exfat::Storage
+impl Copy for ferrosys::exfat::TimeField
+impl Copy for ferrosys::exfat::Times
+impl Copy for ferrosys::exfat::Timestamp
+impl Copy for ferrosys::exfat::VolumeLabel
+impl Copy for ferrosys::exfat::ondisk::AllocationBitmapEntry
+impl Copy for ferrosys::exfat::ondisk::DirEntry
+impl Copy for ferrosys::exfat::ondisk::EntryType
+impl Copy for ferrosys::exfat::ondisk::FileAttributes
+impl Copy for ferrosys::exfat::ondisk::FileEntry
+impl Copy for ferrosys::exfat::ondisk::FileNameEntry
+impl Copy for ferrosys::exfat::ondisk::MainBootSector
+impl Copy for ferrosys::exfat::ondisk::ParseError
+impl Copy for ferrosys::exfat::ondisk::StreamExtensionEntry
+impl Copy for ferrosys::exfat::ondisk::UpcaseTableEntry
+impl Copy for ferrosys::exfat::ondisk::VolumeLabelEntry
+impl Debug for ferrosys::AcceptedLoss
+impl Debug for ferrosys::Acl
+impl Debug for ferrosys::AclEntry
+impl Debug for ferrosys::AclError
+impl Debug for ferrosys::AclQualifier
+impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Civil
+impl Debug for ferrosys::DetectError
+impl Debug for ferrosys::DetectOptions
+impl Debug for ferrosys::Direction
+impl Debug for ferrosys::DosTimestamp
+impl Debug for ferrosys::EntryKind
+impl Debug for ferrosys::Family
+impl Debug for ferrosys::FidelityRecord
+impl Debug for ferrosys::FidelityReport
+impl Debug for ferrosys::FileContent
+impl Debug for ferrosys::FileRange
+impl Debug for ferrosys::Filesystem
+impl Debug for ferrosys::Finding
+impl Debug for ferrosys::FindingReport
+impl Debug for ferrosys::LayeredSource
+impl Debug for ferrosys::Limits
+impl Debug for ferrosys::Metadata
+impl Debug for ferrosys::NodeKind
+impl Debug for ferrosys::OpenError
+impl Debug for ferrosys::OpenOptions
+impl Debug for ferrosys::Property
+impl Debug for ferrosys::ReadPolicy
+impl Debug for ferrosys::ScanReport
+impl Debug for ferrosys::Severity
+impl Debug for ferrosys::SourceEntry
+impl Debug for ferrosys::Synthesis
+impl Debug for ferrosys::Timestamp
+impl Debug for ferrosys::TreeBuilder
+impl Debug for ferrosys::TreeEntry
+impl Debug for ferrosys::TreeError
+impl Debug for ferrosys::Xattr
+impl Debug for ferrosys::exfat::Anomaly
+impl Debug for ferrosys::exfat::BootDefect
+impl Debug for ferrosys::exfat::BoundaryAlign
+impl Debug for ferrosys::exfat::Category
+impl Debug for ferrosys::exfat::ClusterSize
+impl Debug for ferrosys::exfat::Entry
+impl Debug for ferrosys::exfat::ExfatLayout
+impl Debug for ferrosys::exfat::FormatError
+impl Debug for ferrosys::exfat::FormatOptions
+impl Debug for ferrosys::exfat::GeometryError
+impl Debug for ferrosys::exfat::LabelError
+impl Debug for ferrosys::exfat::Location
+impl Debug for ferrosys::exfat::ModelError
+impl Debug for ferrosys::exfat::NameError
+impl Debug for ferrosys::exfat::Node
+impl Debug for ferrosys::exfat::PlanRequest
+impl Debug for ferrosys::exfat::ReadError
+impl Debug for ferrosys::exfat::Storage
+impl Debug for ferrosys::exfat::TimeField
+impl Debug for ferrosys::exfat::Times
+impl Debug for ferrosys::exfat::Timestamp
+impl Debug for ferrosys::exfat::VolumeLabel
+impl Debug for ferrosys::exfat::WalkEntry
+impl Debug for ferrosys::exfat::ondisk::AllocationBitmapEntry
+impl Debug for ferrosys::exfat::ondisk::DirEntry
+impl Debug for ferrosys::exfat::ondisk::EntryType
+impl Debug for ferrosys::exfat::ondisk::FileAttributes
+impl Debug for ferrosys::exfat::ondisk::FileEntry
+impl Debug for ferrosys::exfat::ondisk::FileNameEntry
+impl Debug for ferrosys::exfat::ondisk::MainBootSector
+impl Debug for ferrosys::exfat::ondisk::ParseError
+impl Debug for ferrosys::exfat::ondisk::StreamExtensionEntry
+impl Debug for ferrosys::exfat::ondisk::UpcaseTable
+impl Debug for ferrosys::exfat::ondisk::UpcaseTableEntry
+impl Debug for ferrosys::exfat::ondisk::VolumeLabelEntry
+impl Default for ferrosys::AcceptedLoss
+impl Default for ferrosys::DetectOptions
+impl Default for ferrosys::DosTimestamp
+impl Default for ferrosys::FidelityReport
+impl Default for ferrosys::FindingReport
+impl Default for ferrosys::LayeredSource
+impl Default for ferrosys::Limits
+impl Default for ferrosys::OpenOptions
+impl Default for ferrosys::ReadPolicy
+impl Default for ferrosys::ScanReport
+impl Default for ferrosys::Synthesis
+impl Default for ferrosys::Timestamp
+impl Default for ferrosys::TreeBuilder
+impl Default for ferrosys::exfat::BoundaryAlign
+impl Default for ferrosys::exfat::ClusterSize
+impl Default for ferrosys::exfat::Location
+impl Default for ferrosys::exfat::Timestamp
+impl Default for ferrosys::exfat::VolumeLabel
+impl Default for ferrosys::exfat::ondisk::FileAttributes
+impl Deviation for ferrosys::exfat::Anomaly
+impl Display for ferrosys::AclError
+impl Display for ferrosys::Civil
+impl Display for ferrosys::DetectError
+impl Display for ferrosys::OpenError
+impl Display for ferrosys::TreeError
+impl Display for ferrosys::exfat::BootDefect
+impl Display for ferrosys::exfat::FormatError
+impl Display for ferrosys::exfat::GeometryError
+impl Display for ferrosys::exfat::LabelError
+impl Display for ferrosys::exfat::ModelError
+impl Display for ferrosys::exfat::NameError
+impl Display for ferrosys::exfat::ReadError
+impl Display for ferrosys::exfat::TimeField
+impl Display for ferrosys::exfat::ondisk::ParseError
+impl Eq for ferrosys::AcceptedLoss
+impl Eq for ferrosys::Acl
+impl Eq for ferrosys::AclEntry
+impl Eq for ferrosys::AclError
+impl Eq for ferrosys::AclQualifier
+impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Civil
+impl Eq for ferrosys::DetectError
+impl Eq for ferrosys::DetectOptions
+impl Eq for ferrosys::Direction
+impl Eq for ferrosys::DosTimestamp
+impl Eq for ferrosys::EntryKind
+impl Eq for ferrosys::Family
+impl Eq for ferrosys::FidelityRecord
+impl Eq for ferrosys::FidelityReport
+impl Eq for ferrosys::FileContent
+impl Eq for ferrosys::FileRange
+impl Eq for ferrosys::Filesystem
+impl Eq for ferrosys::Finding
+impl Eq for ferrosys::FindingReport
+impl Eq for ferrosys::Limits
+impl Eq for ferrosys::Metadata
+impl Eq for ferrosys::NodeKind
+impl Eq for ferrosys::OpenError
+impl Eq for ferrosys::OpenOptions
+impl Eq for ferrosys::Property
+impl Eq for ferrosys::ReadPolicy
+impl Eq for ferrosys::ScanReport
+impl Eq for ferrosys::Severity
+impl Eq for ferrosys::SourceEntry
+impl Eq for ferrosys::Synthesis
+impl Eq for ferrosys::Timestamp
+impl Eq for ferrosys::TreeEntry
+impl Eq for ferrosys::TreeError
+impl Eq for ferrosys::Xattr
+impl Eq for ferrosys::exfat::Anomaly
+impl Eq for ferrosys::exfat::BootDefect
+impl Eq for ferrosys::exfat::BoundaryAlign
+impl Eq for ferrosys::exfat::Category
+impl Eq for ferrosys::exfat::ClusterSize
+impl Eq for ferrosys::exfat::Entry
+impl Eq for ferrosys::exfat::ExfatLayout
+impl Eq for ferrosys::exfat::GeometryError
+impl Eq for ferrosys::exfat::LabelError
+impl Eq for ferrosys::exfat::Location
+impl Eq for ferrosys::exfat::ModelError
+impl Eq for ferrosys::exfat::NameError
+impl Eq for ferrosys::exfat::Node
+impl Eq for ferrosys::exfat::PlanRequest
+impl Eq for ferrosys::exfat::ReadError
+impl Eq for ferrosys::exfat::Storage
+impl Eq for ferrosys::exfat::TimeField
+impl Eq for ferrosys::exfat::Times
+impl Eq for ferrosys::exfat::Timestamp
+impl Eq for ferrosys::exfat::VolumeLabel
+impl Eq for ferrosys::exfat::WalkEntry
+impl Eq for ferrosys::exfat::ondisk::AllocationBitmapEntry
+impl Eq for ferrosys::exfat::ondisk::DirEntry
+impl Eq for ferrosys::exfat::ondisk::EntryType
+impl Eq for ferrosys::exfat::ondisk::FileAttributes
+impl Eq for ferrosys::exfat::ondisk::FileEntry
+impl Eq for ferrosys::exfat::ondisk::FileNameEntry
+impl Eq for ferrosys::exfat::ondisk::MainBootSector
+impl Eq for ferrosys::exfat::ondisk::ParseError
+impl Eq for ferrosys::exfat::ondisk::StreamExtensionEntry
+impl Eq for ferrosys::exfat::ondisk::UpcaseTable
+impl Eq for ferrosys::exfat::ondisk::UpcaseTableEntry
+impl Eq for ferrosys::exfat::ondisk::VolumeLabelEntry
+impl Error for ferrosys::AclError
+impl Error for ferrosys::DetectError
+impl Error for ferrosys::OpenError
+impl Error for ferrosys::TreeError
+impl Error for ferrosys::exfat::BootDefect
+impl Error for ferrosys::exfat::FormatError
+impl Error for ferrosys::exfat::GeometryError
+impl Error for ferrosys::exfat::LabelError
+impl Error for ferrosys::exfat::ModelError
+impl Error for ferrosys::exfat::NameError
+impl Error for ferrosys::exfat::ReadError
+impl Error for ferrosys::exfat::ondisk::ParseError
+impl From<&[u8; N]> for ferrosys::FileContent
+impl From<&[u8]> for ferrosys::FileContent
+impl From<&str> for ferrosys::FileContent
+impl From<DetectError> for ferrosys::DetectError
+impl From<DetectError> for ferrosys::OpenError
+impl From<Error> for ferrosys::DetectError
+impl From<Error> for ferrosys::exfat::FormatError
+impl From<Error> for ferrosys::exfat::ReadError
+impl From<FileRange> for ferrosys::FileContent
+impl From<FileRange> for ferrosys::FileRange
+impl From<GeometryError> for ferrosys::exfat::FormatError
+impl From<GeometryError> for ferrosys::exfat::GeometryError
+impl From<ModelError> for ferrosys::exfat::FormatError
+impl From<ModelError> for ferrosys::exfat::ModelError
+impl From<ParseError> for ferrosys::exfat::FormatError
+impl From<ParseError> for ferrosys::exfat::ReadError
+impl From<ParseError> for ferrosys::exfat::ondisk::ParseError
+impl From<ReadError> for ferrosys::TreeError
+impl From<ReadError> for ferrosys::exfat::ReadError
+impl From<String> for ferrosys::FileContent
+impl From<Vec<u8>> for ferrosys::FileContent
+impl FsTree for ferrosys::exfat::Reader
+impl Hash for ferrosys::AcceptedLoss
+impl Hash for ferrosys::Direction
+impl Hash for ferrosys::Family
+impl Hash for ferrosys::Filesystem
+impl Hash for ferrosys::Property
+impl Hash for ferrosys::exfat::ondisk::EntryType
+impl NamedChoice for ferrosys::Severity
+impl Ord for ferrosys::Severity
+impl Ord for ferrosys::exfat::ondisk::EntryType
+impl PartialEq for ferrosys::AcceptedLoss
+impl PartialEq for ferrosys::Acl
+impl PartialEq for ferrosys::AclEntry
+impl PartialEq for ferrosys::AclError
+impl PartialEq for ferrosys::AclQualifier
+impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Civil
+impl PartialEq for ferrosys::DetectError
+impl PartialEq for ferrosys::DetectOptions
+impl PartialEq for ferrosys::Direction
+impl PartialEq for ferrosys::DosTimestamp
+impl PartialEq for ferrosys::EntryKind
+impl PartialEq for ferrosys::Family
+impl PartialEq for ferrosys::FidelityRecord
+impl PartialEq for ferrosys::FidelityReport
+impl PartialEq for ferrosys::FileContent
+impl PartialEq for ferrosys::FileRange
+impl PartialEq for ferrosys::Filesystem
+impl PartialEq for ferrosys::Finding
+impl PartialEq for ferrosys::FindingReport
+impl PartialEq for ferrosys::Limits
+impl PartialEq for ferrosys::Metadata
+impl PartialEq for ferrosys::NodeKind
+impl PartialEq for ferrosys::OpenError
+impl PartialEq for ferrosys::OpenOptions
+impl PartialEq for ferrosys::Property
+impl PartialEq for ferrosys::ReadPolicy
+impl PartialEq for ferrosys::ScanReport
+impl PartialEq for ferrosys::Severity
+impl PartialEq for ferrosys::SourceEntry
+impl PartialEq for ferrosys::Synthesis
+impl PartialEq for ferrosys::Timestamp
+impl PartialEq for ferrosys::TreeEntry
+impl PartialEq for ferrosys::TreeError
+impl PartialEq for ferrosys::Xattr
+impl PartialEq for ferrosys::exfat::Anomaly
+impl PartialEq for ferrosys::exfat::BootDefect
+impl PartialEq for ferrosys::exfat::BoundaryAlign
+impl PartialEq for ferrosys::exfat::Category
+impl PartialEq for ferrosys::exfat::ClusterSize
+impl PartialEq for ferrosys::exfat::Entry
+impl PartialEq for ferrosys::exfat::ExfatLayout
+impl PartialEq for ferrosys::exfat::GeometryError
+impl PartialEq for ferrosys::exfat::LabelError
+impl PartialEq for ferrosys::exfat::Location
+impl PartialEq for ferrosys::exfat::ModelError
+impl PartialEq for ferrosys::exfat::NameError
+impl PartialEq for ferrosys::exfat::Node
+impl PartialEq for ferrosys::exfat::PlanRequest
+impl PartialEq for ferrosys::exfat::ReadError
+impl PartialEq for ferrosys::exfat::Storage
+impl PartialEq for ferrosys::exfat::TimeField
+impl PartialEq for ferrosys::exfat::Times
+impl PartialEq for ferrosys::exfat::Timestamp
+impl PartialEq for ferrosys::exfat::VolumeLabel
+impl PartialEq for ferrosys::exfat::WalkEntry
+impl PartialEq for ferrosys::exfat::ondisk::AllocationBitmapEntry
+impl PartialEq for ferrosys::exfat::ondisk::DirEntry
+impl PartialEq for ferrosys::exfat::ondisk::EntryType
+impl PartialEq for ferrosys::exfat::ondisk::FileAttributes
+impl PartialEq for ferrosys::exfat::ondisk::FileEntry
+impl PartialEq for ferrosys::exfat::ondisk::FileNameEntry
+impl PartialEq for ferrosys::exfat::ondisk::MainBootSector
+impl PartialEq for ferrosys::exfat::ondisk::ParseError
+impl PartialEq for ferrosys::exfat::ondisk::StreamExtensionEntry
+impl PartialEq for ferrosys::exfat::ondisk::UpcaseTable
+impl PartialEq for ferrosys::exfat::ondisk::UpcaseTableEntry
+impl PartialEq for ferrosys::exfat::ondisk::VolumeLabelEntry
+impl PartialOrd for ferrosys::Severity
+impl PartialOrd for ferrosys::exfat::ondisk::EntryType
+impl Source for ferrosys::LayeredSource
+impl Source for ferrosys::TreeBuilder
+pub const ferrosys::AcceptedLoss::ALL: Self
+pub const ferrosys::AcceptedLoss::NONE: Self
+pub const ferrosys::Acl::ACCESS_NAME: &'static [u8]
+pub const ferrosys::Acl::DEFAULT_NAME: &'static [u8]
+pub const ferrosys::Acl::EXEC: u16
+pub const ferrosys::Acl::READ: u16
+pub const ferrosys::Acl::WRITE: u16
+pub const ferrosys::DosTimestamp::MAX_TENTH: u8
+pub const ferrosys::DosTimestamp::SECS_MAX: i64
+pub const ferrosys::DosTimestamp::SECS_MIN: i64
+pub const ferrosys::FINDINGS_SCHEMA_VERSION: u32
+pub const ferrosys::FidelityReport::MAX_RECORDS: usize
+pub const ferrosys::FindingReport::MAX_FINDINGS: usize
+pub const ferrosys::MAX_SYMLINK_HOPS: u32
+pub const ferrosys::NamedChoice::NAMES: &'static [Self]
+pub const ferrosys::Severity::NAMES: &'static [Self]
+pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
+pub const ferrosys::exfat::DEFAULT_BOUNDARY_ALIGN: u32
+pub const ferrosys::exfat::FIRST_CLUSTER: u32
+pub const ferrosys::exfat::MAX_BYTES_PER_CLUSTER: u32
+pub const ferrosys::exfat::MAX_CLUSTER_COUNT: u32
+pub const ferrosys::exfat::MAX_DIRECTORY_BYTES: u64
+pub const ferrosys::exfat::MAX_DIRECTORY_ENTRIES: u64
+pub const ferrosys::exfat::MAX_NAME_UNITS: usize
+pub const ferrosys::exfat::MIN_VOLUME_SECTORS: u64
+pub const ferrosys::exfat::Timestamp::NANOS_PER_SEC: u32
+pub const ferrosys::exfat::VolumeLabel::MAX_UNITS: usize
+pub const ferrosys::exfat::VolumeLabel::UNNAMED: Self
+pub const ferrosys::exfat::ondisk::BACKUP_BOOT_REGION_SECTOR: u64
+pub const ferrosys::exfat::ondisk::BAD_CLUSTER: u32
+pub const ferrosys::exfat::ondisk::BOOT_CHECKSUM_SKIPS: [usize; 3]
+pub const ferrosys::exfat::ondisk::BOOT_CODE_LEN: usize
+pub const ferrosys::exfat::ondisk::BOOT_REGION_SECTORS: u64
+pub const ferrosys::exfat::ondisk::BOOT_SIGNATURE: u16
+pub const ferrosys::exfat::ondisk::CHECKSUM_SECTOR: u64
+pub const ferrosys::exfat::ondisk::DIR_ENTRY_SIZE: usize
+pub const ferrosys::exfat::ondisk::DirEntry::SIZE: usize
+pub const ferrosys::exfat::ondisk::END_OF_CHAIN: u32
+pub const ferrosys::exfat::ondisk::EXTENDED_BOOT_FIRST_SECTOR: u64
+pub const ferrosys::exfat::ondisk::EXTENDED_BOOT_SECTORS: u64
+pub const ferrosys::exfat::ondisk::EXTENDED_BOOT_SIGNATURE: u32
+pub const ferrosys::exfat::ondisk::EntryType::ALLOCATION_BITMAP: Self
+pub const ferrosys::exfat::ondisk::EntryType::END_OF_DIRECTORY: Self
+pub const ferrosys::exfat::ondisk::EntryType::FILE: Self
+pub const ferrosys::exfat::ondisk::EntryType::FILE_NAME: Self
+pub const ferrosys::exfat::ondisk::EntryType::STREAM_EXTENSION: Self
+pub const ferrosys::exfat::ondisk::EntryType::UPCASE_TABLE: Self
+pub const ferrosys::exfat::ondisk::EntryType::VENDOR_ALLOCATION: Self
+pub const ferrosys::exfat::ondisk::EntryType::VENDOR_EXTENSION: Self
+pub const ferrosys::exfat::ondisk::EntryType::VOLUME_GUID: Self
+pub const ferrosys::exfat::ondisk::EntryType::VOLUME_LABEL: Self
+pub const ferrosys::exfat::ondisk::FAT_ENTRY_MEDIA: u32
+pub const ferrosys::exfat::ondisk::FAT_ENTRY_RESERVED: u32
+pub const ferrosys::exfat::ondisk::FILE_SYSTEM_MAJOR_REVISION: u8
+pub const ferrosys::exfat::ondisk::FILE_SYSTEM_MINOR_REVISION: u8
+pub const ferrosys::exfat::ondisk::FILE_SYSTEM_NAME: [u8; 8]
+pub const ferrosys::exfat::ondisk::FILE_SYSTEM_REVISION: u16
+pub const ferrosys::exfat::ondisk::FileAttributes::ARCHIVE: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::DEFINED: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::DIRECTORY: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::HIDDEN: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::NONE: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::READ_ONLY: Self
+pub const ferrosys::exfat::ondisk::FileAttributes::SYSTEM: Self
+pub const ferrosys::exfat::ondisk::MAIN_BOOT_REGION_SECTOR: u64
+pub const ferrosys::exfat::ondisk::MAX_CLUSTER_SHIFT: u8
+pub const ferrosys::exfat::ondisk::MAX_LABEL_UNITS: usize
+pub const ferrosys::exfat::ondisk::MAX_NAME_ENTRIES: usize
+pub const ferrosys::exfat::ondisk::MAX_NAME_UNITS: usize
+pub const ferrosys::exfat::ondisk::MAX_SECONDARY_COUNT: u8
+pub const ferrosys::exfat::ondisk::MUST_BE_ZERO_RANGE: core::ops::Range<usize>
+pub const ferrosys::exfat::ondisk::MainBootSector::JUMP_BOOT: [u8; 3]
+pub const ferrosys::exfat::ondisk::MainBootSector::SIZE: usize
+pub const ferrosys::exfat::ondisk::NAME_UNITS_PER_ENTRY: usize
+pub const ferrosys::exfat::ondisk::OEM_PARAMETERS_SECTOR: u64
+pub const ferrosys::exfat::ondisk::PERCENT_IN_USE_MAX: u8
+pub const ferrosys::exfat::ondisk::PERCENT_IN_USE_UNKNOWN: u8
+pub const ferrosys::exfat::ondisk::RECOMMENDED_UPCASE_BYTES: u64
+pub const ferrosys::exfat::ondisk::RECOMMENDED_UPCASE_CHECKSUM: u32
+pub const ferrosys::exfat::ondisk::RECOMMENDED_UPCASE_TABLE: [u16; 2918]
+pub const ferrosys::exfat::ondisk::RESERVED_SECTOR: u64
+pub const ferrosys::exfat::ondisk::SECONDARY_ALLOCATION_POSSIBLE: u8
+pub const ferrosys::exfat::ondisk::SECONDARY_NO_FAT_CHAIN: u8
+pub const ferrosys::exfat::ondisk::SET_CHECKSUM_SKIPS: [usize; 2]
+pub const ferrosys::exfat::ondisk::UPCASE_IDENTITY_RUN: u16
+pub const ferrosys::exfat::ondisk::UTC_OFFSET: u8
+pub const ferrosys::exfat::ondisk::UTC_OFFSET_VALID: u8
+pub const ferrosys::exfat::ondisk::VOLUME_FLAG_ACTIVE_FAT: u16
+pub const ferrosys::exfat::ondisk::VOLUME_FLAG_CLEAR_TO_ZERO: u16
+pub const ferrosys::exfat::ondisk::VOLUME_FLAG_MEDIA_FAILURE: u16
+pub const ferrosys::exfat::ondisk::VOLUME_FLAG_VOLUME_DIRTY: u16
+pub const ferrosys::exfat::ondisk::VolumeLabelEntry::UNNAMED: Self
+pub const fn ferrosys::AcceptedLoss::and(self, property: Property) -> Self
+pub const fn ferrosys::AcceptedLoss::contains(self, property: Property) -> bool
+pub const fn ferrosys::AcceptedLoss::is_empty(self) -> bool
+pub const fn ferrosys::AcceptedLoss::without(self, property: Property) -> Self
+pub const fn ferrosys::Civil::at_secs(secs: i64) -> Self
+pub const fn ferrosys::Civil::to_secs(self) -> i64
+pub const fn ferrosys::DetectOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::DetectOptions::new() -> Self
+pub const fn ferrosys::Direction::as_str(self) -> &'static str
+pub const fn ferrosys::DosTimestamp::decode(self) -> Timestamp
+pub const fn ferrosys::DosTimestamp::is_well_formed(self) -> bool
+pub const fn ferrosys::DosTimestamp::represents(time: Timestamp) -> bool
+pub const fn ferrosys::Family::as_str(self) -> &'static str
+pub const fn ferrosys::FileRange::is_empty(&self) -> bool
+pub const fn ferrosys::FileRange::len(&self) -> u64
+pub const fn ferrosys::FileRange::offset(&self) -> u64
+pub const fn ferrosys::Limits::max_file_bytes(self, max: u64) -> Self
+pub const fn ferrosys::Limits::max_findings(self, max: usize) -> Self
+pub const fn ferrosys::Limits::max_walk_entries(self, max: usize) -> Self
+pub const fn ferrosys::Limits::new() -> Self
+pub const fn ferrosys::OpenOptions::base(self, base: u64) -> Self
+pub const fn ferrosys::OpenOptions::limits(self, limits: Limits) -> Self
+pub const fn ferrosys::OpenOptions::new() -> Self
+pub const fn ferrosys::OpenOptions::policy(self, policy: ReadPolicy) -> Self
+pub const fn ferrosys::Property::as_str(self) -> &'static str
+pub const fn ferrosys::Severity::as_str(self) -> &'static str
+pub const fn ferrosys::Synthesis::modes(self, file_mode: u16, dir_mode: u16) -> Self
+pub const fn ferrosys::Synthesis::new() -> Self
+pub const fn ferrosys::Synthesis::owner(self, uid: u32, gid: u32) -> Self
+pub const fn ferrosys::Timestamp::civil(self) -> Civil
+pub const fn ferrosys::Timestamp::from_secs(secs: i64) -> Self
+pub const fn ferrosys::exfat::Category::as_str(self) -> &'static str
+pub const fn ferrosys::exfat::ExfatLayout::boot_region_sector(&self, which: u32) -> Option<u64>
+pub const fn ferrosys::exfat::ExfatLayout::bytes_per_sector_shift(&self) -> u8
+pub const fn ferrosys::exfat::ExfatLayout::cluster_start_byte(&self, n: u32) -> Option<u64>
+pub const fn ferrosys::exfat::ExfatLayout::cluster_start_sector(&self, n: u32) -> Option<u64>
+pub const fn ferrosys::exfat::ExfatLayout::clusters_for(&self, bytes: u64) -> u64
+pub const fn ferrosys::exfat::ExfatLayout::fat_entry_byte(&self, n: u32) -> Option<u64>
+pub const fn ferrosys::exfat::ExfatLayout::heap_bytes(&self) -> u64
+pub const fn ferrosys::exfat::ExfatLayout::sectors_per_cluster(&self) -> u32
+pub const fn ferrosys::exfat::ExfatLayout::sectors_per_cluster_shift(&self) -> u8
+pub const fn ferrosys::exfat::ExfatLayout::total_bytes(&self) -> u64
+pub const fn ferrosys::exfat::FormatOptions::accepted_loss(self, accepted: AcceptedLoss) -> Self
+pub const fn ferrosys::exfat::FormatOptions::boot_code(self, boot_code: [u8; 390]) -> Self
+pub const fn ferrosys::exfat::FormatOptions::label(self, label: VolumeLabel) -> Self
+pub const fn ferrosys::exfat::FormatOptions::new(volume_serial: u32) -> Self
+pub const fn ferrosys::exfat::FormatOptions::plan(self, plan: PlanRequest) -> Self
+pub const fn ferrosys::exfat::FormatOptions::synthesis(self, synthesis: Synthesis) -> Self
+pub const fn ferrosys::exfat::FormatPlan::free_clusters(&self) -> u32
+pub const fn ferrosys::exfat::FormatPlan::layout(&self) -> &ExfatLayout
+pub const fn ferrosys::exfat::FormatPlan::volume_bytes(&self) -> u64
+pub const fn ferrosys::exfat::Node::is_dir(&self) -> bool
+pub const fn ferrosys::exfat::PlanRequest::boundary_align(self, align: BoundaryAlign) -> Self
+pub const fn ferrosys::exfat::PlanRequest::bytes_per_sector(self, bytes: u32) -> Self
+pub const fn ferrosys::exfat::PlanRequest::cluster_size(self, size: ClusterSize) -> Self
+pub const fn ferrosys::exfat::PlanRequest::new(volume_bytes: u64) -> Self
+pub const fn ferrosys::exfat::Reader::layout(&self) -> &ExfatLayout
+pub const fn ferrosys::exfat::Reader::media_failure(&self) -> bool
+pub const fn ferrosys::exfat::Reader::policy(&self) -> ReadPolicy
+pub const fn ferrosys::exfat::Reader::root(&self) -> Node
+pub const fn ferrosys::exfat::Reader::upcase(&self) -> &UpcaseTable
+pub const fn ferrosys::exfat::Reader::volume_dirty(&self) -> bool
+pub const fn ferrosys::exfat::Storage::first_cluster(self) -> Option<u32>
+pub const fn ferrosys::exfat::TimeField::as_str(self) -> &'static str
+pub const fn ferrosys::exfat::Timestamp::civil(self) -> Civil
+pub const fn ferrosys::exfat::Timestamp::from_secs(secs: i64) -> Self
+pub const fn ferrosys::exfat::conventional_cluster_size(volume_bytes: u64) -> u32
+pub const fn ferrosys::exfat::ondisk::DirEntry::reserved(entry_type: EntryType) -> Self
+pub const fn ferrosys::exfat::ondisk::EntryType::cleared(self) -> Self
+pub const fn ferrosys::exfat::ondisk::EntryType::code(self) -> u8
+pub const fn ferrosys::exfat::ondisk::EntryType::in_use(self) -> bool
+pub const fn ferrosys::exfat::ondisk::EntryType::is_benign(self) -> bool
+pub const fn ferrosys::exfat::ondisk::EntryType::is_end_of_directory(self) -> bool
+pub const fn ferrosys::exfat::ondisk::EntryType::is_secondary(self) -> bool
+pub const fn ferrosys::exfat::ondisk::FileAttributes::bits(self) -> u16
+pub const fn ferrosys::exfat::ondisk::FileAttributes::contains(self, other: Self) -> bool
+pub const fn ferrosys::exfat::ondisk::FileAttributes::from_bits(bits: u16) -> Self
+pub const fn ferrosys::exfat::ondisk::FileAttributes::is_empty(self) -> bool
+pub const fn ferrosys::exfat::ondisk::FileAttributes::without(self, other: Self) -> Self
+pub const fn ferrosys::exfat::ondisk::MainBootSector::bytes_per_cluster(&self) -> Option<u32>
+pub const fn ferrosys::exfat::ondisk::MainBootSector::bytes_per_sector(&self) -> Option<u32>
+pub const fn ferrosys::exfat::ondisk::MainBootSector::major_revision(&self) -> u8
+pub const fn ferrosys::exfat::ondisk::MainBootSector::minor_revision(&self) -> u8
+pub const fn ferrosys::exfat::ondisk::StreamExtensionEntry::no_fat_chain(&self) -> bool
+pub const fn ferrosys::exfat::ondisk::pack_timestamp(stamp: crate::time::DosTimestamp) -> u32
+pub const fn ferrosys::exfat::ondisk::percent_in_use(used: u32, total: u32) -> u8
+pub const fn ferrosys::exfat::ondisk::unpack_timestamp(field: u32, tenth: u8) -> crate::time::DosTimestamp
+pub const fn ferrosys::exfat::ondisk::utc_offset_minutes(byte: u8) -> Option<i32>
+pub enum ferrosys::AclQualifier
+pub enum ferrosys::ReadPolicy
+pub enum ferrosys::Severity
+pub enum ferrosys::exfat::Storage
+pub ferrosys::AclEntry::perm: u16
+pub ferrosys::AclEntry::who: AclQualifier
+pub ferrosys::AclError::Duplicate::tag: &'static str
+pub ferrosys::AclError::InvalidPerm::perm: u16
+pub ferrosys::AclError::Malformed::reason: &'static str
+pub ferrosys::AclError::MaskRequired
+pub ferrosys::AclError::MissingRequired::tag: &'static str
+pub ferrosys::AclError::UndefinedId::tag: &'static str
+pub ferrosys::AclQualifier::Group(u32)
+pub ferrosys::AclQualifier::GroupObj
+pub ferrosys::AclQualifier::Mask
+pub ferrosys::AclQualifier::Other
+pub ferrosys::AclQualifier::User(u32)
+pub ferrosys::AclQualifier::UserObj
+pub ferrosys::Attributes::meta: crate::source::Metadata
+pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
+pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Civil::day: u32
+pub ferrosys::Civil::hour: u32
+pub ferrosys::Civil::minute: u32
+pub ferrosys::Civil::month: u32
+pub ferrosys::Civil::second: u32
+pub ferrosys::Civil::year: i64
+pub ferrosys::DetectError::Io::kind: std::io::ErrorKind
+pub ferrosys::DetectError::Io::message: String
+pub ferrosys::DetectError::Unrecognized
+pub ferrosys::DetectOptions::base: u64
+pub ferrosys::Direction::Dropped
+pub ferrosys::Direction::Synthesized
+pub ferrosys::DosTimestamp::date: u16
+pub ferrosys::DosTimestamp::tenth: u8
+pub ferrosys::DosTimestamp::time: u16
+pub ferrosys::EntryKind::BlockDevice
+pub ferrosys::EntryKind::BlockDevice::major: u32
+pub ferrosys::EntryKind::BlockDevice::minor: u32
+pub ferrosys::EntryKind::CharDevice
+pub ferrosys::EntryKind::CharDevice::major: u32
+pub ferrosys::EntryKind::CharDevice::minor: u32
+pub ferrosys::EntryKind::Directory
+pub ferrosys::EntryKind::Fifo
+pub ferrosys::EntryKind::File(FileContent)
+pub ferrosys::EntryKind::HardLink
+pub ferrosys::EntryKind::HardLink::target: Vec<u8>
+pub ferrosys::EntryKind::Socket
+pub ferrosys::EntryKind::Symlink(Vec<u8>)
+pub ferrosys::Family::ExFat
+pub ferrosys::FidelityRecord::direction: Direction
+pub ferrosys::FidelityRecord::path: Vec<u8>
+pub ferrosys::FidelityRecord::property: Property
+pub ferrosys::FileContent::Owned(Vec<u8>)
+pub ferrosys::FileContent::Range(FileRange)
+pub ferrosys::Filesystem::ExFat
+pub ferrosys::Finding::category: std::borrow::Cow<'static, str>
+pub ferrosys::Finding::coordinates: Vec<Coordinate>
+pub ferrosys::Finding::detail: String
+pub ferrosys::Finding::family: Family
+pub ferrosys::Finding::offset: Option<u64>
+pub ferrosys::Finding::severity: Severity
+pub ferrosys::FsReader::ExFat(crate::exfat::Reader<R>)
+pub ferrosys::Limits::max_file_bytes: u64
+pub ferrosys::Limits::max_findings: usize
+pub ferrosys::Limits::max_walk_entries: usize
+pub ferrosys::Metadata::atime: crate::time::Timestamp
+pub ferrosys::Metadata::ctime: crate::time::Timestamp
+pub ferrosys::Metadata::gid: u32
+pub ferrosys::Metadata::mode: u16
+pub ferrosys::Metadata::mtime: crate::time::Timestamp
+pub ferrosys::Metadata::uid: u32
+pub ferrosys::NodeKind::BlockDevice
+pub ferrosys::NodeKind::BlockDevice::major: u32
+pub ferrosys::NodeKind::BlockDevice::minor: u32
+pub ferrosys::NodeKind::CharDevice
+pub ferrosys::NodeKind::CharDevice::major: u32
+pub ferrosys::NodeKind::CharDevice::minor: u32
+pub ferrosys::NodeKind::Directory
+pub ferrosys::NodeKind::Fifo
+pub ferrosys::NodeKind::File
+pub ferrosys::NodeKind::File::size: u64
+pub ferrosys::NodeKind::Socket
+pub ferrosys::NodeKind::Symlink
+pub ferrosys::OpenError::Detect(crate::detect::DetectError)
+pub ferrosys::OpenError::Refused::family: crate::finding::Family
+pub ferrosys::OpenError::Refused::message: String
+pub ferrosys::OpenOptions::base: u64
+pub ferrosys::OpenOptions::limits: Limits
+pub ferrosys::OpenOptions::policy: ReadPolicy
+pub ferrosys::Property::AccessTime
+pub ferrosys::Property::ChangeTime
+pub ferrosys::Property::ExtendedAttributes
+pub ferrosys::Property::Kind
+pub ferrosys::Property::ModificationTime
+pub ferrosys::Property::Name
+pub ferrosys::Property::Ownership
+pub ferrosys::Property::Permissions
+pub ferrosys::Property::SpecialBits
+pub ferrosys::Property::TimePrecision
+pub ferrosys::ReadPolicy::Lenient
+pub ferrosys::ReadPolicy::Strict
+pub ferrosys::Severity::Conformance
+pub ferrosys::Severity::Cosmetic
+pub ferrosys::Severity::Integrity
+pub ferrosys::Severity::Structural
+pub ferrosys::SourceEntry::kind: EntryKind
+pub ferrosys::SourceEntry::meta: Metadata
+pub ferrosys::SourceEntry::path: Vec<u8>
+pub ferrosys::SourceEntry::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Synthesis::dir_mode: u16
+pub ferrosys::Synthesis::file_mode: u16
+pub ferrosys::Synthesis::gid: u32
+pub ferrosys::Synthesis::uid: u32
+pub ferrosys::Timestamp::nanos: u32
+pub ferrosys::Timestamp::secs: i64
+pub ferrosys::TreeEntry::kind: NodeKind
+pub ferrosys::TreeEntry::node: N
+pub ferrosys::TreeEntry::path: Vec<u8>
+pub ferrosys::TreeEntry::shared: Option<u64>
+pub ferrosys::TreeError::Io::kind: std::io::ErrorKind
+pub ferrosys::TreeError::Io::message: String
+pub ferrosys::TreeError::LimitExceeded::detail: String
+pub ferrosys::TreeError::LimitExceeded::family: crate::finding::Family
+pub ferrosys::TreeError::Malformed::detail: String
+pub ferrosys::TreeError::Malformed::family: crate::finding::Family
+pub ferrosys::TreeError::Unsupported::detail: String
+pub ferrosys::TreeError::Unsupported::family: crate::finding::Family
+pub ferrosys::Xattr::name: Vec<u8>
+pub ferrosys::Xattr::value: Vec<u8>
+pub ferrosys::exfat::Anomaly::category: Category
+pub ferrosys::exfat::Anomaly::detail: String
+pub ferrosys::exfat::Anomaly::location: Location
+pub ferrosys::exfat::Anomaly::severity: crate::finding::Severity
+pub ferrosys::exfat::BootDefect::ClusterShift::cluster_shift: u8
+pub ferrosys::exfat::BootDefect::ClusterShift::limit: u8
+pub ferrosys::exfat::BootDefect::ClusterShift::sector_shift: u8
+pub ferrosys::exfat::BootDefect::FileSystemRevision::major: u8
+pub ferrosys::exfat::BootDefect::FileSystemRevision::minor: u8
+pub ferrosys::exfat::BootDefect::RegionOutsideVolume::region: &'static str
+pub ferrosys::exfat::BootDefect::RegionOutsideVolume::why: &'static str
+pub ferrosys::exfat::BootDefect::RootOutsideHeap::cluster: u32
+pub ferrosys::exfat::BootDefect::SectorShift::shift: u8
+pub ferrosys::exfat::BootDefect::TableTooShort::cluster_count: u32
+pub ferrosys::exfat::BootDefect::TableTooShort::table_bytes: u64
+pub ferrosys::exfat::BootDefect::VolumeLength::sectors: u64
+pub ferrosys::exfat::BootDefect::VolumeLength::why: &'static str
+pub ferrosys::exfat::BoundaryAlign::Auto
+pub ferrosys::exfat::BoundaryAlign::Bytes(u32)
+pub ferrosys::exfat::Category::AllocationBitmap
+pub ferrosys::exfat::Category::AllocationTable
+pub ferrosys::exfat::Category::BootRegion
+pub ferrosys::exfat::Category::Directory
+pub ferrosys::exfat::Category::UpcaseTable
+pub ferrosys::exfat::ClusterSize::Auto
+pub ferrosys::exfat::ClusterSize::Bytes(u32)
+pub ferrosys::exfat::Entry::name: Vec<u8>
+pub ferrosys::exfat::Entry::node: Node
+pub ferrosys::exfat::ExfatLayout::bitmap_bytes: u64
+pub ferrosys::exfat::ExfatLayout::bitmap_cluster: u32
+pub ferrosys::exfat::ExfatLayout::bytes_per_cluster: u32
+pub ferrosys::exfat::ExfatLayout::bytes_per_sector: u32
+pub ferrosys::exfat::ExfatLayout::cluster_count: u32
+pub ferrosys::exfat::ExfatLayout::cluster_heap_offset: u32
+pub ferrosys::exfat::ExfatLayout::fat_length: u32
+pub ferrosys::exfat::ExfatLayout::fat_offset: u32
+pub ferrosys::exfat::ExfatLayout::first_cluster_of_root: u32
+pub ferrosys::exfat::ExfatLayout::upcase_bytes: u64
+pub ferrosys::exfat::ExfatLayout::upcase_cluster: u32
+pub ferrosys::exfat::ExfatLayout::volume_length: u64
+pub ferrosys::exfat::FormatError::ClusterOutsideVolume::cluster: u32
+pub ferrosys::exfat::FormatError::ClusterOutsideVolume::region: &'static str
+pub ferrosys::exfat::FormatError::DirectoryOverflowsItsClusters::bytes: u64
+pub ferrosys::exfat::FormatError::DirectoryOverflowsItsClusters::capacity: u64
+pub ferrosys::exfat::FormatError::DirectoryOverflowsItsClusters::index: usize
+pub ferrosys::exfat::FormatError::Geometry(super::geometry::GeometryError)
+pub ferrosys::exfat::FormatError::ImageTooLargeInMemory::bytes: u64
+pub ferrosys::exfat::FormatError::Io(std::io::Error)
+pub ferrosys::exfat::FormatError::Model(super::model::ModelError)
+pub ferrosys::exfat::FormatError::Parse(super::ondisk::ParseError)
+pub ferrosys::exfat::FormatOptions::accepted_loss: crate::fidelity::AcceptedLoss
+pub ferrosys::exfat::FormatOptions::boot_code: [u8; 390]
+pub ferrosys::exfat::FormatOptions::label: VolumeLabel
+pub ferrosys::exfat::FormatOptions::plan: super::geometry::PlanRequest
+pub ferrosys::exfat::FormatOptions::synthesis: crate::fidelity::Synthesis
+pub ferrosys::exfat::FormatOptions::volume_serial: u32
+pub ferrosys::exfat::GeometryError::BoundaryAlignUnsupported::bytes: u32
+pub ferrosys::exfat::GeometryError::BoundaryAlignUnsupported::bytes_per_sector: u32
+pub ferrosys::exfat::GeometryError::ClusterSizeUnsupported::bytes_per_cluster: u32
+pub ferrosys::exfat::GeometryError::ClusterSizeUnsupported::bytes_per_sector: u32
+pub ferrosys::exfat::GeometryError::ClusterTooLarge::bytes_per_cluster: u32
+pub ferrosys::exfat::GeometryError::ClusterTooLarge::limit: u32
+pub ferrosys::exfat::GeometryError::HeapTooSmall::clusters: u32
+pub ferrosys::exfat::GeometryError::HeapTooSmall::needed: u32
+pub ferrosys::exfat::GeometryError::NoClusterHeap::heap_at: u64
+pub ferrosys::exfat::GeometryError::NoClusterHeap::volume_bytes: u64
+pub ferrosys::exfat::GeometryError::SectorSizeUnsupported::bytes_per_sector: u32
+pub ferrosys::exfat::GeometryError::TooManyClusters::clusters: u64
+pub ferrosys::exfat::GeometryError::TooManyClusters::limit: u32
+pub ferrosys::exfat::GeometryError::VolumeTooSmall::minimum: u64
+pub ferrosys::exfat::GeometryError::VolumeTooSmall::sectors: u64
+pub ferrosys::exfat::LabelError::NulUnit::at: usize
+pub ferrosys::exfat::LabelError::TooLong::limit: usize
+pub ferrosys::exfat::LabelError::TooLong::units: usize
+pub ferrosys::exfat::Location::cluster: Option<u32>
+pub ferrosys::exfat::Location::entry: Option<u32>
+pub ferrosys::exfat::Location::sector: Option<u64>
+pub ferrosys::exfat::ModelError::DirectoryTooLarge::limit: u64
+pub ferrosys::exfat::ModelError::DirectoryTooLarge::needed: u64
+pub ferrosys::exfat::ModelError::DirectoryTooLarge::path: Vec<u8>
+pub ferrosys::exfat::ModelError::Duplicate::path: Vec<u8>
+pub ferrosys::exfat::ModelError::HardlinkCycle::path: Vec<u8>
+pub ferrosys::exfat::ModelError::HardlinkTargetIsDirectory::path: Vec<u8>
+pub ferrosys::exfat::ModelError::HardlinkTargetIsDirectory::target: Vec<u8>
+pub ferrosys::exfat::ModelError::HardlinkTargetMissing::path: Vec<u8>
+pub ferrosys::exfat::ModelError::HardlinkTargetMissing::target: Vec<u8>
+pub ferrosys::exfat::ModelError::Indistinguishable::other: Vec<u8>
+pub ferrosys::exfat::ModelError::Indistinguishable::path: Vec<u8>
+pub ferrosys::exfat::ModelError::InvalidComponent::path: Vec<u8>
+pub ferrosys::exfat::ModelError::LossNotAccepted::path: Vec<u8>
+pub ferrosys::exfat::ModelError::LossNotAccepted::property: crate::fidelity::Property
+pub ferrosys::exfat::ModelError::Name::path: Vec<u8>
+pub ferrosys::exfat::ModelError::Name::source: super::name::NameError
+pub ferrosys::exfat::ModelError::ParentMissing::path: Vec<u8>
+pub ferrosys::exfat::ModelError::ParentNotDir::path: Vec<u8>
+pub ferrosys::exfat::ModelError::RootNotDirectory::path: Vec<u8>
+pub ferrosys::exfat::ModelError::TimeOutOfRange::field: TimeField
+pub ferrosys::exfat::ModelError::TimeOutOfRange::max: i64
+pub ferrosys::exfat::ModelError::TimeOutOfRange::min: i64
+pub ferrosys::exfat::ModelError::TimeOutOfRange::path: Vec<u8>
+pub ferrosys::exfat::ModelError::TimeOutOfRange::secs: i64
+pub ferrosys::exfat::ModelError::VolumeFull::available: u32
+pub ferrosys::exfat::ModelError::VolumeFull::needed: u64
+pub ferrosys::exfat::NameError::Empty
+pub ferrosys::exfat::NameError::ForbiddenCharacter::ch: char
+pub ferrosys::exfat::NameError::NotUtf8
+pub ferrosys::exfat::NameError::TooLong::limit: usize
+pub ferrosys::exfat::NameError::TooLong::units: usize
+pub ferrosys::exfat::NameError::TrailingDotOrSpace
+pub ferrosys::exfat::Node::attributes: super::ondisk::FileAttributes
+pub ferrosys::exfat::Node::data_length: u64
+pub ferrosys::exfat::Node::storage: Storage
+pub ferrosys::exfat::Node::times: Option<Times>
+pub ferrosys::exfat::Node::valid_data_length: u64
+pub ferrosys::exfat::PlanRequest::boundary_align: BoundaryAlign
+pub ferrosys::exfat::PlanRequest::bytes_per_sector: u32
+pub ferrosys::exfat::PlanRequest::cluster_size: ClusterSize
+pub ferrosys::exfat::PlanRequest::volume_bytes: u64
+pub ferrosys::exfat::ReadError::AllocationNotPossible::index: u32
+pub ferrosys::exfat::ReadError::AllocationWithoutLength::first_cluster: u32
+pub ferrosys::exfat::ReadError::AllocationWithoutLength::index: u32
+pub ferrosys::exfat::ReadError::BackupBootRegionDiffers::detail: String
+pub ferrosys::exfat::ReadError::BackupBootRegionDiffers::sector: u64
+pub ferrosys::exfat::ReadError::BadBootSector::detail: String
+pub ferrosys::exfat::ReadError::BadChainEntry::cluster: u32
+pub ferrosys::exfat::ReadError::BadChainEntry::entry: u32
+pub ferrosys::exfat::ReadError::BadClusterInChain::cluster: u32
+pub ferrosys::exfat::ReadError::BadExtendedBootSignature::expected: u32
+pub ferrosys::exfat::ReadError::BadExtendedBootSignature::found: u32
+pub ferrosys::exfat::ReadError::BadExtendedBootSignature::sector: u64
+pub ferrosys::exfat::ReadError::BadReservedEntry::expected: u32
+pub ferrosys::exfat::ReadError::BadReservedEntry::found: u32
+pub ferrosys::exfat::ReadError::BadReservedEntry::index: u32
+pub ferrosys::exfat::ReadError::BitmapWrongSize::bytes: u64
+pub ferrosys::exfat::ReadError::BitmapWrongSize::clusters: u32
+pub ferrosys::exfat::ReadError::BootChecksumMismatch::computed: u32
+pub ferrosys::exfat::ReadError::BootChecksumMismatch::sector: u64
+pub ferrosys::exfat::ReadError::BootChecksumMismatch::stored: u32
+pub ferrosys::exfat::ReadError::BootChecksumSectorSplit::sector: u64
+pub ferrosys::exfat::ReadError::ChainTooLong::clusters: u32
+pub ferrosys::exfat::ReadError::ChainTooLong::start: u32
+pub ferrosys::exfat::ReadError::ClusterNotAllocated::cluster: u32
+pub ferrosys::exfat::ReadError::ClusterOutOfRange::cluster: u32
+pub ferrosys::exfat::ReadError::CrossLinkedCluster::cluster: u32
+pub ferrosys::exfat::ReadError::DirectoryLengthNotClusters::bytes_per_cluster: u32
+pub ferrosys::exfat::ReadError::DirectoryLengthNotClusters::declared: u64
+pub ferrosys::exfat::ReadError::DirectoryLengthNotClusters::index: u32
+pub ferrosys::exfat::ReadError::DirectoryTooLong::declared: u64
+pub ferrosys::exfat::ReadError::DirectoryTooLong::index: u32
+pub ferrosys::exfat::ReadError::DirectoryTooLong::limit: u64
+pub ferrosys::exfat::ReadError::DirectoryWithoutAllocation::index: u32
+pub ferrosys::exfat::ReadError::DuplicateRootEntry::entry_type: &'static str
+pub ferrosys::exfat::ReadError::DuplicateRootEntry::index: u32
+pub ferrosys::exfat::ReadError::EntriesAfterEnd::index: u32
+pub ferrosys::exfat::ReadError::ExcessNameEntries::have: usize
+pub ferrosys::exfat::ReadError::ExcessNameEntries::index: u32
+pub ferrosys::exfat::ReadError::ExcessNameEntries::want: usize
+pub ferrosys::exfat::ReadError::FatCount::count: u8
+pub ferrosys::exfat::ReadError::FileTooLarge::limit: u64
+pub ferrosys::exfat::ReadError::FileTooLarge::size: u64
+pub ferrosys::exfat::ReadError::HostileName::index: u32
+pub ferrosys::exfat::ReadError::IllFormedName::index: u32
+pub ferrosys::exfat::ReadError::IncompleteEntrySet::detail: String
+pub ferrosys::exfat::ReadError::IncompleteEntrySet::index: u32
+pub ferrosys::exfat::ReadError::Io::kind: std::io::ErrorKind
+pub ferrosys::exfat::ReadError::Io::message: String
+pub ferrosys::exfat::ReadError::LabelNulUnit
+pub ferrosys::exfat::ReadError::LabelTooLong::count: u8
+pub ferrosys::exfat::ReadError::LabelTooLong::limit: usize
+pub ferrosys::exfat::ReadError::LostClusters::count: u64
+pub ferrosys::exfat::ReadError::LostClusters::first: u32
+pub ferrosys::exfat::ReadError::MalformedTimestamp::field: &'static str
+pub ferrosys::exfat::ReadError::MalformedTimestamp::index: u32
+pub ferrosys::exfat::ReadError::MediaFailure
+pub ferrosys::exfat::ReadError::MisplacedRootEntry::entry_type: &'static str
+pub ferrosys::exfat::ReadError::MisplacedRootEntry::index: u32
+pub ferrosys::exfat::ReadError::MissingResident::resident: &'static str
+pub ferrosys::exfat::ReadError::NameHashMismatch::computed: u16
+pub ferrosys::exfat::ReadError::NameHashMismatch::index: u32
+pub ferrosys::exfat::ReadError::NameHashMismatch::stored: u16
+pub ferrosys::exfat::ReadError::NotADirectory::path: Vec<u8>
+pub ferrosys::exfat::ReadError::NotFound::path: Vec<u8>
+pub ferrosys::exfat::ReadError::Parse(super::ondisk::ParseError)
+pub ferrosys::exfat::ReadError::PathTooLong::limit: usize
+pub ferrosys::exfat::ReadError::PercentInUseOutOfRange::stated: u8
+pub ferrosys::exfat::ReadError::PercentInUseStale::actual: u8
+pub ferrosys::exfat::ReadError::PercentInUseStale::clusters: u32
+pub ferrosys::exfat::ReadError::PercentInUseStale::in_use: u64
+pub ferrosys::exfat::ReadError::PercentInUseStale::stated: u8
+pub ferrosys::exfat::ReadError::ReservedAttributes::bits: u16
+pub ferrosys::exfat::ReadError::ReservedAttributes::index: u32
+pub ferrosys::exfat::ReadError::SetChecksumMismatch::computed: u16
+pub ferrosys::exfat::ReadError::SetChecksumMismatch::index: u32
+pub ferrosys::exfat::ReadError::SetChecksumMismatch::stored: u16
+pub ferrosys::exfat::ReadError::StraySecondaryEntry::index: u32
+pub ferrosys::exfat::ReadError::StreamPastHeap::declared: u64
+pub ferrosys::exfat::ReadError::StreamPastHeap::limit: u64
+pub ferrosys::exfat::ReadError::StreamTooShort::declared: u64
+pub ferrosys::exfat::ReadError::StreamTooShort::held: u64
+pub ferrosys::exfat::ReadError::StreamTooShort::start: u32
+pub ferrosys::exfat::ReadError::StreamWithoutAllocation::declared: u64
+pub ferrosys::exfat::ReadError::StreamWithoutAllocation::index: u32
+pub ferrosys::exfat::ReadError::TexFat
+pub ferrosys::exfat::ReadError::UnknownCriticalEntry::entry_type: u8
+pub ferrosys::exfat::ReadError::UnknownCriticalEntry::index: u32
+pub ferrosys::exfat::ReadError::UnknownMinorRevision::minor: u8
+pub ferrosys::exfat::ReadError::UpcaseChecksumMismatch::computed: u32
+pub ferrosys::exfat::ReadError::UpcaseChecksumMismatch::stored: u32
+pub ferrosys::exfat::ReadError::UpcaseTooLong::bytes: u64
+pub ferrosys::exfat::ReadError::UpcaseTooLong::limit: u64
+pub ferrosys::exfat::ReadError::ValidLengthPastEnd::declared: u64
+pub ferrosys::exfat::ReadError::ValidLengthPastEnd::valid: u64
+pub ferrosys::exfat::ReadError::ValidLengthTrails::declared: u64
+pub ferrosys::exfat::ReadError::ValidLengthTrails::valid: u64
+pub ferrosys::exfat::ReadError::VolumeDirty
+pub ferrosys::exfat::ReadError::WalkTooLarge::limit: usize
+pub ferrosys::exfat::Storage::Chain(u32)
+pub ferrosys::exfat::Storage::Contiguous(u32)
+pub ferrosys::exfat::Storage::None
+pub ferrosys::exfat::TimeField::Access
+pub ferrosys::exfat::TimeField::Modification
+pub ferrosys::exfat::Times::access: crate::time::Timestamp
+pub ferrosys::exfat::Times::access_offset: Option<i32>
+pub ferrosys::exfat::Times::create: crate::time::Timestamp
+pub ferrosys::exfat::Times::create_offset: Option<i32>
+pub ferrosys::exfat::Times::modify: crate::time::Timestamp
+pub ferrosys::exfat::Times::modify_offset: Option<i32>
+pub ferrosys::exfat::Timestamp::nanos: u32
+pub ferrosys::exfat::Timestamp::secs: i64
+pub ferrosys::exfat::WalkEntry::node: Node
+pub ferrosys::exfat::WalkEntry::path: Vec<u8>
+pub ferrosys::exfat::ondisk::AllocationBitmapEntry::bitmap_flags: u8
+pub ferrosys::exfat::ondisk::AllocationBitmapEntry::data_length: u64
+pub ferrosys::exfat::ondisk::AllocationBitmapEntry::first_cluster: u32
+pub ferrosys::exfat::ondisk::DirEntry::custom: [u8; 31]
+pub ferrosys::exfat::ondisk::DirEntry::entry_type: EntryType
+pub ferrosys::exfat::ondisk::FileEntry::access: u32
+pub ferrosys::exfat::ondisk::FileEntry::access_utc_offset: u8
+pub ferrosys::exfat::ondisk::FileEntry::attributes: FileAttributes
+pub ferrosys::exfat::ondisk::FileEntry::create: u32
+pub ferrosys::exfat::ondisk::FileEntry::create_tenth: u8
+pub ferrosys::exfat::ondisk::FileEntry::create_utc_offset: u8
+pub ferrosys::exfat::ondisk::FileEntry::modify: u32
+pub ferrosys::exfat::ondisk::FileEntry::modify_tenth: u8
+pub ferrosys::exfat::ondisk::FileEntry::modify_utc_offset: u8
+pub ferrosys::exfat::ondisk::FileEntry::secondary_count: u8
+pub ferrosys::exfat::ondisk::FileEntry::set_checksum: u16
+pub ferrosys::exfat::ondisk::FileNameEntry::flags: u8
+pub ferrosys::exfat::ondisk::FileNameEntry::units: [u16; 15]
+pub ferrosys::exfat::ondisk::MainBootSector::boot_code: [u8; 390]
+pub ferrosys::exfat::ondisk::MainBootSector::bytes_per_sector_shift: u8
+pub ferrosys::exfat::ondisk::MainBootSector::cluster_count: u32
+pub ferrosys::exfat::ondisk::MainBootSector::cluster_heap_offset: u32
+pub ferrosys::exfat::ondisk::MainBootSector::drive_select: u8
+pub ferrosys::exfat::ondisk::MainBootSector::fat_length: u32
+pub ferrosys::exfat::ondisk::MainBootSector::fat_offset: u32
+pub ferrosys::exfat::ondisk::MainBootSector::file_system_name: [u8; 8]
+pub ferrosys::exfat::ondisk::MainBootSector::file_system_revision: u16
+pub ferrosys::exfat::ondisk::MainBootSector::first_cluster_of_root: u32
+pub ferrosys::exfat::ondisk::MainBootSector::jump_boot: [u8; 3]
+pub ferrosys::exfat::ondisk::MainBootSector::number_of_fats: u8
+pub ferrosys::exfat::ondisk::MainBootSector::partition_offset: u64
+pub ferrosys::exfat::ondisk::MainBootSector::percent_in_use: u8
+pub ferrosys::exfat::ondisk::MainBootSector::sectors_per_cluster_shift: u8
+pub ferrosys::exfat::ondisk::MainBootSector::volume_flags: u16
+pub ferrosys::exfat::ondisk::MainBootSector::volume_length: u64
+pub ferrosys::exfat::ondisk::MainBootSector::volume_serial: u32
+pub ferrosys::exfat::ondisk::ParseError::BadMagic::expected: u32
+pub ferrosys::exfat::ondisk::ParseError::BadMagic::found: u32
+pub ferrosys::exfat::ondisk::ParseError::BadMagic::structure: &'static str
+pub ferrosys::exfat::ondisk::ParseError::TooShort::got: usize
+pub ferrosys::exfat::ondisk::ParseError::TooShort::need: usize
+pub ferrosys::exfat::ondisk::ParseError::TooShort::structure: &'static str
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::data_length: u64
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::first_cluster: u32
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::flags: u8
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::name_hash: u16
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::name_length: u8
+pub ferrosys::exfat::ondisk::StreamExtensionEntry::valid_data_length: u64
+pub ferrosys::exfat::ondisk::UpcaseTableEntry::data_length: u64
+pub ferrosys::exfat::ondisk::UpcaseTableEntry::first_cluster: u32
+pub ferrosys::exfat::ondisk::UpcaseTableEntry::table_checksum: u32
+pub ferrosys::exfat::ondisk::VolumeLabelEntry::character_count: u8
+pub ferrosys::exfat::ondisk::VolumeLabelEntry::label: [u16; 11]
+pub fn ferrosys::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
+pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
+pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
+pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
+pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
+pub fn ferrosys::Deviation::to_finding(&self, unit: u32) -> Finding /* required */
+pub fn ferrosys::DosTimestamp::encode(time: Timestamp) -> Option<Self>
+pub fn ferrosys::FidelityReport::count(&self, direction: Direction, property: Property) -> u64
+pub fn ferrosys::FidelityReport::is_faithful(&self) -> bool
+pub fn ferrosys::FidelityReport::is_truncated(&self) -> bool
+pub fn ferrosys::FidelityReport::new() -> Self
+pub fn ferrosys::FidelityReport::record(&mut self, direction: Direction, path: &[u8], property: Property)
+pub fn ferrosys::FidelityReport::records(&self) -> &[FidelityRecord]
+pub fn ferrosys::FidelityReport::summary(&self) -> Vec<(Direction, Property, u64)>
+pub fn ferrosys::FidelityReport::to_table(&self) -> String
+pub fn ferrosys::FileContent::is_empty(&self) -> bool
+pub fn ferrosys::FileContent::len(&self) -> u64
+pub fn ferrosys::FileContent::read(&self) -> std::io::Result<Cow<'_, [u8]>>
+pub fn ferrosys::FileRange::at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
+pub fn ferrosys::FileRange::path(&self) -> &Path
+pub fn ferrosys::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::FindingReport::findings(&self) -> &[Finding]
+pub fn ferrosys::FindingReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::FindingReport::is_clean(&self) -> bool
+pub fn ferrosys::FindingReport::is_truncated(&self) -> bool
+pub fn ferrosys::FindingReport::new(findings: Vec<Finding>, truncated: bool, cap: usize) -> Self
+pub fn ferrosys::FindingReport::to_json(&self) -> String
+pub fn ferrosys::FindingReport::to_sarif(&self, artifact_uri: Option<&str>) -> String
+pub fn ferrosys::FindingReport::to_table(&self) -> String
+pub fn ferrosys::FindingReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::FsReader::family(&self) -> crate::finding::Family
+pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
+pub fn ferrosys::FsTree::family(&self) -> Family /* required */
+pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
+pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
+pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
+pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
+pub fn ferrosys::LayeredSource::is_empty(&self) -> bool
+pub fn ferrosys::LayeredSource::layer(self, source: impl Source) -> Self
+pub fn ferrosys::LayeredSource::len(&self) -> usize
+pub fn ferrosys::LayeredSource::new() -> Self
+pub fn ferrosys::Metadata::new(mode: u16, mtime: Timestamp) -> Self
+pub fn ferrosys::Metadata::owned_by(self, uid: u32, gid: u32) -> Self
+pub fn ferrosys::Metadata::with_times(self, atime: Timestamp, ctime: Timestamp, mtime: Timestamp) -> Self
+pub fn ferrosys::NamedChoice::as_str(self) -> &'static str /* required */
+pub fn ferrosys::NamedChoice::from_name(name: &str) -> Option<Self> /* required */
+pub fn ferrosys::ReadPolicy::is_fatal(self, severity: Severity) -> bool
+pub fn ferrosys::ScanReport::anomalies(&self) -> &[A]
+pub fn ferrosys::ScanReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
+pub fn ferrosys::ScanReport::is_clean(&self) -> bool
+pub fn ferrosys::ScanReport::is_truncated(&self) -> bool
+pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
+pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
+pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
+pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::fifo(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::file(self, path: impl Into<Vec<u8>>, contents: impl Into<FileContent>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::hardlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::new() -> Self
+pub fn ferrosys::TreeBuilder::root(self, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::socket(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: impl Into<Vec<u8>>, meta: Metadata) -> Self
+pub fn ferrosys::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
+pub fn ferrosys::TreeEntry::new(path: Vec<u8>, kind: NodeKind, node: N) -> Self
+pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
+pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
+pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
+pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>
+pub fn ferrosys::exfat::Anomaly::to_finding(&self, bytes_per_sector: u32) -> Finding
+pub fn ferrosys::exfat::FormatPlan::fidelity(&self) -> &FidelityReport
+pub fn ferrosys::exfat::FormatPlan::new(source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<Self, FormatError>
+pub fn ferrosys::exfat::FormatPlan::write_to(&self, sink: impl Write + Seek) -> Result<ExfatLayout, FormatError>
+pub fn ferrosys::exfat::Image::as_bytes(&self) -> &[u8]
+pub fn ferrosys::exfat::Image::fidelity(&self) -> &FidelityReport
+pub fn ferrosys::exfat::Image::into_bytes(self) -> Vec<u8>
+pub fn ferrosys::exfat::Image::layout(&self) -> &ExfatLayout
+pub fn ferrosys::exfat::Image::write_to(&self, w: impl Write) -> std::io::Result<()>
+pub fn ferrosys::exfat::ReadError::anomaly(&self) -> Anomaly
+pub fn ferrosys::exfat::Reader::boot_sector(&self) -> &MainBootSector
+pub fn ferrosys::exfat::Reader::lookup(&mut self, path: &[u8]) -> Result<Node, ReadError>
+pub fn ferrosys::exfat::Reader::open(src: R) -> Result<Self, ReadError>
+pub fn ferrosys::exfat::Reader::open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError>
+pub fn ferrosys::exfat::Reader::read_data(&mut self, node: &Node) -> Result<Vec<u8>, ReadError>
+pub fn ferrosys::exfat::Reader::read_data_to(&mut self, node: &Node, out: impl Write) -> Result<u64, ReadError>
+pub fn ferrosys::exfat::Reader::read_dir(&mut self, node: &Node) -> Result<Vec<Entry>, ReadError>
+pub fn ferrosys::exfat::Reader::read_into(&mut self, node: &Node, offset: u64, buf: &mut [u8]) -> Result<usize, ReadError>
+pub fn ferrosys::exfat::Reader::scan(&mut self) -> ScanReport
+pub fn ferrosys::exfat::Reader::volume_label(&self) -> Option<&[u8]>
+pub fn ferrosys::exfat::Reader::walk(&mut self) -> Result<Vec<WalkEntry>, ReadError>
+pub fn ferrosys::exfat::Reader::walk_with<E: From<ReadError>>(&mut self, visit: impl FnMut(&mut Self, WalkEntry) -> Result<(), E>) -> Result<(), E>
+pub fn ferrosys::exfat::VolumeLabel::new(name: &str) -> Result<Self, LabelError>
+pub fn ferrosys::exfat::VolumeLabel::units(&self) -> &[u16]
+pub fn ferrosys::exfat::format(source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<Image, FormatError>
+pub fn ferrosys::exfat::format_to<W: Write + Seek>(sink: W, source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<FormatPlan, FormatError>
+pub fn ferrosys::exfat::ondisk::AllocationBitmapEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::AllocationBitmapEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::DirEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::DirEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::FileEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::FileEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::FileNameEntry::new(units: &[u16]) -> Self
+pub fn ferrosys::exfat::ondisk::FileNameEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::FileNameEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::MainBootSector::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::MainBootSector::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::StreamExtensionEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::StreamExtensionEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::UpcaseTable::fold(&self, name: &[u16]) -> Vec<u16>
+pub fn ferrosys::exfat::ondisk::UpcaseTable::fold_unit(&self, unit: u16) -> u16
+pub fn ferrosys::exfat::ondisk::UpcaseTable::folded_units(&self) -> usize
+pub fn ferrosys::exfat::ondisk::UpcaseTable::new(units: &[u16]) -> Self
+pub fn ferrosys::exfat::ondisk::UpcaseTable::recommended() -> Self
+pub fn ferrosys::exfat::ondisk::UpcaseTableEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::UpcaseTableEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::VolumeLabelEntry::read_from(buf: &[u8]) -> Result<Self, ParseError>
+pub fn ferrosys::exfat::ondisk::VolumeLabelEntry::write_to(&self, buf: &mut [u8]) -> Result<(), ParseError>
+pub fn ferrosys::exfat::ondisk::boot_checksum(region: &[u8]) -> u32
+pub fn ferrosys::exfat::ondisk::checksum_sector_value(sector: &[u8]) -> Option<u32>
+pub fn ferrosys::exfat::ondisk::entry_set_checksum(entries: &[u8]) -> u16
+pub fn ferrosys::exfat::ondisk::extended_boot_signature(sector: &[u8]) -> Option<u32>
+pub fn ferrosys::exfat::ondisk::name_hash(upcased: &[u16]) -> u16
+pub fn ferrosys::exfat::ondisk::upcase_checksum(table: &[u8]) -> u32
+pub fn ferrosys::exfat::ondisk::write_checksum_sector(sector: &mut [u8], checksum: u32)
+pub fn ferrosys::exfat::ondisk::write_extended_boot_sector(sector: &mut [u8])
+pub fn ferrosys::exfat::ondisk::write_upcase_table(table: &[u16], buf: &mut [u8]) -> Result<(), super::ParseError>
+pub fn ferrosys::exfat::plan_layout(request: &PlanRequest) -> Result<ExfatLayout, GeometryError>
+pub fn ferrosys::hex(bytes: &[u8]) -> String
+pub fn ferrosys::json::Array::end(self)
+pub fn ferrosys::json::Array::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Array::obj(&mut self) -> Object<'_>
+pub fn ferrosys::json::Object::arr(&mut self, key: &str) -> Array<'_>
+pub fn ferrosys::json::Object::bool(&mut self, key: &str, value: bool)
+pub fn ferrosys::json::Object::bytes(&mut self, key: &str, value: &[u8])
+pub fn ferrosys::json::Object::end(self)
+pub fn ferrosys::json::Object::i64(&mut self, key: &str, value: i64)
+pub fn ferrosys::json::Object::new(out: &'a mut String) -> Self
+pub fn ferrosys::json::Object::obj(&mut self, key: &str) -> Object<'_>
+pub fn ferrosys::json::Object::raw(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::str(&mut self, key: &str, value: &str)
+pub fn ferrosys::json::Object::strings(&mut self, key: &str, values: &[&str])
+pub fn ferrosys::json::Object::u64(&mut self, key: &str, value: u64)
+pub fn ferrosys::json::Object::u64s(&mut self, key: &str, values: &[u64])
+pub fn ferrosys::open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError>
+pub fn ferrosys::open_with<R: Read + Seek>(src: R, options: &crate::policy::OpenOptions) -> Result<FsReader<R>, OpenError>
+pub fn ferrosys::printable(bytes: &[u8]) -> String
+pub fn ferrosys::push_json_string(out: &mut String, s: &str)
+pub mod ferrosys
+pub mod ferrosys::exfat
+pub mod ferrosys::exfat::ondisk
+pub mod ferrosys::json
+pub struct ferrosys::AcceptedLoss(/* private */)
+pub struct ferrosys::Acl { /* private fields */ }
+pub struct ferrosys::AclEntry
+pub struct ferrosys::DosTimestamp
+pub struct ferrosys::FidelityReport { /* private fields */ }
+pub struct ferrosys::FileRange { /* private fields */ }
+pub struct ferrosys::FindingReport { /* private fields */ }
+pub struct ferrosys::LayeredSource { /* private fields */ }
+pub struct ferrosys::Metadata
+pub struct ferrosys::ScanReport<A> { /* private fields */ }
+pub struct ferrosys::SourceEntry
+pub struct ferrosys::Timestamp
+pub struct ferrosys::TreeBuilder { /* private fields */ }
+pub struct ferrosys::Xattr
+pub struct ferrosys::exfat::FormatPlan { /* private fields */ }
+pub struct ferrosys::exfat::Image { /* private fields */ }
+pub struct ferrosys::exfat::Reader<R> { /* private fields */ }
+pub struct ferrosys::exfat::Timestamp
+pub struct ferrosys::exfat::VolumeLabel { /* private fields */ }
+pub struct ferrosys::exfat::ondisk::AllocationBitmapEntry
+pub struct ferrosys::exfat::ondisk::DirEntry
+pub struct ferrosys::exfat::ondisk::EntryType(u8)
+pub struct ferrosys::exfat::ondisk::FileAttributes(/* private */)
+pub struct ferrosys::exfat::ondisk::FileEntry
+pub struct ferrosys::exfat::ondisk::FileNameEntry
+pub struct ferrosys::exfat::ondisk::MainBootSector
+pub struct ferrosys::exfat::ondisk::StreamExtensionEntry
+pub struct ferrosys::exfat::ondisk::UpcaseTable { /* private fields */ }
+pub struct ferrosys::exfat::ondisk::UpcaseTableEntry
+pub struct ferrosys::exfat::ondisk::VolumeLabelEntry
+pub struct ferrosys::json::Array<'a> { /* private fields */ }
+pub struct ferrosys::json::Object<'a> { /* private fields */ }
+pub trait ferrosys::Deviation
+pub trait ferrosys::FsTree
+pub trait ferrosys::NamedChoice: Copy + Sized + 'static
+pub trait ferrosys::Source
+pub type ferrosys::Coordinate = (std::borrow::Cow<'static, str>, u64)
+pub type ferrosys::FsTree::Node
+pub type ferrosys::exfat::ScanReport = crate::ScanReport<Anomaly>

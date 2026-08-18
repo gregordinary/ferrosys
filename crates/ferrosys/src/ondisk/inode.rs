@@ -58,13 +58,14 @@ pub const fn extra_isize_for(inode_size: u16) -> u16 {
 
 /// Inode flags (`i_flags`).
 ///
-/// Only the flags this crate sets are named; the field is otherwise zero.
+/// Only the flags this crate sets are named; a bit it does not name is carried through
+/// unchanged, because what an image holds is what it holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct InodeFlags(pub u32);
+pub struct InodeFlags(u32);
+
+crate::flags::flag_set!(InodeFlags: u32);
 
 impl InodeFlags {
-    /// No flags.
-    pub const NONE: Self = Self(0);
     /// `EXT4_EXTENTS_FL` (`0x80000`): the `i_block` area roots an extent tree
     /// rather than a classic block map.
     pub const EXTENTS: Self = Self(0x0008_0000);
@@ -73,25 +74,6 @@ impl InodeFlags {
     pub const HUGE_FILE: Self = Self(0x0004_0000);
     /// `EXT4_INDEX_FL` (`0x1000`): the directory is hash-indexed (htree).
     pub const INDEX: Self = Self(0x0000_1000);
-
-    /// The raw flag word.
-    #[must_use]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    /// True when every flag in `other` is set.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
-
-impl core::ops::BitOr for InodeFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
 }
 
 /// The earliest instant an inode's time fields represent: the signed 32-bit seconds field
@@ -528,7 +510,7 @@ impl Inode {
             // Without the feature they are ext2's `l_i_frag` and `l_i_fsize`, and the
             // reader masks them off once it knows.
             blocks: join64(get_u32(buf, 0x1c), u32::from(get_u16(buf, 0x74))),
-            flags: InodeFlags(get_u32(buf, 0x20)),
+            flags: InodeFlags::from_bits(get_u32(buf, 0x20)),
             atime: decode_time(get_u32(buf, 0x08), extra(0x8c)),
             ctime: decode_time(get_u32(buf, 0x0c), extra(0x84)),
             mtime: decode_time(get_u32(buf, 0x10), extra(0x88)),

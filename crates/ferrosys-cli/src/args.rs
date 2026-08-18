@@ -15,6 +15,11 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use ferrosys::Slack;
+use ferrosys::btrfs::{
+    DEFAULT_COMPAT_RO, DEFAULT_INCOMPAT, Profile as BtrfsProfile, SubvolumeRequest,
+    VolumeLabel as BtrfsVolumeLabel,
+};
+use ferrosys::exfat::VolumeLabel as ExFatVolumeLabel;
 use ferrosys::ext::Timestamp;
 use ferrosys::ext::{
     ErrorBehavior, FeatureError, FeatureSet, GrowReservation, HashSignedness, HashVersion,
@@ -23,7 +28,7 @@ use ferrosys::ext::{
 use ferrosys::fat::{FatTypeRequest, VolumeLabel};
 use ferrosys::{AcceptedLoss, Synthesis};
 
-use crate::parse::{self, FsType, ValueError};
+use crate::parse::{self, BtrfsFeatures, FsType, ValueError};
 
 /// The bytes of an OS string, and the OS string a slice of those bytes names.
 ///
@@ -160,8 +165,12 @@ pub struct FormatArgs {
     pub out: PathBuf,
     /// How large the filesystem is.
     pub size: Size,
-    /// The filesystem's creation and write time.
-    pub time: Timestamp,
+    /// The filesystem's creation and write time, for a family whose format records one.
+    ///
+    /// [`None`] exactly when the family has no field for an instant — exFAT — where the
+    /// parser refuses the flag rather than requiring it. Every family that records times
+    /// reads the value through [`stamp`](Self::stamp).
+    pub time: Option<Timestamp>,
     /// What to populate the filesystem from, or `None` for an empty one.
     pub contents: Option<Contents>,
     /// The user and group every entry is owned by, overriding what a walked directory
@@ -178,6 +187,20 @@ pub struct FormatArgs {
     pub target: Target,
 }
 
+impl FormatArgs {
+    /// The instant the parser guaranteed for this family.
+    ///
+    /// The parser requires `--time` (or `SOURCE_DATE_EPOCH`) for every family whose
+    /// format records an instant and refuses it for the one whose format does not, so a
+    /// formatter that records times reads it here and an absent value is unreachable
+    /// from any command line the parser accepts.
+    #[must_use]
+    pub fn stamp(&self) -> Timestamp {
+        self.time
+            .expect("the parser requires --time for a family that records times")
+    }
+}
+
 /// Which family a format writes, and everything only that family takes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Target {
@@ -185,6 +208,10 @@ pub enum Target {
     Ext(Box<ExtTarget>),
     /// A FAT12, FAT16, or FAT32 volume.
     Fat(FatTarget),
+    /// An exFAT volume.
+    ExFat(ExFatTarget),
+    /// A btrfs filesystem.
+    Btrfs(Box<BtrfsTarget>),
 }
 
 /// What only an ext format takes.
@@ -236,6 +263,76 @@ pub struct FatTarget {
     pub synthesis: Synthesis,
 }
 
+/// What only an exFAT format takes.
+///
+/// Shorter than either of its neighbours, and that is the family rather than an omission: an
+/// exFAT volume records one identity, one name, and its geometry, and the geometry follows
+/// from the size. There is no feature set to compose, no second name for a file to derive,
+/// and no variant to aim a derivation at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExFatTarget {
+    /// The volume serial number the boot region records — this family's identity field, as
+    /// the UUID is ext's and the volume id is FAT's.
+    pub volume_serial: u32,
+    /// The volume label. Unnamed is a label of no code units rather than no label: the format
+    /// writes the entry on every volume.
+    pub label: ExFatVolumeLabel,
+    /// Which properties of the source the build may lose. Empty by default, so a build that
+    /// would drop something fails and names it.
+    pub accepted_loss: AcceptedLoss,
+    /// What a read of the image would fill an owner and a mode with, which is the point a
+    /// loss is measured against: a value that survives the round trip was not lost.
+    pub synthesis: Synthesis,
+}
+
+/// What only a btrfs format takes.
+///
+/// Longer than any of its neighbours, and the length is the format rather than a taste for
+/// options. Two things account for all of it. A btrfs records **five** identifiers where the
+/// other three record one, so a filesystem whose bytes a caller can reproduce is one that
+/// states all five. And the layout a caller asks for is a filesystem's own — the size of a
+/// sector, the size of a tree block, how each kind of block group is replicated, and which of
+/// the source's directories are subvolume roots — where the other families derive theirs from
+/// the volume's size and have nothing left to be asked.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BtrfsTarget {
+    /// The filesystem's own id, which is what a mount by identifier names and what every
+    /// device of it records. This family's identity field, as the UUID is ext's.
+    pub fsid: [u8; 16],
+    /// The id every tree block is stamped with, where it is to differ from the one a person
+    /// sees, or `None` for a filesystem whose two ids are one.
+    pub metadata_uuid: Option<[u8; 16]>,
+    /// The chunk tree's own id, which every tree block and every device extent repeats.
+    pub chunk_tree_uuid: [u8; 16],
+    /// The device's own id, which the device record and every chunk copy name.
+    pub device_uuid: [u8; 16],
+    /// The top-level subvolume's own id, which the UUID tree is keyed by.
+    pub subvolume_uuid: [u8; 16],
+    /// The name the filesystem is known by. Unnamed is the field's padding rather than a name
+    /// of no bytes: the two are the same on disk.
+    pub label: BtrfsVolumeLabel,
+    /// The smallest addressable unit of file data, or `None` for the planner's default.
+    pub sector_size: Option<u32>,
+    /// The size of a tree block, or `None` for the planner's default.
+    pub node_size: Option<u32>,
+    /// How metadata and system block groups are replicated.
+    pub metadata_profile: BtrfsProfile,
+    /// How data block groups are replicated.
+    pub data_profile: BtrfsProfile,
+    /// The two feature words the filesystem will advertise.
+    ///
+    /// Seeded from what this crate writes when a caller names nothing, and moved by `-O`. The
+    /// word each name belongs to is decided by the name, so the pair travels together.
+    pub features: BtrfsFeatures,
+    /// Which of the source's directories become subvolumes of their own, keyed by path
+    /// because a subvolume root is a directory and its subvolume-ness is a layout instruction
+    /// rather than a kind of entry.
+    pub subvolumes: Vec<SubvolumeRequest>,
+    /// Which subvolume a mount that was told none resolves to, or `None` for the top-level
+    /// one every btrfs starts with.
+    pub default_subvolume: Option<Vec<u8>>,
+}
+
 /// `ferrosys inspect`: what to report on, and what counts as a failing verdict.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InspectArgs {
@@ -272,6 +369,9 @@ pub struct DetectArgs {
 pub struct IdentityArgs {
     /// The image to rewrite, opened for reading and writing.
     pub image: PathBuf,
+    /// Where the filesystem begins within the file, for a partition inside a whole-disk
+    /// image. Zero when the filesystem is the file.
+    pub offset: u64,
     /// The new filesystem UUID, or `None` to leave it.
     pub uuid: Option<[u8; 16]>,
     /// The new volume label, NUL-padded, or `None` to leave it.
@@ -424,20 +524,58 @@ pub enum UsageError {
          goes with --from-dir"
     )]
     OwnerWithoutDir,
-    /// An option belonging to one family was given to a format writing another.
+    /// An option belonging to one family, or to a class of them, was given to a format
+    /// writing another.
     ///
     /// Refused rather than passed over: an ext filesystem has no volume serial number and a
     /// FAT volume has no journal, so a line naming both has said two things that cannot both
     /// be honoured, and carrying on would write an image built differently from the one that
     /// was asked for.
-    #[error("format: {flag} is an option of the {family} family, and this format writes {named}")]
+    ///
+    /// `family` is a list because an option can belong to more than one: FAT and exFAT record
+    /// a name, a few attribute bits and some times and nothing else, so `--accept-loss` and
+    /// what a read of the image assumes are questions both answer and ext answers for neither.
+    #[error("format: {flag} is an option of {family}, and this format writes {named}")]
     FlagNotForFamily {
         /// The offending option, as it is spelled.
         flag: &'static str,
-        /// The family the option belongs to.
-        family: &'static str,
+        /// The family the option belongs to, or the families where more than one shares it,
+        /// as a phrase: `the ext family`, or `the fat and exfat families`.
+        family: String,
         /// The filesystem the command line named.
         named: &'static str,
+    },
+    /// `--size auto` was given to a format writing a family with no search behind it.
+    ///
+    /// Refused here rather than after the source is read, which is where the plan would find
+    /// out: a size that cannot be searched for is a property of the command line, and a run
+    /// that reads a whole archive before saying so has spent the caller's time to tell them
+    /// something it knew at the start.
+    #[error(
+        "format: --size auto finds the smallest filesystem that holds the contents, and \
+         {family} has no search behind it: name a size"
+    )]
+    NoFitForFamily {
+        /// The filesystem the command line named.
+        family: &'static str,
+    },
+    /// Two `--subvol` directives named one identifier.
+    ///
+    /// Refused here rather than by the writer, because the UUID tree is keyed by that
+    /// identifier: two subvolumes sharing one produce a tree with a repeated key, and what
+    /// comes back from further down is a fact about a tree rather than about the two flags
+    /// that caused it.
+    #[error(
+        "format: --subvol named {uuid} twice, for {first} and for {second}: a subvolume's \
+         identifier is what the UUID tree is keyed by, so each needs its own"
+    )]
+    SubvolumeUuidRepeated {
+        /// The identifier both directives named.
+        uuid: String,
+        /// The path of the first directive that named it.
+        first: String,
+        /// The path of the second.
+        second: String,
     },
     /// `extract` was told to produce nothing, or more than one thing.
     #[error("extract: give exactly one of --to-tar, --to-dir, --cat, --stat, or --list")]
@@ -663,6 +801,41 @@ pub fn parse(
     }
 }
 
+/// The families an option can belong to, for the refusal that names them.
+///
+/// A list rather than a word because the unit is not always a family. `FIDELITY` is the two
+/// that record a name, a few attribute bits and some times and have nowhere to put anything
+/// else: what a build may lose and what a read of the image assumes are questions both of
+/// them answer identically and ext answers for neither, so an option about them belongs to a
+/// *class* of families. That is the same seam the library already shares between the two —
+/// one loss accounting, one set of assumptions — reaching the command line.
+const EXT: &[&str] = &["ext"];
+const FAT: &[&str] = &["fat"];
+const EXFAT: &[&str] = &["exfat"];
+const BTRFS: &[&str] = &["btrfs"];
+const FIDELITY: &[&str] = &["fat", "exfat"];
+/// The families whose format records an instant of its own — ext in its superblock, FAT in
+/// its label entry, btrfs in its subvolume items — which is the class `--time` belongs to.
+/// exFAT has no field for one anywhere: every time on such a volume belongs to an entry and
+/// comes from the source that named it.
+const TIMED: &[&str] = &["ext", "fat", "btrfs"];
+/// The two families whose on-disk format carries feature words a caller names, which is the
+/// class `-O` belongs to. The other two record a fixed structure and have no word to set.
+const FEATURES: &[&str] = &["ext", "btrfs"];
+
+/// The families a list names, as a refusal spells them.
+///
+/// The whole phrase rather than the names alone, because the number is part of the grammar:
+/// one family is *the fat family* and two are *the fat and exfat families*, and a message
+/// that appended a fixed word to a list would say one of the two wrongly.
+fn families(names: &[&str]) -> String {
+    match names {
+        [one] => format!("the {one} family"),
+        [rest @ .., last] => format!("the {} and {last} families", rest.join(", ")),
+        [] => String::new(),
+    }
+}
+
 /// `ferrosys format [options] OUT`.
 fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Command, UsageError> {
     const CMD: &str = "format";
@@ -673,6 +846,21 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut slack: Option<Slack> = None;
     let mut uuid: Option<[u8; 16]> = None;
     let mut volume_id: Option<u32> = None;
+    let mut volume_serial: Option<u32> = None;
+    // btrfs's five identifiers. Only the first is required — a filesystem with no id for
+    // itself is nothing a caller can have meant — and the rest default to zero, which is a
+    // legitimate value and an obviously unset one.
+    let mut fsid: Option<[u8; 16]> = None;
+    let mut metadata_uuid: Option<[u8; 16]> = None;
+    let mut chunk_tree_uuid = [0u8; 16];
+    let mut device_uuid = [0u8; 16];
+    let mut subvolume_uuid = [0u8; 16];
+    let mut sector_size: Option<u32> = None;
+    let mut node_size: Option<u32> = None;
+    let mut metadata_profile = ferrosys::btrfs::DEFAULT_METADATA_PROFILE;
+    let mut data_profile = ferrosys::btrfs::DEFAULT_DATA_PROFILE;
+    let mut subvolumes: Vec<SubvolumeRequest> = Vec::new();
+    let mut default_subvolume: Option<Vec<u8>> = None;
     let mut time: Option<i64> = None;
     let mut from_tar: Option<Stream> = None;
     let mut from_dir: Option<PathBuf> = None;
@@ -705,10 +893,11 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut json = false;
     let mut atomic = false;
     let mut dry_run = false;
-    // Every option seen that belongs to one family alone, so naming one with the other
-    // family's type is refused by name rather than passed over. Recorded rather than checked
-    // on the spot, because `-t` may come after the option it disqualifies.
-    let mut family_only: Vec<(&'static str, &'static str)> = Vec::new();
+    // Every option seen that does not belong to every family, with the families it does
+    // belong to, so naming one with another family's type is refused by name rather than
+    // passed over. Recorded rather than checked on the spot, because `-t` may come after the
+    // option it disqualifies.
+    let mut family_only: Vec<(&'static str, &'static [&'static str])> = Vec::new();
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -738,7 +927,7 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         );
                     }
                     "uuid" => {
-                        family_only.push(("--uuid", "ext"));
+                        family_only.push(("--uuid", EXT));
                         uuid = Some(
                             parse::hex16(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
@@ -748,13 +937,102 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // Each family names its own rather than one flag being truncated into
                     // whatever the format has room for.
                     "volume-id" => {
-                        family_only.push(("--volume-id", "fat"));
+                        family_only.push(("--volume-id", FAT));
                         volume_id = Some(
                             parse::hex32(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
+                    // An exFAT volume's identity, and a third flag rather than a reuse of
+                    // FAT's: the field is `VolumeSerialNumber` where FAT's is `BS_VolID`, the
+                    // two are in different structures of different formats, and a shared flag
+                    // would say the families share a field they do not. Same width, which is
+                    // a coincidence of the lineage rather than a reason.
+                    "volume-serial" => {
+                        family_only.push(("--volume-serial", EXFAT));
+                        volume_serial = Some(
+                            parse::hex32(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // btrfs's identity, and a fourth flag rather than a reuse of `--uuid`:
+                    // the field is `fsid`, it belongs to a different format, and a filesystem
+                    // carries four more identifiers beside it that `--uuid` would say nothing
+                    // about. Same width as ext's, which is a coincidence rather than a reason.
+                    "fsid" => {
+                        family_only.push(("--fsid", BTRFS));
+                        fsid = Some(
+                            parse::hex16(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // The id every tree block is stamped with. Setting it is what makes the
+                    // id a person sees changeable without rewriting every block, and it is
+                    // what the feature bit recording that state follows from.
+                    "metadata-uuid" => {
+                        family_only.push(("--metadata-uuid", BTRFS));
+                        metadata_uuid = Some(
+                            parse::hex16(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    "chunk-tree-uuid" => {
+                        family_only.push(("--chunk-tree-uuid", BTRFS));
+                        chunk_tree_uuid = parse::hex16(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "device-uuid" => {
+                        family_only.push(("--device-uuid", BTRFS));
+                        device_uuid = parse::hex16(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "subvolume-uuid" => {
+                        family_only.push(("--subvolume-uuid", BTRFS));
+                        subvolume_uuid = parse::hex16(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    // The geometry a btrfs is planned at. The other families derive theirs
+                    // from the volume's size and have nothing here.
+                    "sector-size" => {
+                        family_only.push(("--sector-size", BTRFS));
+                        sector_size = parse::btrfs_block_size(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "node-size" => {
+                        family_only.push(("--node-size", BTRFS));
+                        node_size = parse::btrfs_block_size(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "metadata-profile" => {
+                        family_only.push(("--metadata-profile", BTRFS));
+                        metadata_profile = parse::btrfs_profile(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "data-profile" => {
+                        family_only.push(("--data-profile", BTRFS));
+                        data_profile = parse::btrfs_profile(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    // Which of the source's directories are subvolume roots. Repeatable and
+                    // accumulating, because a filesystem has as many as the caller names and
+                    // a last-one-wins setting would silently build one subvolume of several.
+                    "subvol" => {
+                        family_only.push(("--subvol", BTRFS));
+                        subvolumes.push(
+                            parse::subvolume(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // Which subvolume a mount told none resolves to, named by the path it was
+                    // asked for rather than by the id it will be given — the id is decided
+                    // while the tree is built and is not something a caller can know.
+                    "default-subvol" => {
+                        let value = args.value(&flag, attached)?;
+                        family_only.push(("--default-subvol", BTRFS));
+                        default_subvolume = Some(os::bytes(&value).to_vec());
+                    }
                     "time" => {
+                        family_only.push(("--time", TIMED));
                         time = Some(
                             parse::seconds(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
@@ -779,14 +1057,14 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         );
                     }
                     "block-size" => {
-                        family_only.push(("--block-size", "ext"));
+                        family_only.push(("--block-size", EXT));
                         block_size = Some(
                             parse::count_u32(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
                     "inode-size" => {
-                        family_only.push(("--inode-size", "ext"));
+                        family_only.push(("--inode-size", EXT));
                         let v = parse::count_u32(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         inode_size = Some(u16::try_from(v).map_err(|_| UsageError::Value {
@@ -798,18 +1076,18 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // the count outright, `--bytes-per-inode` names the density it derives
                     // from. Either overrides the size-driven default.
                     "inodes" => {
-                        family_only.push(("--inodes", "ext"));
+                        family_only.push(("--inodes", EXT));
                         let count = parse::count_u32(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         inodes = InodeCount::Count(count);
                     }
                     "bytes-per-inode" => {
-                        family_only.push(("--bytes-per-inode", "ext"));
+                        family_only.push(("--bytes-per-inode", EXT));
                         inodes = parse::bytes_per_inode(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "reserved-percent" => {
-                        family_only.push(("--reserved-percent", "ext"));
+                        family_only.push(("--reserved-percent", EXT));
                         reserved = parse::reserved_percent(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
@@ -826,7 +1104,7 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // name, a device number, or an extended attribute, so a tree carrying any
                     // of them is refused until the caller has said which may go.
                     "accept-loss" => {
-                        family_only.push(("--accept-loss", "fat"));
+                        family_only.push(("--accept-loss", FIDELITY));
                         accepted_loss = parse::accepted_loss(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
@@ -835,51 +1113,51 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // not lost, so these are what make a root-owned, conventionally moded
                     // tree go into a FAT image faithfully.
                     "assume-owner" => {
-                        family_only.push(("--assume-owner", "fat"));
+                        family_only.push(("--assume-owner", FIDELITY));
                         let (uid, gid) = parse::owner(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         synthesis = synthesis.owner(uid, gid);
                     }
                     "assume-modes" => {
-                        family_only.push(("--assume-modes", "fat"));
+                        family_only.push(("--assume-modes", FIDELITY));
                         let (file, dir) = parse::modes(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                         synthesis = synthesis.modes(file, dir);
                     }
                     "grow" => {
-                        family_only.push(("--grow", "ext"));
+                        family_only.push(("--grow", EXT));
                         grow =
                             parse::grow(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
                     }
                     "journal" => {
-                        family_only.push(("--journal", "ext"));
+                        family_only.push(("--journal", EXT));
                         journal = parse::journal(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "errors" => {
-                        family_only.push(("--errors", "ext"));
+                        family_only.push(("--errors", EXT));
                         errors = parse::error_behavior(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "fixed-time" => {
-                        family_only.push(("--fixed-time", "ext"));
+                        family_only.push(("--fixed-time", EXT));
                         fixed_time = Some(
                             parse::seconds(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
                         );
                     }
                     "hash" => {
-                        family_only.push(("--hash", "ext"));
+                        family_only.push(("--hash", EXT));
                         hash_version = parse::hash_version(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "hash-signedness" => {
-                        family_only.push(("--hash-signedness", "ext"));
+                        family_only.push(("--hash-signedness", EXT));
                         hash_signedness = parse::hash_signedness(&args.value(&flag, attached)?)
                             .map_err(value_err(&flag))?;
                     }
                     "hash-seed" => {
-                        family_only.push(("--hash-seed", "ext"));
+                        family_only.push(("--hash-seed", EXT));
                         hash_seed = Some(
                             parse::hex16(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
@@ -903,10 +1181,12 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                 }
             }
             // `-O` and `-t` are read here but applied below, once the whole line is known:
-            // the base profile seeds the set and every `-O` list layers on top, left to
-            // right, so two `-O`s compose and the last element to name a feature wins.
+            // the family's baseline seeds the set and every `-O` list layers on top, left to
+            // right, so two `-O`s compose and the last element to name a feature wins. Which
+            // baseline, and which vocabulary the names are written in, is the family's — so
+            // neither can be resolved until `-t` has been read.
             Arg::Short('O', attached) => {
-                family_only.push(("-O", "ext"));
+                family_only.push(("-O", FEATURES));
                 feature_ops.push(args.value("-O", attached)?);
             }
             Arg::Short('t', attached) => {
@@ -935,13 +1215,21 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
         }
     }
 
+    // The family, and with it which of the options above apply at all. `-t` names it and
+    // ext4 is what an unnamed one means, which is what keeps every ext command line that
+    // worked before working unchanged.
+    let fs_type = fs_type.unwrap_or_default();
     // The time comes from the option, or from SOURCE_DATE_EPOCH, and from nowhere else:
     // the tool does not read the clock, so an absent time is a missing input rather than
-    // "now".
+    // "now" — for the families whose format records an instant. For the family whose
+    // format does not, the flag is refused below with the rest of `family_only`, and the
+    // ambient variable is left unread: an input the format has no field for is not an
+    // input this command is missing.
     let time = match time {
-        Some(t) => t,
+        Some(t) => Some(t),
+        None if !TIMED.contains(&fs_type.family()) => None,
         None => match source_date_epoch {
-            Some(v) => parse::seconds(&v).map_err(value_err("SOURCE_DATE_EPOCH"))?,
+            Some(v) => Some(parse::seconds(&v).map_err(value_err("SOURCE_DATE_EPOCH"))?),
             None => {
                 return Err(UsageError::MissingRequired {
                     command: CMD,
@@ -950,21 +1238,26 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
             }
         },
     };
-    // The family, and with it which of the options above apply at all. `-t` names it and
-    // ext4 is what an unnamed one means, which is what keeps every ext command line that
-    // worked before working unchanged.
-    let fs_type = fs_type.unwrap_or_default();
     // An option belonging to the family that was not named is refused rather than passed
     // over. Silently ignoring `--journal` on a FAT format would report a volume built the
     // way it was asked for when it was not.
     for (flag, family) in &family_only {
-        if *family != fs_type.family() {
+        if !family.contains(&fs_type.family()) {
             return Err(UsageError::FlagNotForFamily {
                 flag,
-                family,
+                family: families(family),
                 named: fs_type.name(),
             });
         }
+    }
+    // `--size auto` searches for the smallest filesystem that holds the contents, and the
+    // search is a family's own — a filesystem's free room follows from its size, so what is
+    // being solved is a fixed point rather than a formula. A family with no search says so
+    // here, before a source is read.
+    if fit && !fs_type.has_fit() {
+        return Err(UsageError::NoFitForFamily {
+            family: fs_type.name(),
+        });
     }
     // `--size auto` and a named size are one setting; `--slack` modifies only the first,
     // since a size that was named has no room to find.
@@ -1073,12 +1366,92 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                 synthesis,
             })
         }
+        FsType::ExFat => {
+            let volume_serial = volume_serial.ok_or(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--volume-serial",
+            })?;
+            // An exFAT label is up to eleven UTF-16 code units, so the same bytes that make a
+            // sixteen-byte ext field and an eleven-byte FAT one in the OEM character set are
+            // a third value here — which is why a label is carried as the argument's bytes
+            // until the family is known.
+            let label = match &label {
+                Some(bytes) => parse::exfat_label(bytes).map_err(value_err("--label"))?,
+                // What an unnamed volume carries: the format writes the entry either way,
+                // with a character count of zero.
+                None => ExFatVolumeLabel::UNNAMED,
+            };
+            Target::ExFat(ExFatTarget {
+                volume_serial,
+                label,
+                accepted_loss,
+                synthesis,
+            })
+        }
+        FsType::Btrfs => {
+            let fsid = fsid.ok_or(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--fsid",
+            })?;
+            // A btrfs label is bytes and the field records no encoding, so the argument's own
+            // bytes are what reaches the superblock — which is a fourth answer to one question
+            // and the reason a label is carried untyped until `-t` is read.
+            let label = match &label {
+                Some(bytes) => parse::btrfs_label(bytes).map_err(value_err("--label"))?,
+                None => BtrfsVolumeLabel::UNNAMED,
+            };
+            // Two subvolumes sharing an identifier make a UUID tree with a repeated key, which
+            // is a filesystem no driver expects and no checker accepts. Caught by the name the
+            // caller typed rather than by the tree that came out of it.
+            for (at, request) in subvolumes.iter().enumerate() {
+                if let Some(other) = subvolumes[..at]
+                    .iter()
+                    .find(|earlier| earlier.uuid == request.uuid)
+                {
+                    return Err(UsageError::SubvolumeUuidRepeated {
+                        uuid: crate::render::uuid(&request.uuid),
+                        first: String::from_utf8_lossy(&other.path).into_owned(),
+                        second: String::from_utf8_lossy(&request.path).into_owned(),
+                    });
+                }
+            }
+            // The words this crate writes when a caller names none, moved by each `-O` list
+            // in turn. A combination the format does not define — a block-group tree without
+            // the free-space tree it rests on, a feature nothing here writes — is refused by
+            // the planner, which names the conflict; what is caught here is a *word* no
+            // feature of this family goes by.
+            let mut features = BtrfsFeatures {
+                incompat: DEFAULT_INCOMPAT,
+                compat_ro: DEFAULT_COMPAT_RO,
+            };
+            for op in &feature_ops {
+                features = parse::features(features, op).map_err(value_err("-O"))?;
+            }
+            Target::Btrfs(Box::new(BtrfsTarget {
+                fsid,
+                // Normalized the way the library writes it: an id equal to the filesystem's
+                // describes the one-id state, so the summary and receipt must not report a
+                // distinct metadata id the image does not carry.
+                metadata_uuid: metadata_uuid.filter(|uuid| *uuid != fsid),
+                chunk_tree_uuid,
+                device_uuid,
+                subvolume_uuid,
+                label,
+                sector_size,
+                node_size,
+                metadata_profile,
+                data_profile,
+                features,
+                subvolumes,
+                default_subvolume,
+            }))
+        }
     };
 
     Ok(Command::Format(Box::new(FormatArgs {
         out,
         size,
-        time: Timestamp::from_secs(time),
+        time: time.map(Timestamp::from_secs),
         contents,
         owner,
         json,
@@ -1278,6 +1651,7 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
 fn identity(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "identity";
     let mut image: Option<PathBuf> = None;
+    let mut offset = 0u64;
     let mut uuid: Option<[u8; 16]> = None;
     let mut volume_name: Option<[u8; 16]> = None;
     let mut set_checksum_seed = false;
@@ -1291,6 +1665,10 @@ fn identity(args: &mut Args) -> Result<Command, UsageError> {
                     "help" => {
                         Args::no_value(&flag, attached)?;
                         return Ok(Command::Help(Topic::Identity));
+                    }
+                    "offset" => {
+                        offset =
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
                     }
                     "uuid" => {
                         uuid = Some(
@@ -1354,6 +1732,7 @@ fn identity(args: &mut Args) -> Result<Command, UsageError> {
     }
     Ok(Command::Identity(IdentityArgs {
         image,
+        offset,
         uuid,
         volume_name,
         set_checksum_seed,
@@ -1597,7 +1976,7 @@ mod tests {
         let a = fmt(&text);
         assert_eq!(a.out, PathBuf::from("out.img"));
         assert_eq!(a.size, Size::Bytes(512 << 20));
-        assert_eq!(a.time, Timestamp::from_secs(1_700_000_000));
+        assert_eq!(a.time, Some(Timestamp::from_secs(1_700_000_000)));
         assert_eq!(a.contents, None);
         assert_eq!(a.owner, None);
         assert!(!a.json);
@@ -1696,7 +2075,7 @@ mod tests {
             Some(OsString::from("1700000000")),
         );
         match from_env.expect("SOURCE_DATE_EPOCH supplies the time") {
-            Command::Format(a) => assert_eq!(a.time, Timestamp::from_secs(1_700_000_000)),
+            Command::Format(a) => assert_eq!(a.time, Some(Timestamp::from_secs(1_700_000_000))),
             other => panic!("expected format, got {other:?}"),
         }
         // An option always wins over the environment.
@@ -1708,7 +2087,7 @@ mod tests {
             Some(OsString::from("1700000000")),
         );
         match both.expect("parses") {
-            Command::Format(a) => assert_eq!(a.time, Timestamp::from_secs(42)),
+            Command::Format(a) => assert_eq!(a.time, Some(Timestamp::from_secs(42))),
             other => panic!("expected format, got {other:?}"),
         }
     }
@@ -1891,7 +2270,7 @@ mod tests {
                 .unwrap_err(),
             UsageError::FlagNotForFamily {
                 flag: "--uuid",
-                family: "ext",
+                family: "the ext family".to_string(),
                 named: "fat32",
             }
         );
@@ -1902,7 +2281,7 @@ mod tests {
             .unwrap_err(),
             UsageError::FlagNotForFamily {
                 flag: "--volume-id",
-                family: "fat",
+                family: "the fat family".to_string(),
                 named: "ext4",
             }
         );
