@@ -9,16 +9,16 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Five is the registry's limit, so each family gets the name someone searches for rather
+# Five is the registry's limit, so each family gets the one name someone searches for rather
 # than one entry per format. The lineages they cover — ext2 and ext3, FAT12 and FAT16 — are
 # in the description, which the registry's own search reads; exFAT has no lineage to spell,
 # being one revision of one format, and neither has btrfs. Four families leave one slot, and
-# `mkfs` has it: it is the word someone types when they want a formatter, and it is the one
-# word here that names what the crate does rather than what it does it to. `filesystem` and
-# `disk-image` are absent because every word of both is already in the description or in
-# `categories`, which the registry's search reads too.
-
-keywords = ["ext4", "fat32", "exfat", "btrfs", "mkfs"]
+# `disk-image` has it: it is what someone building boot media, a virtual machine's disk, or
+# an embedded root filesystem is looking for, and it is the only word here that names the
+# artifact rather than a format. `mkfs` is the binary's, one crate over, where a search for
+# the tool being replaced should land. `filesystem` is absent because it is in `categories`
+# and in the description, both of which that search reads.
+keywords = ["ext4", "btrfs", "exfat", "fat32", "disk-image"]
 # `virtualization` because a microVM root disk is a filesystem image built by a program
 # rather than by a person, which is this crate's shape of consumer.
 categories = ["filesystem", "os", "virtualization"]

@@ -14,7 +14,7 @@ or by editing `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrosys = "0.4"
+ferrosys = "0.5"
 ```
 
 The build is pure Rust and depends only on `thiserror`. Features shape it, and the first
@@ -64,7 +64,7 @@ including the answers `detect` then gives.
 
 ```toml
 [dependencies]
-ferrosys = { version = "0.4", features = ["tar", "dir"] }
+ferrosys = { version = "0.5", features = ["tar", "dir"] }
 ```
 
 The [API reference](./api-reference.md) documents the public surface.

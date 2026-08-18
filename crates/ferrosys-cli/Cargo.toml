@@ -7,11 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Five is the registry's limit, so each family gets the name someone searches for rather than
-# one entry per format; the lineages they cover are in the description, which the registry's
-# own search reads. Four families leave one slot, and `mkfs` has it: it is the word someone
-# types when they want a formatter. `filesystem` is absent, being in `categories` already.
-keywords = ["ext4", "fat32", "exfat", "btrfs", "mkfs"]
+# Five is the registry's limit, so each family gets the one name someone searches for rather
+# than one entry per format; the lineages they cover are in the description, which the
+# registry's own search reads. `mkfs` leads because this is the artifact that answers to it:
+# someone looking for the command they would otherwise reach for is looking for a binary, and
+# the library one crate over spends that slot on `disk-image` instead. `filesystem` is absent,
+# being in `categories` already.
+keywords = ["mkfs", "ext4", "btrfs", "exfat", "fat32"]
 categories = ["command-line-utilities", "filesystem"]
 # The package's front page on a registry.
 readme = "README.md"

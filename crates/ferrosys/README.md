@@ -84,6 +84,39 @@ assert_eq!(image.layout().bytes_per_cluster, 4 << 10);
 # fn main() {}
 ```
 
+And a btrfs, under the `btrfs` feature, where one of the source's directories becomes a
+subvolume of its own and a mount naming none lands there:
+
+```rust
+# #[cfg(feature = "btrfs")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use ferrosys::btrfs::{FormatOptions, Reader, SubvolumeRequest, format};
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let source = TreeBuilder::new()
+    .directory(b"/@root".to_vec(), Metadata::new(0o755, time))
+    .file(b"/@root/hostname".to_vec(), b"ferrosys\n".to_vec(), Metadata::new(0o644, time));
+
+// Every identifier a formatter would invent is an input, so two formats are one image.
+let options = FormatOptions::new([0x11; 16], time)
+    .chunk_tree_uuid([0x22; 16])
+    .device_uuid([0x33; 16])
+    .subvolume_uuid([0x44; 16])
+    .subvolume(SubvolumeRequest::new(b"/@root".to_vec(), [0x55; 16]))
+    .default_subvolume(b"/@root".to_vec());
+let image = format(source, 1 << 30, options)?;
+
+// Read it back: a path crosses the subvolume boundary without being told it is there.
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+let node = reader.lookup(b"/@root/hostname")?;
+assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
+# Ok(())
+# }
+# #[cfg(not(feature = "btrfs"))]
+# fn main() {}
+```
+
 ## What it does
 
 The ext family:

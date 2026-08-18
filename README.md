@@ -65,6 +65,11 @@ $ ferrosys extract rootfs.img --to-tar - | tar -tv
 
 $ ferrosys format --type fat32 --size auto --volume-id 1a2b3c4d --time 1700000000 \
       --owner 0:0 --accept-loss all --from-dir seed/ seed.img
+$ ferrosys format --type exfat --volume-serial 1234abcd --size 4G card.img
+
+$ ferrosys format --type btrfs --size 2G --fsid "$(uuidgen)" --time 1700000000 \
+      --subvol "$(uuidgen)":/@root --default-subvol /@root --from-dir staged/ root.img
+$ ferrosys extract root.img --cat /@root/etc/hostname
 ```
 
 `format` writes a filesystem — of the type `--type` names, from a tar archive, a directory

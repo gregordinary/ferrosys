@@ -7,9 +7,14 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-18
 
-One home per concept. The shapes both families need — a bounded findings accumulator, a
+Two filesystem families, and one crate rearranged to hold four. ferrosys writes and reads
+exFAT volumes and btrfs filesystems beside the ext and FAT families it already had, each
+behind a feature of its own, and every concept the four share is answered once rather than
+per family.
+
+One home per concept. The shapes every family needs — a bounded findings accumulator, a
 depth-first walk, a path resolution, a scan report, a JSON writer, a calendar, a checksum
 recipe, a padded on-disk field, a flag newtype, the list of names an option accepts — are each
 written once, with each family supplying only what genuinely differs. Nothing an image holds changes: the
@@ -379,7 +384,7 @@ the feature words always did.
   operations; three of them were each missing a different part of it.
 - **`FsTree::family` and `FsTree::max_file_bytes`**, which is what lets `check_file_size` be
   one default body rather than an identical one per family.
-- **`From<std::io::Error> for DetectError`**, which both families' `ReadError` already
+- **`From<std::io::Error> for DetectError`**, which the family readers' `ReadError` already
   carried. Detection's own i/o failures were reached through a private constructor, so a
   caller composing detection into a function of its own could not use `?` where the two
   readers allowed it.
@@ -1971,7 +1976,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
-[Unreleased]: https://github.com/gregordinary/ferrosys/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.0
 [0.4.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.4.0
 [0.3.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.1
 [0.3.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.0

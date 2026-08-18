@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -77,4 +77,4 @@ lzokay = { version = "2", default-features = false, features = ["compress", "std
 # minor is the breaking axis, so `"0.4"` resolves `>=0.4.0, <0.5.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
-ferrosys = { path = "crates/ferrosys", version = "0.4" }
+ferrosys = { path = "crates/ferrosys", version = "0.5" }
