@@ -14,6 +14,11 @@ surface to naming all of them.
   ci/family-coverage.sh            check
   ci/family-coverage.sh --list     print the surfaces and the spellings without checking
 
+It holds two things, and the second is narrower than the first. Every page that names one
+family names all of them; and every *field* that names one — a `description`, a keyword
+list — spells each in the form a search is typed as, because a lineage has more than one
+member and `ext2/3/4` is a string containing the word `ext2` and never the word `ext4`.
+
 It is lexical, so it is neither sound nor complete: it cannot tell a family named in
 passing from one the page actually covers, and it would accept a page that names them all
 badly. What it catches is the failure that keeps happening — a page that stops one short.
@@ -56,6 +61,21 @@ SPELLINGS = {
     "exfat": r"\bex-?fat\b",
     # The one family whose name carries no format number and needs none: nothing else is
     # spelled this way, where `ext` is the first three letters of `extract`.
+    "btrfs": r"\bbtrfs\b",
+}
+
+# And the one spelling a search is actually typed as, for the fields a search reads.
+#
+# A lineage has more than one member and the rule above is satisfied by any of them, so
+# `ext2/3/4` passes it while containing the word `ext2` and never the word `ext4` -- the
+# most-searched term this crate has, absent from the field a registry indexes. Prose may
+# say `ext2` and mean the family; a `description` is matched word for word, so it says the
+# word. Applied only to the surfaces below that name a field, which are the ones a search
+# reads rather than a reader.
+SEARCHED = {
+    "ext": r"\bext4\b",
+    "fat": r"\bfat32\b",
+    "exfat": r"\bexfat\b",
     "btrfs": r"\bbtrfs\b",
 }
 
@@ -185,6 +205,19 @@ def main():
             extra = ", ".join(f for f in named if f not in expected)
             fault = f"not {missing}" if missing else f"and claims {extra}, which it cannot open"
             problems.append(f"{path} ({artifact}): names {', '.join(named)} -- {fault}")
+        # A field a search reads must carry the word that search is typed as. Only where a
+        # field was named: the whole-file surfaces are prose, and prose introduces a lineage
+        # by whichever member the sentence is about.
+        if named and fields is not None:
+            unfindable = [
+                f for f in expected if f in named and not re.search(SEARCHED[f], text, re.I)
+            ]
+            if unfindable:
+                want = ", ".join(re.sub(r"\\b", "", SEARCHED[f]) for f in unfindable)
+                problems.append(
+                    f"{path} ({artifact}): names {', '.join(unfindable)} in a form a search "
+                    f"does not match -- spell out {want}"
+                )
 
     if problems:
         print("A page names some of this crate's filesystem families and not the rest.\n")
