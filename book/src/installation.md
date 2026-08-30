@@ -18,7 +18,7 @@ ferrosys = "0.5"
 ```
 
 The build is pure Rust and depends only on `thiserror`. Features shape it, and the first
-four are the filesystem families — a build takes the families it names, so a consumer that
+four are the filesystem families. A build takes the families it names, so a consumer that
 wants an ext image compiles no FAT code:
 
 | Feature | Default | What it adds | What it depends on |
@@ -34,33 +34,39 @@ wants an ext image compiles no FAT code:
 | `dir` | off | `DirectorySource` and `DirectorySink`: a filesystem built from a directory tree on this machine, and one written back out as a tree, with modes, ownership, times, hard links, special files, and extended attributes. Built on Linux, whose metadata and extended attributes both ends read and write | `rustix` |
 | `serde` | off | `Serialize` on the findings taxonomy, each family's planned geometry, and the ext feature model, for embedding them in a document of your own | `serde` |
 
-Granularity is per family rather than per format: `ext` is ext2, ext3, and ext4 together,
-and `fat` is FAT12, FAT16, and FAT32 together, since each set is one lineage sharing its
+Granularity is per family rather than per format. `ext` is ext2, ext3, and ext4 together,
+and `fat` is FAT12, FAT16, and FAT32 together. Each set is one lineage that shares its
 on-disk structures.
 
-The three decoders are named for the algorithm rather than for a family, because an
-encoding is a property of a run of bytes and not of the format around it. Of the families
-here, btrfs is the one that stores runs that way, so a build that wants to read them names
-a decoder beside it: `--features btrfs,zstd`. What each one decides is what a *file* does
-when it is read — a build without the decoder for the algorithm a file was stored with
-declines that file by name, and one without a decoder for an algorithm the filesystem
-*advertises in its feature word* declines the filesystem itself. Verification is a separate
-question and needs none of them: the checksums a filesystem records cover the bytes it
-stored, so they are checked whether or not those bytes can be expanded.
+The three decoders are named for the algorithm, not for a family. An encoding is a
+property of a run of bytes, not of the format around it. Of the families here, btrfs is the
+one that stores runs that way. A build that wants to read them names a decoder beside it:
+`--features btrfs,zstd`.
 
-`default-features = false` is a real build, not a smaller version of the same one: it
-leaves the family-agnostic substrate the crate root carries — the `crc32c` primitive, the
-source and extraction vocabulary, and `detect`, which says which filesystem an image holds
-— and no family code at all, so `detect` then recognizes nothing. It is the build a
-consumer starts from when it wants one family and not the other. None of `tar`, `dir`, or
-`serde` names a family: a source feeds whichever family is being written and a sink drains
-whichever one was opened, so `--features fat,dir` builds a FAT volume from a directory tree
-on this machine and extracts one back, with no ext code compiled.
+Each decoder decides what a *file* does when it is read. A build lacking the decoder for
+the algorithm a file was stored with declines that file by name. A build lacking a decoder
+for an algorithm the filesystem *advertises in its feature word* declines the filesystem
+itself.
 
-Cargo unifies features across a dependency graph, so naming a subset is a property of a
-leaf application rather than of a library deep in someone's tree: anything else in the
-build that pulls this crate with a family turns that family on for everyone in it —
-including the answers `detect` then gives.
+Verification is a separate question and needs none of them. The checksums a filesystem
+records cover the bytes it stored, so ferrosys checks them whether or not those bytes can
+be expanded.
+
+`default-features = false` is a real build, not a smaller version of the same one. It
+leaves the family-agnostic substrate the crate root carries. That is the `crc32c`
+primitive, the source and extraction vocabulary, and `detect`, which says which filesystem
+an image holds. It leaves no family code at all, so `detect` then recognizes nothing. It is
+the build a consumer starts from when it wants one family and not the other.
+
+None of `tar`, `dir`, or `serde` names a family. A source feeds whichever family the writer
+makes, and a sink takes whichever one the reader opened. So `--features fat,dir` builds a
+FAT volume from a directory tree on this machine and extracts one back, with no ext code
+compiled.
+
+Cargo unifies features across a dependency graph. Naming a subset is therefore a property
+of a leaf application, not of a library deep in someone's tree. Anything in the build that
+pulls this crate with a family turns that family on for everyone in it. That includes the
+answers `detect` then gives.
 
 ```toml
 [dependencies]
@@ -71,8 +77,8 @@ The [API reference](./api-reference.md) documents the public surface.
 
 ## The command line
 
-The `ferrosys` binary writes, inspects, and reads back filesystems without
-writing any Rust. Install it from the registry:
+The `ferrosys` binary writes, inspects, and reads back filesystems from a shell prompt.
+Install it from the registry:
 
 ```sh
 cargo install ferrosys-cli
