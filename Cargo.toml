@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job

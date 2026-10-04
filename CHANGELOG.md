@@ -7,7 +7,10 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [Unreleased]
+## [0.5.2] - 2026-10-04
+
+A btrfs writer fix. The public API, the command line's options, and the minimum supported
+Rust version, 1.88, are unchanged. Both crates move to `0.5.2` together.
 
 ### Fixed
 
@@ -2031,6 +2034,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.5.2]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.2
 [0.5.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.1
 [0.5.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.0
 [0.4.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.4.0
