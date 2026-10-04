@@ -214,8 +214,8 @@ pub fn dir_hash(
 /// The four seed words, or the transform's built-in state when the seed is all zero.
 fn decode_seed(seed: &[u8; 16]) -> [u32; 4] {
     let mut buf = [0u32; 4];
-    for (word, chunk) in buf.iter_mut().zip(seed.chunks_exact(4)) {
-        *word = u32::from_le_bytes(chunk.try_into().expect("chunks_exact(4) yields 4 bytes"));
+    for (word, chunk) in buf.iter_mut().zip(seed.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*chunk);
     }
     if buf == [0; 4] { DEFAULT_SEED } else { buf }
 }

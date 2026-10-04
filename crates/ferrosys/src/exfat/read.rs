@@ -2257,11 +2257,9 @@ impl<R: Read + Seek> Reader<R> {
                 .cluster_start_sector(cluster)
                 .ok_or(ReadError::ClusterOutOfRange { cluster })?;
             let bytes = self.read_cluster(cluster).map_err(E::from)?;
-            for (i, chunk) in bytes.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
-                let mut raw = [0u8; DIR_ENTRY_SIZE];
-                raw.copy_from_slice(chunk);
+            for (i, chunk) in bytes.as_chunks::<DIR_ENTRY_SIZE>().0.iter().enumerate() {
                 let slot = Slot {
-                    bytes: raw,
+                    bytes: *chunk,
                     index,
                     cluster,
                     sector: first_sector + (i as u64) / slots_per_sector.max(1),
@@ -2562,7 +2560,10 @@ impl<R: Read + Seek> Reader<R> {
         // Every name entry of the set, in order. A benign secondary entry a vendor placed among
         // them is stepped over rather than read as name units.
         let mut units: Vec<u16> = Vec::new();
-        for slot in set.bytes[2 * DIR_ENTRY_SIZE..].chunks_exact(DIR_ENTRY_SIZE) {
+        for slot in set.bytes[2 * DIR_ENTRY_SIZE..]
+            .as_chunks::<DIR_ENTRY_SIZE>()
+            .0
+        {
             let entry_type = EntryType(slot[0]);
             if entry_type == EntryType::FILE_NAME {
                 let name = FileNameEntry::read_from(slot)?;
@@ -3794,8 +3795,8 @@ mod tests {
                     if EntryType(e[0]) != EntryType::FILE_NAME {
                         continue;
                     }
-                    for pair in e[2..].chunks_exact(2) {
-                        units.push(u16::from_le_bytes([pair[0], pair[1]]));
+                    for pair in e[2..].as_chunks::<2>().0 {
+                        units.push(u16::from_le_bytes(*pair));
                     }
                 }
                 units.truncate(length);

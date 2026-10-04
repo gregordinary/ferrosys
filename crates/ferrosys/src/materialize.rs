@@ -2032,7 +2032,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         // Back the block map up into the superblock: the 15 i_block words, then the
         // high and low halves of the size.
         let mut backup = [0u32; 17];
-        for (i, word) in inode.block.chunks_exact(4).enumerate() {
+        for (i, word) in inode.block.as_chunks::<4>().0.iter().enumerate() {
             backup[i] = get_u32(word, 0);
         }
         backup[15] = (inode.size >> 32) as u32;

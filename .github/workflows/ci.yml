@@ -17,7 +17,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rust-toolchain.toml pins the channel and the rustfmt/clippy components;
       # rustup installs them on first use.
@@ -81,7 +81,7 @@ jobs:
       # sha256-pinned source tarball (cached across runs) and read the pinned
       # ci/mke2fs.conf, so a distro rebuild cannot re-baseline the gates silently.
       - name: Cache pinned e2fsprogs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/e2fsprogs
           key: e2fsprogs-${{ hashFiles('ci/build-e2fsprogs.sh') }}
@@ -116,13 +116,13 @@ jobs:
       # actually in one -- and reads the pinned ci/mtools.conf, so the runner's own
       # mtools configuration cannot reach it.
       - name: Cache pinned dosfstools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/dosfstools
           key: dosfstools-${{ hashFiles('ci/build-dosfstools.sh') }}
 
       - name: Cache pinned mtools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/mtools
           key: mtools-${{ hashFiles('ci/build-mtools.sh') }}
@@ -168,7 +168,7 @@ jobs:
       # that two formats at the same parameters compare byte for byte. `dump.exfat` and
       # `exfatlabel` are second readings of what a format wrote.
       - name: Cache pinned exfatprogs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/exfatprogs
           key: exfatprogs-${{ hashFiles('ci/build-exfatprogs.sh') }}
@@ -199,7 +199,7 @@ jobs:
       # else: no libfuse to build, and at run time no /dev/fuse, no fusermount, no loop
       # device, no kernel, and no root.
       - name: Cache the pinned exFAT populator
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/exfat-populate
           key: exfat-populate-${{ hashFiles('ci/build-exfat-populate.sh', 'ci/exfat-populate.c') }}
@@ -230,7 +230,7 @@ jobs:
       # pinned one turned `block-group-tree` on by default -- so the pin is not only about
       # a checker's strictness here. It is what "the baseline" means at all.
       - name: Cache pinned btrfs-progs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ferrosys/btrfs-progs
           key: btrfs-progs-${{ hashFiles('ci/build-btrfs-progs.sh') }}
@@ -403,7 +403,7 @@ jobs:
       CARGO_DENY_SHA256_X86_64: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
       CARGO_DENY_SHA256_AARCH64: "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain
         run: rustup show
@@ -478,7 +478,7 @@ jobs:
           - target: i686-unknown-linux-gnu
             flags: --all-targets
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain and target
         run: |
@@ -501,7 +501,7 @@ jobs:
       # surface through a misread document.
       FERROSYS_API_NIGHTLY: "nightly-2026-07-09"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install the pinned nightly for rustdoc JSON
         run: rustup toolchain install "$FERROSYS_API_NIGHTLY" --profile minimal --no-self-update
@@ -513,11 +513,19 @@ jobs:
       - name: Public API matches its snapshot
         run: ci/public-api.sh
 
+      # The other half of what a consumer depends on: the dependency floors. Every gate
+      # above reads the lockfile, which moves forward with each `cargo update` while a
+      # requirement's floor stays where it was written. This resolves each direct
+      # dependency to that floor and checks every target there. The resolution is
+      # nightly-only, which is why it shares this job's pinned nightly.
+      - name: Every dependency floor builds
+        run: ci/minimal-versions.sh
+
   msrv:
     name: MSRV 1.88
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Verify the crate still builds on the declared floor (Cargo.toml
       # `rust-version`). Keep this toolchain version in lockstep with that field.
@@ -540,7 +548,7 @@ jobs:
       MDBOOK_SHA256_X86_64: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
       MDBOOK_SHA256_AARCH64: "753e5c5c363ee8a56972344dcf91466f005a51db84a7aeffe427ae3ef83d6d44"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # `mdbook test` spawns `rustdoc` from a temporary directory, where rustup's
       # directory-based override does not apply — so it would pick the runner's default

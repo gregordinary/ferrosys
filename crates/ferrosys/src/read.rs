@@ -4416,8 +4416,8 @@ mod tests {
         assert_eq!(inode.links_count, 1);
         assert!(inode.flags.contains(InodeFlags::EXTENTS));
         assert_eq!(inode.size, 4096 * 4096);
-        for (i, word) in inode.block.chunks_exact(4).enumerate() {
-            let w = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        for (i, word) in inode.block.as_chunks::<4>().0.iter().enumerate() {
+            let w = u32::from_le_bytes(*word);
             assert_eq!(r.superblock().jnl_blocks[i], w, "jnl_blocks[{i}]");
         }
         assert_eq!(r.superblock().jnl_blocks[16], inode.size as u32);

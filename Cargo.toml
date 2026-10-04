@@ -39,21 +39,27 @@ overflow-checks = true
 
 [workspace.dependencies]
 # Versions are pinned here; a crate lists one in its own [dependencies] only when
-# a module actually uses it.
-thiserror = "2"
+# a module actually uses it. Each requirement's floor is a release the workspace is checked
+# against: `ci/minimal-versions.sh` resolves every direct dependency to its floor and checks
+# every target there. A consumer whose own lockfile carries an older release is moved up to
+# one this workspace has built, rather than unified onto one it never has.
+thiserror = "2.0.21"
 # default-features off: archive parsing (incl. PAX xattrs), no host-side xattr writes.
-tar = { version = "0.4", default-features = false }
+# The floor is above 0.4.44, the last release RUSTSEC-2026-0067 and RUSTSEC-2026-0068
+# apply to.
+tar = { version = "0.4.46", default-features = false }
 # default-features off, `std` + `fs` on: the directory, node, ownership and
 # extended-attribute calls the host-directory source and sink need, over the
 # direct-syscall backend, with no C library in the tree.
-rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"] }
 # default-features off, `std` + `derive` on: the `Serialize` implementations the `serde`
 # feature adds, and nothing else — no deserialization, no runtime format.
-serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 # DEFLATE, behind the `zlib` feature. `#![forbid(unsafe_code)]` throughout, which is this
-# crate's own bar, and `with-alloc` alone: the SIMD checksum path is an optional dependency
-# this build does not take, and the encoder is compiled either way but never called.
-miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# crate's own bar, and no features at all: the decoder writes into a caller's buffer, which
+# is the one entry point that needs no allocator, so the encoder and the `Vec`-returning
+# helpers that `with-alloc` adds are not compiled, and neither is the SIMD checksum path.
+miniz_oxide = { version = "0.9.1", default-features = false }
 # Zstandard decoding, behind the `zstd` feature. default-features off leaves `std` on and
 # `hash` off, which drops the `twox-hash` dependency along with the frame checksum it
 # verifies: btrfs records its own crc32c over every sector of the compressed bytes, so what
@@ -61,20 +67,20 @@ miniz_oxide = { version = "0.9", default-features = false, features = ["with-all
 # It carries `unsafe` in a hand-written ring buffer, which is a departure from this crate's
 # own bar and is stated here rather than left to be discovered. The feature is off by
 # default, so a build that does not ask for Zstandard carries none of it.
-ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+ruzstd = { version = "0.9.0", default-features = false, features = ["std"] }
 # The `serde` feature's gate reads what the derives emit, so the shape a consumer sees is
 # asserted rather than assumed. A development dependency only; never shipped.
-serde_json = "1"
-tempfile = "3"
-proptest = "1"
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+proptest = "1.11.0"
 # A second, independent LZO1X implementation, used only to *produce* streams the decoder in
 # this crate is held against. Compression alone, so what it brings is the encoder; the
 # decoder it also ships is never called, because a decoder checked against itself checks
 # nothing. A development dependency, never shipped.
-lzokay = { version = "2", default-features = false, features = ["compress", "std"] }
+lzokay = { version = "2.0.1", default-features = false, features = ["compress", "std"] }
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.4"` resolves `>=0.4.0, <0.5.0` — the published
+# minor is the breaking axis, so `"0.5"` resolves `>=0.5.0, <0.6.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
 ferrosys = { path = "crates/ferrosys", version = "0.5" }

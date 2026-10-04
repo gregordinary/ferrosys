@@ -422,7 +422,7 @@ impl Root {
         let (mut bitmap, mut upcase, mut label_at) = (None, None, None);
         let (mut upcase_checksum, mut label) = (0, String::new());
         let (mut reserved_at, mut free_slot) = (None, None);
-        for (slot, entry) in bytes.chunks_exact(32).enumerate() {
+        for (slot, entry) in bytes.as_chunks::<32>().0.iter().enumerate() {
             let at = base + slot as u64 * 32;
             let resident = || Resident {
                 entry_at: at,
@@ -440,8 +440,10 @@ impl Root {
                     let units = entry[1] as usize;
                     label = String::from_utf16_lossy(
                         &entry[2..2 + units * 2]
-                            .chunks_exact(2)
-                            .map(|u| u16::from_le_bytes([u[0], u[1]]))
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|u| u16::from_le_bytes(*u))
                             .collect::<Vec<_>>(),
                     );
                 }
@@ -867,7 +869,11 @@ fn the_boot_checksum_of_each_region_is_the_one_the_specification_computes() {
                 boot.bytes_per_sector as usize,
             );
             assert!(
-                sector.chunks_exact(4).all(|w| w == stored.to_le_bytes()),
+                sector
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|w| *w == stored.to_le_bytes()),
                 "the checksum sector of boot region {region} of {} does not repeat its \
                  value for the whole sector",
                 volume.what
@@ -3079,7 +3085,7 @@ fn foreign_directory(bytes: &[u8]) -> Vec<ForeignSet> {
 
     let mut sets = Vec::new();
     let mut pending: Option<(ForeignSet, usize)> = None;
-    for (slot, entry) in bytes.chunks_exact(32).enumerate() {
+    for (slot, entry) in bytes.as_chunks::<32>().0.iter().enumerate() {
         let at = slot as u64 * 32;
         match entry[0] {
             0x00 => break,
@@ -3112,8 +3118,10 @@ fn foreign_directory(bytes: &[u8]) -> Vec<ForeignSet> {
                 let (set, remaining) = pending.as_mut().expect("a name entry inside a set");
                 set.name.push_str(&String::from_utf16_lossy(
                     &entry[2..32]
-                        .chunks_exact(2)
-                        .map(|u| u16::from_le_bytes([u[0], u[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|u| u16::from_le_bytes(*u))
                         .collect::<Vec<_>>(),
                 ));
                 set.slots.push(at);
@@ -3243,7 +3251,7 @@ fn foreign_set<'a>(sets: &'a [ForeignSet], path: &str) -> &'a ForeignSet {
 /// its neighbours.
 fn foreign_upcase_at(image: &Path, boot: &Boot) -> u64 {
     let root = foreign_stream(image, boot, boot.root_cluster, false, None);
-    for entry in root.chunks_exact(32) {
+    for entry in root.as_chunks::<32>().0 {
         if entry[0] == 0x00 {
             break;
         }

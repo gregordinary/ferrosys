@@ -40,7 +40,7 @@ jobs:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain
         run: rustup show
@@ -88,11 +88,13 @@ jobs:
           # rustdoc uses underscore paths; keep Jekyll from mangling them.
           touch site/.nojekyll
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
+          # `.nojekyll` is a dotfile, and the artifact leaves dotfiles out unless asked.
+          include-hidden-files: true
 
   deploy:
     needs: build
@@ -102,4 +104,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

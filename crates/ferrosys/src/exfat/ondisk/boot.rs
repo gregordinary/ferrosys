@@ -458,11 +458,16 @@ pub fn extended_boot_signature(sector: &[u8]) -> Option<u32> {
 ///
 /// When `sector`'s length is not a multiple of four, which no sector size is.
 pub fn write_checksum_sector(sector: &mut [u8], checksum: u32) {
+    let (words, rest) = sector.as_chunks_mut::<4>();
+    assert!(
+        rest.is_empty(),
+        "a sector is a whole number of four-byte words"
+    );
     // The byte order is named once, and what follows repeats those four bytes rather than
     // writing a field at each of a sector's worth of offsets.
     let word = checksum.to_le_bytes();
-    for at in sector.chunks_exact_mut(4) {
-        at.copy_from_slice(&word);
+    for at in words {
+        *at = word;
     }
 }
 
@@ -474,9 +479,9 @@ pub fn write_checksum_sector(sector: &mut [u8], checksum: u32) {
 /// intended value of.
 #[must_use]
 pub fn checksum_sector_value(sector: &[u8]) -> Option<u32> {
-    let mut words = sector.chunks_exact(4);
-    let first = words.next()?;
-    if !words.all(|w| w == first) || !sector.chunks_exact(4).remainder().is_empty() {
+    let (words, rest) = sector.as_chunks::<4>();
+    let (first, others) = words.split_first()?;
+    if !rest.is_empty() || others.iter().any(|w| w != first) {
         return None;
     }
     Some(get_u32(first, 0))
@@ -692,8 +697,10 @@ mod tests {
             write_checksum_sector(&mut sector, 0xDEAD_BEEF);
             assert!(
                 sector
-                    .chunks_exact(4)
-                    .all(|w| w == 0xDEAD_BEEFu32.to_le_bytes())
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|w| *w == 0xDEAD_BEEFu32.to_le_bytes())
             );
             assert_eq!(checksum_sector_value(&sector), Some(0xDEAD_BEEF));
 
@@ -704,5 +711,21 @@ mod tests {
             assert_eq!(checksum_sector_value(&sector), None);
         }
         assert_eq!(checksum_sector_value(&[]), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a sector is a whole number of four-byte words")]
+    fn a_checksum_sector_that_is_not_whole_words_is_refused_by_the_writer() {
+        write_checksum_sector(&mut [0u8; 510], 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn a_checksum_sector_with_a_partial_word_has_no_value() {
+        // Every whole word agrees, so what refuses this one is the two bytes past them: a
+        // length the value cannot repeat across is not a checksum sector.
+        let mut sector = [0u8; 18];
+        write_checksum_sector(&mut sector[..16], 0xDEAD_BEEF);
+        assert_eq!(checksum_sector_value(&sector[..16]), Some(0xDEAD_BEEF));
+        assert_eq!(checksum_sector_value(&sector), None);
     }
 }

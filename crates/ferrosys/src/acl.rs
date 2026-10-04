@@ -331,7 +331,7 @@ impl Acl {
             });
         }
         let mut entries = Vec::with_capacity(body.len() / XATTR_ENTRY_LEN);
-        for e in body.chunks_exact(XATTR_ENTRY_LEN) {
+        for e in body.as_chunks::<XATTR_ENTRY_LEN>().0 {
             let tag = get_u16(e, 0);
             let perm = get_u16(e, 2);
             // The id is meaningful only for a named user or group; the other tags carry

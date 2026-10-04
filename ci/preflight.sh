@@ -266,7 +266,8 @@ import re, sys
 
 # Steps deliberately not mirrored, and why. Everything else must be a gate above.
 NOT_APPLICABLE = {
-    "Toolchain": "rust-toolchain.toml pins the local channel already",
+    "Toolchain": "rust-toolchain.toml pins the local channel, and the book gate names it "
+                 "for the rustdoc mdbook spawns outside the tree",
     "Toolchain and target": "the cross gates install their own targets",
     "Install the pinned nightly for rustdoc JSON": "the public API gate installs it",
     "Install MSRV toolchain": "the MSRV gate installs it",
@@ -321,6 +322,7 @@ MIRRORED = {
     "Rustdoc": "rustdoc (--document-private-items)",
     "Check": "cross: ",
     "Public API matches its snapshot": "public API matches its snapshot",
+    "Every dependency floor builds": "every dependency floor builds",
     "cargo check on MSRV": "cargo +",
     "Build crate": "book: build the crate it links against",
     "Build book": "book: mdbook build",
@@ -438,7 +440,7 @@ gates preflight runs, mirroring .github/workflows/ci.yml:
   deps        cargo deny over this workspace and the fuzz package: advisories,
               licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
-  public-api  ci/public-api.sh under $NIGHTLY
+  public-api  ci/public-api.sh, and ci/minimal-versions.sh, under $NIGHTLY
   msrv        cargo +$MSRV check --all-targets --all-features
   book        mdbook build, and the guide's examples against the crate
 
@@ -562,8 +564,10 @@ echo "public API"
 if rustup toolchain list 2>/dev/null | grep -q "$NIGHTLY" \
    || rustup toolchain install "$NIGHTLY" --profile minimal --no-self-update >/dev/null 2>&1; then
     gate "public API matches its snapshot" ci/public-api.sh
+    gate "every dependency floor builds" ci/minimal-versions.sh
 else
     skip "public API matches its snapshot" "$NIGHTLY could not be installed"
+    skip "every dependency floor builds" "$NIGHTLY could not be installed"
 fi
 
 echo
@@ -601,8 +605,15 @@ else
     gate "book: build the crate it links against" \
         env CARGO_TARGET_DIR="$book_target" cargo build --features fat,exfat,btrfs
     gate "book: mdbook build" mdbook build book
+
+    # `mdbook test` spawns `rustdoc` from a temporary directory, outside the reach of
+    # rust-toolchain.toml, so it runs whatever toolchain rustup defaults to here. The
+    # crate above was built with the pinned one, and a default on any other release fails
+    # every example on "compiled by an incompatible version of rustc". The workflow names
+    # the channel for the whole job; this names it for the one command that leaves the tree.
+    book_channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
     gate "book: guide examples against the crate" \
-        mdbook test book -L "$book_target/debug/deps"
+        env RUSTUP_TOOLCHAIN="$book_channel" mdbook test book -L "$book_target/debug/deps"
 fi
 
 echo

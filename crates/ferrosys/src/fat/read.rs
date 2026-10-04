@@ -1631,9 +1631,9 @@ impl<R: Read + Seek> Reader<R> {
                 count = self.layout.sectors_per_cluster;
             }
             let bytes = self.read_sectors(first, count).map_err(E::from)?;
-            for (i, chunk) in bytes.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
-                // `chunks_exact` yields exactly `DIR_ENTRY_SIZE` bytes, so the parse cannot
-                // be short; the error path stands because the parser is fallible in general.
+            for (i, chunk) in bytes.as_chunks::<DIR_ENTRY_SIZE>().0.iter().enumerate() {
+                // Every chunk is exactly `DIR_ENTRY_SIZE` bytes, so the parse cannot be
+                // short; the error path stands because the parser is fallible in general.
                 let Ok(entry) = DirEntry::read_from(chunk) else {
                     continue;
                 };
@@ -3925,7 +3925,9 @@ mod tests {
     fn entry_of(image: &Image, name: &[u8; 11]) -> usize {
         let bytes = image.as_bytes();
         bytes
-            .chunks_exact(DIR_ENTRY_SIZE)
+            .as_chunks::<DIR_ENTRY_SIZE>()
+            .0
+            .iter()
             .position(|slot| &slot[..11] == name)
             .map(|n| n * DIR_ENTRY_SIZE)
             .unwrap_or_else(|| panic!("no entry is named {}", String::from_utf8_lossy(name)))
@@ -3991,8 +3993,8 @@ mod tests {
         slot[22..24].copy_from_slice(&stamp.time.to_le_bytes());
         slot[24..26].copy_from_slice(&stamp.date.to_le_bytes());
         let data = at(&layout, layout.first_data_sector);
-        for chunk in bytes[data..].chunks_exact_mut(DIR_ENTRY_SIZE) {
-            chunk.copy_from_slice(&slot);
+        for chunk in bytes[data..].as_chunks_mut::<DIR_ENTRY_SIZE>().0 {
+            *chunk = slot;
         }
         (bytes, layout)
     }

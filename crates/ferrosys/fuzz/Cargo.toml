@@ -11,7 +11,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = "0.4.13"
 # `tar` for the archive target: the parser reads untrusted input, so it is fuzzed
 # alongside the readers rather than left to the crate's own tests. `fat`, `exfat`, and
 # `btrfs` for those families' reader targets, none of which is in the default feature set.

@@ -6,5 +6,5 @@
 # introduce a lint that turns a green build red. `rustfmt` and `clippy` back the
 # formatting and lint gates.
 [toolchain]
-channel = "1.97.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]

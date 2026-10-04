@@ -399,8 +399,8 @@ pub fn hex16(v: &OsStr) -> Result<[u8; 16], ValueError> {
         return Err(ValueError::NotHex16(shown(v)));
     }
     let mut out = [0u8; 16];
-    for (byte, pair) in out.iter_mut().zip(nibbles.chunks_exact(2)) {
-        *byte = (pair[0] << 4) | pair[1];
+    for (byte, &[high, low]) in out.iter_mut().zip(nibbles.as_chunks::<2>().0) {
+        *byte = (high << 4) | low;
     }
     Ok(out)
 }

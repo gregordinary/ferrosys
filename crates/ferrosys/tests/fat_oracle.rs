@@ -2026,7 +2026,9 @@ mod populated {
         ) * u64::from(layout.bytes_per_sector);
         let mut entries = super::read_at(image.path(), root, 32 * 16);
         let short = entries
-            .chunks_exact(32)
+            .as_chunks::<32>()
+            .0
+            .iter()
             .position(|e| e.starts_with(b"ALONGFIL"))
             .expect("the short entry is in the first sixteen slots");
         let at = short * 32 + 26;

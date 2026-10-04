@@ -806,8 +806,8 @@ impl<R: Read + Seek> Reader<R> {
                 );
                 return !scan.found.is_full();
             }
-            for id in data.chunks_exact(8) {
-                let id = u64::from_le_bytes(id.try_into().expect("eight bytes"));
+            for id in data.as_chunks::<8>().0 {
+                let id = u64::from_le_bytes(*id);
                 match recorded.get(&id) {
                     Some(held) if *held == uuid => {
                         satisfied.insert(id);
