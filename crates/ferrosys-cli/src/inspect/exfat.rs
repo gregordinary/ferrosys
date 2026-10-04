@@ -35,18 +35,12 @@ pub fn report(
     args: &InspectArgs,
     dialect: Dialect,
 ) -> Result<Report, Error> {
-    // A block group is ext's unit of self-description and an exFAT volume has nothing of the
-    // kind, so the option is refused rather than passed over — the same answer the FAT body
-    // gives and for the same reason. A report that quietly omitted the section would read as a
-    // volume with no groups in it, which is a different claim from the question not applying.
-    if args.groups {
-        return Err(Error::NotForFamily {
-            option: "--groups",
-            family: "exfat",
-            reason: "block groups are how an ext filesystem divides itself, and an exFAT \
-                     volume has one flat cluster heap",
-        });
-    }
+    super::refuse_groups(
+        args,
+        "exfat",
+        "block groups are how an ext filesystem divides itself, and an exFAT volume has one \
+         flat cluster heap",
+    )?;
 
     // A scan follows every stream in the volume, reads every directory, and holds every
     // cluster the tree occupies against the allocation bitmap in both directions, so it is
@@ -133,23 +127,16 @@ fn label_text(label: Option<&[u8]>) -> String {
     }
 }
 
-/// What the two flags say, in the words the finding for each says it.
-fn volume_state(state: &State) -> String {
-    match (state.volume_dirty, state.media_failure) {
-        (false, false) => "clean".to_string(),
-        (true, false) => "not cleanly unmounted".to_string(),
-        (false, true) => "a medium failure was recorded".to_string(),
-        (true, true) => "not cleanly unmounted; a medium failure was recorded".to_string(),
-    }
-}
-
 /// The description a person reads.
 fn table(layout: &ExfatLayout, state: &State, label: Option<&[u8]>) -> String {
     let mut rows = render::Rows::report();
     let mut line = |k: &str, v: String| rows.row(k, v);
 
     line("Volume label:", label_text(label));
-    line("Volume state:", volume_state(state));
+    line(
+        "Volume state:",
+        render::volume_state(state.volume_dirty, state.media_failure),
+    );
     line("Percent in use:", percent_in_use(state.percent_in_use));
     line("Partition offset:", state.partition_offset.to_string());
     line("Bytes per sector:", layout.bytes_per_sector.to_string());
@@ -256,27 +243,5 @@ mod tests {
         // percentage that is out of date.
         assert_eq!(percent_in_use(200), "<not a percentage: 200>");
         assert_eq!(percent_in_use(101), "<not a percentage: 101>");
-    }
-
-    #[test]
-    fn the_volume_state_names_each_bit_and_both_together() {
-        let state = |dirty, failure| State {
-            volume_dirty: dirty,
-            media_failure: failure,
-            percent_in_use: 0,
-            partition_offset: 0,
-        };
-        assert_eq!(volume_state(&state(false, false)), "clean");
-        assert_eq!(volume_state(&state(true, false)), "not cleanly unmounted");
-        assert_eq!(
-            volume_state(&state(false, true)),
-            "a medium failure was recorded"
-        );
-        // Both, because a card pulled out of a reader that had also met a bad sector says two
-        // things and a report that named one of them would be dropping the other.
-        assert_eq!(
-            volume_state(&state(true, true)),
-            "not cleanly unmounted; a medium failure was recorded"
-        );
     }
 }

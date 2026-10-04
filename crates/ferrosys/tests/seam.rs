@@ -216,6 +216,68 @@ fn a_stat_is_complete_and_says_nothing_was_invented() {
     assert!(at("/etc/hostname").xattrs.is_empty());
 }
 
+/// A source written outside the crate builds its entries through the constructors, since
+/// neither `SourceEntry` nor `Metadata` can be written as a literal here, and what it built
+/// is what the image holds.
+#[test]
+fn a_source_written_outside_the_crate_builds_its_entries_through_the_constructors() {
+    use ferrosys::ext::{FormatOptions, format};
+    use ferrosys::{EntryKind, FileContent, Source, SourceEntry, Xattr};
+
+    struct Listed(Vec<SourceEntry>);
+    impl Source for Listed {
+        fn into_entries(self) -> Vec<SourceEntry> {
+            self.0
+        }
+    }
+
+    let time = Timestamp::from_secs(1_700_000_000);
+    let later = Timestamp::from_secs(1_700_000_100);
+    let mut meta = Metadata::new(0o640, time).with_times(later, later, time);
+    meta.uid = 7;
+    let source = Listed(vec![
+        SourceEntry::new(
+            b"/etc".to_vec(),
+            EntryKind::Directory,
+            Metadata::new(0o755, time),
+        ),
+        SourceEntry::new(
+            b"/etc/motd".to_vec(),
+            EntryKind::File(FileContent::from(b"hello\n".to_vec())),
+            meta,
+        )
+        .with_xattrs(vec![Xattr {
+            name: b"user.origin".to_vec(),
+            value: b"listed".to_vec(),
+        }]),
+    ]);
+    let bytes = format(
+        source,
+        16 << 20,
+        FormatOptions::new([0x34; 16], time, [0; 16]),
+    )
+    .expect("format")
+    .into_bytes();
+
+    let FsReader::Ext(mut reader) = open(Cursor::new(&bytes)).expect("open") else {
+        panic!("the ext family claimed the image")
+    };
+    let mut motd = None;
+    reader
+        .walk_tree::<TreeError, _>(|tree, entry| {
+            if entry.path == b"/etc/motd" {
+                motd = Some(tree.stat(&entry.node, &Synthesis::new())?);
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+    let motd = motd.expect("/etc/motd was walked");
+    assert_eq!(motd.meta, meta);
+    assert_eq!(motd.xattrs.len(), 1);
+    assert_eq!(motd.xattrs[0].name, b"user.origin");
+    assert_eq!(motd.xattrs[0].value, b"listed");
+}
+
 #[test]
 fn a_synthesis_input_never_overrides_what_the_image_holds() {
     // The inputs answer for a format that records nothing. A family that records a property
@@ -461,6 +523,13 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
             }
             let bytes = std::fs::read(&path).expect("read the seed");
             let name = path.display().to_string();
+            // A repository host refuses a file of 100 MB or more, and a seed is committed
+            // whole however much of it is zeros.
+            assert!(
+                bytes.len() < 100_000_000,
+                "{name} is {} bytes, more than a repository host accepts in one file",
+                bytes.len()
+            );
             let reader = open_with(
                 Cursor::new(&bytes),
                 // Leniently, because a seed may deliberately be an image a strict read

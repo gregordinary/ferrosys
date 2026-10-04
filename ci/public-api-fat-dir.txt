@@ -10,6 +10,7 @@
 #[non_exhaustive] pub enum ferrosys::NodeKind
 #[non_exhaustive] pub enum ferrosys::OpenError
 #[non_exhaustive] pub enum ferrosys::Property
+#[non_exhaustive] pub enum ferrosys::ReadPolicy
 #[non_exhaustive] pub enum ferrosys::Slack
 #[non_exhaustive] pub enum ferrosys::TreeError
 #[non_exhaustive] pub enum ferrosys::fat::Category
@@ -131,7 +132,9 @@
 #[non_exhaustive] pub struct ferrosys::FidelityRecord
 #[non_exhaustive] pub struct ferrosys::Finding
 #[non_exhaustive] pub struct ferrosys::Limits
+#[non_exhaustive] pub struct ferrosys::Metadata
 #[non_exhaustive] pub struct ferrosys::OpenOptions
+#[non_exhaustive] pub struct ferrosys::SourceEntry
 #[non_exhaustive] pub struct ferrosys::Synthesis
 #[non_exhaustive] pub struct ferrosys::TreeEntry<N>
 #[non_exhaustive] pub struct ferrosys::fat::Anomaly
@@ -653,6 +656,7 @@ pub const ferrosys::fat::ondisk::LfnEntry::SIZE: usize
 pub const ferrosys::fat::ondisk::NAME_DELETED: u8
 pub const ferrosys::fat::ondisk::NAME_END: u8
 pub const ferrosys::fat::ondisk::NAME_LEADING_E5: u8
+pub const ferrosys::fat::ondisk::VOLUME_DIRTY: u8
 pub const ferrosys::fat::ondisk::VolumeInfo::NO_NAME: [u8; 11]
 pub const ferrosys::fat::ondisk::VolumeInfo::SIZE: usize
 pub const ferrosys::fat::table::FREE: u32
@@ -730,7 +734,9 @@ pub const fn ferrosys::fat::Reader::boot_sector(&self) -> &BootSector
 pub const fn ferrosys::fat::Reader::charset(&self) -> ShortNameCharset
 pub const fn ferrosys::fat::Reader::fat_type(&self) -> FatType
 pub const fn ferrosys::fat::Reader::layout(&self) -> &FatLayout
+pub const fn ferrosys::fat::Reader::media_failure(&self) -> bool
 pub const fn ferrosys::fat::Reader::policy(&self) -> ReadPolicy
+pub const fn ferrosys::fat::Reader::volume_dirty(&self) -> bool
 pub const fn ferrosys::fat::ShortNameCharset::as_str(self) -> &'static str
 pub const fn ferrosys::fat::ShortNameCharset::table(self) -> Option<&'static [char; 128]>
 pub const fn ferrosys::fat::TimeField::as_str(self) -> &'static str
@@ -743,6 +749,8 @@ pub const fn ferrosys::fat::ondisk::Attributes::from_bits(bits: u8) -> Self
 pub const fn ferrosys::fat::ondisk::Attributes::is_empty(self) -> bool
 pub const fn ferrosys::fat::ondisk::Attributes::is_long_name(self) -> bool
 pub const fn ferrosys::fat::ondisk::Attributes::without(self, other: Self) -> Self
+pub const fn ferrosys::fat::ondisk::BootSectorTail::volume(&self) -> &VolumeInfo
+pub const fn ferrosys::fat::ondisk::BootSectorTail::volume_offset(&self) -> usize
 pub const fn ferrosys::fat::table::bad_cluster(fat_type: crate::fat::FatType) -> u32
 pub const fn ferrosys::fat::table::end_of_chain(fat_type: crate::fat::FatType) -> u32
 pub const fn ferrosys::fat::table::entry_mask(fat_type: crate::fat::FatType) -> u32
@@ -752,9 +760,9 @@ pub const fn ferrosys::fat::table::fits(fat_type: crate::fat::FatType, cluster: 
 pub const fn ferrosys::fat::table::is_cluster(fat_type: crate::fat::FatType, entry: u32) -> bool
 pub const fn ferrosys::fat::table::is_end_of_chain(fat_type: crate::fat::FatType, entry: u32) -> bool
 pub const fn ferrosys::fat::table::media_entry(fat_type: crate::fat::FatType, media: u8) -> u32
+pub const fn ferrosys::fat::table::status_bits(fat_type: crate::fat::FatType) -> (u32, u32)
 pub const fn ferrosys::fat::table::tail_entry(fat_type: crate::fat::FatType) -> u32
 pub enum ferrosys::AclQualifier
-pub enum ferrosys::ReadPolicy
 pub enum ferrosys::Severity
 pub enum ferrosys::fat::FatType
 pub enum ferrosys::fat::Storage
@@ -1098,6 +1106,7 @@ pub ferrosys::fat::ReadError::LostClusters::count: u32
 pub ferrosys::fat::ReadError::LostClusters::first: u32
 pub ferrosys::fat::ReadError::MalformedTimestamp::field: &'static str
 pub ferrosys::fat::ReadError::MalformedTimestamp::index: u32
+pub ferrosys::fat::ReadError::MediaFailure
 pub ferrosys::fat::ReadError::MisplacedVolumeLabel::index: u32
 pub ferrosys::fat::ReadError::NotADirectory::path: Vec<u8>
 pub ferrosys::fat::ReadError::NotFound::path: Vec<u8>
@@ -1115,6 +1124,7 @@ pub ferrosys::fat::ReadError::TableMismatch::other: u32
 pub ferrosys::fat::ReadError::TablePaddingMismatch::copy: u32
 pub ferrosys::fat::ReadError::UninterpretedShortName::byte: u8
 pub ferrosys::fat::ReadError::UninterpretedShortName::index: u32
+pub ferrosys::fat::ReadError::VolumeDirty
 pub ferrosys::fat::ReadError::WalkTooLarge::limit: usize
 pub ferrosys::fat::ReservedSectors::Auto
 pub ferrosys::fat::ReservedSectors::Count(u32)
@@ -1192,6 +1202,7 @@ pub ferrosys::fat::ondisk::VolumeInfo::drive_number: u8
 pub ferrosys::fat::ondisk::VolumeInfo::ext_boot_signature: u8
 pub ferrosys::fat::ondisk::VolumeInfo::fs_type: [u8; 8]
 pub ferrosys::fat::ondisk::VolumeInfo::label: [u8; 11]
+pub ferrosys::fat::ondisk::VolumeInfo::reserved: u8
 pub ferrosys::fat::ondisk::VolumeInfo::volume_id: u32
 pub fn ferrosys::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
 pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
@@ -1260,6 +1271,8 @@ pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
 pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
 pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::SourceEntry::new(path: impl Into<Vec<u8>>, kind: EntryKind, meta: Metadata) -> Self
+pub fn ferrosys::SourceEntry::with_xattrs(self, xattrs: Vec<Xattr>) -> Self
 pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
@@ -1362,9 +1375,7 @@ pub struct ferrosys::FidelityReport { /* private fields */ }
 pub struct ferrosys::FileRange { /* private fields */ }
 pub struct ferrosys::FindingReport { /* private fields */ }
 pub struct ferrosys::LayeredSource { /* private fields */ }
-pub struct ferrosys::Metadata
 pub struct ferrosys::ScanReport<A> { /* private fields */ }
-pub struct ferrosys::SourceEntry
 pub struct ferrosys::Timestamp
 pub struct ferrosys::TreeBuilder { /* private fields */ }
 pub struct ferrosys::Xattr

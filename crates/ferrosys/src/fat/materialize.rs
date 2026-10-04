@@ -1310,6 +1310,7 @@ fn boot_sector(layout: &FatLayout, options: &FormatOptions) -> BootSector {
     let (sectors_per_track, heads) = chs(layout.total_sectors);
     let volume = VolumeInfo {
         drive_number: options.drive_number(),
+        reserved: 0,
         ext_boot_signature: EXTENDED_BOOT_SIGNATURE,
         volume_id: options.volume_id,
         label: *options.label.unwrap_or(VolumeLabel::NO_NAME).as_bytes(),

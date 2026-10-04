@@ -299,12 +299,18 @@ MIRRORED = {
         "lib lints clean in every configuration",
     "One home per concept": "one home per concept",
     "No body written twice": "no body written twice",
+    "No file names another implementation's internals":
+        "no file names another implementation's internals",
     "Every page that names a family names all of them":
         "every page that names a family names all of them",
     "The guide asks for the version the crate is":
         "the guide asks for the version the crate is",
     "Base library builds and passes its tests without the archive source":
         "base lib without the archive source",
+    "Library builds and passes its tests under the default features":
+        "lib under the default features",
+    "Library builds and passes its tests with ext as the only family":
+        "lib with ext as the only family",
     "Library builds and passes its tests with FAT as the only family":
         "lib with FAT as the only family",
     "Library builds and passes its tests with a family and no ext":
@@ -433,10 +439,12 @@ gates preflight runs, mirroring .github/workflows/ci.yml:
 
   check       fmt, clippy, the library linted in every configuration it offers, the three
               consistency gates — one home per concept, no body written twice, and every
-              page that names a family naming all of them — the workspace suite, the
-              base library without the archive source, the library
-              with FAT as its only family and again with exFAT as its only family, three
-              fuzz gates, and rustdoc over private items
+              page that names a family naming all of them — the provenance gate, which
+              holds every file to naming no other implementation's internals, the
+              workspace suite, the
+              base library without the archive source, the library under the default
+              features, the library with each family as its only one and btrfs again
+              with every decoder, three fuzz gates, and rustdoc over private items
   deps        cargo deny over this workspace and the fuzz package: advisories,
               licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
@@ -467,6 +475,7 @@ gate "clippy" cargo clippy --all-targets --all-features -- -D warnings
 gate "lib lints clean in every configuration" ci/lint-features.sh
 gate "one home per concept" ci/one-home.sh
 gate "no body written twice" ci/duplicate-bodies.sh
+gate "no file names another implementation's internals" ci/provenance.sh
 gate "every page that names a family names all of them" ci/family-coverage.sh
 gate "the guide asks for the version the crate is" ci/book-version.sh
 
@@ -479,6 +488,10 @@ fi
 
 gate_tests "base lib without the archive source" base-lib \
     cargo test -p ferrosys --no-default-features --lib
+gate_tests "lib under the default features" default-lib \
+    cargo test -p ferrosys --lib
+gate_tests "lib with ext as the only family" ext-only \
+    cargo test -p ferrosys --no-default-features --features ext --lib
 gate_tests "lib with FAT as the only family" fat-only \
     cargo test -p ferrosys --no-default-features --features fat --lib
 gate_tests "lib with a family, a source, and a sink, and no ext" fat-dir \

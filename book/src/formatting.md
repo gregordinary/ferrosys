@@ -1,14 +1,15 @@
 # Formatting and reading images
 
 `ferrosys` has two halves: a formatter that writes a filesystem image, and a reader
-that parses one back. Each filesystem family lives in a module of its own. `ext` writes and
-reads ext2, ext3, and ext4, and `fat` writes FAT12, FAT16, and FAT32.
+that parses one back. Each filesystem family lives in a module of its own, which writes and
+reads its formats. `ext` covers ext2, ext3, and ext4, `fat` FAT12, FAT16, and FAT32,
+`exfat` exFAT, and `btrfs` btrfs.
 
 A third vocabulary belongs to neither half and lives at the crate root. It describes a
 directory tree, reports what a format could not hold, and says what an image is.
 
-Most of this page is the ext family, which is the one with the fullest surface.
-[Formatting a FAT volume](#formatting-a-fat-volume) is what differs.
+Most of this page is the ext family, which is the one with the fullest surface. The
+sections on FAT, exFAT, and btrfs say what differs for each.
 
 ## Describing the contents
 
@@ -541,7 +542,7 @@ grows with the image's size in bytes.
 
 The `fat` module writes FAT12, FAT16, and FAT32. That is the family the EFI System
 Partition is, and the one with no POSIX fidelity at all. It is behind the `fat` feature,
-which is off by default.
+which the default build carries.
 
 **Which of the three a volume is follows from its cluster count and from nothing else.**
 No FAT image records its type. Every driver counts the clusters and compares against two
@@ -797,6 +798,49 @@ An archive that makes the round trip through `ArchiveSource` describes the same 
 at both ends. A socket has no tar entry type at all. A filesystem holding one is therefore
 a typed error, rather than an archive quietly missing a file.
 
+### A filesystem left needing recovery
+
+A filesystem that was not unmounted cleanly carries `needs_recovery`. Its journal holds
+committed transactions whose blocks have not reached their homes. An image taken from a
+running system is one, and so is a disk copied while it was mounted.
+
+The reader replays such a journal into memory as it opens the filesystem. Every read after
+that returns what a mount presents, and the image is not written. `Reader::journal_replay`
+reports the transactions and blocks it applied, and `Reader::read_block` returns any block as
+the reader presents it.
+
+```rust,ignore
+# extern crate ferrosys;
+let reader = Reader::open(image)?;
+if let Some(replay) = reader.journal_replay() {
+    println!("{} transactions, {} blocks", replay.transactions, replay.blocks);
+}
+```
+
+Recovery applies the rules e2fsprogs's recovery applies. A revoke record cancels the earlier
+copies of its block. A transaction without a sound commit record ends the log.
+
+A journal on another device is refused by name. So are fast commits, asynchronous commits,
+and the version 1 commit checksum. Under `ReadPolicy::Strict` the open fails on any of
+these with `ReadError::JournalUnsupported`. It fails with `ReadError::JournalMalformed` on a
+log that does not describe one, and with `ReadError::JournalCopyChecksum` on a logged copy
+whose checksum fails. Under `ReadPolicy::Lenient` such a copy is skipped and its block keeps
+the copy before it. A journal that cannot be replayed is read as its homes hold it, and a scan
+reports why.
+
+A scan reports the unclean shutdown itself as one cosmetic finding,
+`ReadError::NotCleanlyUnmounted`. A driver records it as `needs_recovery` on a filesystem
+with a journal. On one without, it clears the clean bit of the superblock's state. The
+finding is the same either way.
+
+A driver that found errors records that in the state as well. A scan reports it as
+`ReadError::ErrorsDetected`, beside the fault itself where the fault is still there.
+`Reader::state_on_disk` returns the state word as the last driver left it.
+
+Recovery stops at the journal. A mount also clears the orphan list, deleting files that were
+unlinked while still open. Those files are unreachable from the tree, so a walk never meets
+them.
+
 ### Writing the tree back out
 
 With the `dir` feature enabled, on Linux, `DirectorySink` is the same thing as a tree on
@@ -880,12 +924,28 @@ this crate wrote:
   and this crate does not model is part of the checksum it was part of when it was
   computed. `l_i_version`, which the kernel bumps on every inode update, is one such
   field, and the superblock's error record is another.
+- **Either descriptor layout**. Under `meta_bg` the descriptor table is split into
+  meta-groups, the runs of groups whose descriptors fill one block. Each keeps its block at
+  the start of its own first group, a layout the writer never produces. `mke2fs` writes it
+  at 800 GiB and above at 1 KiB blocks. A kernel converts a filesystem to it when growing
+  one online past its reservation. Under `sparse_super2` the superblock copies are found in
+  the two groups the superblock names.
+- **A journal left needing recovery**, replayed as the filesystem opens, as the section
+  above describes.
+- **A hash index another tool built**, a kernel growing a directory a name at a time or
+  `e2fsck -fD` rebuilding one whole. A lookup follows it, as the next section describes.
 
 ### Resolving a path
 
 `lookup` resolves a path to its inode, following symbolic links. Targets resolve
 against the image's own root, never the host's, and resolution stops at a bounded
-number of links, so a cycle terminates:
+number of links, so a cycle terminates.
+
+A directory with a hash index is searched through it. A lookup hashes the name with the
+algorithm the index records, and reads the root, any interior node, and the leaf the hash
+leads to. It reads on into the following leaves while a run of names sharing the hash
+continues. A directory without an index is read block by block until the name turns up.
+Either way nothing is gathered, so `Limits::max_walk_entries` does not govern a lookup:
 
 ```rust,ignore
 # extern crate ferrosys;
@@ -920,13 +980,15 @@ what reaches them by the name a system actually uses.
 ### Checking an image
 
 `scan` walks the whole image and reports every deviation it finds as a structured
-`Anomaly`, rather than stopping at the first. Five such deviations are these:
+`Anomaly`, rather than stopping at the first. Six such deviations are these:
 
 - A checksum that does not match.
 - A reference out of range.
 - A structure that does not parse, or whose counts contradict each other.
 - An inode carrying a structure its superblock's feature words deny.
 - A directory entry naming an inode the filesystem does not have.
+- A name in an indexed directory sitting outside the leaf its hash leads to, where a lookup
+  trusting the index would not find it.
 
 It reports what is wrong, and does not refuse the image. `verify_checksums` is the strict
 counterpart, failing on the first object whose stored checksum does not match its
@@ -986,6 +1048,8 @@ any of it is read**. That covers these:
 - Every pointer in a classic block map.
 - The table bytes an inode is read from, bounded through the block the inode's *last* byte
   falls in.
+- A group descriptor, wherever its table or meta-group keeps it.
+- The home block of every copy a journal logs.
 
 A reference past the end is a `ReadError::OutOfRange`, and a scan's structural finding
 under the subsystem that named it.
@@ -1128,6 +1192,11 @@ first. Failing that, it matches without regard to the case of its ASCII letters,
 how every FAT driver finds a name. Bytes above ASCII are compared as they stand, for the
 reason below.
 
+A lookup reads a directory only as far as an exact match and gathers nothing. So
+`Limits::max_walk_entries` does not limit it, and an entry past the name is never read. A
+name matched only without regard to case reads on to the directory's end, since an exact
+match further on is the one returned.
+
 ### Short names above ASCII
 
 An eleven-byte short name is bytes in whatever code page the machine that created the entry
@@ -1198,6 +1267,17 @@ things:
 - A name no directory could hold.
 - A first cluster outside the volume.
 - A `.` or `..` that is not what the format requires.
+
+It reports a volume a driver had mounted and did not put down, at the cosmetic severity, as
+`fat::ReadError::VolumeDirty`. The FAT specification records that state as the
+clean-shutdown bit of table entry 1. A Linux driver leaves the table alone and sets bit 0 of
+the boot sector's reserved byte, `VolumeInfo::reserved`. Either one is
+reported, once.
+
+A driver marks only the primary boot sector, so the backup is compared with that bit set
+aside. A medium failure a driver recorded in entry 1 is `MediaFailure`, at the
+same severity. `Reader::volume_dirty` and `Reader::media_failure` answer the same questions
+without a scan.
 
 It checks every cluster chain for a loop, and for a cluster two chains both claim. It also
 checks for clusters that are marked allocated and reached by nothing at all. That last one
@@ -1424,9 +1504,9 @@ entirely plausible.
 #### Two names one directory cannot hold
 
 exFAT compares names through the volume's own up-case table. A source carrying `README` and
-`readme` in one directory therefore describes a directory a driver cannot resolve. A lookup
-has two answers and returns whichever it met first, leaving the other file unreachable by
-its own name. The pair is refused at the model boundary with both paths named.
+`readme` in one directory therefore describes a directory a driver cannot resolve. A
+driver's lookup has two answers and returns whichever it met first, leaving the other file
+unreachable by its own name. The pair is refused at the model boundary with both paths named.
 
 The comparison is the *volume's* rather than an approximation of it. This crate's writer lays
 down `RECOMMENDED_UPCASE_TABLE` and folds through that same table. The comparison a driver
@@ -1661,6 +1741,10 @@ A reader that folded through a table of its own would resolve names a driver doe
 miss names a driver finds. The difference is real rather than theoretical. A volume is free
 to carry a table that folds nothing, and its lookups are then case-sensitive.
 
+A lookup reads a directory only as far as an exact match, as FAT's does, so
+`Limits::max_walk_entries` does not limit it. A name matched through the table reads on to
+the directory's end, since an exact match further on is the one returned.
+
 ```rust
 # extern crate ferrosys;
 use ferrosys::exfat::{FormatOptions, Reader, format};
@@ -1729,9 +1813,9 @@ recording something that happened. The volume is well-formed, and every field is
 driver is supposed to have written. A strict read of a card somebody pulled out of a reader
 therefore still succeeds.
 
-Each message says what the bit means rather than which field held it. "This volume was not
-cleanly unmounted" sends a caller somewhere useful, and "`VolumeFlags` is `0x0002`" does
-not.
+Each message says what the bit means rather than which field held it. "The filesystem was
+not cleanly unmounted" sends a caller somewhere useful, and "`VolumeFlags` is `0x0002`" does
+not. It is the same sentence every family uses for the same state.
 
 ## Reading a btrfs
 
@@ -1882,6 +1966,10 @@ held against what the reader believed when it went to fetch it. Those are checks
 can make, for the same reason `Misplaced` is: the fields are inside what the checksum
 covers.
 
+A tree block in a mirrored block group has a copy in each stripe. A strict read refuses a
+block whose first copy fails those checks. A lenient read takes the next copy, failing only
+where every copy fails, and `scan` names the block and which copy served it.
+
 ### What it refuses to read at all
 
 Some filesystems are entirely well-formed and beyond this reader. Each is refused by a
@@ -1981,13 +2069,18 @@ most matters for.
 ### Scanning a whole filesystem
 
 `Reader::scan` walks every tree and reports rather than stopping, which is what a caller asking
-"is anything wrong with this image" wants. Two of what it reports are this family's alone.
+"is anything wrong with this image" wants. Three of what it reports are this family's own.
 
 **A live log tree**. A filesystem that was not cleanly unmounted has a nonzero `log_root`, and
-the committed trees are stale with respect to it. This crate never replays a log, so what it
-reads is the last committed transaction and the finding says so. It is cosmetic, since the
-image is conformant and every byte read is trustworthy. The message says what is *missing*
-rather than which field held an unexpected value.
+the committed trees are stale with respect to it. The btrfs reader never replays a log tree,
+so what it reads is the last committed transaction. The finding says so, after the sentence
+every family uses for a filesystem left mounted. It is cosmetic, since the image is
+conformant and every byte read is trustworthy. The message says what is *missing* rather
+than which field held an unexpected value.
+
+**A tree block read through a later copy**. Its first copy failed its checks, so a lenient
+read took the next one. The finding names the block and the copy that served it, at the
+integrity severity, since one copy of the filesystem's own metadata is damaged.
 
 **An item type this reader has no opinion about**. Skipped, counted, and named, one finding per
 type with the count. A used filesystem carries thousands of records of a handful of types

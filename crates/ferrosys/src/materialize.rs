@@ -2389,7 +2389,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         sb.inodes_per_group = l.inodes_per_group;
         sb.wtime = self.options.time.secs as u32;
         sb.max_mnt_count = 0xffff;
-        sb.state = 1; // cleanly unmounted
+        sb.state = crate::ondisk::STATE_CLEAN;
         sb.errors = self.options.errors.to_s_errors();
         sb.lastcheck = self.options.time.secs as u32;
         sb.rev_level = 1; // dynamic

@@ -281,6 +281,11 @@ pub trait Describe<R: FsTree> {
     fn cat(&self, reader: &mut R, path: &[u8], out: &mut dyn Write) -> Result<(), Error>;
 }
 
+/// How much of a stream of file bytes or archive members is gathered before it is
+/// written: enough that the output is a write per stretch of it, rather than one per
+/// member's header and per few kilobytes of each body.
+const OUTPUT_BUFFER: usize = 1 << 20;
+
 /// Carry out the mode the arguments asked for against one family's open reader.
 fn dispatch<R, D>(reader: &mut R, family: D, args: ExtractArgs) -> Result<(), Error>
 where
@@ -290,7 +295,7 @@ where
     match args.mode {
         ExtractMode::Cat(path) => {
             let stdout = io::stdout();
-            let mut out = stdout.lock();
+            let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock());
             family.cat(reader, &path, &mut out)?;
             out.flush().map_err(|source| Error::Io {
                 what: "standard output".to_string(),
@@ -319,7 +324,7 @@ where
             // The archive is the artifact, and it is the only thing on the standard
             // output: no summary, no count, not even on the standard error.
             let stdout = io::stdout();
-            let mut out = stdout.lock();
+            let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock());
             ArchiveSink::new(&mut out)
                 .synthesis(args.synthesis)
                 .write_tree(reader)?;
@@ -330,7 +335,7 @@ where
         }
         ExtractMode::ToTar(Stream::File(path)) => {
             let mut dest = Destination::open(&path, args.atomic)?;
-            let mut out = io::BufWriter::new(dest.file());
+            let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, dest.file());
             ArchiveSink::new(&mut out)
                 .synthesis(args.synthesis)
                 .write_tree(reader)?;

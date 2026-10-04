@@ -36,6 +36,9 @@ pub const FSINFO_TRAIL_SIGNATURE: u32 = 0xAA55_0000;
 /// would be trusting a cache nothing is obliged to invalidate.
 const FSINFO_UNKNOWN: u32 = 0xFFFF_FFFF;
 
+/// The bit of [`VolumeInfo::reserved`] a Linux driver sets while it has the volume mounted.
+pub const VOLUME_DIRTY: u8 = 0x01;
+
 /// The volume identity record shared by all three FAT types: what `fatlabel` reads and
 /// writes, and what a driver reports as a volume serial number.
 ///
@@ -47,6 +50,14 @@ pub struct VolumeInfo {
     /// The BIOS drive number a boot loader would be handed: `0x80` for a fixed disk,
     /// `0x00` for removable media. Nothing but boot code reads it.
     pub drive_number: u8,
+    /// The byte after the drive number, which the format reserves and a formatter writes as
+    /// zero.
+    ///
+    /// A Linux driver sets bit 0 ([`VOLUME_DIRTY`]) when it mounts the volume and clears it
+    /// when it unmounts the volume cleanly, so a volume it did not put down carries the bit
+    /// (observed of Linux 7.1's `vfat` driver on FAT12, FAT16 and FAT32). `fsck.fat` reports a
+    /// volume carrying it as not properly unmounted (observed of dosfstools 4.2).
+    pub reserved: u8,
     /// [`EXTENDED_BOOT_SIGNATURE`] when the three fields below are present. A volume
     /// without it carries no label and no identifier, which is legal and ancient.
     pub ext_boot_signature: u8,
@@ -77,8 +88,7 @@ impl VolumeInfo {
     fn read_at(buf: &[u8], off: usize) -> Self {
         Self {
             drive_number: get_u8(buf, off),
-            // Byte 1 is reserved and reads as zero on a freshly formatted volume; Windows
-            // NT used it as a dirty flag, so it is not modelled as one.
+            reserved: get_u8(buf, off + 1),
             ext_boot_signature: get_u8(buf, off + 2),
             volume_id: get_u32(buf, off + 3),
             label: get_arr::<11>(buf, off + 7),
@@ -86,10 +96,10 @@ impl VolumeInfo {
         }
     }
 
-    /// Write the record at `off`, leaving the reserved byte at `off + 1` alone.
+    /// Write the record at `off`.
     fn write_at(&self, buf: &mut [u8], off: usize) {
         put_u8(buf, off, self.drive_number);
-        put_u8(buf, off + 1, 0);
+        put_u8(buf, off + 1, self.reserved);
         put_u8(buf, off + 2, self.ext_boot_signature);
         put_u32(buf, off + 3, self.volume_id);
         put_arr(buf, off + 7, &self.label);
@@ -143,6 +153,26 @@ pub enum BootSectorTail {
         /// The volume identity record, at byte 64.
         volume: VolumeInfo,
     },
+}
+
+impl BootSectorTail {
+    /// The volume identity record, whichever type's tail carries it.
+    #[must_use]
+    pub const fn volume(&self) -> &VolumeInfo {
+        match self {
+            BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => volume,
+        }
+    }
+
+    /// Where in the boot sector the volume identity record begins: byte 36 on FAT12 and
+    /// FAT16, and byte 64 on FAT32.
+    #[must_use]
+    pub const fn volume_offset(&self) -> usize {
+        match self {
+            BootSectorTail::Fat1216 { .. } => 36,
+            BootSectorTail::Fat32 { .. } => 64,
+        }
+    }
 }
 
 /// Sector 0 of a FAT volume: a jump instruction, the BIOS parameter block that describes
@@ -464,6 +494,7 @@ mod tests {
     fn volume(fs_type: &[u8; 8]) -> VolumeInfo {
         VolumeInfo {
             drive_number: 0x80,
+            reserved: 0,
             ext_boot_signature: EXTENDED_BOOT_SIGNATURE,
             volume_id: 0x1234_abcd,
             label: VolumeInfo::NO_NAME,

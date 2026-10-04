@@ -172,6 +172,27 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
     Ok(())
 }
 
+/// Refuse `--groups` for a family that has no block groups to report.
+///
+/// A block group is ext's unit of self-description, and no other family has anything of the
+/// kind, so the option is refused rather than passed over. A report that quietly omitted the
+/// section would read as a filesystem with no groups in it, which is a different claim from
+/// the question not applying. `reason` says how the family divides itself instead.
+fn refuse_groups(
+    args: &InspectArgs,
+    family: &'static str,
+    reason: &'static str,
+) -> Result<(), Error> {
+    if args.groups {
+        return Err(Error::NotForFamily {
+            option: "--groups",
+            family,
+            reason,
+        });
+    }
+    Ok(())
+}
+
 /// The envelope a person reads: the head, then the family's own description, then the
 /// verdict.
 fn table(report: &Report) -> String {

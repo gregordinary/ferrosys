@@ -9,6 +9,7 @@
 #[non_exhaustive] pub enum ferrosys::NodeKind
 #[non_exhaustive] pub enum ferrosys::OpenError
 #[non_exhaustive] pub enum ferrosys::Property
+#[non_exhaustive] pub enum ferrosys::ReadPolicy
 #[non_exhaustive] pub enum ferrosys::TreeError
 #[non_exhaustive] pub enum ferrosys::exfat::BootDefect
 #[non_exhaustive] pub enum ferrosys::exfat::BoundaryAlign
@@ -128,7 +129,9 @@
 #[non_exhaustive] pub struct ferrosys::FidelityRecord
 #[non_exhaustive] pub struct ferrosys::Finding
 #[non_exhaustive] pub struct ferrosys::Limits
+#[non_exhaustive] pub struct ferrosys::Metadata
 #[non_exhaustive] pub struct ferrosys::OpenOptions
+#[non_exhaustive] pub struct ferrosys::SourceEntry
 #[non_exhaustive] pub struct ferrosys::Synthesis
 #[non_exhaustive] pub struct ferrosys::TreeEntry<N>
 #[non_exhaustive] pub struct ferrosys::exfat::Anomaly
@@ -728,7 +731,6 @@ pub const fn ferrosys::exfat::ondisk::percent_in_use(used: u32, total: u32) -> u
 pub const fn ferrosys::exfat::ondisk::unpack_timestamp(field: u32, tenth: u8) -> crate::time::DosTimestamp
 pub const fn ferrosys::exfat::ondisk::utc_offset_minutes(byte: u8) -> Option<i32>
 pub enum ferrosys::AclQualifier
-pub enum ferrosys::ReadPolicy
 pub enum ferrosys::Severity
 pub enum ferrosys::exfat::Storage
 pub ferrosys::AclEntry::perm: u16
@@ -1199,6 +1201,8 @@ pub fn ferrosys::ScanReport::to_report(&self) -> FindingReport
 pub fn ferrosys::ScanReport::worst_severity(&self) -> Option<Severity>
 pub fn ferrosys::Severity::from_name(name: &str) -> Option<Self>
 pub fn ferrosys::Source::into_entries(self) -> Vec<SourceEntry> /* required */
+pub fn ferrosys::SourceEntry::new(path: impl Into<Vec<u8>>, kind: EntryKind, meta: Metadata) -> Self
+pub fn ferrosys::SourceEntry::with_xattrs(self, xattrs: Vec<Xattr>) -> Self
 pub fn ferrosys::TreeBuilder::block_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::char_device(self, path: impl Into<Vec<u8>>, major: u32, minor: u32, meta: Metadata) -> Self
 pub fn ferrosys::TreeBuilder::directory(self, path: impl Into<Vec<u8>>, meta: Metadata) -> Self
@@ -1305,9 +1309,7 @@ pub struct ferrosys::FidelityReport { /* private fields */ }
 pub struct ferrosys::FileRange { /* private fields */ }
 pub struct ferrosys::FindingReport { /* private fields */ }
 pub struct ferrosys::LayeredSource { /* private fields */ }
-pub struct ferrosys::Metadata
 pub struct ferrosys::ScanReport<A> { /* private fields */ }
-pub struct ferrosys::SourceEntry
 pub struct ferrosys::Timestamp
 pub struct ferrosys::TreeBuilder { /* private fields */ }
 pub struct ferrosys::Xattr

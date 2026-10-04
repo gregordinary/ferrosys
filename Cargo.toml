@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -65,8 +65,9 @@ miniz_oxide = { version = "0.9.1", default-features = false }
 # verifies: btrfs records its own crc32c over every sector of the compressed bytes, so what
 # a frame's own checksum would cover is already covered by the checksum the reader verifies.
 # It carries `unsafe` in a hand-written ring buffer, which is a departure from this crate's
-# own bar and is stated here rather than left to be discovered. The feature is off by
-# default, so a build that does not ask for Zstandard carries none of it.
+# own bar and is stated here rather than left to be discovered. The feature is in the
+# default build, so a consumer that wants none of it turns the default off and leaves `zstd`
+# out of the features it names.
 ruzstd = { version = "0.9.0", default-features = false, features = ["std"] }
 # The `serde` feature's gate reads what the derives emit, so the shape a consumer sees is
 # asserted rather than assumed. A development dependency only; never shipped.
@@ -80,7 +81,7 @@ proptest = "1.11.0"
 lzokay = { version = "2.0.1", default-features = false, features = ["compress", "std"] }
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.5"` resolves `>=0.5.0, <0.6.0` — the published
+# minor is the breaking axis, so `"0.6"` resolves `>=0.6.0, <0.7.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
-ferrosys = { path = "crates/ferrosys", version = "0.5" }
+ferrosys = { path = "crates/ferrosys", version = "0.6" }

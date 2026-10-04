@@ -15,15 +15,16 @@
 //! what the block holds, and the entry slot that frees up carries the checksum tail.
 //!
 //! The low bit of an entry's hash marks a hash whose names continue from the
-//! previous block, so a lookup that lands on it looks back one block. The hashes
-//! themselves always have that bit clear.
+//! previous block, so a lookup that does not find its name in one leaf goes on into
+//! the next while the entry leading there carries its hash with that bit set. The
+//! hashes themselves always have that bit clear.
 
 use super::{ParseError, get_u16, get_u32, put_u8, put_u16, put_u32};
 
-/// On-disk size of one index entry (`struct ext4_dx_entry`): a hash and a block.
+/// On-disk size of one index entry (`struct dx_entry`): a hash and a block.
 pub const DX_ENTRY_LEN: usize = 8;
 
-/// On-disk size of the index checksum tail (`struct ext4_dx_tail`).
+/// On-disk size of the index checksum tail (`struct dx_tail`).
 pub const DX_TAIL_LEN: usize = 8;
 
 /// Byte offset of `dt_checksum` within the index checksum tail, past the
@@ -125,7 +126,7 @@ pub fn write_dx_root_header(
     buf[20] = b'.';
     buf[21] = b'.';
 
-    // struct ext4_dx_root_info.
+    // struct dx_root_info.
     put_u32(buf, 24, 0); // reserved_zero
     put_u8(buf, 28, hash_version);
     put_u8(buf, 29, 8); // info_length

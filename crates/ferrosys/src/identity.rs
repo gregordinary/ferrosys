@@ -42,11 +42,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use crate::bytes::{get_u16, get_u32, get_u32_be, put_arr, put_u32, put_u32_be};
 use crate::crc32c::crc32c;
 use crate::feature::Incompat;
-use crate::geometry::sparse_super_has_copy;
+use crate::geometry::carries_superblock;
 use crate::io::{offset_of, read_exact_at};
 use crate::journal;
 use crate::ondisk::{SuperBlock, superblock_checksum};
-use crate::read::{OpenOptions, ReadError, Reader};
+use crate::read::{INCOMPAT_RECOVER, OpenOptions, ReadError, Reader};
 
 /// What to change about an image's identity. Every field left unset is left alone.
 ///
@@ -63,11 +63,14 @@ pub struct IdentityChange {
     /// `metadata_csum_seed` on, so that a UUID change leaves every existing metadata
     /// checksum valid.
     ///
-    /// Only meaningful on a filesystem carrying `metadata_csum` without
+    /// It sets something only on a filesystem carrying `metadata_csum` without
     /// `metadata_csum_seed`, which is the one combination where a UUID change would
-    /// otherwise invalidate the image. Requesting it anywhere else is an error rather than
-    /// a no-op, because the feature it sets is one an older kernel refuses to mount and
-    /// setting it for no benefit is not a thing to do quietly.
+    /// otherwise invalidate the image. On a filesystem already carrying
+    /// `metadata_csum_seed` the seed is already recorded, and every copy takes the
+    /// primary's: that is what finishes a run cut short after the primary was written.
+    ///
+    /// Requesting it on a filesystem without `metadata_csum` is an error, because nothing
+    /// there is seeded and the feature it sets is one an older kernel refuses to mount.
     pub set_checksum_seed: bool,
 }
 
@@ -93,7 +96,7 @@ pub struct IdentityReport {
     pub superblocks: u32,
     /// Whether the journal's own record of the filesystem UUID was written.
     pub journal_superblock: bool,
-    /// Whether `metadata_csum_seed` was turned on and the seed recorded.
+    /// Whether `metadata_csum_seed` was turned on, and the seed recorded, in any copy.
     pub checksum_seed_set: bool,
 }
 
@@ -115,16 +118,13 @@ pub enum IdentityError {
          UUID itself — set the checksum seed to keep them valid"
     )]
     UuidWouldInvalidateChecksums,
-    /// The checksum seed was asked for where it changes nothing.
+    /// The checksum seed was asked for on a filesystem whose metadata carries no checksums,
+    /// so there is nothing for a seed to keep valid.
     #[error(
-        "setting the checksum seed needs a filesystem with metadata_csum and without \
-         metadata_csum_seed; this one is {found}"
+        "setting the checksum seed needs a filesystem with metadata_csum, and this one has \
+         none: nothing in it is seeded from the UUID"
     )]
-    #[non_exhaustive]
-    ChecksumSeedPointless {
-        /// What the filesystem's checksum features actually are.
-        found: &'static str,
-    },
+    ChecksumSeedPointless,
     /// The image ends before a group the superblock's geometry claims exists, so a backup
     /// this rewrite must patch is not in the file at all.
     ///
@@ -194,6 +194,14 @@ pub enum IdentityError {
         /// The checksum its bytes compute to.
         computed: u32,
     },
+    /// The filesystem needs journal recovery: its journal holds committed transactions that
+    /// have not reached their homes. One of them may carry a superblock's block, and recovery
+    /// writes it back over whatever identity the home copy holds.
+    #[error(
+        "the filesystem needs journal recovery, which writes any journaled copy of the \
+         superblock back over a new identity: recover it first, by mounting it or with e2fsck"
+    )]
+    NeedsRecovery,
     /// The journal declares a checksummed log whose checksum is not the crc32c jbd2
     /// defines, so the word covering its UUID cannot be recomputed.
     #[error(
@@ -215,10 +223,19 @@ pub enum IdentityError {
 /// refusal leaves the image untouched rather than half re-identified.
 ///
 /// A failure of the writing itself is the one case that leaves copies disagreeing, and the
-/// answer to it is to run this again: the change is stated as what each copy becomes rather
-/// than as an edit to what it holds, so a second run over a half-written image reaches the
-/// same result as a first run over an untouched one. The primary is written before any backup,
-/// so a run cut short still leaves the copy every reader consults holding the new identity.
+/// answer to it is to run the same change again. Each copy is written whole, and is stated as
+/// what it becomes rather than as an edit to what it holds — so whichever of
+/// the writes reached the image, a second run reaches exactly the bytes a first run over the
+/// untouched image does. Whichever, not only the first few: a device that loses power may
+/// keep any subset of the writes issued to it, in any order.
+///
+/// The primary is written first, the backups next, and the journal's record last, so a run
+/// stopped partway leaves the copy every reader consults holding the new identity. That is
+/// the order the writes are issued in; what a device keeps after a power loss is the
+/// device's, and making the writes durable is the caller's — `rewrite_identity` flushes
+/// `image`, which for a [`File`](std::fs::File) does not reach the disk until
+/// [`sync_all`](std::fs::File::sync_all). A copy torn partway through its own write fails its
+/// checksum, on a filesystem carrying `metadata_csum`, and the next run refuses it as damaged.
 ///
 /// The image is rewritten where it lies. There is no write-elsewhere-and-rename form of this,
 /// because the image already exists and copying it to gain one would duplicate every byte of a
@@ -240,11 +257,13 @@ pub enum IdentityError {
 /// [`IdentityError::SuperblockChecksumMismatch`] if its primary superblock is damaged;
 /// [`IdentityError::UuidWouldInvalidateChecksums`] if the UUID seeds the filesystem's
 /// checksums and [`set_checksum_seed`](IdentityChange::set_checksum_seed) was not asked
-/// for; [`IdentityError::ChecksumSeedPointless`] if it was asked for where it does nothing;
+/// for; [`IdentityError::ChecksumSeedPointless`] if it was asked for on a filesystem without
+/// `metadata_csum`;
 /// [`IdentityError::BackupNotASuperblock`] if a backup copy is missing;
 /// [`IdentityError::JournalChecksumMismatch`] if the journal superblock is damaged;
 /// [`IdentityError::JournalChecksumUnsupported`] if the log declares a checksum that is not
-/// crc32c; and [`IdentityError::Io`] if the image cannot be read or written.
+/// crc32c; [`IdentityError::NeedsRecovery`] if the filesystem's journal needs recovery; and
+/// [`IdentityError::Io`] if the image cannot be read or written.
 ///
 /// # Example
 ///
@@ -305,6 +324,16 @@ fn plan_rewrite<F: Read + Write + Seek>(
     change: &IdentityChange,
     base: u64,
 ) -> Result<Rewrite, IdentityError> {
+    // Asked of the superblock on disk before anything else, because opening the filesystem
+    // replays a journal needing recovery and reads through it. A recovery at the next mount
+    // writes the journal's copies to their homes, a superblock's among them, so the copies
+    // this would patch are not the ones the filesystem ends up with.
+    let primary = read_exact_at(image, base.saturating_add(1024), SuperBlock::SIZE)?;
+    if get_u16(&primary, SuperBlock::MAGIC_OFFSET) == crate::ondisk::SUPERBLOCK_MAGIC
+        && get_u32(&primary, SuperBlock::FEATURE_INCOMPAT_OFFSET) & INCOMPAT_RECOVER != 0
+    {
+        return Err(IdentityError::NeedsRecovery);
+    }
     // The reader borrows the handle rather than taking it, so the same descriptor writes
     // the copies afterwards.
     let mut reader = Reader::open_with(&mut *image, &OpenOptions::new().base(base))?;
@@ -351,7 +380,7 @@ fn plan_rewrite<F: Read + Write + Seek>(
                 });
             }
         };
-        if feature.is_sparse_super() && !sparse_super_has_copy(group) {
+        if !carries_superblock(group, &sb) {
             continue;
         }
         // The block is under `source_blocks`, which is the image's own length divided by
@@ -367,6 +396,7 @@ fn plan_rewrite<F: Read + Write + Seek>(
 
     let superblocks = u32::try_from(copies.len()).unwrap_or(u32::MAX);
     let mut writes = Vec::with_capacity(copies.len() + 1);
+    let mut seed_turned_on = false;
     for (group, offset) in copies {
         let mut bytes = read_exact_at(image, base + offset, SuperBlock::SIZE)?;
         // Every copy must be a superblock before any is written, so a damaged backup is a
@@ -387,7 +417,7 @@ fn plan_rewrite<F: Read + Write + Seek>(
         if checksummed {
             verify_checksum(&bytes, group)?;
         }
-        patch(&mut bytes, change, seed_to_set, checksummed);
+        seed_turned_on |= patch(&mut bytes, change, seed_to_set, checksummed);
         writes.push((offset, bytes));
     }
 
@@ -416,55 +446,68 @@ fn plan_rewrite<F: Read + Write + Seek>(
         report: IdentityReport {
             superblocks,
             journal_superblock: journal_written,
-            checksum_seed_set: seed_to_set.is_some(),
+            checksum_seed_set: seed_turned_on,
         },
     })
 }
 
-/// The seed to record and the feature to set, or `None` when neither is wanted.
+/// The seed every copy is to record, with `metadata_csum_seed` set beside it, or `None` when
+/// the copies' seed fields are left as they are.
 ///
 /// This is where the one combination that cannot be re-identified is refused: `metadata_csum`
 /// without `metadata_csum_seed` seeds every checksum in the filesystem from the UUID.
+///
+/// The decision is the primary's, and every copy takes it. A primary that already records a
+/// seed hands it to each copy whose UUID moves: a copy's UUID may move only where the copy
+/// records the seed its filesystem's checksums derive from, and the one way a backup can lack
+/// it while the primary has it is a rewrite that stopped between the two.
 fn decide_checksum_seed(
     change: &IdentityChange,
     sb: &SuperBlock,
     checksummed: bool,
     seeded: bool,
 ) -> Result<Option<u32>, IdentityError> {
-    let seedable = checksummed && !seeded;
-    if change.set_checksum_seed {
-        if !seedable {
-            return Err(IdentityError::ChecksumSeedPointless {
-                found: match (checksummed, seeded) {
-                    (false, _) => "without metadata_csum, so nothing is seeded",
-                    (true, true) => "already carrying metadata_csum_seed",
-                    (true, false) => unreachable!("seedable is checked above"),
-                },
-            });
+    if !checksummed {
+        if change.set_checksum_seed {
+            return Err(IdentityError::ChecksumSeedPointless);
         }
+        return Ok(None);
+    }
+    if seeded {
+        let wanted = change.set_checksum_seed || change.uuid.is_some();
+        return Ok(wanted.then_some(sb.checksum_seed));
+    }
+    if change.set_checksum_seed {
         // The seed every existing checksum was computed from: the crc32c of the UUID the
         // image carries now. Recording it is what lets the UUID move without them.
         return Ok(Some(crc32c(!0, &sb.uuid)));
     }
-    if change.uuid.is_some() && seedable {
+    if change.uuid.is_some() {
         return Err(IdentityError::UuidWouldInvalidateChecksums);
     }
     Ok(None)
 }
 
 /// Overwrite the identity fields in one superblock copy's own bytes, then its checksum.
-fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksummed: bool) {
+///
+/// Answers whether this copy took `metadata_csum_seed` here, having not carried it before.
+fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksummed: bool) -> bool {
     if let Some(uuid) = change.uuid {
         put_arr(bytes, SuperBlock::UUID_OFFSET, &uuid);
     }
     if let Some(label) = change.volume_name {
         put_arr(bytes, SuperBlock::VOLUME_NAME_OFFSET, &label);
     }
+    let mut turned_on = false;
     if let Some(seed) = seed {
         put_u32(bytes, SuperBlock::CHECKSUM_SEED_OFFSET, seed);
-        let incompat =
-            get_u32(bytes, SuperBlock::FEATURE_INCOMPAT_OFFSET) | Incompat::CSUM_SEED.bits();
-        put_u32(bytes, SuperBlock::FEATURE_INCOMPAT_OFFSET, incompat);
+        let incompat = get_u32(bytes, SuperBlock::FEATURE_INCOMPAT_OFFSET);
+        turned_on = incompat & Incompat::CSUM_SEED.bits() == 0;
+        put_u32(
+            bytes,
+            SuperBlock::FEATURE_INCOMPAT_OFFSET,
+            incompat | Incompat::CSUM_SEED.bits(),
+        );
     }
     if checksummed {
         // The record's checksum covers the identity fields written above, so it is
@@ -476,6 +519,7 @@ fn patch(bytes: &mut [u8], change: &IdentityChange, seed: Option<u32>, checksumm
             superblock_checksum(bytes),
         );
     }
+    turned_on
 }
 
 /// Overwrite the UUID the log records as its own, and the checksum covering it.
@@ -629,5 +673,256 @@ mod tests {
         assert!(report.superblocks >= 1);
         let reader = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
         assert_eq!(reader.superblock().uuid, [0x5a; 16]);
+    }
+
+    /// A handle that keeps every write issued to it, at the offset it was issued at, so a
+    /// test can replay any subset of them onto the image they were meant for.
+    struct Recording {
+        inner: Cursor<Vec<u8>>,
+        writes: Vec<(usize, Vec<u8>)>,
+    }
+
+    impl Read for Recording {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for Recording {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    impl Write for Recording {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let at = usize::try_from(self.inner.position()).expect("an in-memory offset");
+            let n = self.inner.write(buf)?;
+            self.writes.push((at, buf[..n].to_vec()));
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// The three checksum policies a filesystem can present to a rewrite: none at all,
+    /// checksums from a recorded seed, and checksums seeded from the UUID itself.
+    fn policies() -> [(&'static str, FormatOptions); 3] {
+        let plain = options(Profile::Ext2);
+        let seeded = options(Profile::Ext4);
+        let mut from_uuid = options(Profile::Ext4);
+        from_uuid.feature.incompat =
+            Incompat::from_bits(from_uuid.feature.incompat.bits() & !Incompat::CSUM_SEED.bits());
+        [
+            ("no metadata_csum", plain),
+            ("metadata_csum_seed", seeded),
+            ("metadata_csum seeded from the UUID", from_uuid),
+        ]
+    }
+
+    /// An image with backups to write as well as the primary: 1 KiB blocks put a group every
+    /// 8 MiB, so 32 MiB holds groups 0 to 3 and copies in groups 0, 1, and 3.
+    fn multi_group_image(mut options: FormatOptions) -> Vec<u8> {
+        options.feature = options.feature.with_block_size(1024);
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new().file(
+            b"/a".to_vec(),
+            b"contents\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+        format(source, 32 * MIB, options)
+            .expect("format")
+            .into_bytes()
+    }
+
+    /// Every change a rewrite can be asked for, each field taking each value it can.
+    ///
+    /// Built by exhaustive destructure, so a field added to [`IdentityChange`] is a compile
+    /// error here until the sweep decides what values it takes.
+    fn every_change() -> Vec<IdentityChange> {
+        let mut out = Vec::new();
+        for uuid in [None, Some([0x5a; 16])] {
+            for volume_name in [None, Some(*b"relabelled\0\0\0\0\0\0")] {
+                for set_checksum_seed in [false, true] {
+                    let mut change = IdentityChange::new();
+                    let IdentityChange {
+                        uuid: u,
+                        volume_name: v,
+                        set_checksum_seed: s,
+                    } = &mut change;
+                    *u = uuid;
+                    *v = volume_name;
+                    *s = set_checksum_seed;
+                    out.push(change);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn whichever_writes_landed_a_second_run_reaches_the_same_bytes() {
+        // The contract a cut-short rewrite is answered by: run the same change again. A
+        // process stopped partway leaves the first few writes; a device that loses power may
+        // keep any subset of them. So every subset is replayed onto the untouched image, the
+        // same change is run over it, and the result must be the uncut run's bytes exactly.
+        //
+        // The domain: the three checksum policies, every change by exhaustive destructure,
+        // and every subset of the writes each one issues — the primary, the backups in
+        // groups 1 and 3, and the journal's record where the UUID moves on a journalled
+        // filesystem.
+        let mut swept = 0;
+        for (policy, options) in policies() {
+            let checksummed = options.feature.has_metadata_csum();
+            let seeded = options.feature.has_csum_seed();
+            let original = multi_group_image(options);
+            for change in every_change() {
+                let refused_up_front = (change.set_checksum_seed && !checksummed)
+                    || (change.uuid.is_some()
+                        && checksummed
+                        && !seeded
+                        && !change.set_checksum_seed);
+                let mut first = Recording {
+                    inner: Cursor::new(original.clone()),
+                    writes: Vec::new(),
+                };
+                let result = rewrite_identity(&mut first, &change);
+                if refused_up_front {
+                    assert!(result.is_err(), "{policy}, {change:?}: expected a refusal");
+                    assert!(
+                        first.writes.is_empty(),
+                        "{policy}, {change:?}: a refusal wrote"
+                    );
+                    continue;
+                }
+                let report =
+                    result.unwrap_or_else(|e| panic!("{policy}, {change:?}: the uncut run: {e}"));
+                let target = first.inner.into_inner();
+                let writes = first.writes;
+
+                // The order the documentation promises: the primary first, the journal's
+                // record last.
+                assert_eq!(
+                    writes[0].0, 1024,
+                    "{policy}, {change:?}: the primary goes first"
+                );
+                assert_eq!(
+                    writes.len(),
+                    report.superblocks as usize + usize::from(report.journal_superblock),
+                    "{policy}, {change:?}: one write per copy"
+                );
+                assert_eq!(
+                    report.superblocks, 3,
+                    "{policy}: copies in groups 0, 1, and 3"
+                );
+
+                for landed in 0u32..1 << writes.len() {
+                    let mut bytes = original.clone();
+                    for (i, (at, data)) in writes.iter().enumerate() {
+                        if landed & (1 << i) != 0 {
+                            bytes[*at..*at + data.len()].copy_from_slice(data);
+                        }
+                    }
+                    rewrite_identity(&mut Cursor::new(&mut bytes), &change).unwrap_or_else(|e| {
+                        panic!(
+                            "{policy}, {change:?}, writes {landed:#b} landed: the second run: {e}"
+                        )
+                    });
+                    assert!(
+                        bytes == target,
+                        "{policy}, {change:?}, writes {landed:#b} landed: the second run did \
+                         not reach the uncut run's bytes"
+                    );
+                    swept += 1;
+                }
+            }
+        }
+        // Three copies make 8 subsets, and a journal record makes 16. Without metadata_csum
+        // (and without a journal): the four changes not asking for the seed, 4 x 8. With a
+        // recorded seed, all eight: the four moving the UUID 4 x 16, the rest 4 x 8. Seeded
+        // from the UUID, the two moving it without the seed are refused: the two moving it
+        // with the seed 2 x 16, the four leaving it 4 x 8.
+        assert_eq!(swept, 32 + 96 + 64, "the cases the sweep ran");
+    }
+
+    #[test]
+    fn a_copy_torn_partway_through_its_write_is_refused_as_damaged() {
+        // A superblock is two 512-byte sectors, and a device that loses power between them
+        // keeps one. The identity fields are in the first and the checksum in the second, so
+        // a torn copy no longer checks out — and the next run refuses it rather than writing a
+        // correct checksum over it.
+        let original = multi_group_image(options(Profile::Ext4));
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        let mut first = Recording {
+            inner: Cursor::new(original.clone()),
+            writes: Vec::new(),
+        };
+        rewrite_identity(&mut first, &change).expect("the uncut run");
+
+        for (copy, (at, data)) in first.writes.iter().take(2).enumerate() {
+            let mut bytes = original.clone();
+            bytes[*at..*at + 512].copy_from_slice(&data[..512]);
+            let err = rewrite_identity(&mut Cursor::new(&mut bytes), &change)
+                .expect_err("a torn copy is refused");
+            match copy {
+                0 => assert!(
+                    matches!(
+                        err,
+                        IdentityError::Read(ReadError::ChecksumMismatch { .. })
+                            | IdentityError::SuperblockChecksumMismatch { group: 0, .. }
+                    ),
+                    "a torn primary: {err:?}"
+                ),
+                _ => assert!(
+                    matches!(
+                        err,
+                        IdentityError::SuperblockChecksumMismatch { group: 1, .. }
+                    ),
+                    "a torn backup: {err:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn a_filesystem_needing_recovery_is_refused_untouched() {
+        // A transaction in the journal may carry a superblock's block, and recovery at the
+        // next mount writes it home over whatever identity is there. So the rewrite refuses
+        // before it reads a copy, whether or not the journal could be replayed.
+        let mut bytes = image(Profile::Ext4);
+        let at = 1024 + SuperBlock::FEATURE_INCOMPAT_OFFSET;
+        let incompat = get_u32(&bytes, at) | INCOMPAT_RECOVER;
+        bytes[at..at + 4].copy_from_slice(&incompat.to_le_bytes());
+        let before = bytes.clone();
+        let mut change = IdentityChange::new();
+        change.volume_name = Some(*b"relabelled\0\0\0\0\0\0");
+        let err = rewrite_identity(&mut Cursor::new(&mut bytes), &change)
+            .expect_err("a filesystem needing recovery is refused");
+        assert!(matches!(err, IdentityError::NeedsRecovery), "{err:?}");
+        assert!(bytes == before, "nothing was written");
+    }
+
+    #[test]
+    fn the_seed_asked_for_again_is_already_recorded() {
+        // Asked for on a filesystem that records its seed already, there is nothing to set:
+        // the rewrite goes ahead and reports that no copy took the feature here.
+        let mut bytes = multi_group_image(options(Profile::Ext4));
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        change.set_checksum_seed = true;
+        let report = rewrite_identity(&mut Cursor::new(&mut bytes), &change).expect("rewrite");
+        assert!(!report.checksum_seed_set, "every copy already carried it");
+
+        // Asked for where nothing is seeded, it is refused.
+        let mut bytes = multi_group_image(options(Profile::Ext2));
+        let err = rewrite_identity(&mut Cursor::new(&mut bytes), &change)
+            .expect_err("no metadata_csum, nothing to seed");
+        assert!(
+            matches!(err, IdentityError::ChecksumSeedPointless),
+            "{err:?}"
+        );
     }
 }

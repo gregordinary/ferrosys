@@ -273,6 +273,17 @@ impl ChunkMap {
     /// [`ReadError::UnmappedLogical`] where no chunk covers the address, or where the run
     /// leaves the chunk that covers its start.
     pub fn translate(&self, logical: u64, len: u64) -> Result<u64, ReadError> {
+        Ok(self.copies_of(logical, len)?[0])
+    }
+
+    /// Where on the device every copy of the `len` bytes at `logical` begins, in the chunk's
+    /// stripe order: one for an unmirrored chunk, two for a mirrored one. Never empty, and the
+    /// first is [`translate`](Self::translate)'s answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`translate`](Self::translate).
+    pub(crate) fn copies_of(&self, logical: u64, len: u64) -> Result<Vec<u64>, ReadError> {
         let chunk = self
             .chunk_at(logical)
             .ok_or(ReadError::UnmappedLogical { logical, len })?;
@@ -281,9 +292,9 @@ impl ChunkMap {
             Some(end) if end <= chunk.length => {}
             _ => return Err(ReadError::UnmappedLogical { logical, len }),
         }
-        // The sum is bounded: `insert` established that this copy plus the chunk's whole
+        // Each sum is bounded: `insert` established that every copy plus the chunk's whole
         // length is within the device, and `within + len` is no larger than that length.
-        Ok(chunk.copies[0] + within)
+        Ok(chunk.copies.iter().map(|&copy| copy + within).collect())
     }
 }
 

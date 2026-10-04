@@ -4,12 +4,12 @@
 streams, in safe Rust (`#![forbid(unsafe_code)]`). It is self-contained, pure Rust, and
 runs anywhere Rust runs. It carries four families:
 
-- ext2, ext3, and ext4
+- ext2, ext3, and ext4, behind the `ext` feature
 - FAT12, FAT16, and FAT32, behind the `fat` feature
 - exFAT, behind the `exfat` feature
 - btrfs, behind the `btrfs` feature
 
-Every family but ext is off by default. Three properties hold across all four. The output
+A default build carries all four. Three properties hold across all four. The output
 is byte-reproducible. The reader is held to a never-panic contract on any input. The whole
 layout is decided before a byte is written.
 

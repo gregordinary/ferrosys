@@ -13,7 +13,8 @@ There is no `unsafe` block anywhere in the crate.
 
 All four families fix their byte order in the format, not in the host. ext2, ext3, and
 ext4, FAT12 through FAT32, exFAT, and btrfs all store their structures little-endian.
-The jbd2 journal superblock an ext filesystem carries is big-endian.
+The jbd2 journal an ext filesystem carries is big-endian: its superblock and every
+descriptor, commit, and revoke block in its log.
 
 Every family reads and writes each on-disk structure field by field, through explicit
 accessors of the order that structure defines. The byte layout is therefore spelled out

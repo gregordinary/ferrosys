@@ -50,7 +50,7 @@ use tar::{Builder, EntryType, Header};
 use crate::archive::ArchiveError;
 use crate::fidelity::{Direction, FidelityReport, Synthesis};
 use crate::time::Timestamp;
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError};
 
 /// `/lost+found`, the one path an archive must not carry: every filesystem makes it for
 /// itself, and a formatter refuses a source that tries to make it again.
@@ -256,7 +256,11 @@ impl<W: Write> ArchiveSink<W> {
                 .append(&header, std::io::empty())
                 .map_err(ArchiveError::Io);
         }
-        let body = NodeData::new(tree, &m.node, size);
+        // `tar` copies a body a few kilobytes at a time. Buffered to the window, each read of
+        // the filesystem moves up to a mebibyte, which is what lets a reader fetch the
+        // blocks of a contiguous file in one request rather than two at a time.
+        let window = usize::try_from(size).unwrap_or(usize::MAX).min(BODY_WINDOW);
+        let body = std::io::BufReader::with_capacity(window, NodeData::new(tree, &m.node, size));
         self.builder
             .append(&header, body)
             .map_err(|e| ArchiveError::from_body_io(e, &m.path))

@@ -4,11 +4,12 @@
 //! filesystem and reports every deviation it meets, which is what a caller asking "is anything
 //! wrong with this image" wants and what a caller asking "give me this file" does not.
 //!
-//! # The two things this family reports that no other here can
+//! # What this family reports that no other here can
 //!
 //! **A live log tree.** A filesystem that was not cleanly unmounted has a nonzero `log_root`,
-//! and the committed trees are stale with respect to it. This crate never replays a log, so
-//! what it reads is the last committed transaction — and it says so. The finding is cosmetic
+//! and the committed trees are stale with respect to it. This reader never replays a log tree,
+//! so what it reads is the last committed transaction — and it says so, after the sentence
+//! every family uses for a filesystem left mounted. The finding is cosmetic
 //! because every byte read is trustworthy and the image is conformant, but the message says
 //! what is *missing* rather than only that something is: the filesystem genuinely holds writes
 //! the committed trees do not.

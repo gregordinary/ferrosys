@@ -32,46 +32,47 @@ documentation = "https://docs.rs/ferrosys"
 # family-agnostic substrate — the `crc32c` primitive, the byte accessors, the `Filesystem` /
 # `detect` selector, and the source and extraction vocabulary — and `detect` recognizes
 # nothing.
-default = ["ext"]
+#
+# The default carries all four families and the three decoders, so a default build reads
+# what a Linux kernel mounts, a compressed btrfs root included. A consumer that wants fewer
+# turns the default off and names them.
+default = ["ext", "fat", "exfat", "btrfs", "zlib", "lzo", "zstd"]
 # The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
 # structures, reached through the `ext` module.
 ext = []
-# The FAT12/FAT16/FAT32 family, reached through the `fat` module. Off by default: a
-# consumer that wants an ext image should not compile a FAT planner. Granularity is per
+# The FAT12/FAT16/FAT32 family, reached through the `fat` module. Granularity is per
 # family rather than per format — the three FATs are one lineage sharing a BIOS parameter
 # block, a directory format, and a cluster heap, differing only in the width of a FAT entry
 # and in where the root directory sits.
 fat = []
-# The exFAT family, reached through the `exfat` module. Off by default, for the reason `fat`
-# is. It is a family of its own rather than a member of that one: the two share the word
-# "cluster" and no bytes — a different boot region, a different directory entry format, a
-# different name encoding, and an allocation bitmap FAT has no concept of.
+# The exFAT family, reached through the `exfat` module. It is a family of its own rather
+# than a member of that one: the two share the word "cluster" and no bytes — a different
+# boot region, a different directory entry format, a different name encoding, and an
+# allocation bitmap FAT has no concept of.
 exfat = []
-# The btrfs family, reached through the `btrfs` module. Off by default, for the reason `fat`
-# is. It shares no structure with any of the three above: a copy-on-write filesystem built
-# out of B-trees over a logical address space, where a chunk tree maps that space onto the
-# device and every metadata block carries its own checksum.
+# The btrfs family, reached through the `btrfs` module. It shares no structure with any of
+# the three above: a copy-on-write filesystem built out of B-trees over a logical address
+# space, where a chunk tree maps that space onto the device and every metadata block
+# carries its own checksum.
 btrfs = []
-# The tar/PAX archive `Source` and `Sink`. Off by default so the base build carries only
-# `thiserror`; enabling it pulls in the `tar` crate (no default features, so no
-# host-side xattr writes) for parsing archives, their PAX timestamps and xattrs,
-# and SCHILY ACL records. It names no family: a source feeds whichever family is being
-# written, and a sink drains whichever one was opened.
+# The tar/PAX archive `Source` and `Sink`. Off by default; enabling it pulls in the `tar`
+# crate (no default features, so no host-side xattr writes) for parsing archives, their PAX
+# timestamps and xattrs, and SCHILY ACL records. It names no family: a source feeds
+# whichever family is being written, and a sink drains whichever one was opened.
 tar = ["dep:tar"]
 # The host-directory `Source` and `Sink`: the walk that turns a tree on this machine into
 # the entries a format writes, and the extraction that writes a filesystem's contents back
-# out as a tree. Off by default so the base build carries only `thiserror`; enabling it
-# pulls in `rustix` for the directory, node, ownership and extended-attribute calls the
-# standard library has no equivalent of. Both ends read and write Linux inode metadata and
-# Linux extended attributes, so they are present on Linux. Like `tar`, neither end names a
-# family.
+# out as a tree. Off by default; enabling it pulls in `rustix` for the directory, node,
+# ownership and extended-attribute calls the standard library has no equivalent of. Both
+# ends read and write Linux inode metadata and Linux extended attributes, so they are
+# present on Linux. Like `tar`, neither end names a family.
 dir = ["dep:rustix"]
 # The three ways a filesystem stores a run of bytes in fewer of them, each behind its own
-# feature and each off by default. A build carrying one reads a file whose extents are
-# encoded that way; a build without it reports such a file as one it does not decode, naming
-# the algorithm, rather than handing back the bytes on the volume as though they were the
-# file's. Verification is unaffected either way — the checksums a filesystem records cover
-# the bytes it stored, so they are checked without any of this.
+# feature. A build carrying one reads a file whose extents are encoded that way; a build
+# without it reports such a file as one it does not decode, naming the algorithm, rather
+# than handing back the bytes on the volume as though they were the file's. Verification is
+# unaffected either way — the checksums a filesystem records cover the bytes it stored, so
+# they are checked without any of this.
 #
 # Named for the algorithm rather than for a family, as `tar` and `dir` are named for what
 # they are: an encoding is a property of a run of bytes and not of the format around it, and
@@ -96,8 +97,8 @@ zstd = ["dep:ruzstd"]
 # Serialization only — nothing here is deserialized, since these values are read from an
 # image or produced by a planner, never reconstructed from a document. The crate's own
 # `to_json` / `to_sarif` emitters are unaffected: they stay the schema-versioned canonical
-# form, and this is for a consumer whose own document has its own shape. Off by default so
-# the base build carries only `thiserror`; it covers whatever families the build carries.
+# form, and this is for a consumer whose own document has its own shape. Off by default; it
+# covers whatever families the build carries.
 serde = ["dep:serde"]
 
 [dependencies]

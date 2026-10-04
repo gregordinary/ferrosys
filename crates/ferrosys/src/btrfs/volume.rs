@@ -20,8 +20,11 @@
 //!
 //! This module does I/O.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek};
+use std::sync::Arc;
 
+use crate::cache::BlockCache;
 use crate::io::{io_error, offset_of, read_exact_at, read_exact_into};
 use crate::{Limits, OpenOptions, ReadPolicy};
 
@@ -159,6 +162,20 @@ pub struct Volume<R> {
     superblock: Box<SuperBlock>,
     mirrors: [Mirror; MIRRORS.len()],
     chunks: ChunkMap,
+    /// Tree blocks already read and verified. See [`TREE_CACHE_BYTES`].
+    cache: BlockCache<TreeBlock>,
+    /// Tree blocks read through a later copy. See [`read_through`](Self::read_through).
+    read_through: BTreeMap<u64, ReadThrough>,
+}
+
+/// A tree block whose first copy failed its checks and which a lenient read took from a later
+/// one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct ReadThrough {
+    /// The copy it was read through, counted from zero in the chunk's stripe order.
+    pub(super) copy: usize,
+    /// What the first copy failed.
+    pub(super) fault: String,
 }
 
 impl<R: Read + Seek> Volume<R> {
@@ -306,6 +323,7 @@ impl<R: Read + Seek> Volume<R> {
             })?;
         let chunks = ChunkMap::from_bootstrap(bootstrap, superblock.dev_item.devid, device_bytes)?;
 
+        let cache = tree_cache(superblock.nodesize);
         let mut volume = Self {
             src,
             base,
@@ -314,6 +332,8 @@ impl<R: Read + Seek> Volume<R> {
             superblock: Box::new(superblock),
             mirrors: found,
             chunks,
+            cache,
+            read_through: BTreeMap::new(),
         };
         volume.load_chunk_tree()?;
         Ok(volume)
@@ -445,9 +465,47 @@ impl<R: Read + Seek> Volume<R> {
     /// [`ReadError::UnmappedLogical`] where the chunk map does not cover the address,
     /// [`ReadError::BadChecksum`] where the block's checksum does not cover it, and
     /// [`ReadError::BadTreeBlock`] for each of the other three.
+    ///
+    /// A block in a mirrored block group has a copy for each of its stripes. A strict read
+    /// takes the first and refuses the block where it fails. A lenient read takes the next copy
+    /// where one fails its checks, fails only where every copy does, and the filesystem's
+    /// [`scan`](super::Reader::scan) names each block it read that way.
     pub fn read_block(&mut self, logical: u64) -> Result<TreeBlock, ReadError> {
+        if let Some(block) = self.cache.get(logical) {
+            return Ok(block.clone());
+        }
         let len = u64::from(self.superblock.nodesize);
-        let physical = self.chunks.translate(logical, len)?;
+        let mut first: Option<ReadError> = None;
+        for (copy, physical) in self.chunks.copies_of(logical, len)?.into_iter().enumerate() {
+            match self.read_copy(logical, physical, len) {
+                Ok(block) => {
+                    if let Some(fault) = first {
+                        self.read_through.insert(
+                            logical,
+                            ReadThrough {
+                                copy,
+                                fault: fault.to_string(),
+                            },
+                        );
+                    }
+                    self.cache.insert(logical, block.clone());
+                    return Ok(block);
+                }
+                // What a mirrored block group is for. Under a lenient read, a copy that fails
+                // its own checks is read past to the next, and the scan names the block.
+                Err(fault @ (ReadError::BadChecksum { .. } | ReadError::BadTreeBlock { .. }))
+                    if self.policy == ReadPolicy::Lenient =>
+                {
+                    first.get_or_insert(fault);
+                }
+                Err(fault) => return Err(first.unwrap_or(fault)),
+            }
+        }
+        Err(first.expect("a chunk has at least one copy, and each failed"))
+    }
+
+    /// One copy of the tree block at `logical`, read from `physical` and checked.
+    fn read_copy(&mut self, logical: u64, physical: u64, len: u64) -> Result<TreeBlock, ReadError> {
         let offset =
             offset_of(self.base, physical, 1).ok_or(ReadError::UnmappedLogical { logical, len })?;
         let bytes = read_exact_at(&mut self.src, offset, len as usize)?;
@@ -477,7 +535,17 @@ impl<R: Read + Seek> Volume<R> {
                 fault: "the block is at a height the format does not define",
             });
         }
-        Ok(TreeBlock { header, bytes })
+        Ok(TreeBlock {
+            header,
+            bytes: bytes.into(),
+        })
+    }
+
+    /// Every tree block this volume has read through a later copy because an earlier one
+    /// failed its checks, by logical address. Only a lenient read does that; a strict one
+    /// refuses the block instead.
+    pub(super) fn read_through(&self) -> &BTreeMap<u64, ReadThrough> {
+        &self.read_through
     }
 
     /// Fill `buf` from a logical address, through the chunk map.
@@ -563,14 +631,36 @@ impl<R: Read + Seek> Volume<R> {
     }
 }
 
+/// How many bytes of tree blocks a volume holds once read: 1 MiB, which at the default 16 KiB
+/// node is 64 blocks.
+///
+/// A tree is read from its root down, and every search of it passes through the same few
+/// blocks at the top. Held, those are read and verified once, where a walk that looks each
+/// entry up again would otherwise read and checksum the root of every tree it consults once
+/// per lookup. A walk's searches move through the keys in order, so what it returns to is the
+/// upper levels and the leaves it is working through, a few blocks per tree. Measured over a
+/// tree of 24,000 files, a cache four or sixteen times this size reads no fewer blocks and
+/// spends longer searching itself.
+const TREE_CACHE_BYTES: usize = 1 << 20;
+
+/// The cache a volume with `node_size` tree blocks holds: [`TREE_CACHE_BYTES`] of them, and
+/// never fewer than sixty-four, so the largest node the format defines holds as many blocks
+/// as the default does.
+fn tree_cache(node_size: u32) -> BlockCache<TreeBlock> {
+    BlockCache::within(TREE_CACHE_BYTES, node_size as usize, 64)
+}
+
 /// One tree block, checked and held whole.
 ///
 /// A block is read entire because that is what its checksum covers: verifying it means having
 /// every byte, so there is nothing to be gained by fetching an item at a time.
+///
+/// Cloning one is cheap: the bytes are shared, so a block held by the volume's cache and
+/// handed to a caller is one copy of them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TreeBlock {
     header: Header,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 impl TreeBlock {
@@ -1233,6 +1323,14 @@ io_error!(ReadError);
 /// The tree engine reaches into a volume's source and its map, and nothing outside this module
 /// does.
 impl<R: Read + Seek> Volume<R> {
+    /// This volume with a cache of `capacity` tree blocks, empty, for the tests that compare
+    /// what the source is asked for at one size against another.
+    #[cfg(test)]
+    pub(crate) fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.cache = BlockCache::new(capacity);
+        self
+    }
+
     /// The key a search may not go past, and the tree it belongs to — used by the engine to
     /// name a limit it hit.
     pub(super) fn walk_limit(&self) -> usize {

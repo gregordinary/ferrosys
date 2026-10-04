@@ -6,8 +6,11 @@
 //! map ext2 and ext3 use for every file; any inode size is honored, down to the 128-byte
 //! inode that has no extended area at all; and every checksum is verified against the
 //! object's own bytes, so a field an image carries and this crate does not model does not
-//! read as corruption. [`Reader::lookup`] resolves a path against the image's own root,
-//! following symbolic links as it goes.
+//! read as corruption. A journal left needing recovery is replayed in memory as the
+//! filesystem opens ([`Reader::journal_replay`]), and descriptors split into meta-groups by
+//! `meta_bg` are found where each meta-group keeps them. [`Reader::lookup`] resolves a path
+//! against the image's own root, following symbolic links as it goes and descending each
+//! directory's hash index where it has one.
 //!
 //! # Robustness and strictness
 //!
@@ -22,9 +25,10 @@
 //!
 //! [`ReadPolicy::Lenient`] moves that threshold above every severity, so nothing is
 //! fatal. A whole-image [`scan`](Reader::scan) walks the superblock, every group
-//! descriptor, and every in-use inode and its extent tree, collecting each deviation
-//! as an [`Anomaly`] into a [`ScanReport`] instead of stopping at the first — the
-//! forensic counterpart to a strict read. The report projects to JSON, SARIF, or a
+//! descriptor, every in-use inode and its extent tree, and each indexed directory's names
+//! against its hash index, with the journal and the state the last driver left the
+//! filesystem in. It collects each deviation as an [`Anomaly`] into a [`ScanReport`]
+//! instead of stopping at the first — the forensic counterpart to a strict read. The report projects to JSON, SARIF, or a
 //! human table, and [`ScanReport::has_fatal`] applies a policy's threshold back to what
 //! the scan found.
 //!
@@ -35,7 +39,7 @@
 //! after the final block belong to whatever the image sits in, and a reference reaching
 //! them is out of range however much source there is behind it.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::acl::Acl;
@@ -44,13 +48,15 @@ use crate::extent::{ExtentNode, MAX_EXTENT_DEPTH, parse_node, tail_offset};
 use crate::feature::{FeatureSet, Incompat, LARGE_FILE_MIN_SIZE, Profile};
 use crate::fidelity::Synthesis;
 use crate::finding::{Family, Finding, Findings, Severity};
+use crate::geometry::carries_superblock;
 use crate::io::{offset_of, read_exact_at};
 use crate::model::ROOT_INO;
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, DIR_TAIL_LEN, DX_CHECKSUM_OFFSET, DX_ENTRY_LEN,
-    DX_NODE_COUNT_OFFSET, DX_ROOT_COUNT_OFFSET, DX_TAIL_LEN, DirEntry, EXTENT_ENTRY_SIZE,
-    EXTENT_TAIL_LEN, FileType, GOOD_OLD_FIRST_INODE, GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode,
-    InodeFlags, ParseError, SuperBlock, XATTR_CHECKSUM_OFFSET, decode_device, dx_tail_offset,
+    DX_HASH_CONTINUED, DX_MAX_INDIRECT_LEVELS, DX_NODE_COUNT_OFFSET, DX_ROOT_COUNT_OFFSET,
+    DX_TAIL_LEN, DirEntry, DxEntry, EXTENT_ENTRY_SIZE, EXTENT_TAIL_LEN, FileType,
+    GOOD_OLD_FIRST_INODE, GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode, InodeFlags, ParseError,
+    STATE_CLEAN, STATE_ERRORS, SuperBlock, XATTR_CHECKSUM_OFFSET, decode_device, dx_tail_offset,
     get_u16, get_u32, orphan_entries_len, parse_block, parse_inline, put_u16, read_dx_entries,
     read_dx_root_info, read_orphan_tail, superblock_checksum,
 };
@@ -63,19 +69,28 @@ use crate::source::Metadata;
 use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
 use crate::xattr::Xattr;
 
-/// The `incompat` features whose on-disk layout this reader interprets. Every one is a
-/// format this crate reads and, where relevant, writes: typed directory entries, extent
-/// trees, 64-bit geometry, flex block groups, and a superblock-stored checksum seed. A
-/// set `incompat` bit outside this mask means the reader cannot be certain it reads the
-/// image correctly — an unknown extension, or `meta_bg`, whose distributed group
-/// descriptors this reader's contiguous-table parsing does not follow. The `incompat`
-/// word is the one an implementation must refuse when it does not recognize a bit, so
-/// this mask is what a strict read enforces and a scan reports against.
+/// The `incompat` features whose on-disk layout this reader interprets: typed directory
+/// entries, extent trees, 64-bit geometry, flex block groups, a superblock-stored checksum
+/// seed, a journal needing recovery, and descriptors split into meta-groups. Each but the
+/// last two is a format this crate also writes. A set `incompat` bit outside this mask
+/// means the reader cannot be certain it reads the image correctly. The `incompat` word is
+/// the one an implementation must refuse when it does not recognize a bit, so this mask is
+/// what a strict read enforces and a scan reports against.
 const SUPPORTED_INCOMPAT: u32 = Incompat::FILETYPE.bits()
     | Incompat::EXTENTS.bits()
     | Incompat::SIXTY_FOUR_BIT.bits()
     | Incompat::FLEX_BG.bits()
-    | Incompat::CSUM_SEED.bits();
+    | Incompat::CSUM_SEED.bits()
+    | Incompat::META_BG.bits()
+    | INCOMPAT_RECOVER;
+
+/// `needs_recovery`: the journal holds committed transactions that have not reached their
+/// home blocks. The reader follows it by replaying the log into an overlay when it opens the
+/// filesystem, which writes nothing.
+///
+/// A raw bit rather than an [`Incompat`] flag, because [`Incompat`] is also what a formatter
+/// may be asked for, and no formatter writes a filesystem that needs recovery.
+pub(crate) const INCOMPAT_RECOVER: u32 = 0x0000_0004;
 
 /// The `incompat` bits set in `incompat` that this reader does not interpret: the word
 /// with every [`SUPPORTED_INCOMPAT`] bit cleared. Zero means every feature the image
@@ -105,6 +120,38 @@ const UNMODELLED_INCOMPAT: &[(&str, u32)] = &[
     ("casefold", 0x0002_0000),
 ];
 
+/// The name `dumpe2fs` and `tune2fs` print for the `incompat` bit `bit`, whether or not
+/// [`Incompat`] models it, or `None` when `bit` is not one bit ext4 defines.
+///
+/// [`Incompat`] names the bits a formatter may be asked for. ext4 defines more: features this
+/// crate neither writes nor follows, and `needs_recovery`, which is a state a filesystem is
+/// left in rather than a feature. A report names those too, so that a bit ext4 defines is
+/// never reported as unknown.
+///
+/// ```
+/// use ferrosys::ext::incompat_name;
+///
+/// assert_eq!(incompat_name(0x0002), Some("filetype"));
+/// assert_eq!(incompat_name(0x0004), Some("needs_recovery"));
+/// assert_eq!(incompat_name(0x8000_0000), None);
+/// ```
+#[must_use]
+pub fn incompat_name(bit: u32) -> Option<&'static str> {
+    if bit.count_ones() != 1 {
+        return None;
+    }
+    Incompat::from_bits(bit)
+        .names()
+        .first()
+        .copied()
+        .or_else(|| {
+            UNMODELLED_INCOMPAT
+                .iter()
+                .find(|(_, b)| *b == bit)
+                .map(|(name, _)| *name)
+        })
+}
+
 /// Describe the unsupported `incompat` bits for an anomaly's detail: the on-disk name
 /// of each feature, in ascending bit order, and any bit ext4 itself does not define
 /// gathered into one hexadecimal word. All of them are what the reader cannot vouch for
@@ -117,13 +164,10 @@ fn describe_unsupported_incompat(bits: u32) -> String {
         if bits & bit == 0 {
             continue;
         }
-        // A bit the feature word models carries its name there; the rest of ext4's
-        // vocabulary is named by the table above. Anything in neither belongs to no
+        // A bit ext4 defines has a name, modelled or not; anything else belongs to no
         // feature ext4 defines, so there is no name to give it.
-        if let Some(name) = Incompat::from_bits(bit).names().first() {
-            parts.push((*name).to_string());
-        } else if let Some((name, _)) = UNMODELLED_INCOMPAT.iter().find(|(_, b)| *b == bit) {
-            parts.push((*name).to_string());
+        if let Some(name) = incompat_name(bit) {
+            parts.push(name.to_string());
         } else {
             undefined |= bit;
         }
@@ -152,6 +196,102 @@ const INDIRECT_LEVELS: u32 = 3;
 /// 32 KiB of map covering 16 MiB of file at a 4 KiB block size. A file of any length is
 /// read as a succession of these rather than as one map of everything its size claims.
 const MAP_WINDOW_BLOCKS: usize = 4096;
+
+/// The most bytes one read of file data asks the source for. Blocks of a file that sit
+/// next to each other on disk are read as one run rather than one block at a time, up to
+/// this, so streaming a contiguous file costs one request per 256 KiB rather than one per
+/// block, and the buffer a run is read into is bounded by it however long the run is.
+const MAX_RUN_BYTES: usize = 256 * 1024;
+
+/// What the reader holds of the group descriptor table and the inode tables. See
+/// [`TableCache`].
+const TABLE_CACHE_BYTES: usize = 256 * 1024;
+
+/// Recently read blocks of the group descriptor table and the inode tables, the least
+/// recently used given up first.
+///
+/// It holds those two tables and nothing else. They are what a walk reads once per inode —
+/// the descriptor that places the inode's table, then the inode itself — and one block of
+/// either serves many inodes: sixteen 256-byte inodes, or sixty-four 64-byte descriptors, in
+/// a 4 KiB block. Held, two reads per inode become one read per table block. Directory
+/// blocks, extent nodes, and file data are each read once by a walk and pass it by; holding
+/// them would only push the table blocks out.
+///
+/// Every byte it returns was read from the source as an uncached read would have read it,
+/// and the source does not change under a reader, so nothing it holds goes stale.
+type TableCache = crate::cache::BlockCache<Vec<u8>>;
+
+/// The table cache a reader at `block_size` holds: [`TABLE_CACHE_BYTES`] of blocks, and never
+/// fewer than four, so a 64 KiB block size still keeps a descriptor block and an inode table
+/// block apiece with room to spare.
+fn table_cache(block_size: usize) -> TableCache {
+    TableCache::within(TABLE_CACHE_BYTES, block_size, 4)
+}
+
+/// A directory's hash index, as far as opening it: the directory's block map, its root
+/// block, how many levels sit below the root, and how its names hash.
+struct DirIndex {
+    blocks: Vec<u64>,
+    root: Vec<u8>,
+    levels: u8,
+    version: crate::hash::HashVersion,
+    signedness: crate::hash::HashSignedness,
+}
+
+/// A descent through a hash index: each level's entries, and the one followed.
+type IndexPath = Vec<(Vec<DxEntry>, usize)>;
+
+/// What a directory's hash index says about one name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Indexed {
+    /// A leaf the index leads to holds the name, under this inode.
+    Found(u32),
+    /// The leaves the index leads to do not hold the name.
+    Absent,
+    /// The directory has no index this reader can follow.
+    Unusable,
+}
+
+/// Where moving to the next leaf of a hash index arrived.
+enum Step {
+    /// At a leaf, whose range begins at this hash.
+    Leaf(u32),
+    /// Past the last leaf.
+    End,
+    /// At a block that is not an index node.
+    Unusable,
+}
+
+/// A stretch of a mapping window: `len` of its entries from index `at`, which are either
+/// all holes (`phys` zero) or name consecutive physical blocks from `phys`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Run {
+    at: usize,
+    phys: u64,
+    len: usize,
+}
+
+/// Split a window's map into [`Run`]s, none longer than `max` blocks. `max` of zero is
+/// taken as one.
+fn runs(map: &[u64], max: usize) -> Vec<Run> {
+    let max = max.max(1);
+    let mut out: Vec<Run> = Vec::new();
+    for (at, &phys) in map.iter().enumerate() {
+        if let Some(run) = out.last_mut() {
+            let continues = if run.phys == 0 {
+                phys == 0
+            } else {
+                phys != 0 && run.phys.checked_add(run.len as u64) == Some(phys)
+            };
+            if continues && run.len < max {
+                run.len += 1;
+                continue;
+            }
+        }
+        out.push(Run { at, phys, len: 1 });
+    }
+    out
+}
 
 /// The number of logical blocks a file can address: a logical block number is 32
 /// bits wide in both the extent (`ee_block`) and classic maps, so a file spans at
@@ -611,17 +751,85 @@ pub enum ReadError {
         /// The inode number the offending entry names.
         inode: u32,
     },
+    /// A hash-indexed directory holds an entry in a leaf its name's hash does not lead to, so
+    /// a lookup through the index does not find it. Like
+    /// [`HostileName`](Self::HostileName), it carries the inode the entry names rather than
+    /// the name.
+    #[error(
+        "a directory entry naming inode {inode} sits in a leaf its hash does not lead to, so \
+         a lookup through the index misses it"
+    )]
+    #[non_exhaustive]
+    IndexMisplacesName {
+        /// The inode number the misplaced entry names.
+        inode: u32,
+    },
     /// The journal inode or its jbd2 superblock was malformed.
     #[error("journal structure is malformed")]
     BadJournal,
+    /// The filesystem needs recovery and its journal uses something this reader does not
+    /// replay: an external journal, a commit or checksum scheme no pinned tool writes, or a
+    /// journal feature it does not know.
+    #[error("the journal needs recovery and uses {feature}, which this reader does not replay")]
+    #[non_exhaustive]
+    JournalUnsupported {
+        /// What the journal uses.
+        feature: &'static str,
+    },
+    /// The filesystem needs recovery and its journal's log does not describe one: a field of
+    /// the journal superblock outside the journal, or a record that runs past its block.
+    #[error("the journal's log is malformed at log block {log_block}: {detail}")]
+    #[non_exhaustive]
+    JournalMalformed {
+        /// The block of the log, counted from the journal's own first block, where it is.
+        log_block: u32,
+        /// What is wrong there.
+        detail: &'static str,
+    },
+    /// A copy of a block that recovery would apply fails its checksum, so recovery skips it
+    /// and the block keeps the copy before it.
+    #[error(
+        "the journal's copy of block {block} in transaction {sequence} fails its checksum: \
+         stored {stored:#010x}, computed {computed:#010x}"
+    )]
+    #[non_exhaustive]
+    JournalCopyChecksum {
+        /// The filesystem block the copy would have rewritten.
+        block: u64,
+        /// The transaction the copy was logged in.
+        sequence: u32,
+        /// The checksum its tag records.
+        stored: u32,
+        /// The checksum its bytes compute to.
+        computed: u32,
+    },
     /// The orphan file was malformed: the feature is set but no inode holds the file, the
     /// file claims more blocks than the filesystem has (it is a fixed array of entry
     /// blocks, so it is never sparse), or one of its blocks does not end in the orphan
     /// magic word.
     #[error("orphan file structure is malformed")]
     BadOrphanFile,
+    /// The filesystem was not cleanly unmounted: a driver had it mounted and did not put it
+    /// down. A Linux kernel records this one of two ways, both observed: a filesystem with a
+    /// journal carries `needs_recovery`, and one without has the clean bit of its state
+    /// cleared. Either way it is one fact, and it is reported once.
+    ///
+    /// The filesystem is well-formed either way — the record is the format working rather
+    /// than failing — so it is [`Severity::Cosmetic`] and a strict read is unaffected by it. A
+    /// journal needing recovery is replayed as the filesystem opens, whatever this says.
+    #[error("{}", crate::finding::NOT_CLEANLY_UNMOUNTED)]
+    NotCleanlyUnmounted,
+    /// A driver found errors in the filesystem's structures and recorded that it had, in
+    /// the superblock's state. The record stays until a check repairs the filesystem.
+    ///
+    /// What it says is that a driver met a fault, not where: the fault itself, if it is still
+    /// there, is reported at its own severity by the rest of a scan. The record is the format
+    /// working, so it is [`Severity::Cosmetic`].
+    #[error("a driver recorded that it found errors in this filesystem")]
+    ErrorsDetected,
     /// The superblock advertises an `incompat` feature this reader does not interpret —
-    /// an unknown extension, or `meta_bg`. Such a feature may change the on-disk format
+    /// an unknown extension, or one ext4 defines and this reader does not follow, such as
+    /// `inline_data`. Such a feature may change the on-disk format
     /// in ways that make unaware access unsafe, so a strict read refuses it at open. The
     /// anomaly this projects to names the features; the bare error carries the bits.
     #[error(
@@ -816,10 +1024,11 @@ pub enum ReadError {
     ChecksumMismatch {
         /// The kind of object that failed (`superblock`, `group descriptor`, `inode`,
         /// `extent node`, `block bitmap`, `inode bitmap`, `directory block`,
-        /// `xattr block`, or `orphan block`).
+        /// `xattr block`, `orphan block`, `journal superblock`, `journal descriptor`, or
+        /// `journal revoke block`).
         object: &'static str,
-        /// The object's index (group, inode, or block number; zero for the
-        /// superblock).
+        /// The object's index (group, inode, or block number; zero for either superblock;
+        /// for a journal descriptor or revoke block, its block within the journal).
         index: u64,
         /// The checksum stored on disk.
         stored: u32,
@@ -901,12 +1110,26 @@ impl ReadError {
             // nothing.
             // A name no directory could hold is a fault in the directory holding it, located
             // the same way and by the same callers as the reference fault above.
-            ReadError::DirEntryNoSuchInode { .. } | ReadError::HostileName { .. } => (
+            ReadError::DirEntryNoSuchInode { .. }
+            | ReadError::HostileName { .. }
+            | ReadError::IndexMisplacesName { .. } => (
                 Severity::Structural,
                 Category::Directory,
                 Location::default(),
             ),
-            ReadError::BadJournal => (Severity::Structural, Category::Journal, Location::default()),
+            ReadError::BadJournal
+            | ReadError::JournalUnsupported { .. }
+            | ReadError::JournalMalformed { .. } => {
+                (Severity::Structural, Category::Journal, Location::default())
+            }
+            ReadError::JournalCopyChecksum { block, .. } => (
+                Severity::Integrity,
+                Category::Journal,
+                Location {
+                    block: Some(*block),
+                    ..Location::default()
+                },
+            ),
             ReadError::BadOrphanFile => {
                 (Severity::Structural, Category::Orphan, Location::default())
             }
@@ -978,6 +1201,11 @@ impl ReadError {
                             ..Location::default()
                         },
                     ),
+                    // A log block is counted within the journal, not the filesystem, so
+                    // it is no block coordinate; the detail carries it.
+                    "journal superblock" | "journal descriptor" | "journal revoke block" => {
+                        (Category::Journal, Location::default())
+                    }
                     "orphan block" => (
                         Category::Orphan,
                         Location {
@@ -989,6 +1217,13 @@ impl ReadError {
                 };
                 (Severity::Integrity, category, location)
             }
+            // A state a driver left behind: the format recording what happened to the
+            // filesystem, not a departure from it.
+            ReadError::NotCleanlyUnmounted | ReadError::ErrorsDetected => (
+                Severity::Cosmetic,
+                Category::Superblock,
+                Location::default(),
+            ),
             // An `incompat` feature the reader does not follow means it cannot vouch for
             // the whole image, so it is structural and filed against the superblock that
             // advertised it.
@@ -1134,6 +1369,13 @@ pub struct WalkEntry {
 /// The filesystem may sit at an arbitrary byte offset within the source — a partition
 /// inside a whole-disk image — fixed at open time. Reads seek relative to that offset
 /// and return owned buffers, so nothing is borrowed from the source between calls.
+///
+/// A reader holds up to 256 KiB of the group descriptor and inode table blocks it has
+/// read, so a walk asks the source for each such block once rather than twice per inode.
+/// It reads a file's blocks that sit next to each other on disk in one request, up to
+/// 256 KiB, and so holds at most that much of a file at a time. Neither changes what a read
+/// returns or how one fails: the source is read-only to a reader and is taken not to change
+/// under it.
 pub struct Reader<R> {
     src: R,
     base: u64,
@@ -1157,6 +1399,50 @@ pub struct Reader<R> {
     policy: ReadPolicy,
     limits: Limits,
     csum_seed: Option<u32>,
+    table_cache: TableCache,
+    /// Whether the superblock on disk carries `needs_recovery`.
+    needs_recovery: bool,
+    /// The superblock's state as it sits on disk, before any replay: the record of how the
+    /// last driver to have the filesystem put it down.
+    state_on_disk: u16,
+    /// What became of a journal needing recovery. Absent for a filesystem that was clean,
+    /// which is most of them, so a clean one carries nothing for it.
+    journal: Option<Box<Recovery>>,
+}
+
+/// What became of a journal needing recovery when the filesystem was opened.
+struct Recovery {
+    /// The blocks a replayed journal rewrites, each to the block of the image holding the
+    /// copy recovery puts there. Every read consults it. Empty where the journal was not
+    /// replayed.
+    overlay: BTreeMap<u64, crate::replay::Copy>,
+    outcome: Outcome,
+}
+
+/// Whether the journal was replayed.
+enum Outcome {
+    /// The log was replayed into the overlay. Any copy it skipped is listed, for a scan.
+    Replayed(JournalReplay, Vec<ReadError>),
+    /// The log could not be replayed, and a lenient read went ahead without it.
+    NotReplayed(ReadError),
+}
+
+/// What recovering a filesystem's journal applied when the filesystem was opened.
+///
+/// A filesystem carrying `needs_recovery` was not unmounted cleanly, and its journal holds
+/// committed transactions whose blocks have not reached their homes. The reader replays them
+/// into memory as it opens the filesystem, so every read returns what a mount would present,
+/// and the image itself is not written. [`Reader::journal_replay`] reports what was applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub struct JournalReplay {
+    /// Committed transactions the log held.
+    pub transactions: u32,
+    /// Filesystem blocks the reader presents from the journal rather than from their homes.
+    pub blocks: u64,
+    /// Copies recovery skips because their checksum does not hold. Each block keeps the copy
+    /// before it, or its home contents.
+    pub skipped: u32,
 }
 
 /// How a filesystem is opened: where it begins, how strictly it is read, what it may
@@ -1249,7 +1535,9 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// [`ReadError::Parse`] if the superblock's magic is wrong; [`ReadError::Io`] if
     /// the source cannot be read; [`ReadError::UnsupportedIncompat`] if it advertises an
-    /// `incompat` feature this reader does not follow (the default policy is strict).
+    /// `incompat` feature this reader does not follow (the default policy is strict); and
+    /// the journal errors [`open_with`](Self::open_with) names, where the filesystem needs
+    /// recovery.
     pub fn open(src: R) -> Result<Self, ReadError> {
         Self::open_with(src, &OpenOptions::new())
     }
@@ -1264,6 +1552,11 @@ impl<R: Read + Seek> Reader<R> {
     /// among them); [`ReadError::UnsupportedIncompat`] if it advertises an `incompat`
     /// feature this reader does not follow and the policy is [`ReadPolicy::Strict`]. A
     /// lenient open accepts such an image so a [`scan`](Self::scan) can report it.
+    ///
+    /// Where the filesystem needs recovery and the policy is strict, also
+    /// [`ReadError::JournalUnsupported`], [`ReadError::JournalMalformed`], or
+    /// [`ReadError::JournalCopyChecksum`] if its journal cannot be replayed whole. A lenient
+    /// open reads what recovery can apply, and a scan reports the rest.
     pub fn open_with(mut src: R, options: &OpenOptions) -> Result<Self, ReadError> {
         let &OpenOptions {
             common:
@@ -1284,7 +1577,54 @@ impl<R: Read + Seek> Reader<R> {
             index: base,
         })?;
         let sb_bytes = read_exact_at(&mut src, sb_offset, SuperBlock::SIZE)?;
-        let mut sb = SuperBlock::read_from(&sb_bytes)?;
+        let (sb, feature, block_size) = Self::checked_superblock(&sb_bytes)?;
+        // The `incompat` word is the one an implementation must refuse when it carries a
+        // bit it does not recognize: those features change the on-disk format in ways that
+        // make unaware access unsafe. A strict read refuses such an image at open; a
+        // lenient read opens it so a [`scan`](Self::scan) reports the feature as an anomaly
+        // rather than the open failing. `unknown_bits` on the individual words is what a
+        // description still reports either way.
+        let unsupported = unsupported_incompat(feature.incompat);
+        if unsupported != 0 && policy.is_fatal(Severity::Structural) {
+            return Err(ReadError::UnsupportedIncompat { bits: unsupported });
+        }
+        // What the source has for this filesystem, which every structural bound is derived
+        // from. Measured here rather than at each use: a bound that governs how much a
+        // verifier examines must not depend on a seek that could fail mid-read, and the
+        // filesystem's length does not change under a reader.
+        let source_len = src.seek(SeekFrom::End(0))?.saturating_sub(base);
+        let needs_recovery = sb.feature_incompat & INCOMPAT_RECOVER != 0;
+        let state_on_disk = sb.state;
+        let mut reader = Self {
+            src,
+            base,
+            source_len,
+            sb,
+            sb_raw: sb_bytes,
+            feature,
+            block_size,
+            policy,
+            limits,
+            csum_seed,
+            table_cache: table_cache(block_size),
+            needs_recovery,
+            state_on_disk,
+            journal: None,
+        };
+        if needs_recovery {
+            reader.recover()?;
+        }
+        Ok(reader)
+    }
+
+    /// Parse the superblock in `sb_bytes` and hold it to every bound the reader rests on,
+    /// answering with the feature set it advertises and its block size.
+    ///
+    /// Opening applies it to the superblock on disk, and recovery to the one a replayed
+    /// journal leaves, so a transaction carrying the superblock's block is held to exactly
+    /// what the home copy was.
+    fn checked_superblock(sb_bytes: &[u8]) -> Result<(SuperBlock, FeatureSet, usize), ReadError> {
+        let mut sb = SuperBlock::read_from(sb_bytes)?;
         // A revision-0 filesystem predates the fields that describe an inode's size and
         // the first inode a file may use: the words hold zero and the values are fixed
         // by the revision — the 128-byte classic inode, and inode 11. Resolving them
@@ -1396,33 +1736,7 @@ impl<R: Read + Seek> Reader<R> {
                 value: sb.blocks_count,
             }));
         }
-        // The `incompat` word is the one an implementation must refuse when it carries a
-        // bit it does not recognize: those features change the on-disk format in ways that
-        // make unaware access unsafe. A strict read refuses such an image at open; a
-        // lenient read opens it so a [`scan`](Self::scan) reports the feature as an anomaly
-        // rather than the open failing. `unknown_bits` on the individual words is what a
-        // description still reports either way.
-        let unsupported = unsupported_incompat(feature.incompat);
-        if unsupported != 0 && policy.is_fatal(Severity::Structural) {
-            return Err(ReadError::UnsupportedIncompat { bits: unsupported });
-        }
-        // What the source has for this filesystem, which every structural bound is derived
-        // from. Measured here rather than at each use: a bound that governs how much a
-        // verifier examines must not depend on a seek that could fail mid-read, and the
-        // filesystem's length does not change under a reader.
-        let source_len = src.seek(SeekFrom::End(0))?.saturating_sub(base);
-        Ok(Self {
-            src,
-            base,
-            source_len,
-            sb,
-            sb_raw: sb_bytes,
-            feature,
-            block_size,
-            policy,
-            limits,
-            csum_seed,
-        })
+        Ok((sb, feature, block_size))
     }
 
     /// The parsed superblock.
@@ -1454,6 +1768,58 @@ impl<R: Read + Seek> Reader<R> {
     /// read that runs off the end of the source is reported as an out-of-range
     /// reference, not a raw i/o error, so callers can relabel it to the referent.
     fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, ReadError> {
+        let mut bytes = self.read_home(offset, len)?;
+        if len > 0 && self.journal.as_ref().is_some_and(|j| !j.overlay.is_empty()) {
+            self.lay_over(offset, &mut bytes)?;
+        }
+        Ok(bytes)
+    }
+
+    /// Replace the bytes of every block a replayed journal rewrites within `bytes`, which
+    /// were read from their homes at `offset`.
+    ///
+    /// A copy is read from where the journal holds it, by [`read_home`](Self::read_home), so
+    /// laying one over never consults the overlay again.
+    fn lay_over(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), ReadError> {
+        let bs = self.block_size as u64;
+        let end = offset.saturating_add(bytes.len() as u64);
+        let first = offset / bs;
+        let last = (end - 1) / bs;
+        let copies: Vec<(u64, crate::replay::Copy)> = self
+            .journal
+            .as_ref()
+            .map(|j| {
+                j.overlay
+                    .range(first..=last)
+                    .map(|(&home, &copy)| (home, copy))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (home, copy) in copies {
+            let at = offset_of(0, copy.at, bs).ok_or(ReadError::OutOfRange {
+                what: "block",
+                index: copy.at,
+            })?;
+            let mut block = self.read_home(at, self.block_size)?;
+            if copy.escaped {
+                // The log zeroed the magic a block began with; recovery puts it back.
+                block[..4].copy_from_slice(&crate::journal::JBD2_MAGIC.to_be_bytes());
+            }
+            // The home is between `first` and `last`, so its byte offset is inside the read
+            // and the products are in range.
+            let home_start = home * bs;
+            let lo = home_start.max(offset);
+            let hi = (home_start + bs).min(end);
+            let (into, from) = ((lo - offset) as usize, (lo - home_start) as usize);
+            let n = (hi - lo) as usize;
+            bytes[into..into + n].copy_from_slice(&block[from..from + n]);
+        }
+        Ok(())
+    }
+
+    /// Read `len` bytes at `offset` bytes into the filesystem from their homes in the source,
+    /// with no replayed journal laid over them.
+    fn read_home(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, ReadError> {
         // A base-relative offset a malformed field pushed past the 64-bit range is an
         // out-of-range reference, not an overflow.
         let pos = offset_of(self.base, offset, 1).ok_or(ReadError::OutOfRange {
@@ -1495,6 +1861,174 @@ impl<R: Read + Seek> Reader<R> {
         }
     }
 
+    /// Whether blocks `first` through `first + count - 1` are all inside the filesystem and
+    /// all inside the source, so that one read of the run returns every byte of it.
+    fn blocks_in_reach(&self, first: u64, count: usize) -> bool {
+        let Some(end) = u64::try_from(count)
+            .ok()
+            .and_then(|count| first.checked_add(count))
+        else {
+            return false;
+        };
+        count > 0
+            && end <= self.sb.blocks_count
+            && offset_of(0, end, self.block_size as u64).is_some_and(|end| end <= self.source_len)
+    }
+
+    /// `len` bytes at `offset` out of the group descriptor table or an inode table, through
+    /// the [`TableCache`].
+    ///
+    /// The caller has bounded the bytes by the filesystem, and they lie inside one block: a
+    /// descriptor and an inode are each a power of two no larger than a block, at an offset
+    /// that is a multiple of their size. That whole block is what is read and held. A block
+    /// not wholly in reach — a truncated image can leave the bytes asked for inside a block
+    /// whose tail is missing — is not held: the bytes are read alone, as they would be
+    /// without the cache. So the cache changes how often the source is read, and never what
+    /// a read returns or how one fails.
+    fn table_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, ReadError> {
+        let bs = self.block_size as u64;
+        let block = offset / bs;
+        let within = usize::try_from(offset % bs).unwrap_or(usize::MAX);
+        if within.saturating_add(len) > self.block_size || !self.blocks_in_reach(block, 1) {
+            return self.read_at(offset, len);
+        }
+        if let Some(bytes) = self.table_cache.get(block) {
+            return Ok(bytes[within..within + len].to_vec());
+        }
+        // `block` is `offset` divided by the block size, so this product is at most
+        // `offset` and cannot leave the range.
+        let bytes = self.read_at(block * bs, self.block_size)?;
+        let out = bytes[within..within + len].to_vec();
+        self.table_cache.insert(block, bytes);
+        Ok(out)
+    }
+
+    /// The bytes of a run of data blocks in one read, where the whole run is in reach, or
+    /// `None` where it is a hole, a single block, or not wholly in reach.
+    ///
+    /// The caller reads a `None` run a block at a time. That is what reports the first
+    /// block out of reach, as [`block`](Self::block) names it, and writes whatever came
+    /// before it — exactly what a block-at-a-time read of the run does, because it is one.
+    fn read_run(&mut self, run: &Run) -> Result<Option<Vec<u8>>, ReadError> {
+        if run.phys == 0 || run.len < 2 || !self.blocks_in_reach(run.phys, run.len) {
+            return Ok(None);
+        }
+        // In reach, so the run's end is inside the source and neither product can leave
+        // the range; the checked forms state it rather than rely on it.
+        let bs = self.block_size as u64;
+        let start = offset_of(0, run.phys, bs);
+        let len = offset_of(0, run.len as u64, bs).and_then(|len| usize::try_from(len).ok());
+        match (start, len) {
+            (Some(start), Some(len)) => self.read_at(start, len).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The most blocks one [`read_run`](Self::read_run) reads at this block size.
+    fn max_run_blocks(&self) -> usize {
+        (MAX_RUN_BYTES / self.block_size.max(1)).max(1)
+    }
+
+    /// Replay the journal of a filesystem that needs recovery, and lay it over every read.
+    ///
+    /// What cannot be replayed is refused under a policy that is fatal at its severity, and
+    /// otherwise recorded for [`scan`](Self::scan) while the reader goes ahead with the homes
+    /// as they are. The superblock is read again through the replay and held to every bound
+    /// the first read was, since a transaction may carry its block.
+    fn recover(&mut self) -> Result<(), ReadError> {
+        let fault = match self.replay_journal() {
+            Ok(()) => return Ok(()),
+            Err(fault) => fault,
+        };
+        // Nothing of a replay that failed is kept.
+        self.journal = None;
+        self.table_cache = table_cache(self.block_size);
+        if self.policy.is_fatal(fault.anomaly().severity) {
+            return Err(fault);
+        }
+        self.journal = Some(Box::new(Recovery {
+            overlay: BTreeMap::new(),
+            outcome: Outcome::NotReplayed(fault),
+        }));
+        Ok(())
+    }
+
+    /// Plan the replay, install it, and take the superblock it leaves.
+    fn replay_journal(&mut self) -> Result<(), ReadError> {
+        let replay = self.plan_replay()?;
+        let skipped: Vec<ReadError> = replay
+            .skipped
+            .iter()
+            .map(|s| ReadError::JournalCopyChecksum {
+                block: s.home,
+                sequence: s.sequence,
+                stored: s.stored,
+                computed: s.computed,
+            })
+            .collect();
+        if let Some(first) = skipped.first()
+            && self.policy.is_fatal(first.anomaly().severity)
+        {
+            return Err(first.clone());
+        }
+        let report = JournalReplay {
+            transactions: replay.transactions,
+            blocks: replay.copies.len() as u64,
+            skipped: u32::try_from(skipped.len()).unwrap_or(u32::MAX),
+        };
+        self.journal = Some(Box::new(Recovery {
+            overlay: replay.copies,
+            outcome: Outcome::Replayed(report, skipped),
+        }));
+        // Anything read while planning was read from the homes.
+        self.table_cache = table_cache(self.block_size);
+        let sb_bytes = self.read_at(1024, SuperBlock::SIZE)?;
+        let (sb, feature, block_size) = Self::checked_superblock(&sb_bytes)?;
+        if block_size != self.block_size {
+            return Err(ReadError::JournalMalformed {
+                log_block: 0,
+                detail: "a replayed superblock naming a different block size",
+            });
+        }
+        let unsupported = unsupported_incompat(feature.incompat);
+        if unsupported != 0 && self.policy.is_fatal(Severity::Structural) {
+            return Err(ReadError::UnsupportedIncompat { bits: unsupported });
+        }
+        self.sb = sb;
+        self.sb_raw = sb_bytes;
+        self.feature = feature;
+        Ok(())
+    }
+
+    /// Decide what recovering the journal would apply, reading the log from the homes.
+    fn plan_replay(&mut self) -> Result<crate::replay::Replay, ReadError> {
+        if !self.feature.has_journal() || self.sb.journal_inum == 0 {
+            return Err(ReadError::JournalUnsupported {
+                feature: "a journal on another device",
+            });
+        }
+        let inode = self.inode(self.sb.journal_inum)?;
+        let bs = self.block_size as u64;
+        let journal_blocks = self.file_len(&inode) / bs;
+        let block_size = self.block_size;
+        let fs_blocks = self.sb.blocks_count;
+        let mut log = JournalLog {
+            reader: self,
+            inode,
+            window: None,
+        };
+        let superblock = crate::replay::Log::read(&mut log, 0)?;
+        crate::replay::plan(&superblock, block_size, fs_blocks, journal_blocks, &mut log)
+    }
+
+    /// This reader with a [`TableCache`] of `capacity` blocks, for the tests that compare
+    /// what the source is asked for at one size against another.
+    #[cfg(test)]
+    fn with_table_capacity(mut self, capacity: usize) -> Self {
+        self.table_cache = TableCache::new(capacity);
+        self
+    }
+
     /// Read the descriptor for group `group` from the primary descriptor table.
     ///
     /// # Errors
@@ -1533,18 +2067,60 @@ impl<R: Read + Seek> Reader<R> {
         }
     }
 
+    /// The block holding group `group`'s descriptor, and where in that block it begins.
+    ///
+    /// A filesystem without `meta_bg` keeps every descriptor in one table, in the blocks
+    /// after the superblock. One with `meta_bg` splits the table into meta-groups — each the
+    /// run of groups whose descriptors fill one block — and keeps each meta-group's block at
+    /// the start of the meta-group's own first group, after the superblock copy where that
+    /// group carries one. The meta-groups before `s_first_meta_bg` keep the contiguous
+    /// table: that field counts meta-groups, which is where a filesystem converted while it
+    /// grew still holds the table it had before.
+    ///
+    /// The layout is the ext4 documentation's (Meta Block Groups), and every place was
+    /// confirmed against the "Group descriptor at" lines `dumpe2fs` prints, over images the
+    /// pinned `mke2fs` wrote and images a Linux kernel converted as it grew them.
+    ///
+    /// `None` where a field the image supplies would carry the arithmetic past the 64-bit
+    /// range, which the caller reports as the group being out of range.
+    fn descriptor_place(&self, group: u32) -> Option<(u64, usize)> {
+        let desc_size = self.desc_size();
+        let per_block = u32::try_from(self.block_size / desc_size).ok()?.max(1);
+        let meta_group = group / per_block;
+        let within = (group % per_block) as usize * desc_size;
+        let first_data_block = u64::from(self.sb.first_data_block);
+        let block = if self.feature.incompat.contains(Incompat::META_BG)
+            && meta_group >= self.sb.first_meta_bg
+        {
+            let first = meta_group.checked_mul(per_block)?;
+            let start = offset_of(
+                first_data_block,
+                u64::from(first),
+                u64::from(self.sb.blocks_per_group),
+            )?;
+            start.checked_add(u64::from(carries_superblock(first, &self.sb)))?
+        } else {
+            first_data_block
+                .checked_add(1)?
+                .checked_add(u64::from(meta_group))?
+        };
+        Some((block, within))
+    }
+
     /// The descriptor for group `group` exactly as it sits on disk.
     ///
     /// Its checksum covers these bytes, not a re-serialization of the parsed value, so
     /// the verifier works from them.
     fn group_descriptor_raw(&mut self, group: u32) -> Result<Vec<u8>, ReadError> {
         let desc_size = self.desc_size();
-        let table = u64::from(self.sb.first_data_block) + 1;
-        // Both the table's place and the descriptor's place within it come from fields the
-        // image supplies, so both products are checked. Counted from the filesystem's own
+        // Both the block's place and the descriptor's place within it come from fields the
+        // image supplies, so the products are checked. Counted from the filesystem's own
         // first byte; `read_at` is what places that in the source.
-        let off = offset_of(0, table, self.block_size as u64)
-            .and_then(|table| offset_of(table, u64::from(group), desc_size as u64))
+        let off = self
+            .descriptor_place(group)
+            .and_then(|(block, within)| {
+                offset_of(0, block, self.block_size as u64)?.checked_add(within as u64)
+            })
             .ok_or(ReadError::OutOfRange {
                 what: "group",
                 index: u64::from(group),
@@ -1561,7 +2137,7 @@ impl<R: Read + Seek> Reader<R> {
                 index: u64::from(group),
             });
         }
-        match self.read_at(off, desc_size) {
+        match self.table_bytes(off, desc_size) {
             Err(ReadError::OutOfRange { .. }) => Err(ReadError::OutOfRange {
                 what: "group",
                 index: u64::from(group),
@@ -2307,7 +2883,10 @@ impl<R: Read + Seek> Reader<R> {
     /// The scan walks the superblock, every group descriptor and its bitmap checksums,
     /// and every in-use inode with its extent tree, directory-block tails, and external
     /// attribute block, plus the journal superblock — checking each metadata checksum
-    /// the image carries and the bounds of every reference it follows. It never stops at
+    /// the image carries and the bounds of every reference it follows. It holds each name
+    /// of an indexed directory to the leaf its hash leads to, and reports what a journal
+    /// replay could not apply or skipped, and the state the last driver left the
+    /// filesystem in. It never stops at
     /// the first finding and, like every read, never panics on malformed input. Apply a
     /// [`ReadPolicy`] threshold to the result with [`ScanReport::has_fatal`].
     ///
@@ -2336,6 +2915,22 @@ impl<R: Read + Seek> Reader<R> {
         let unsupported = unsupported_incompat(self.feature.incompat);
         if unsupported != 0 {
             anomalies.push(ReadError::UnsupportedIncompat { bits: unsupported }.anomaly());
+        }
+        // A journal that could not be replayed, and copies a replay skipped. Both were found
+        // at open, where a strict read would have refused them.
+        match self.journal.as_deref().map(|j| &j.outcome) {
+            None => {}
+            Some(Outcome::Replayed(_, skipped)) => {
+                for fault in skipped {
+                    anomalies.push(fault.anomaly());
+                }
+            }
+            Some(Outcome::NotReplayed(fault)) => anomalies.push(fault.anomaly()),
+        }
+        // How the last driver to have the filesystem put it down, as the superblock on disk
+        // records it.
+        for state in self.left_state() {
+            anomalies.push(state.anomaly());
         }
 
         // Superblock checksum.
@@ -2499,6 +3094,11 @@ impl<R: Read + Seek> Reader<R> {
                         // whether or not the image carries checksums, so both are checked
                         // outside the `has_csum` block below.
                         self.scan_dirents(n, &inode, &mut anomalies);
+                        // Whether the index leads to every name the directory holds, which
+                        // is what a lookup through it relies on.
+                        if is_dir(&inode) {
+                            self.scan_index(n, &inode, &mut anomalies);
+                        }
                         if has_csum {
                             let mut faults = Vec::new();
                             self.collect_directory_faults(n, &inode, &csum, &mut faults);
@@ -2906,7 +3506,7 @@ impl<R: Read + Seek> Reader<R> {
                 index: u64::from(number),
             });
         }
-        match self.read_at(off, isize) {
+        match self.table_bytes(off, isize) {
             Err(ReadError::OutOfRange { .. }) => Err(ReadError::OutOfRange {
                 what: "inode",
                 index: u64::from(number),
@@ -3427,17 +4027,32 @@ impl<R: Read + Seek> Reader<R> {
             let remaining_blocks = (want - written).div_ceil(bs);
             let count = usize::try_from(remaining_blocks.min(MAP_WINDOW_BLOCKS as u64))
                 .unwrap_or(MAP_WINDOW_BLOCKS);
-            for phys in self.map_window(inode, first, count)? {
-                let left = want - written;
-                let take = usize::try_from(left.min(bs)).unwrap_or(self.block_size);
-                if phys == 0 {
-                    // A hole: it reads as zeros without occupying a block to read.
-                    out.write_all(&zeros[..take])?;
+            let map = self.map_window(inode, first, count)?;
+            // Blocks that sit next to each other on disk are read as one run; the rest —
+            // holes, lone blocks, and a run not wholly in reach — a block at a time.
+            for run in runs(&map, self.max_run_blocks()) {
+                if let Some(bytes) = self.read_run(&run)? {
+                    let take = usize::try_from((want - written).min(bytes.len() as u64))
+                        .unwrap_or(bytes.len());
+                    out.write_all(&bytes[..take])?;
+                    written += take as u64;
                 } else {
-                    let block = self.block(phys)?;
-                    out.write_all(&block[..take])?;
+                    for &phys in &map[run.at..run.at + run.len] {
+                        let left = want - written;
+                        let take = usize::try_from(left.min(bs)).unwrap_or(self.block_size);
+                        if phys == 0 {
+                            // A hole: it reads as zeros without occupying a block to read.
+                            out.write_all(&zeros[..take])?;
+                        } else {
+                            let block = self.block(phys)?;
+                            out.write_all(&block[..take])?;
+                        }
+                        written += take as u64;
+                        if written >= want {
+                            break;
+                        }
+                    }
                 }
-                written += take as u64;
                 if written >= want {
                     break;
                 }
@@ -3484,20 +4099,36 @@ impl<R: Read + Seek> Reader<R> {
         // land in the buffer.
         let mut skip = usize::try_from(offset % bs).unwrap_or(0);
         let mut filled = 0usize;
-        for phys in self.map_window(inode, first, count)? {
-            let take =
-                (self.block_size - skip).min(usize::try_from(want).unwrap_or(usize::MAX) - filled);
-            if phys == 0 {
-                // A hole reads as zeros; the buffer is filled rather than left as it was,
-                // so a caller reusing one buffer never sees a previous read's bytes.
-                buf[filled..filled + take].fill(0);
+        let want_len = usize::try_from(want).unwrap_or(usize::MAX);
+        let map = self.map_window(inode, first, count)?;
+        // As in `read_data_to`: a run of adjacent blocks in one read, everything else a
+        // block at a time.
+        for run in runs(&map, self.max_run_blocks()) {
+            if let Some(bytes) = self.read_run(&run)? {
+                let take = (bytes.len() - skip).min(want_len - filled);
+                buf[filled..filled + take].copy_from_slice(&bytes[skip..skip + take]);
+                filled += take;
+                skip = 0;
             } else {
-                let block = self.block(phys)?;
-                buf[filled..filled + take].copy_from_slice(&block[skip..skip + take]);
+                for &phys in &map[run.at..run.at + run.len] {
+                    let take = (self.block_size - skip).min(want_len - filled);
+                    if phys == 0 {
+                        // A hole reads as zeros; the buffer is filled rather than left as it
+                        // was, so a caller reusing one buffer never sees a previous read's
+                        // bytes.
+                        buf[filled..filled + take].fill(0);
+                    } else {
+                        let block = self.block(phys)?;
+                        buf[filled..filled + take].copy_from_slice(&block[skip..skip + take]);
+                    }
+                    filled += take;
+                    skip = 0;
+                    if filled >= want_len {
+                        break;
+                    }
+                }
             }
-            filled += take;
-            skip = 0;
-            if filled as u64 >= want {
+            if filled >= want_len {
                 break;
             }
         }
@@ -3547,6 +4178,68 @@ impl<R: Read + Seek> Reader<R> {
     /// bound no well-formed image reaches and a crafted one cannot exceed.
     fn max_names(&mut self) -> usize {
         usize::try_from(self.source_len() / MIN_DIRENT_LEN).unwrap_or(usize::MAX)
+    }
+
+    /// What recovering the journal applied when the filesystem was opened, or `None` when
+    /// it was clean or its journal was not replayed.
+    ///
+    /// A filesystem carrying `needs_recovery` has its journal replayed into memory as it is
+    /// opened, and every read after returns the blocks recovery would leave. Under a lenient
+    /// policy, a journal that cannot be replayed leaves the blocks as their homes hold them,
+    /// and [`scan`](Self::scan) reports why.
+    #[must_use]
+    pub fn journal_replay(&self) -> Option<&JournalReplay> {
+        match self.journal.as_deref().map(|j| &j.outcome) {
+            Some(Outcome::Replayed(report, _)) => Some(report),
+            None | Some(Outcome::NotReplayed(_)) => None,
+        }
+    }
+
+    /// Whether the filesystem was left needing recovery: its superblock on disk carries
+    /// `needs_recovery`, so its journal holds committed transactions that have not reached
+    /// their homes. [`journal_replay`](Self::journal_replay) says what became of them.
+    #[must_use]
+    pub fn needs_recovery(&self) -> bool {
+        self.needs_recovery
+    }
+
+    /// The superblock's state word (`s_state`) as it sits on disk: [`STATE_CLEAN`] where the
+    /// last driver to have the filesystem unmounted it cleanly, and [`STATE_ERRORS`] where it
+    /// found errors.
+    ///
+    /// It is the word on disk rather than in a superblock a replay put in its place, because
+    /// it records what happened before any recovery. A filesystem with a journal keeps the
+    /// clean bit set while it is mounted and records an unclean shutdown as
+    /// [`needs_recovery`](Self::needs_recovery) instead.
+    #[must_use]
+    pub fn state_on_disk(&self) -> u16 {
+        self.state_on_disk
+    }
+
+    /// What the superblock on disk records of how the last driver to have the filesystem put
+    /// it down, as the findings a [`scan`](Self::scan) reports: [`ReadError::NotCleanlyUnmounted`]
+    /// for either way a kernel records an unclean shutdown, and [`ReadError::ErrorsDetected`]
+    /// where it found errors.
+    fn left_state(&self) -> Vec<ReadError> {
+        let mut out = Vec::new();
+        if self.needs_recovery || self.state_on_disk & STATE_CLEAN == 0 {
+            out.push(ReadError::NotCleanlyUnmounted);
+        }
+        if self.state_on_disk & STATE_ERRORS != 0 {
+            out.push(ReadError::ErrorsDetected);
+        }
+        out
+    }
+
+    /// The bytes of block `block`, as the reader presents it: with a replayed journal's copy
+    /// in place of the home contents where recovery rewrites the block.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::OutOfRange`] if the filesystem has no such block or the source ends
+    /// before it; [`ReadError::Io`] if the source cannot be read.
+    pub fn read_block(&mut self, block: u64) -> Result<Vec<u8>, ReadError> {
+        self.block(block)
     }
 
     /// Parse the jbd2 journal superblock, or `None` when the image carries no journal.
@@ -3739,60 +4432,314 @@ impl<R: Read + Seek> Reader<R> {
                 continue;
             }
             let block = self.block(phys)?;
-            let mut off = 0;
-            // Walk to the end of the block. Under `metadata_csum` the final twelve
-            // bytes are a checksum tail, which parses as a zero-inode slot and is
-            // skipped by the `inode != 0` test below; without the feature the kernel
-            // tiles real entries across the whole block, so a legitimate entry can begin
-            // in those last twelve bytes. Stopping short of the block's end would drop
-            // it.
-            while off < self.block_size {
-                let (entry, rec_len) = DirEntry::read_from(&block[off..], self.block_size)?;
-                // [`DirEntry::read_from`] returns no record shorter than the eight-byte
-                // header it parses, so `off` always advances and this cannot fire. It
-                // guards that invariant rather than describing a record an image holds: a
-                // zero-length one would turn the walk below into the one thing a reader of
-                // hostile bytes must never do.
-                if rec_len == 0 {
-                    return Err(ReadError::BadDirectory);
-                }
-                if entry.inode != 0 {
-                    // An entry naming an inode the filesystem does not have and an entry
-                    // carrying a name no directory could hold are the same fault in two
-                    // fields, and get the same treatment: a policy that refuses deviations
-                    // refuses them, and one that does not leaves the entry out and lets the
-                    // scan report it. Failing the whole listing instead discards the good
-                    // entries beside the bad one — which is precisely what a lenient read
-                    // exists to recover.
-                    //
-                    // Both checks sit here because this is where bytes become a name and a
-                    // reference: one check covers listing, resolution, the walk, and every
-                    // sink a walk feeds, and no later caller has to remember either.
-                    let fault = if is_hostile_entry(&entry.name) {
-                        Some(ReadError::HostileName { inode: entry.inode })
-                    } else {
-                        self.check_dir_entry_inode(entry.inode).err()
-                    };
-                    if let Some(e) = fault {
-                        if self.policy.is_fatal(Severity::Structural) {
-                            return Err(e);
-                        }
-                        off += rec_len;
-                        continue;
-                    }
-                    let keep = visit(Entry {
-                        name: entry.name,
-                        inode: entry.inode,
-                        file_type: entry.file_type,
-                    })?;
-                    if keep.is_break() {
-                        return Ok(());
-                    }
-                }
-                off += rec_len;
+            if self.for_each_entry_in_block(&block, &mut visit)?.is_break() {
+                return Ok(());
             }
         }
         Ok(())
+    }
+
+    /// Walk the live entries of one directory block, calling `visit` until it answers `Break`,
+    /// and say whether it did.
+    fn for_each_entry_in_block<F>(
+        &self,
+        block: &[u8],
+        visit: &mut F,
+    ) -> Result<std::ops::ControlFlow<()>, ReadError>
+    where
+        F: FnMut(Entry) -> Result<std::ops::ControlFlow<()>, ReadError>,
+    {
+        let mut off = 0;
+        // Walk to the end of the block. Under `metadata_csum` the final twelve
+        // bytes are a checksum tail, which parses as a zero-inode slot and is
+        // skipped by the `inode != 0` test below; without the feature the kernel
+        // tiles real entries across the whole block, so a legitimate entry can begin
+        // in those last twelve bytes. Stopping short of the block's end would drop
+        // it.
+        while off < self.block_size {
+            let (entry, rec_len) = DirEntry::read_from(&block[off..], self.block_size)?;
+            // [`DirEntry::read_from`] returns no record shorter than the eight-byte
+            // header it parses, so `off` always advances and this cannot fire. It
+            // guards that invariant rather than describing a record an image holds: a
+            // zero-length one would turn the walk below into the one thing a reader of
+            // hostile bytes must never do.
+            if rec_len == 0 {
+                return Err(ReadError::BadDirectory);
+            }
+            if entry.inode != 0 {
+                // An entry naming an inode the filesystem does not have and an entry
+                // carrying a name no directory could hold are the same fault in two
+                // fields, and get the same treatment: a policy that refuses deviations
+                // refuses them, and one that does not leaves the entry out and lets the
+                // scan report it. Failing the whole listing instead discards the good
+                // entries beside the bad one — which is precisely what a lenient read
+                // exists to recover.
+                //
+                // Both checks sit here because this is where bytes become a name and a
+                // reference: one check covers listing, resolution, the walk, and every
+                // sink a walk feeds, and no later caller has to remember either.
+                let fault = if is_hostile_entry(&entry.name) {
+                    Some(ReadError::HostileName { inode: entry.inode })
+                } else {
+                    self.check_dir_entry_inode(entry.inode).err()
+                };
+                if let Some(e) = fault {
+                    if self.policy.is_fatal(Severity::Structural) {
+                        return Err(e);
+                    }
+                    off += rec_len;
+                    continue;
+                }
+                let keep = visit(Entry {
+                    name: entry.name,
+                    inode: entry.inode,
+                    file_type: entry.file_type,
+                })?;
+                if keep.is_break() {
+                    return Ok(keep);
+                }
+            }
+            off += rec_len;
+        }
+        Ok(std::ops::ControlFlow::Continue(()))
+    }
+
+    /// The hash index of `dir`, or `None` where it has none this reader can follow: no index
+    /// flag, a filesystem without `dir_index`, a root that does not parse, an algorithm this
+    /// crate does not compute, or a depth past what the format allows without `largedir`.
+    fn dir_index(&mut self, dir: &Inode) -> Result<Option<DirIndex>, ReadError> {
+        use crate::hash::{HashSignedness, HashVersion};
+
+        if !dir.flags.contains(InodeFlags::INDEX) || !self.feature.has_dir_index() {
+            return Ok(None);
+        }
+        let blocks = self.data_blocks(dir)?;
+        let Some(root) = self.dir_block_at(&blocks, 0)? else {
+            return Ok(None);
+        };
+        let Ok((code, levels)) = read_dx_root_info(&root) else {
+            return Ok(None);
+        };
+        // The root records the algorithm, and the codes past the three algorithms are the same
+        // three read as unsigned; for the three themselves, the superblock says how bytes read.
+        let (version, signedness) = match code {
+            0..=2 => (code, HashSignedness::from_flags(self.sb.flags)),
+            3..=5 => (code - 3, HashSignedness::Unsigned),
+            _ => return Ok(None),
+        };
+        let Some(version) = HashVersion::from_u8(version) else {
+            return Ok(None);
+        };
+        if levels > DX_MAX_INDIRECT_LEVELS {
+            return Ok(None);
+        }
+        Ok(Some(DirIndex {
+            blocks,
+            root,
+            levels,
+            version,
+            signedness,
+        }))
+    }
+
+    /// Descend `index` from its root: at each level to the last entry whose hash is at or below
+    /// `major`, or to the first entry where `major` is `None`. Answers the entries of each level
+    /// and the one followed, or `None` where a level is not an index node.
+    fn descend(
+        &mut self,
+        index: &DirIndex,
+        major: Option<u32>,
+    ) -> Result<Option<IndexPath>, ReadError> {
+        let mut path: IndexPath = Vec::with_capacity(usize::from(index.levels) + 1);
+        let mut block = index.root.clone();
+        let mut count_offset = DX_ROOT_COUNT_OFFSET;
+        for level in 0..=index.levels {
+            let Ok(entries) = read_dx_entries(&block, count_offset) else {
+                return Ok(None);
+            };
+            // The first entry stores no hash and covers everything below the second's.
+            let at = major.map_or(0, |major| {
+                entries[1..].partition_point(|entry| entry.hash <= major)
+            });
+            let child = entries[at].block;
+            path.push((entries, at));
+            if level < index.levels {
+                let Some(node) = self.dir_block_at(&index.blocks, child)? else {
+                    return Ok(None);
+                };
+                block = node;
+                count_offset = DX_NODE_COUNT_OFFSET;
+            }
+        }
+        Ok(Some(path))
+    }
+
+    /// Find `name` in the directory `dir` through its hash index.
+    ///
+    /// The lookup the format documents. The name is hashed with the algorithm the index root
+    /// records and the filesystem's seed; the descent takes, at each level, the last entry
+    /// whose hash is at or below the name's; and the leaf that names is read. Where it does
+    /// not hold the name, the leaves that follow in tree order are read for as long as the
+    /// entry leading to each carries the same hash with its low bit set, which is how a run of
+    /// names sharing one hash continues across a split.
+    ///
+    /// A name whose hash this crate moves off the end of the hash space is also followed into
+    /// the leaf its unmoved hash leads to, which is where a writer that leaves the hash where
+    /// it fell places the name ([`crate::hash`]).
+    ///
+    /// An index this cannot follow answers [`Indexed::Unusable`], and the caller reads every
+    /// block of the directory instead. The leaves hold every name whatever the index says, so
+    /// the answer is the same and only its cost differs. Whether the index leads to every name
+    /// it holds is the scan's question.
+    fn find_indexed(&mut self, dir: &Inode, name: &[u8]) -> Result<Indexed, ReadError> {
+        use crate::hash::{dir_hash, unmoved_major};
+
+        let Some(index) = self.dir_index(dir)? else {
+            return Ok(Indexed::Unusable);
+        };
+        let hash = dir_hash(name, index.version, index.signedness, &self.sb.hash_seed);
+        let unmoved = unmoved_major(hash.major);
+        let Some(mut path) = self.descend(&index, Some(hash.major))? else {
+            return Ok(Indexed::Unusable);
+        };
+
+        // Every leaf is visited at most once, since tree order only moves forward; the bound
+        // is the directory's own length.
+        for _ in 0..index.blocks.len() {
+            let (entries, at) = path.last().expect("the descent pushed one level at least");
+            let Some(leaf) = self.dir_block_at(&index.blocks, entries[*at].block)? else {
+                return Ok(Indexed::Unusable);
+            };
+            let mut found = 0;
+            let hit = self.for_each_entry_in_block(&leaf, &mut |entry: Entry| {
+                Ok(if entry.name == name {
+                    found = entry.inode;
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                })
+            })?;
+            if hit.is_break() {
+                return Ok(Indexed::Found(found));
+            }
+            let next = match self.next_leaf(&index.blocks, &mut path)? {
+                Step::Leaf(next) => next,
+                Step::End => return Ok(Indexed::Absent),
+                Step::Unusable => return Ok(Indexed::Unusable),
+            };
+            let continues = next == hash.major | DX_HASH_CONTINUED
+                || unmoved.is_some_and(|unmoved| next & !DX_HASH_CONTINUED == unmoved);
+            if !continues {
+                return Ok(Indexed::Absent);
+            }
+        }
+        Ok(Indexed::Unusable)
+    }
+
+    /// Hold every name in an indexed directory to the leaf its index leads it to, and report
+    /// the first that sits elsewhere: a lookup through the index would not find it.
+    ///
+    /// A leaf holds the hashes from the one its entry records up to the next leaf's, and also
+    /// that next hash where the next leaf's entry marks it continued. A name this crate moves
+    /// off the end of the hash space fits where either of its two hashes does.
+    fn scan_index(&mut self, ino: u32, dir: &Inode, out: &mut Findings<Anomaly>) {
+        use crate::hash::{dir_hash, unmoved_major};
+
+        let Ok(Some(index)) = self.dir_index(dir) else {
+            return;
+        };
+        let Ok(Some(mut path)) = self.descend(&index, None) else {
+            return;
+        };
+        // Each leaf in tree order with the hash its range begins at.
+        let mut leaves: Vec<(u32, u32)> = Vec::new();
+        let mut low = 0u32;
+        for _ in 0..index.blocks.len() {
+            let (entries, at) = path.last().expect("the descent pushed one level at least");
+            leaves.push((entries[*at].block, low));
+            match self.next_leaf(&index.blocks, &mut path) {
+                Ok(Step::Leaf(next)) => low = next,
+                Ok(Step::End) => break,
+                Ok(Step::Unusable) | Err(_) => return,
+            }
+        }
+        let fits = |major: u32, low: u32, high: Option<u32>| {
+            low & !DX_HASH_CONTINUED <= major
+                && high.is_none_or(|high| {
+                    major < high & !DX_HASH_CONTINUED || major | DX_HASH_CONTINUED == high
+                })
+        };
+        for (k, &(leaf, low)) in leaves.iter().enumerate() {
+            let high = leaves.get(k + 1).map(|&(_, next)| next);
+            let Ok(Some(block)) = self.dir_block_at(&index.blocks, leaf) else {
+                continue;
+            };
+            let mut misplaced = None;
+            let walked = self.for_each_entry_in_block(&block, &mut |entry: Entry| {
+                let major = dir_hash(
+                    &entry.name,
+                    index.version,
+                    index.signedness,
+                    &self.sb.hash_seed,
+                )
+                .major;
+                let placed = fits(major, low, high)
+                    || unmoved_major(major).is_some_and(|unmoved| fits(unmoved, low, high));
+                Ok(if placed {
+                    std::ops::ControlFlow::Continue(())
+                } else {
+                    misplaced = Some(entry.inode);
+                    std::ops::ControlFlow::Break(())
+                })
+            });
+            if walked.is_ok()
+                && let Some(inode) = misplaced
+            {
+                out.push(anomaly_at_inode(
+                    &ReadError::IndexMisplacesName { inode },
+                    ino,
+                ));
+                return;
+            }
+        }
+    }
+
+    /// Move `path` to the next leaf in tree order: the next entry at the deepest level that
+    /// has one, and the first entry of every level below it. Answers the hash of the entry it
+    /// moved to, which is the hash the next leaf's range begins at.
+    fn next_leaf(&mut self, blocks: &[u64], path: &mut IndexPath) -> Result<Step, ReadError> {
+        let Some(level) = path
+            .iter()
+            .rposition(|(entries, at)| at + 1 < entries.len())
+        else {
+            return Ok(Step::End);
+        };
+        path[level].1 += 1;
+        let hash = path[level].0[path[level].1].hash;
+        for below in level + 1..path.len() {
+            let (entries, at) = &path[below - 1];
+            let Some(node) = self.dir_block_at(blocks, entries[*at].block)? else {
+                return Ok(Step::Unusable);
+            };
+            let Ok(entries) = read_dx_entries(&node, DX_NODE_COUNT_OFFSET) else {
+                return Ok(Step::Unusable);
+            };
+            path[below] = (entries, 0);
+        }
+        Ok(Step::Leaf(hash))
+    }
+
+    /// The directory block at logical block `logical`, or `None` where the directory's map
+    /// has no block there. Block zero is the root, and is asked for only as the root.
+    fn dir_block_at(&mut self, blocks: &[u64], logical: u32) -> Result<Option<Vec<u8>>, ReadError> {
+        match blocks
+            .get(logical as usize)
+            .copied()
+            .filter(|&phys| phys != 0)
+        {
+            Some(phys) => Ok(Some(self.block(phys)?)),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a path to its inode number and inode, following symbolic links.
@@ -3810,6 +4757,10 @@ impl<R: Read + Seek> Reader<R> {
     /// following one.
     ///
     /// Resolution follows at most [`MAX_SYMLINK_HOPS`](crate::MAX_SYMLINK_HOPS) links, so a cycle terminates.
+    ///
+    /// Each directory is read only as far as the name it resolves — through its hash index
+    /// where it has one — and nothing is gathered, so [`Limits::max_walk_entries`] does not
+    /// govern a lookup, and an entry past the name is not read.
     ///
     /// # Errors
     ///
@@ -3963,6 +4914,11 @@ impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
         dir: &Self::Node,
         name: &[u8],
     ) -> Result<Option<Self::Node>, ReadError> {
+        match self.find_indexed(&dir.1, name)? {
+            Indexed::Found(ino) => return Ok(Some((ino, self.inode(ino)?))),
+            Indexed::Absent => return Ok(None),
+            Indexed::Unusable => {}
+        }
         // Streamed with an early stop rather than listed and searched: a resolution asks
         // for one name, and a large directory read whole per component would cost every
         // entry's allocation to use one of them.
@@ -4135,6 +5091,45 @@ impl From<ReadError> for TreeError {
 ///
 /// The node handle is the [`Inode`] itself, which the walk already read, so a sink that
 /// stats and then reads a file costs no second lookup of it.
+/// A journal's log, reached through the file that holds it, one mapping window at a time.
+struct JournalLog<'a, R> {
+    reader: &'a mut Reader<R>,
+    inode: Inode,
+    /// The window of the journal file's map last looked up: its first log block and the
+    /// blocks of the image it maps to.
+    window: Option<(u32, Vec<u64>)>,
+}
+
+impl<R: Read + Seek> crate::replay::Log for JournalLog<'_, R> {
+    fn locate(&mut self, n: u32) -> Result<u64, ReadError> {
+        let width = MAP_WINDOW_BLOCKS as u32;
+        let start = n - n % width;
+        if self.window.as_ref().map(|(first, _)| *first) != Some(start) {
+            let map = self
+                .reader
+                .map_window(&self.inode, start as usize, MAP_WINDOW_BLOCKS)?;
+            self.window = Some((start, map));
+        }
+        let at = self
+            .window
+            .as_ref()
+            .and_then(|(_, map)| map.get((n - start) as usize).copied())
+            .unwrap_or(0);
+        if at == 0 {
+            return Err(ReadError::JournalMalformed {
+                log_block: n,
+                detail: "a log block the journal file does not map",
+            });
+        }
+        Ok(at)
+    }
+
+    fn read(&mut self, n: u32) -> Result<Vec<u8>, ReadError> {
+        let at = self.locate(n)?;
+        self.reader.block(at)
+    }
+}
+
 impl<R: Read + Seek> FsTree for Reader<R> {
     type Node = Inode;
 
@@ -5535,13 +6530,12 @@ mod tests {
         // A report that renders a real feature as a bare hexadecimal bit tells a reader
         // nothing to act on. Every bit ext4 defines is named — whether or not this crate
         // models it — and only a bit no ext4 feature claims stays hexadecimal.
-        let d = describe_unsupported_incompat(
-            Incompat::META_BG.bits() | 0x0000_4000 | 0x0000_8000 | 0x8000_0000,
-        );
-        for name in ["meta_bg", "large_dir", "inline_data", "0x80000000"] {
+        let d =
+            describe_unsupported_incompat(0x0000_0100 | 0x0000_4000 | 0x0000_8000 | 0x8000_0000);
+        for name in ["mmp", "large_dir", "inline_data", "0x80000000"] {
             assert!(d.contains(name), "{name} is missing from {d:?}");
         }
-        let order: Vec<usize> = ["meta_bg", "large_dir", "inline_data", "0x80000000"]
+        let order: Vec<usize> = ["mmp", "large_dir", "inline_data", "0x80000000"]
             .iter()
             .map(|n| d.find(n).unwrap())
             .collect();
@@ -5562,6 +6556,13 @@ mod tests {
                 Incompat::from_bits(*bit).names().is_empty(),
                 "{name} ({bit:#x}) is named by the feature word too"
             );
+            // One bit is followed without being modelled: `needs_recovery` is a state the
+            // reader resolves by replaying the journal, not a feature a formatter could be
+            // asked for. Every other bit named only here is one the reader refuses.
+            if *bit == INCOMPAT_RECOVER {
+                assert_ne!(bit & SUPPORTED_INCOMPAT, 0, "{name} is followed by replay");
+                continue;
+            }
             assert_eq!(
                 bit & SUPPORTED_INCOMPAT,
                 0,
@@ -5941,6 +6942,267 @@ mod tests {
         );
     }
 
+    /// An image holding `/bigdir`, a hash-indexed directory deep enough for an interior level.
+    ///
+    /// 800 entries with 200-byte names pack four to a 1024-byte leaf, filling roughly 200 leaf
+    /// blocks — past the 123 a single 1024-byte root indexes, so the writer grows an interior
+    /// level between the root and the leaves.
+    fn two_level_directory() -> Vec<u8> {
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut o = opts();
+        o.feature.block_size = 1024;
+        o.grow = GrowReservation::None;
+        let mut src = TreeBuilder::new().directory(b"/bigdir".to_vec(), Metadata::new(0o755, time));
+        for i in 0..800u32 {
+            src = src.file(big_entry(i), Vec::new(), Metadata::new(0o644, time));
+        }
+        format(src, 64 * MIB, o).unwrap().into_bytes()
+    }
+
+    /// The path of entry `i` of [`two_level_directory`]'s `/bigdir`: a 200-byte name.
+    fn big_entry(i: u32) -> Vec<u8> {
+        let mut name = format!("/bigdir/entry-{i:04}").into_bytes();
+        name.resize(b"/bigdir/".len() + 200, b'x');
+        name
+    }
+
+    #[test]
+    fn a_name_in_an_indexed_directory_is_found_through_its_index() {
+        let (source, reads) = Counting::new(two_level_directory());
+        let mut r = Reader::open(source).unwrap();
+        let (_, dir) = r.lookup(b"/bigdir").unwrap();
+        let listed = r.read_dir(&dir).unwrap();
+        assert_eq!(
+            listed.len(),
+            802,
+            "800 entries and the two every directory has"
+        );
+        for entry in listed.iter().filter(|e| e.name != b"." && e.name != b"..") {
+            assert_eq!(
+                r.find_indexed(&dir, &entry.name).unwrap(),
+                Indexed::Found(entry.inode),
+                "{}",
+                String::from_utf8_lossy(&entry.name)
+            );
+        }
+        // A name the directory does not hold, and one that differs from a held one in its
+        // last byte, are absent through the index as they are in the listing.
+        let held = &big_entry(417)[b"/bigdir/".len()..];
+        let mut near = held.to_vec();
+        *near.last_mut().unwrap() = b'y';
+        for absent in [&b"entry-9999"[..], &near] {
+            assert_eq!(r.find_indexed(&dir, absent).unwrap(), Indexed::Absent);
+        }
+
+        // Through the index, one name costs the root, one interior node, and one leaf of a
+        // directory over two hundred blocks long.
+        reads.borrow_mut().clear();
+        assert!(matches!(
+            r.find_indexed(&dir, held).unwrap(),
+            Indexed::Found(_)
+        ));
+        let read = reads.borrow().len();
+        assert!(
+            read <= 3,
+            "one lookup read {read} blocks: {:?}",
+            reads.borrow()
+        );
+    }
+
+    #[test]
+    fn a_run_of_names_sharing_a_hash_is_followed_across_the_leaves_it_spans() {
+        // Twelve 200-byte names whose half-MD4 major hash under this seed is one value, found
+        // by search: three leaves' worth at a 1 KiB block, so the run is split and the entries
+        // after its first leaf carry the hash with the continued bit set. Each is found
+        // through the index, which takes following the continuation from the first leaf.
+        const RUN: [&str; 12] = [
+            "00000000", "000yur3r", "00ikgk6p", "038nnvs7", "04fj9czy", "06o4c9mm", "08fmpxko",
+            "0cfkev4t", "0dcul5zd", "0di2m3ht", "0e8lvhi2", "0fzu2fjy",
+        ];
+        let seed = *b"ferrosys-htree\0\0";
+        let name = |suffix: &str| {
+            let mut name = b"run-".to_vec();
+            name.resize(192, b'x');
+            name.extend_from_slice(suffix.as_bytes());
+            name
+        };
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut o = opts();
+        o.feature.block_size = 1024;
+        o.grow = GrowReservation::None;
+        o.hash_seed = seed;
+        o.hash_signedness = crate::hash::HashSignedness::Signed;
+        let mut src = TreeBuilder::new().directory(b"/run".to_vec(), Metadata::new(0o755, time));
+        for suffix in RUN {
+            let mut path = b"/run/".to_vec();
+            path.extend_from_slice(&name(suffix));
+            src = src.file(path, Vec::new(), Metadata::new(0o644, time));
+        }
+        let bytes = format(src, 64 * MIB, o).unwrap().into_bytes();
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (_, dir) = r.lookup(b"/run").unwrap();
+        let index = r
+            .dir_index(&dir)
+            .unwrap()
+            .expect("an index this reader follows");
+        let root = read_dx_entries(&index.root, DX_ROOT_COUNT_OFFSET).unwrap();
+        let continued = root[1..]
+            .iter()
+            .filter(|e| e.hash & DX_HASH_CONTINUED != 0)
+            .count();
+        assert!(
+            continued >= 2,
+            "the run was not split across leaves: {root:?}"
+        );
+        let major = crate::hash::dir_hash(
+            &name(RUN[0]),
+            crate::hash::HashVersion::HalfMd4,
+            crate::hash::HashSignedness::Signed,
+            &seed,
+        )
+        .major;
+        assert_eq!(major, 0xe464_36ac, "the run's hash under this seed");
+
+        let listed = r.read_dir(&dir).unwrap();
+        for suffix in RUN {
+            let want = listed
+                .iter()
+                .find(|e| e.name == name(suffix))
+                .expect("listed")
+                .inode;
+            assert_eq!(
+                r.find_indexed(&dir, &name(suffix)).unwrap(),
+                Indexed::Found(want),
+                "{suffix}"
+            );
+        }
+        // A name of the same shape that is not in the run is absent, after the run's leaves.
+        assert_eq!(
+            r.find_indexed(&dir, &name("zzzzzzzz")).unwrap(),
+            Indexed::Absent
+        );
+        assert!(r.scan().is_clean(), "{:?}", r.scan().anomalies());
+    }
+
+    #[test]
+    fn a_name_at_the_end_of_the_hash_space_is_found_under_either_reading_of_it() {
+        // Two names whose half-MD4 major hash under this seed is the end of the hash space,
+        // which this crate moves down one step and a writer that does not move it leaves. Forty
+        // others fill ten leaves of four, so the two sort last into a leaf of their own, and
+        // its index entry carries the moved value. Rewritten to the unmoved one, it is the
+        // index such a writer builds; the names are found and the scan holds them placed.
+        let seed = *b"ferrosys-htree\0\0";
+        let end_name = |suffix: &str| {
+            let mut name = b"eos-".to_vec();
+            name.resize(192, b'x');
+            name.extend_from_slice(suffix.as_bytes());
+            name
+        };
+        let ends = [end_name("001x3k0e"), end_name("0fyrqufv")];
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut o = opts_no_csum();
+        o.feature.block_size = 1024;
+        o.grow = GrowReservation::None;
+        o.hash_seed = seed;
+        o.hash_signedness = crate::hash::HashSignedness::Signed;
+        let mut src = TreeBuilder::new().directory(b"/d".to_vec(), Metadata::new(0o755, time));
+        for i in 0..40u32 {
+            let mut path = format!("/d/fill-{i:04}").into_bytes();
+            path.resize(b"/d/".len() + 200, b'x');
+            src = src.file(path, Vec::new(), Metadata::new(0o644, time));
+        }
+        for name in &ends {
+            let mut path = b"/d/".to_vec();
+            path.extend_from_slice(name);
+            src = src.file(path, Vec::new(), Metadata::new(0o644, time));
+        }
+        let mut bytes = format(src, 64 * MIB, o).unwrap().into_bytes();
+
+        let root_at = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let (_, dir) = r.lookup(b"/d").unwrap();
+            let index = r
+                .dir_index(&dir)
+                .unwrap()
+                .expect("an index this reader follows");
+            let root = read_dx_entries(&index.root, DX_ROOT_COUNT_OFFSET).unwrap();
+            assert_eq!(
+                root.len(),
+                11,
+                "ten leaves of four and one of two: {root:?}"
+            );
+            assert_eq!(
+                root[10].hash, 0xFFFF_FFFC,
+                "the last leaf begins at the moved value"
+            );
+            index.blocks[0] as usize * 1024
+        };
+        let at = root_at + DX_ROOT_COUNT_OFFSET + DX_ENTRY_LEN * 10;
+        bytes[at..at + 4].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let (_, dir) = r.lookup(b"/d").unwrap();
+        for name in &ends {
+            assert!(
+                matches!(r.find_indexed(&dir, name).unwrap(), Indexed::Found(_)),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        assert!(r.scan().is_clean(), "{:?}", r.scan().anomalies());
+    }
+
+    #[test]
+    fn a_name_its_index_does_not_lead_to_is_reported_and_missed_through_the_index() {
+        // Raise the lower bound of one leaf's range to just below the next leaf's, so the
+        // names that leaf holds sit below the range its entry now claims. Each is still in the
+        // directory's blocks, which a listing reads, and is not where the index leads.
+        let mut bytes = two_level_directory();
+        let (node_at, raised, leaf) = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            let (_, dir) = r.lookup(b"/bigdir").unwrap();
+            let index = r
+                .dir_index(&dir)
+                .unwrap()
+                .expect("an index this reader follows");
+            let root = read_dx_entries(&index.root, DX_ROOT_COUNT_OFFSET).unwrap();
+            let node_phys = index.blocks[root[0].block as usize];
+            let node = r.block(node_phys).unwrap();
+            let entries = read_dx_entries(&node, DX_NODE_COUNT_OFFSET).unwrap();
+            let leaf = r.block(index.blocks[entries[2].block as usize]).unwrap();
+            (node_phys as usize * 1024, entries[3].hash - 2, leaf)
+        };
+        let at = node_at + DX_NODE_COUNT_OFFSET + DX_ENTRY_LEN * 2;
+        bytes[at..at + 4].copy_from_slice(&raised.to_le_bytes());
+
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        let (dir_ino, dir) = r.lookup(b"/bigdir").unwrap();
+        let report = r.scan();
+        let misplaced: Vec<_> = report
+            .anomalies()
+            .iter()
+            .filter(|a| a.detail.contains("does not lead to"))
+            .collect();
+        assert_eq!(misplaced.len(), 1, "{:?}", report.anomalies());
+        assert_eq!(misplaced[0].category, Category::Directory);
+        assert_eq!(misplaced[0].location.inode, Some(dir_ino));
+
+        // And a name in that leaf is missed through the index, where the listing has it.
+        let (entry, _) = DirEntry::read_from(&leaf, 1024).unwrap();
+        assert!(
+            r.read_dir(&dir)
+                .unwrap()
+                .iter()
+                .any(|e| e.name == entry.name)
+        );
+        assert_eq!(r.find_indexed(&dir, &entry.name).unwrap(), Indexed::Absent);
+    }
+
     #[test]
     fn verifies_a_two_level_htree_with_interior_index_nodes() {
         // A hash tree deep enough to need interior index nodes has three block roles —
@@ -5949,22 +7211,7 @@ mod tests {
         // whole two-level tree must verify with no false mismatch. A 1024-byte block
         // indexes at most 123 leaves at one level, so a directory spanning more than
         // that many blocks is provably two-level.
-        let time = Timestamp::from_secs(1_700_000_000);
-        let mut o = opts();
-        o.feature.block_size = 1024;
-        o.grow = GrowReservation::None;
-
-        // 800 entries with 200-byte names pack four to a leaf, filling roughly 200 leaf
-        // blocks — past what a single 1024-byte root indexes, so the writer grows an
-        // interior level between the root and the leaves.
-        let mut src = TreeBuilder::new().directory(b"/bigdir".to_vec(), Metadata::new(0o755, time));
-        for i in 0..800u32 {
-            let mut name = format!("/bigdir/entry-{i:04}").into_bytes();
-            name.resize(b"/bigdir/".len() + 200, b'x');
-            src = src.file(name, Vec::new(), Metadata::new(0o644, time));
-        }
-        let bytes = format(src, 64 * MIB, o).unwrap().into_bytes();
-
+        let bytes = two_level_directory();
         let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
         let (_, dir) = r.lookup(b"/bigdir").expect("the directory is present");
         assert!(
@@ -6318,12 +7565,52 @@ mod tests {
         assert_eq!(oor.category, Category::Superblock);
         assert_eq!(oor.location.block, Some(99));
 
+        // A state a driver left behind is the format recording it: cosmetic, so a strict
+        // read carries on, and filed against the superblock that holds it.
+        for state in [ReadError::NotCleanlyUnmounted, ReadError::ErrorsDetected] {
+            let a = state.anomaly();
+            assert_eq!(a.severity, Severity::Cosmetic, "{state:?}");
+            assert_eq!(a.category, Category::Superblock, "{state:?}");
+        }
+
         // The strict policy is fatal at conformance and above, and is the default.
         assert!(ReadPolicy::Strict.is_fatal(Severity::Structural));
         assert!(ReadPolicy::Strict.is_fatal(Severity::Integrity));
         assert!(ReadPolicy::Strict.is_fatal(Severity::Conformance));
         assert!(!ReadPolicy::Strict.is_fatal(Severity::Cosmetic));
         assert_eq!(ReadPolicy::default(), ReadPolicy::Strict);
+    }
+
+    #[test]
+    fn the_state_word_is_read_as_the_last_driver_left_it() {
+        // The documented bits of `s_state`, in every combination: clean, errors found, and
+        // orphans being recovered, which records a step of a mount rather than how one ended
+        // and is reported as nothing.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src =
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time));
+        let image = format(src, 8 * MIB, opts()).unwrap().into_bytes();
+        for (state, expected) in [
+            (STATE_CLEAN, vec![]),
+            (0, vec![ReadError::NotCleanlyUnmounted]),
+            (STATE_CLEAN | STATE_ERRORS, vec![ReadError::ErrorsDetected]),
+            (
+                STATE_ERRORS,
+                vec![ReadError::NotCleanlyUnmounted, ReadError::ErrorsDetected],
+            ),
+            (STATE_CLEAN | 0x0004, vec![]),
+            (0x0004, vec![ReadError::NotCleanlyUnmounted]),
+        ] {
+            let mut bytes = image.clone();
+            put_u16(&mut bytes, 1024 + 0x3a, state);
+            let sum = superblock_checksum(&bytes[1024..2048]);
+            bytes[1024 + 0x3fc..1024 + 0x400].copy_from_slice(&sum.to_le_bytes());
+            let mut r = Reader::open(std::io::Cursor::new(bytes.as_slice()))
+                .unwrap_or_else(|e| panic!("state {state:#x}: a strict open: {e}"));
+            assert_eq!(r.state_on_disk(), state);
+            let expected: Vec<Anomaly> = expected.iter().map(ReadError::anomaly).collect();
+            assert_eq!(r.scan().anomalies(), expected, "state {state:#x}");
+        }
     }
 
     #[test]
@@ -6390,9 +7677,9 @@ mod tests {
     #[test]
     fn refuses_an_unsupported_incompat_feature_and_reports_it() {
         // The `incompat` word is the one an implementation must refuse when it does not
-        // recognize a bit: an unknown extension, or `meta_bg`, whose distributed group
-        // descriptors this reader does not follow. A strict open refuses; a lenient scan
-        // reports it as a structural anomaly against the superblock.
+        // recognize a bit: an unknown extension, or one ext4 defines and this reader does not
+        // follow, such as `inline_data`. A strict open refuses; a lenient scan reports it as
+        // a structural anomaly against the superblock.
         let clean = format(TreeBuilder::new(), 64 * MIB, opts())
             .unwrap()
             .into_bytes();
@@ -6404,7 +7691,7 @@ mod tests {
         // superblock begins 1024 bytes into the image.
         let incompat = 1024 + 0x60;
         for (name, byte, mask, want) in [
-            ("meta_bg", 0, 0x10u8, 0x10u32),
+            ("inline_data", 1, 0x80u8, 0x8000u32),
             ("unknown high bit", 3, 0x80u8, 0x8000_0000u32),
         ] {
             let mut bytes = clean.clone();
@@ -8047,6 +9334,133 @@ mod tests {
         ));
     }
 
+    /// A filesystem this crate wrote, left needing recovery: its journal holds two committed
+    /// transactions — blocks 3000 and 3001 in the first, a revoke of 3000 and block 3002 in
+    /// the second — and its superblock carries `needs_recovery`. Answers the image and the
+    /// block the journal superblock sits at.
+    fn needing_recovery() -> (Vec<u8>, usize) {
+        use crate::bytes::put_u32_be;
+        let image = format(TreeBuilder::new(), 16 * MIB, opts())
+            .unwrap()
+            .into_bytes();
+        let mut r = Reader::open(std::io::Cursor::new(image.as_slice())).unwrap();
+        let jsb = usize::try_from(r.journal_superblock_block().unwrap().unwrap()).unwrap();
+        let bs = r.block_size;
+        drop(r);
+        let mut bytes = image;
+        let at = |n: usize| (jsb + n) * bs;
+        // The journal this crate writes is one contiguous run with no journal features, so
+        // log block n is the block n past its superblock, and a tag is eight bytes.
+        put_u32_be(&mut bytes, at(0) + crate::journal::offset::START, 1);
+        let header = |b: &mut Vec<u8>, at: usize, kind: u32, seq: u32| {
+            put_u32_be(b, at, crate::journal::JBD2_MAGIC);
+            put_u32_be(b, at + 4, kind);
+            put_u32_be(b, at + 8, seq);
+        };
+        header(&mut bytes, at(1), crate::journal::BLOCKTYPE_DESCRIPTOR, 1);
+        put_u32_be(&mut bytes, at(1) + 12, 3000);
+        put_u32_be(&mut bytes, at(1) + 16, 0);
+        put_u32_be(&mut bytes, at(1) + 36, 3001);
+        put_u32_be(
+            &mut bytes,
+            at(1) + 40,
+            crate::journal::TAG_SAME_UUID | crate::journal::TAG_LAST,
+        );
+        bytes[at(2)..at(3)].fill(0xa1);
+        bytes[at(3)..at(4)].fill(0xa2);
+        header(&mut bytes, at(4), crate::journal::BLOCKTYPE_COMMIT, 1);
+        header(&mut bytes, at(5), crate::journal::BLOCKTYPE_REVOKE, 2);
+        put_u32_be(&mut bytes, at(5) + 12, 20);
+        put_u32_be(&mut bytes, at(5) + 16, 3000);
+        header(&mut bytes, at(6), crate::journal::BLOCKTYPE_DESCRIPTOR, 2);
+        put_u32_be(&mut bytes, at(6) + 12, 3002);
+        put_u32_be(&mut bytes, at(6) + 16, crate::journal::TAG_LAST);
+        bytes[at(7)..at(8)].fill(0xa3);
+        header(&mut bytes, at(8), crate::journal::BLOCKTYPE_COMMIT, 2);
+        // And the superblock says so, under a checksum that covers the word.
+        let incompat = crate::bytes::get_u32(&bytes, 1024 + SuperBlock::FEATURE_INCOMPAT_OFFSET);
+        crate::bytes::put_u32(
+            &mut bytes,
+            1024 + SuperBlock::FEATURE_INCOMPAT_OFFSET,
+            incompat | INCOMPAT_RECOVER,
+        );
+        let sum = superblock_checksum(&bytes[1024..2048]);
+        crate::bytes::put_u32(&mut bytes, 1024 + SuperBlock::CHECKSUM_OFFSET, sum);
+        (bytes, jsb)
+    }
+
+    #[test]
+    fn a_forged_log_is_replayed_over_the_homes() {
+        let (bytes, _) = needing_recovery();
+        let mut r = Reader::open(std::io::Cursor::new(bytes.as_slice())).expect("open");
+        assert!(r.needs_recovery());
+        let replay = *r.journal_replay().expect("replayed");
+        assert_eq!(
+            (replay.transactions, replay.blocks, replay.skipped),
+            (2, 2, 0)
+        );
+        // 3000 was revoked by the second transaction; 3001 and 3002 read from the log.
+        assert_eq!(r.read_block(3000).unwrap(), bytes[3000 * 4096..3001 * 4096]);
+        assert!(r.read_block(3001).unwrap().iter().all(|&b| b == 0xa2));
+        assert!(r.read_block(3002).unwrap().iter().all(|&b| b == 0xa3));
+        // A read spanning a replayed block and its neighbours takes each from its own place.
+        let mut span = vec![0u8; 3 * 4096];
+        let got = r.read_at(3000 * 4096 + 100, span.len()).unwrap();
+        span.copy_from_slice(&got);
+        assert_eq!(span[..4096 - 100], bytes[3000 * 4096 + 100..3001 * 4096]);
+        assert!(span[4096 - 100..2 * 4096 - 100].iter().all(|&b| b == 0xa2));
+        assert!(span[2 * 4096 - 100..].iter().take(100).all(|&b| b == 0xa3));
+        // What a scan says of it is the one thing the log records about the filesystem:
+        // that it was not cleanly unmounted.
+        assert_eq!(
+            r.scan().anomalies(),
+            [ReadError::NotCleanlyUnmounted.anomaly()],
+        );
+    }
+
+    #[test]
+    fn reader_never_panics_on_a_mangled_log() {
+        // The log is read from bytes the image supplies, at open, before anything else a
+        // caller asks for. Every byte of the journal superblock and the log is flipped in
+        // turn, and the log is cut short at assorted points; opening and reading must answer
+        // with an error or a view, never a panic.
+        let (bytes, jsb) = needing_recovery();
+        let bs = 4096;
+        fn drive(bytes: &[u8]) {
+            for policy in [ReadPolicy::Strict, ReadPolicy::Lenient] {
+                if let Ok(mut r) = Reader::open_with(
+                    std::io::Cursor::new(bytes),
+                    &OpenOptions::new().policy(policy),
+                ) {
+                    let _ = r.walk();
+                    let _ = r.scan();
+                    for block in [0, 1, 3000, 3001, 3002] {
+                        let _ = r.read_block(block);
+                    }
+                }
+            }
+        }
+        drive(&bytes);
+        let mut flip = bytes.clone();
+        let mut i = jsb * bs;
+        while i < (jsb + 9) * bs {
+            let orig = flip[i];
+            // Every byte of the headers and tags three ways — the high bit, the low bit, all
+            // of them — and a stride through the rest of each block one way.
+            let header = i % bs < 64;
+            let ways: &[u8] = if header { &[0xff, 0x01, 0x80] } else { &[0xff] };
+            for &x in ways {
+                flip[i] = orig ^ x;
+                drive(&flip);
+            }
+            flip[i] = orig;
+            i += if header { 1 } else { 251 };
+        }
+        for n in 0..9 {
+            drive(&bytes[..(jsb + n) * bs + 7]);
+        }
+    }
+
     #[test]
     fn reader_never_panics_on_mangled_images() {
         // The never-panic contract: opening and every read path return errors on
@@ -8513,5 +9927,233 @@ mod tests {
             "an inode carrying a field this crate does not model was rejected: {:?}",
             report.anomalies()
         );
+    }
+
+    // -- what a read costs ------------------------------------------------------------------
+    //
+    // These pin the shape of the reads a walk and a file read issue, not their count on one
+    // build: the count moves with the tree, and the shape is the property.
+
+    use crate::io::Counting;
+
+    /// A tree shaped like a small root filesystem: directories two deep, a few hundred
+    /// files from empty to twenty kilobytes, and two files long enough to span several runs.
+    fn read_cost_image() -> Vec<u8> {
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut tree = TreeBuilder::new();
+        for d in 0..8u32 {
+            tree = tree.directory(format!("/d{d}").into_bytes(), Metadata::new(0o755, time));
+            for s in 0..3u32 {
+                tree = tree.directory(
+                    format!("/d{d}/s{s}").into_bytes(),
+                    Metadata::new(0o755, time),
+                );
+                for f in 0..20u32 {
+                    let len = ((d * 61 + s * 17 + f * 389) % 20_000) as usize;
+                    let byte = (d + s + f) as u8;
+                    tree = tree.file(
+                        format!("/d{d}/s{s}/f{f}").into_bytes(),
+                        vec![byte; len],
+                        Metadata::new(0o644, time),
+                    );
+                }
+            }
+        }
+        let long = |len: usize| (0..len).map(|i| (i / 4096) as u8).collect::<Vec<u8>>();
+        tree = tree
+            .file(
+                b"/long1".to_vec(),
+                long((1 << 20) + 5),
+                Metadata::new(0o644, time),
+            )
+            .file(
+                b"/long2".to_vec(),
+                long(3 << 20),
+                Metadata::new(0o644, time),
+            );
+        format(tree, 64 * MIB, opts()).unwrap().into_bytes()
+    }
+
+    #[test]
+    fn a_walk_reads_no_byte_twice() {
+        // A walk reads each inode's group descriptor and then the inode, and a table block
+        // serves many of both. With the table blocks the walk touches all held, every byte
+        // the walk needs is fetched once: no block is asked for twice and no read overlaps
+        // another. The domain is a tree whose touched table blocks fit the default cache,
+        // which a few hundred inodes do.
+        let (source, reads) = Counting::new(read_cost_image());
+        let mut r = Reader::open(source).unwrap();
+        reads.borrow_mut().clear();
+        let entries = r.walk().unwrap();
+        assert!(
+            entries.len() > 500,
+            "the walk reached {} entries",
+            entries.len()
+        );
+
+        let mut spans: Vec<(u64, u64)> = reads
+            .borrow()
+            .iter()
+            .map(|&(at, len)| (at, at + len as u64))
+            .collect();
+        spans.sort_unstable();
+        for pair in spans.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].0,
+                "the walk read {:?} and then {:?} again",
+                pair[0],
+                pair[1]
+            );
+        }
+        // And a table block is a read, not sixteen: there are far fewer reads than entries.
+        assert!(
+            spans.len() * 4 < entries.len(),
+            "{} reads for {} entries",
+            spans.len(),
+            entries.len()
+        );
+    }
+
+    #[test]
+    fn a_larger_table_cache_never_asks_for_more() {
+        // The cache gives up the least recently used block first, and that is a stack
+        // algorithm: what a larger cache holds is a superset of what a smaller one holds at
+        // every step, so it can never miss where the smaller one hits. Measured over the
+        // walk and a stat of every path, at sizes from none to more than the tree needs.
+        let bytes = read_cost_image();
+        let mut counts = Vec::new();
+        for capacity in [0usize, 1, 2, 4, 8, 16, 64] {
+            let (source, reads) = Counting::new(bytes.clone());
+            let mut r = Reader::open(source).unwrap().with_table_capacity(capacity);
+            reads.borrow_mut().clear();
+            let entries = r.walk().unwrap();
+            for entry in &entries {
+                r.lookup(&entry.path).unwrap();
+            }
+            counts.push((capacity, reads.borrow().len()));
+        }
+        for pair in counts.windows(2) {
+            assert!(pair[1].1 <= pair[0].1, "{counts:?}");
+        }
+        // Holding the tables takes away the two reads per inode; what stays is each lookup
+        // reading the directories along its path, which are not held. So at least half go.
+        let (none, held) = (counts[0].1, counts[counts.len() - 1].1);
+        assert!(
+            held * 2 < none,
+            "holding the tables cut {none} reads only to {held}"
+        );
+    }
+
+    #[test]
+    fn a_file_is_read_a_run_at_a_time() {
+        // Blocks that sit next to each other on disk are one request, up to the run limit,
+        // whether the file is streamed whole or read through a window. So a streamed file
+        // costs exactly as many reads as its map has runs of data.
+        let (source, reads) = Counting::new(read_cost_image());
+        let mut r = Reader::open(source).unwrap();
+        let max = r.max_run_blocks();
+        let mut files = 0;
+        for entry in r.walk().unwrap() {
+            if entry.inode.mode & 0o170000 != 0o100000 || entry.inode.size == 0 {
+                continue;
+            }
+            let blocks = usize::try_from(entry.inode.size.div_ceil(r.block_size as u64)).unwrap();
+            let map = r.map_window(&entry.inode, 0, blocks).unwrap();
+            let expected = runs(&map, max).iter().filter(|run| run.phys != 0).count();
+            reads.borrow_mut().clear();
+            let mut sink = Vec::new();
+            r.read_data_to(&entry.inode, &mut sink).unwrap();
+            assert_eq!(
+                reads.borrow().len(),
+                expected,
+                "{}: {} bytes",
+                String::from_utf8_lossy(&entry.path),
+                entry.inode.size
+            );
+            files += 1;
+        }
+        assert!(files > 400, "{files} files read");
+
+        // The long files span runs: 3 MiB at 4 KiB blocks is twelve runs of 256 KiB, read
+        // through a window as well as whole.
+        let (_, long) = r.lookup(b"/long2").unwrap();
+        reads.borrow_mut().clear();
+        let mut buf = vec![0u8; 1 << 20];
+        let filled = r.read_into(&long, 4096 * 3 + 7, &mut buf).unwrap();
+        assert_eq!(filled, 1 << 20);
+        assert!(reads.borrow().len() <= 5, "{:?}", reads.borrow());
+        let whole = r.read_data(&long).unwrap();
+        assert_eq!(&buf[..], &whole[4096 * 3 + 7..4096 * 3 + 7 + (1 << 20)]);
+    }
+
+    #[test]
+    fn runs_join_adjacent_blocks_and_nothing_else() {
+        // Holes join holes, adjacent blocks join, and a run stops at the limit.
+        let map = [10, 11, 12, 0, 0, 20, 22, 23, 24, 25, 0, 30];
+        let got: Vec<(usize, u64, usize)> = runs(&map, 3)
+            .iter()
+            .map(|r| (r.at, r.phys, r.len))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 10, 3),
+                (3, 0, 2),
+                (5, 20, 1),
+                (6, 22, 3),
+                (9, 25, 1),
+                (10, 0, 1),
+                (11, 30, 1),
+            ]
+        );
+        // A limit of zero is taken as one, and the last block of the address space joins
+        // nothing past it.
+        assert_eq!(runs(&[5, 6], 0).len(), 2);
+        assert_eq!(runs(&[u64::MAX, 0], 8).len(), 2);
+        assert!(runs(&[], 8).is_empty());
+    }
+
+    #[test]
+    fn a_source_cut_short_fails_where_a_block_at_a_time_read_does() {
+        // Reading whole runs and whole table blocks changes how often the source is asked,
+        // never what a read returns or how it fails. A source cut short in the middle of a
+        // file's run still writes the blocks before the cut and names the first block past
+        // it; one cut short just past an inode, inside its table block, still reads the
+        // inode.
+        let bytes = read_cost_image();
+        let mut r = Reader::open(std::io::Cursor::new(bytes.clone())).unwrap();
+        let (_, long) = r.lookup(b"/long2").unwrap();
+        let map = r.map_window(&long, 0, 8).unwrap();
+        let bs = r.block_size;
+        // Cut after the fifth block of the file.
+        let cut = usize::try_from(map[5]).unwrap() * bs;
+        let mut short = Reader::open(std::io::Cursor::new(bytes[..cut].to_vec())).unwrap();
+        let mut sink = Vec::new();
+        let err = short.read_data_to(&long, &mut sink).unwrap_err();
+        assert!(
+            matches!(err, ReadError::OutOfRange { what: "block", index } if index == map[5]),
+            "{err:?}"
+        );
+        assert_eq!(
+            sink.len(),
+            5 * bs,
+            "the five blocks before the cut were written"
+        );
+        assert_eq!(sink, r.read_data(&long).unwrap()[..5 * bs]);
+
+        // The last inode the tree uses, with the source ending on its final byte.
+        let last = r.walk().unwrap().iter().map(|e| e.number).max().unwrap();
+        let group = (last - 1) / r.sb.inodes_per_group;
+        let index = u64::from((last - 1) % r.sb.inodes_per_group);
+        let table = r.group_descriptor(group).unwrap().inode_table;
+        let isize = u64::from(r.sb.inode_size);
+        let end = usize::try_from(table * bs as u64 + (index + 1) * isize).unwrap();
+        assert_ne!(end % bs, 0, "the cut falls inside a table block");
+        let mut short = Reader::open_with(
+            std::io::Cursor::new(bytes[..end].to_vec()),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
+        assert_eq!(short.inode(last).unwrap(), r.inode(last).unwrap());
     }
 }

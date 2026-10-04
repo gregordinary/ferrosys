@@ -4873,3 +4873,66 @@ print(doc["family"], doc["variant"])
         );
     }
 }
+
+/// A FAT16 and an exFAT volume the binary wrote, each then given the bit its format defines for
+/// a driver that had the volume mounted and did not put it down, set the way a driver sets it.
+///
+/// The record is the format working rather than failing, so it is a cosmetic finding: the
+/// report says it in the same words for both families, and a verdict drawn at the conformance
+/// line passes the volume.
+#[test]
+fn a_volume_left_mounted_is_described_and_passes_a_conformance_verdict() {
+    let dir = scratch();
+    for fs in ["fat16", "exfat"] {
+        let image = at(&dir, &format!("{fs}.img"));
+        let path = image.to_str().expect("a text path");
+        // An exFAT volume records no time anywhere until it holds a file, so it takes none.
+        let identity: &[&str] = if fs == "exfat" {
+            &["--volume-serial", EXFAT_SERIAL]
+        } else {
+            &["--volume-id", SERIAL, "--time", TIME]
+        };
+        let mut args = vec!["format", "--size", "32M", "-t", fs];
+        args.extend(identity);
+        args.push(path);
+        assert_eq!(code(&run(&args)), OK, "{fs}: format");
+
+        let mut bytes = std::fs::read(&image).expect("read the image");
+        if fs == "fat16" {
+            // The clean-shutdown bit, the top bit of entry 1, cleared in every copy of the table.
+            let le16 = |at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
+            let (per_sector, reserved, per_table) = (le16(11), le16(14), le16(22));
+            for copy in 0..usize::from(bytes[16]) {
+                bytes[(reserved + copy * per_table) * per_sector + 3] &= !0x80;
+            }
+        } else {
+            // `VolumeDirty`, bit 1 of the volume flags, which the boot region's checksum leaves
+            // out so a driver can set it.
+            bytes[106] |= 0x02;
+        }
+        std::fs::write(&image, &bytes).expect("write the image");
+
+        let out = run(&["inspect", "--fail-on", "conformance", path]);
+        let report = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(code(&out), OK, "{fs}: {report}");
+        assert!(
+            report
+                .lines()
+                .any(|l| l.starts_with("Volume state:") && l.ends_with("not cleanly unmounted")),
+            "{fs}: {report}"
+        );
+        let finding = report
+            .lines()
+            .find(|l| l.starts_with("cosmetic"))
+            .unwrap_or_else(|| panic!("{fs}: no cosmetic finding in\n{report}"));
+        assert!(
+            finding.ends_with(
+                "the filesystem was not cleanly unmounted, so its metadata may not describe its \
+                 contents"
+            ),
+            "{fs}: {finding}"
+        );
+        let json = String::from_utf8(ok(&["inspect", "--quick", "--json", path])).expect("text");
+        assert!(json.contains("\"volume_dirty\":true"), "{fs}: {json}");
+    }
+}

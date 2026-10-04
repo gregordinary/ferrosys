@@ -203,6 +203,49 @@ macro_rules! io_error {
 
 pub(crate) use io_error;
 
+/// Every read a [`Counting`] source was asked for: the offset each began at, and the bytes
+/// it wanted. Shared, so a test reads the log while a reader holds the source.
+#[cfg(all(test, any(feature = "ext", feature = "fat", feature = "btrfs")))]
+pub(crate) type ReadLog = std::rc::Rc<std::cell::RefCell<Vec<(u64, usize)>>>;
+
+/// A source held in memory that keeps every read it is asked for, for the tests that pin
+/// what a read costs: how many requests a walk makes, and whether any byte is asked for
+/// twice.
+#[cfg(all(test, any(feature = "ext", feature = "fat", feature = "btrfs")))]
+pub(crate) struct Counting {
+    inner: std::io::Cursor<Vec<u8>>,
+    reads: ReadLog,
+}
+
+#[cfg(all(test, any(feature = "ext", feature = "fat", feature = "btrfs")))]
+impl Counting {
+    /// A source over `bytes`, and the log its reads are kept in.
+    pub(crate) fn new(bytes: Vec<u8>) -> (Self, ReadLog) {
+        let reads = ReadLog::default();
+        let source = Self {
+            inner: std::io::Cursor::new(bytes),
+            reads: std::rc::Rc::clone(&reads),
+        };
+        (source, reads)
+    }
+}
+
+#[cfg(all(test, any(feature = "ext", feature = "fat", feature = "btrfs")))]
+impl Read for Counting {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let at = self.inner.position();
+        self.reads.borrow_mut().push((at, buf.len()));
+        self.inner.read(buf)
+    }
+}
+
+#[cfg(all(test, any(feature = "ext", feature = "fat", feature = "btrfs")))]
+impl Seek for Counting {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 #[cfg(all(
     test,
     any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")

@@ -9,7 +9,9 @@
 //! Nothing is written until every copy has been read and every check has passed, so a
 //! refusal leaves the image exactly as it was. What cannot be done wholly is not begun —
 //! there is no `--atomic` here, because an image is rewritten in place rather than produced,
-//! and a sibling temporary file would mean copying every byte of it to change sixteen.
+//! and a sibling temporary file would mean copying every byte of it to change sixteen. A run
+//! cut short partway through the writing is finished by running the same command again, and
+//! success is reported only once the writes are on the disk.
 
 use ferrosys::ext::{IdentityChange, rewrite_identity_at};
 use ferrosys::{DetectOptions, Filesystem};
@@ -59,6 +61,9 @@ pub fn run(args: IdentityArgs) -> Result<(), Error> {
             path: args.image.display().to_string(),
             source,
         })?;
+    // On the disk before success is reported, so a report is never of writes a power loss
+    // could still take back. A run cut short before this is finished by running it again.
+    file.sync_all().map_err(|e| Error::io(&args.image, e))?;
 
     let text = if args.json {
         crate::json::document(|o| {

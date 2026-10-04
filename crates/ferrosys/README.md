@@ -140,7 +140,8 @@ assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
 - **Hash-indexed directories** (`dir_index`). A directory that outgrows one block
   gains an htree ordered by the half-MD4, TEA, or legacy name hash. The hash and the
   byte signedness of names are recorded in the image, so output is independent of the
-  build host.
+  build host. The reader looks a name up through an index, whichever tool built it, and a
+  scan reports a name filed under the wrong leaf.
 - **Extended attributes and POSIX ACLs**. Inline in the inode and in an external
   attribute block, including `security.capability`, SELinux labels, and
   `system.posix_acl_*`.
@@ -148,7 +149,9 @@ assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
   superblock, group descriptors, inodes, bitmaps, directory blocks, and attribute blocks.
   A checker therefore detects corruption of the filesystem's own metadata.
 - **A format-time journal** (`has_journal`). A jbd2 v2 log in the journal inode, sized
-  from the filesystem, so the kernel journals writes from the first mount.
+  from the filesystem, so the kernel journals writes from the first mount. The reader
+  replays a journal left needing recovery, in memory, and writes nothing. A filesystem off a
+  machine that crashed therefore reads as a mount presents it.
 - **An orphan file** (`orphan_file`). The inodes awaiting deletion live in a dedicated
   file, so concurrent deletions share no list.
 - **A robust reader**. It parses an image over any `Read + Seek` source at any byte
@@ -164,8 +167,9 @@ assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
   inode size, including the 128-byte inode, and both the extent tree and the classic
   direct/indirect map that ext2 and ext3 use. The reader verifies checksums against each
   object's own bytes, so a field the filesystem carries and this crate does not model
-  reads cleanly. `lookup` resolves a path through symbolic links against the image's own
-  root.
+  reads cleanly. It reads `meta_bg`, the descriptor layout `mke2fs` uses on very large
+  filesystems and a kernel converts to when it grows one online. `lookup` resolves a path
+  through symbolic links against the image's own root.
 - **Streaming a write**. `format_to` writes an image to any seekable destination,
   touching only the blocks the filesystem uses. A file therefore stays sparse, and a
   filesystem larger than memory is possible. `format` collects the same bytes in memory.
@@ -274,14 +278,16 @@ This crate reads a btrfs in full, and writes one from a source tree:
 
 ## Features
 
-Ten, and the first four are the filesystem families. A build takes the families it names.
+Ten, and the first four are the filesystem families. The default build carries all four
+and the three decoders, so it reads what a Linux kernel mounts, a compressed btrfs root
+included. A build that turns the default off takes the families it names.
 
 | Feature | Default | The module it adds |
 |---|---|---|
 | `ext` | on | The whole ext surface under `ext`: the formatter, the reader, the feature model, and the on-disk structures |
-| `fat` | off | The FAT12, FAT16, and FAT32 formatter, reader, geometry planner, on-disk structures, and classifier, under `fat` |
-| `exfat` | off | The same set for exFAT, under `exfat` |
-| `btrfs` | off | That family's reader, its logical address space, its B-trees, its geometry planner, its writer with subvolumes, its on-disk structures, and its classifier, under `btrfs` |
+| `fat` | on | The FAT12, FAT16, and FAT32 formatter, reader, geometry planner, on-disk structures, and classifier, under `fat` |
+| `exfat` | on | The same set for exFAT, under `exfat` |
+| `btrfs` | on | That family's reader, its logical address space, its B-trees, its geometry planner, its writer with subvolumes, its on-disk structures, and its classifier, under `btrfs` |
 
 Granularity is per *family* rather than per format, since each set is one lineage sharing
 its on-disk structures. exFAT is a family of its own rather than a fourth FAT, because it
@@ -290,16 +296,16 @@ shares the name and none of the bytes.
 Turning every family off is a real build rather than a smaller version of the same one. It
 leaves the family-agnostic substrate the crate root carries. That is the `crc32c`
 primitive, the source and extraction vocabulary, and `detect`, which says which filesystem
-an image holds. It leaves no family code at all. That is the build for a consumer that classifies
-images without reading them.
+an image holds. It leaves no family code at all, and depends on `thiserror` alone. That is
+the build for a consumer that classifies images without reading them.
 
 Three more name an algorithm rather than a family. An encoding is a property of a run of
-bytes, not of the format around it. Each is off by default. Each is what lets a build read a
-file whose extents are stored that way: `zlib` for DEFLATE, `lzo` for LZO1X, and `zstd`
-for Zstandard.
+bytes, not of the format around it. Each is in the default build. Each is what lets a build
+read a file whose extents are stored that way: `zlib` for DEFLATE, `lzo` for LZO1X, and
+`zstd` for Zstandard.
 
-btrfs is the family here that stores runs that way, so a build that wants to read them
-names a decoder beside it: `--features btrfs,zstd`. A build without the decoder for the
+btrfs is the family here that stores runs that way. A build that names its own features names
+a decoder beside it to read them: `--features btrfs,zstd`. A build without the decoder for the
 algorithm a file was stored with declines that *file* by name. A build without a decoder
 for an algorithm the filesystem advertises in its feature word declines the *filesystem*,
 which is what that word means.
@@ -309,11 +315,10 @@ which is what that word means.
 anything else. Verification needs none of them. The checksums a filesystem records cover
 the bytes it stored, so a compressed extent is verified without being expanded.
 
-The last three are off by default, so a build that wants none of them depends only on
-`thiserror`. None of them names a family. A source feeds whichever family the writer
-makes, and a sink takes whichever one the reader opened. So `--features fat,dir` is a
-build that formats a FAT volume from a directory tree and extracts one back, with no ext
-code compiled:
+The last three are off by default. None of them names a family. A source feeds whichever
+family the writer makes, and a sink takes whichever one the reader opened. So
+`--no-default-features --features fat,dir` is a build that formats a FAT volume from a
+directory tree and extracts one back, with no ext code compiled:
 
 - **`tar`**. `ArchiveSource` builds a filesystem from a tar stream with its PAX
   timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` ACL records.

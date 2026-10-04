@@ -2850,3 +2850,117 @@ fn a_filesystem_past_thirty_two_bits_streams_and_passes_e2fsck() {
         "dumpe2fs must report no reserved descriptor blocks past the 32-bit ceiling"
     );
 }
+
+/// Every directory hash this crate computes is the one e2fsprogs computes, over names no table
+/// of vectors was written for.
+///
+/// Generated names from one byte to the longest a directory entry holds, drawn from every byte
+/// a `debugfs` command passes through unchanged, the bytes at and above 0x80 among them: those
+/// are what the signed and unsigned forms disagree on. Every one of the six algorithm codes,
+/// under a run of seeds with the all-zero one among them. One `debugfs` answers the batch.
+#[test]
+fn every_directory_hash_is_the_one_e2fsprogs_computes() {
+    use ferrosys::ext::hash::dir_hash;
+    use ferrosys::ext::{HashSignedness, HashVersion};
+
+    if !available("debugfs") {
+        return;
+    }
+    let mut state = 0x5eed_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as usize
+    };
+    let alphabet: Vec<u8> = (0x21..=0xffu8)
+        .filter(|&b| !matches!(b, b'"' | b'\'' | b'\\' | 0x7f))
+        .collect();
+    let mut seeds = vec![[0u8; 16]];
+    for _ in 0..5 {
+        seeds.push(std::array::from_fn(|_| next() as u8));
+    }
+
+    let mut cases: Vec<(Vec<u8>, u8, [u8; 16])> = Vec::new();
+    let mut script: Vec<u8> = Vec::new();
+    for seed in &seeds {
+        let uuid: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        let uuid = format!(
+            "{}-{}-{}-{}-{}",
+            &uuid[0..8],
+            &uuid[8..12],
+            &uuid[12..16],
+            &uuid[16..20],
+            &uuid[20..32]
+        );
+        for code in 0..6u8 {
+            for n in 0..40 {
+                // Half the names short, so the chunk boundaries at sixteen and thirty-two are
+                // met often, and the rest up to a whole entry's 255.
+                let len = 1 + if n % 2 == 0 {
+                    next() % 40
+                } else {
+                    next() % 255
+                };
+                // A leading '-' would be read as an option.
+                let name: Vec<u8> = (0..len)
+                    .map(|_| alphabet[next() % alphabet.len()])
+                    .map(|b| if b == b'-' { b'_' } else { b })
+                    .collect();
+                script.extend_from_slice(format!("dx_hash -h {code} -s {uuid} ").as_bytes());
+                script.extend_from_slice(&name);
+                script.push(b'\n');
+                cases.push((name, code, *seed));
+            }
+        }
+    }
+    let mut file = tempfile::NamedTempFile::new().expect("a scratch script");
+    file.write_all(&script).expect("write the script");
+    let out = tool("debugfs")
+        .arg("-f")
+        .arg(file.path())
+        .output()
+        .expect("spawn debugfs");
+
+    // `Hash of NAME is 0xMAJOR (minor 0xMINOR)`, one per command and in order. No generated
+    // name holds a space, so the last " is 0x" on a line is the one the tool wrote.
+    let answers: Vec<(u32, u32)> = out
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter(|line| line.starts_with(b"Hash of "))
+        .map(|line| {
+            let line = String::from_utf8_lossy(line);
+            let (_, tail) = line.rsplit_once(" is 0x").expect("a hash after the name");
+            let (major, minor) = tail
+                .trim_end_matches(')')
+                .split_once(" (minor 0x")
+                .expect("a minor hash");
+            (
+                u32::from_str_radix(major, 16).expect("a major hash in hex"),
+                u32::from_str_radix(minor, 16).expect("a minor hash in hex"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        answers.len(),
+        cases.len(),
+        "debugfs answered {} of {} names:\n{}",
+        answers.len(),
+        cases.len(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for ((name, code, seed), (major, minor)) in cases.iter().zip(answers) {
+        let version = HashVersion::from_u8(code % 3).expect("a defined algorithm");
+        let signedness = if *code >= 3 {
+            HashSignedness::Unsigned
+        } else {
+            HashSignedness::Signed
+        };
+        let ours = dir_hash(name, version, signedness, seed);
+        assert_eq!(
+            (ours.major, ours.minor),
+            (major, minor),
+            "code {code} of {name:02x?} under seed {seed:02x?}"
+        );
+    }
+}

@@ -110,6 +110,23 @@ pub fn volume_serial(id: u32) -> String {
     format!("{:04X}-{:04X}", id >> 16, id & 0xffff)
 }
 
+/// How the last driver to have a filesystem put it down, in the words its finding uses: the
+/// state line FAT, exFAT, and btrfs print in their reports.
+///
+/// Both records are named where both are set, because a card pulled out of a reader that had
+/// also met a bad sector says two things, and a report naming one of them would be dropping
+/// the other. ext prints its state in `dumpe2fs`'s words instead, beside the rest of the
+/// superblock it mirrors.
+#[must_use]
+pub fn volume_state(dirty: bool, media_failure: bool) -> String {
+    match (dirty, media_failure) {
+        (false, false) => "clean".to_string(),
+        (true, false) => "not cleanly unmounted".to_string(),
+        (false, true) => "a medium failure was recorded".to_string(),
+        (true, true) => "not cleanly unmounted; a medium failure was recorded".to_string(),
+    }
+}
+
 /// An ext volume label as a person reads it: the field's name, rendered lossily, or `None`
 /// when the label is empty.
 ///
@@ -265,6 +282,17 @@ pub fn acl(acl: &Acl) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_volume_state_names_each_record_and_both_together() {
+        assert_eq!(volume_state(false, false), "clean");
+        assert_eq!(volume_state(true, false), "not cleanly unmounted");
+        assert_eq!(volume_state(false, true), "a medium failure was recorded");
+        assert_eq!(
+            volume_state(true, true),
+            "not cleanly unmounted; a medium failure was recorded"
+        );
+    }
 
     #[test]
     fn a_volume_serial_is_written_the_way_every_tool_prints_one() {

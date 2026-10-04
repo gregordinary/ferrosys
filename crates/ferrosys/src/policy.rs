@@ -46,7 +46,12 @@ pub const MAX_SYMLINK_HOPS: u32 = 40;
 /// Robustness — bounds-checking, never panicking on malformed input — is unconditional and
 /// not governed by this. The policy decides only where the fatal line sits on the severity
 /// scale.
+///
+/// The set of policies is this crate's choice rather than a format's, so the enum is
+/// `#[non_exhaustive]` and a `match` over it carries a wildcard arm;
+/// [`is_fatal`](Self::is_fatal) answers the question a `match` usually asks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum ReadPolicy {
     /// Fatal at [`Severity::Conformance`] and above: the read fails on anything a
     /// conformant filesystem of that family would not carry, so what a strict read returns

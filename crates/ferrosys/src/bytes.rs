@@ -77,6 +77,13 @@ pub(crate) fn get_u32_be(buf: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
+/// Read one big-endian `u64` at `off`: a jbd2 revoke record under `64bit`.
+#[inline]
+#[cfg(feature = "ext")]
+pub(crate) fn get_u64_be(buf: &[u8], off: usize) -> u64 {
+    u64::from_be_bytes(get_arr(buf, off))
+}
+
 /// Read a fixed-size byte array at `off`.
 #[inline]
 #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
@@ -190,5 +197,14 @@ mod tests {
         // And it is genuinely the other order from the unsuffixed pair beside it.
         put_u32(&mut buf, 1, 0x789a_bcde);
         assert_eq!(get_u32_be(&buf, 1), 0xdebc_9a78);
+    }
+
+    #[test]
+    #[cfg(feature = "ext")]
+    fn the_big_endian_sixty_four_bit_read_takes_the_high_byte_first() {
+        // A revoke record under jbd2's `64bit`: asserted against literal bytes, for the
+        // reason the pair above is.
+        let buf = [0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        assert_eq!(get_u64_be(&buf, 1), 0x0123_4567_89ab_cdef);
     }
 }

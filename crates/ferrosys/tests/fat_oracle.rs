@@ -2503,9 +2503,28 @@ mod foreign {
 
             // The enumeration: every path the fixture wrote, and the directories those paths
             // needed, and nothing else.
-            let mut paths: Vec<String> = reader
+            let walked = reader
                 .walk()
-                .unwrap_or_else(|e| panic!("{}: the walk failed: {e}", row.what))
+                .unwrap_or_else(|e| panic!("{}: the walk failed: {e}", row.what));
+            // A lookup reads a directory only as far as the name it came for, and a walk reads
+            // every directory whole. Every path the walk reached resolves to the entry it
+            // reached, so the two readings agree on a volume this crate did not write.
+            for entry in &walked {
+                let found = reader.lookup(&entry.path).unwrap_or_else(|e| {
+                    panic!(
+                        "{}: {} was walked and not looked up: {e}",
+                        row.what,
+                        String::from_utf8_lossy(&entry.path)
+                    )
+                });
+                assert_eq!(
+                    found,
+                    entry.node,
+                    "{}",
+                    String::from_utf8_lossy(&entry.path)
+                );
+            }
+            let mut paths: Vec<String> = walked
                 .into_iter()
                 .map(|e| String::from_utf8_lossy(&e.path).into_owned())
                 .collect();

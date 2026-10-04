@@ -8,9 +8,12 @@ use std::fmt::Write as _;
 use std::fs::File;
 
 use ferrosys::ext::ondisk::{
-    BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, GroupDescriptor, SuperBlock, unpadded,
+    BG_BLOCK_UNINIT, BG_INODE_UNINIT, BG_INODE_ZEROED, GroupDescriptor, STATE_CLEAN, STATE_ERRORS,
+    SuperBlock, unpadded,
 };
-use ferrosys::ext::{FeatureSet, HashSignedness, HashVersion, Incompat, Reader};
+use ferrosys::ext::{
+    FeatureSet, HashSignedness, HashVersion, Incompat, JournalReplay, Reader, incompat_name,
+};
 
 use crate::args::InspectArgs;
 use crate::inspect::{Dialect, Head, Report};
@@ -65,6 +68,11 @@ pub fn report(
     // and the same bound the descriptor listing above iterated, so the count printed can
     // never disagree with the groups shown.
     let group_count = reader.group_count();
+    let recovery = Recovery {
+        state: reader.state_on_disk(),
+        needed: reader.needs_recovery(),
+        replay: reader.journal_replay().copied(),
+    };
     let sb = reader.superblock();
 
     let head = Head {
@@ -80,8 +88,8 @@ pub fn report(
         identifier: render::uuid(&sb.uuid),
     };
     let body = match dialect {
-        Dialect::Table => table(sb, feature, group_count, &groups, complete),
-        Dialect::Json => json(sb, feature, group_count, &groups, complete),
+        Dialect::Table => table(sb, feature, recovery, group_count, &groups, complete),
+        Dialect::Json => json(sb, feature, recovery, group_count, &groups, complete),
         Dialect::None => String::new(),
     };
     Ok(Report {
@@ -89,6 +97,58 @@ pub fn report(
         findings,
         body,
     })
+}
+
+/// How the last driver to have the filesystem left it, for the report: the state word on
+/// disk, and what became of a journal needing recovery.
+#[derive(Clone, Copy)]
+struct Recovery {
+    /// The superblock's state word as it sits on disk, before any replay — the word
+    /// `dumpe2fs` reads.
+    state: u16,
+    /// Whether the superblock on disk carries `needs_recovery`.
+    needed: bool,
+    /// What replaying the journal applied, where it was replayed.
+    replay: Option<JournalReplay>,
+}
+
+/// The state word in `dumpe2fs`'s words: `clean` or `not clean` for the clean bit, and
+/// ` with errors` after it where a driver recorded errors. The orphan-recovery bit is a step
+/// of a mount rather than how one ended, and `dumpe2fs` prints nothing for it.
+fn state_text(state: u16) -> String {
+    let clean = if state & STATE_CLEAN != 0 {
+        "clean"
+    } else {
+        "not clean"
+    };
+    if state & STATE_ERRORS != 0 {
+        format!("{clean} with errors")
+    } else {
+        clean.to_string()
+    }
+}
+
+/// The `incompat` word's names, the bits [`Incompat`] does not model among them, and the
+/// bits ext4 does not define at all.
+///
+/// A bit ext4 defines is named whether or not this crate writes it — `needs_recovery`, which
+/// a filesystem not unmounted cleanly carries, most of all — so that what is reported as
+/// unknown is only what nothing defines.
+fn incompat_names(feature: FeatureSet) -> (Vec<&'static str>, u32) {
+    let mut names = feature.incompat.names();
+    let mut unknown = 0u32;
+    let unmodelled = feature.incompat.unknown_bits();
+    for i in 0..u32::BITS {
+        let bit = 1u32 << i;
+        if unmodelled & bit == 0 {
+            continue;
+        }
+        match incompat_name(bit) {
+            Some(name) => names.push(name),
+            None => unknown |= bit,
+        }
+    }
+    (names, unknown)
 }
 
 /// The inode-table blocks one group takes: its inodes, rounded up to whole blocks.
@@ -159,6 +219,7 @@ const LISTED_GROUPS: u32 = 1 << 20;
 fn table(
     sb: &SuperBlock,
     feature: FeatureSet,
+    recovery: Recovery,
     group_count: u32,
     groups: &[(u32, GroupDescriptor)],
     complete: bool,
@@ -177,12 +238,16 @@ fn table(
     );
     line("Filesystem UUID:", render::uuid(&sb.uuid));
     line("Filesystem magic number:", format!("0x{:X}", sb.magic));
-    line("Filesystem features:", feature.names().join(" "));
+    let (incompat, unknown_incompat) = incompat_names(feature);
+    let mut names = feature.compat.names();
+    names.extend(incompat);
+    names.extend(feature.ro_compat.names());
+    line("Filesystem features:", names.join(" "));
     // A feature this tool does not know is never passed over in silence: an image
     // carrying one is not an image it understands, whatever the rest of the line says.
     let unknown = [
         ("compat", feature.compat.unknown_bits()),
-        ("incompat", feature.incompat.unknown_bits()),
+        ("incompat", unknown_incompat),
         ("ro_compat", feature.ro_compat.unknown_bits()),
     ];
     if unknown.iter().any(|(_, bits)| *bits != 0) {
@@ -193,14 +258,7 @@ fn table(
             .collect();
         line("Unknown feature bits:", named.join(", "));
     }
-    line(
-        "Filesystem state:",
-        if sb.state & 1 != 0 {
-            "clean".to_string()
-        } else {
-            "not clean".to_string()
-        },
-    );
+    line("Filesystem state:", state_text(recovery.state));
     line(
         "Errors behavior:",
         match sb.errors {
@@ -232,6 +290,13 @@ fn table(
         "Inode blocks per group:",
         inode_table_blocks(sb, feature).to_string(),
     );
+    // Where the descriptor table stops being one table and becomes one block per meta-group,
+    // counted in meta-groups. `dumpe2fs` prints it, here, where it is not zero: a filesystem
+    // formatted with `meta_bg` splits the table from the start, and one a kernel converted
+    // while it grew it keeps the table it had for the meta-groups before this.
+    if feature.incompat.contains(Incompat::META_BG) && sb.first_meta_bg != 0 {
+        line("First meta block group:", sb.first_meta_bg.to_string());
+    }
     line(
         "Flex block group size:",
         flex_bg_size(sb, feature).map_or_else(
@@ -249,6 +314,24 @@ fn table(
     line("Inode size:", sb.inode_size.to_string());
     if feature.has_journal() {
         line("Journal inode:", sb.journal_inum.to_string());
+    }
+    if recovery.needed {
+        line(
+            "Journal recovery:",
+            match recovery.replay {
+                Some(r) => {
+                    let mut text = format!(
+                        "replayed {} transactions, {} blocks",
+                        r.transactions, r.blocks
+                    );
+                    if r.skipped > 0 {
+                        let _ = write!(text, ", {} copies skipped", r.skipped);
+                    }
+                    text
+                }
+                None => "not replayed".to_string(),
+            },
+        );
     }
     if feature.has_orphan_file() {
         line("Orphan file inode:", sb.orphan_file_inum.to_string());
@@ -315,6 +398,7 @@ fn table(
 fn json(
     sb: &SuperBlock,
     feature: FeatureSet,
+    recovery: Recovery,
     group_count: u32,
     groups: &[(u32, GroupDescriptor)],
     complete: bool,
@@ -326,7 +410,8 @@ fn json(
     s.bytes("volume_name", unpadded(&sb.volume_name));
     s.str("uuid", &render::uuid(&sb.uuid));
     s.u64("magic", u64::from(sb.magic));
-    s.bool("clean", sb.state & 1 != 0);
+    s.bool("clean", recovery.state & STATE_CLEAN != 0);
+    s.bool("errors", recovery.state & STATE_ERRORS != 0);
     s.u64("errors_behavior", u64::from(sb.errors));
     s.u64("os", u64::from(sb.creator_os));
     s.u64("block_size", u64::from(feature.block_size));
@@ -345,6 +430,7 @@ fn json(
         u64::from(inode_table_blocks(sb, feature)),
     );
     s.u64("reserved_gdt_blocks", u64::from(sb.reserved_gdt_blocks));
+    s.u64("first_meta_bg", u64::from(sb.first_meta_bg));
     match flex_bg_size(sb, feature) {
         Some(n) => s.u64("flex_bg_size", u64::from(n)),
         // A shift a 32-bit count cannot hold: null rather than a fabricated size.
@@ -366,19 +452,34 @@ fn json(
     s.i64("last_checked", i64::from(sb.lastcheck));
     s.end();
 
+    let (incompat, unknown_incompat) = incompat_names(feature);
     let mut f = ext.obj("features");
     f.strings("compat", &feature.compat.names());
-    f.strings("incompat", &feature.incompat.names());
+    f.strings("incompat", &incompat);
     f.strings("ro_compat", &feature.ro_compat.names());
     // Always reported, zero or not: a consumer that reads this document must be able to
     // tell that a filesystem carries a feature this tool did not understand, and an absent
     // field would read as though there were none.
     let mut u = f.obj("unknown");
     u.u64("compat", u64::from(feature.compat.unknown_bits()));
-    u.u64("incompat", u64::from(feature.incompat.unknown_bits()));
+    u.u64("incompat", u64::from(unknown_incompat));
     u.u64("ro_compat", u64::from(feature.ro_compat.unknown_bits()));
     u.end();
     f.end();
+
+    // Always reported, as the unknown bits are: a consumer tells a clean filesystem from one
+    // whose journal was replayed, or could not be, by reading the fields rather than by
+    // their absence.
+    let (transactions, blocks, skipped) = recovery
+        .replay
+        .map_or((0, 0, 0), |r| (r.transactions, r.blocks, r.skipped));
+    let mut j = ext.obj("journal_recovery");
+    j.bool("needed", recovery.needed);
+    j.bool("replayed", recovery.replay.is_some());
+    j.u64("transactions", u64::from(transactions));
+    j.u64("blocks", blocks);
+    j.u64("skipped", u64::from(skipped));
+    j.end();
 
     if !groups.is_empty() {
         // Whether the array below is the whole table. A consumer that read a short listing
@@ -408,6 +509,24 @@ fn json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_line_says_what_dumpe2fs_says() {
+        // What `dumpe2fs -h` 1.47.0 prints for each value of the three documented bits,
+        // observed by setting each with `debugfs ssv state`.
+        for (state, says) in [
+            (0, "not clean"),
+            (1, "clean"),
+            (2, "not clean with errors"),
+            (3, "clean with errors"),
+            (4, "not clean"),
+            (5, "clean"),
+            (6, "not clean with errors"),
+            (7, "clean with errors"),
+        ] {
+            assert_eq!(state_text(state), says, "state {state}");
+        }
+    }
 
     #[test]
     fn flex_size_bounds_an_out_of_range_shift() {

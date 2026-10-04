@@ -91,7 +91,8 @@ named_flags! {
         /// `meta_bg` (`0x0010`) — group descriptors are stored in a distributed
         /// meta-block-group layout. This crate never writes it: it is the online
         /// group-descriptor conversion that reserved GDT blocks exist to avoid, so
-        /// planning rejects it.
+        /// planning rejects it. The reader follows it, since a filesystem a kernel grew
+        /// past its reservation carries it.
         META_BG("meta_bg") = 0x0010,
         /// `extent` (`0x0040`) — files map their blocks with extent trees rather
         /// than the classic indirect-block scheme.

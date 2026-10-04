@@ -49,6 +49,13 @@ jobs:
       - name: No body written twice
         run: ci/duplicate-bodies.sh
 
+      # The crate's license grant holds only for code derived from nothing licensed
+      # otherwise. A comment naming a routine of another implementation reads as code taken
+      # from it, and points the next reader at its source, so every tracked file describes
+      # the format in the format's own terms.
+      - name: No file names another implementation's internals
+        run: ci/provenance.sh
+
       # Adding a family fails loudly in the code and silently in the prose: a landing page
       # that stops at the families it had when it was written keeps rendering, and a reader
       # has no way to tell the newest one is there. This holds every page a stranger reads
@@ -293,10 +300,24 @@ jobs:
       - name: Base library builds and passes its tests without the archive source
         run: cargo test -p ferrosys --no-default-features --lib
 
-      # A family that is not the default one, alone. The CLI names every family, so every
-      # other build here has `ext` on, and an item gated on `ext` where it meant "any
-      # family" is invisible in all of them — it compiles, and it simply is not there in
-      # the one configuration a FAT-only consumer selects. This is that configuration.
+      # The default build: four families and three decoders, and none of the two ends of a
+      # tree or the derives. It is what `cargo add` gives, so it is the configuration most
+      # consumers compile, and every other run here either names its features or has the
+      # CLI's on. A test that needs `tar` and is not gated on it fails here first.
+      - name: Library builds and passes its tests under the default features
+        run: cargo test -p ferrosys --lib
+
+      # ext alone, the configuration a consumer selects to write and read ext images and
+      # compile nothing else. The CLI and the default build both carry every family, so a
+      # `#[cfg]` written as "ext" where it meant "any family", or an ext item that reaches for
+      # another family's, builds in both of them and fails only here.
+      - name: Library builds and passes its tests with ext as the only family
+        run: cargo test -p ferrosys --no-default-features --features ext --lib
+
+      # FAT alone. The CLI names every family, so every other build here has `ext` on, and
+      # an item gated on `ext` where it meant "any family" is invisible in all of them — it
+      # compiles, and it simply is not there in the one configuration a FAT-only consumer
+      # selects. This is that configuration.
       - name: Library builds and passes its tests with FAT as the only family
         run: cargo test -p ferrosys --no-default-features --features fat --lib
 

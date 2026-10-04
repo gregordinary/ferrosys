@@ -18,6 +18,19 @@ use super::{get_arr, get_u8, get_u16, get_u32, join64, put_arr, put_u8, put_u16,
 /// The ext4 superblock magic (`s_magic`): `0xEF53`.
 pub const SUPERBLOCK_MAGIC: u16 = 0xef53;
 
+/// The [`SuperBlock::state`] bit that says the filesystem was cleanly unmounted.
+///
+/// A Linux kernel clears it while it has a filesystem without a journal mounted, and sets
+/// it again when it unmounts the filesystem. A filesystem with a journal keeps it set while
+/// mounted, and records an unclean shutdown as `needs_recovery` instead.
+pub const STATE_CLEAN: u16 = 0x0001;
+
+/// The [`SuperBlock::state`] bit that says a driver found errors in the filesystem.
+///
+/// A Linux kernel sets it when it meets a fault in the filesystem's structures, and it
+/// stays set until a check repairs the filesystem.
+pub const STATE_ERRORS: u16 = 0x0002;
+
 /// The name a NUL-padded superblock text field holds: its bytes up to the first NUL.
 ///
 /// ext writes `s_volume_name` and `s_last_mounted` into fixed-width fields and pads what is
@@ -125,7 +138,8 @@ pub struct SuperBlock {
     pub max_mnt_count: u16,
     /// Magic number (`s_magic`), always [`SUPERBLOCK_MAGIC`].
     pub magic: u16,
-    /// Filesystem state (`s_state`): 1 when cleanly unmounted.
+    /// Filesystem state (`s_state`): [`STATE_CLEAN`] when cleanly unmounted, with
+    /// [`STATE_ERRORS`] beside it when a driver found errors.
     pub state: u16,
     /// Error behavior (`s_errors`): 1 to continue.
     pub errors: u16,
@@ -184,9 +198,12 @@ pub struct SuperBlock {
     pub desc_size: u16,
     /// Default mount options (`s_default_mount_opts`): `user_xattr | acl`.
     pub default_mount_opts: u32,
-    /// First meta-block group (`s_first_meta_bg`). The writer never sets `meta_bg`, so
-    /// it writes zero here; the field is parsed on read and may be nonzero in a
-    /// foreign image.
+    /// First meta-block group (`s_first_meta_bg`): under `meta_bg`, the first meta-group
+    /// whose descriptors sit in the meta-group itself, the ones before it keeping the
+    /// contiguous table after the superblock. It counts meta-groups, each the run of groups
+    /// one descriptor block describes. Zero for a filesystem formatted with `meta_bg`, and
+    /// for one formatted without it, which is everything this crate writes; nonzero for one
+    /// a kernel converted as it grew it.
     pub first_meta_bg: u32,
     /// Filesystem creation time (`s_mkfs_time`).
     pub mkfs_time: u32,
@@ -209,6 +226,10 @@ pub struct SuperBlock {
     /// Blocks the filesystem's own metadata occupies (`s_overhead_clusters`); a
     /// checker recomputes it, so it is a hint rather than an authority.
     pub overhead_clusters: u32,
+    /// The two groups holding superblock copies under `sparse_super2`
+    /// (`s_backup_bgs`), zero for one not used. Under that feature these, with group 0, are
+    /// the only groups with a copy. This crate never writes the feature, so it writes zeros.
+    pub backup_bgs: [u32; 2],
     /// The seed every metadata checksum derives from (`s_checksum_seed`):
     /// `crc32c(!0, uuid)` when `metadata_csum_seed` is set, zero when it is not. Storing it
     /// decouples the checksums from the UUID; the value is the one the UUID yields, so
@@ -303,6 +324,7 @@ impl SuperBlock {
             checksum_type: 0,
             kbytes_written: 0,
             overhead_clusters: 0,
+            backup_bgs: [0; 2],
             checksum_seed: 0,
             orphan_file_inum: 0,
             checksum: 0,
@@ -375,6 +397,8 @@ impl SuperBlock {
         put_u32(&mut b, 0x178, kb_lo);
         put_u32(&mut b, 0x17c, kb_hi);
         put_u32(&mut b, 0x248, self.overhead_clusters);
+        put_u32(&mut b, 0x24c, self.backup_bgs[0]);
+        put_u32(&mut b, 0x250, self.backup_bgs[1]);
         put_u32(&mut b, Self::CHECKSUM_SEED_OFFSET, self.checksum_seed);
         put_u32(&mut b, 0x280, self.orphan_file_inum);
         put_u32(&mut b, Self::CHECKSUM_OFFSET, self.checksum);
@@ -473,6 +497,7 @@ impl SuperBlock {
             checksum_type: get_u8(buf, 0x175),
             kbytes_written: join64(get_u32(buf, 0x178), get_u32(buf, 0x17c)),
             overhead_clusters: get_u32(buf, 0x248),
+            backup_bgs: [get_u32(buf, 0x24c), get_u32(buf, 0x250)],
             checksum_seed: get_u32(buf, Self::CHECKSUM_SEED_OFFSET),
             orphan_file_inum: get_u32(buf, 0x280),
             checksum: get_u32(buf, Self::CHECKSUM_OFFSET),
@@ -507,7 +532,7 @@ mod tests {
         s.inodes_per_group = 16384;
         s.wtime = 1_700_000_000;
         s.max_mnt_count = 0xffff;
-        s.state = 1;
+        s.state = STATE_CLEAN;
         s.errors = 1;
         s.lastcheck = 1_700_000_000;
         s.rev_level = 1;

@@ -3641,9 +3641,28 @@ fn the_reader_reads_every_tree_a_foreign_implementation_wrote() {
         let (image, _) = foreign_volume(row);
         let mut reader = open_strict(image.path());
 
-        let walked: Vec<String> = reader
+        let entries = reader
             .walk()
-            .unwrap_or_else(|e| panic!("{}: walk a foreign volume: {e}", row.what))
+            .unwrap_or_else(|e| panic!("{}: walk a foreign volume: {e}", row.what));
+        // A lookup reads a directory only as far as the name it came for, and a walk reads
+        // every directory whole. Every path the walk reached resolves to the entry it reached,
+        // so the two readings agree on a volume this crate did not write.
+        for entry in &entries {
+            let found = reader.lookup(&entry.path).unwrap_or_else(|e| {
+                panic!(
+                    "{}: {} was walked and not looked up: {e}",
+                    row.what,
+                    String::from_utf8_lossy(&entry.path)
+                )
+            });
+            assert_eq!(
+                found,
+                entry.node,
+                "{}",
+                String::from_utf8_lossy(&entry.path)
+            );
+        }
+        let walked: Vec<String> = entries
             .into_iter()
             .map(|e| String::from_utf8_lossy(&e.path).into_owned())
             .collect();

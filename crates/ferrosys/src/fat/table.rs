@@ -39,6 +39,21 @@ pub const fn tail_entry(fat_type: FatType) -> u32 {
     entry_mask(fat_type)
 }
 
+/// The two status bits entry 1 carries, as `(clean shutdown, no hard error)`: each set means
+/// the good state, and a driver clears one to record the other.
+///
+/// The FAT specification defines them for FAT16, at the top two bits of the sixteen, and for
+/// FAT32, at the top two bits of the twenty-eight the entry uses. FAT12 has none, so its
+/// masks are zero and its entry 1 is a value and nothing else.
+#[must_use]
+pub const fn status_bits(fat_type: FatType) -> (u32, u32) {
+    match fat_type {
+        FatType::Fat12 => (0, 0),
+        FatType::Fat16 => (0x8000, 0x4000),
+        FatType::Fat32 => (0x0800_0000, 0x0400_0000),
+    }
+}
+
 /// The value written into the last entry of a chain.
 ///
 /// Any value from `mask - 7` up marks the end, and every driver tests the range rather than

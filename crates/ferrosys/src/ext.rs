@@ -113,12 +113,13 @@ pub mod ondisk {
         DX_ROOT_COUNT_OFFSET, DX_TAIL_LEN, DirEntry, DxEntry, EXTENT_ENTRY_SIZE, EXTENT_MAGIC,
         EXTENT_TAIL_LEN, ExtentHeader, ExtentIdx, ExtentLeaf, FileType, GOOD_OLD_FIRST_INODE,
         GOOD_OLD_INODE_SIZE, GroupDescriptor, Inode, InodeFlags, ORPHAN_BLOCK_MAGIC,
-        ORPHAN_TAIL_LEN, ROOT_INODE_MODE, SUPERBLOCK_MAGIC, SuperBlock, TIME_SECS_MAX,
-        TIME_SECS_MIN, decode_acl, decode_time, dx_limit, dx_tail_offset, encode_acl, encode_time,
-        extra_isize_for, min_rec_len, orphan_entries_len, orphan_tail_bytes, read_dx_countlimit,
-        read_dx_entries, read_dx_root_info, read_orphan_tail, rec_len_from_disk, rec_len_to_disk,
-        superblock_checksum, time_is_representable, unpadded, write_dir_tail, write_dx_entries,
-        write_dx_node_header, write_dx_root_header, write_dx_tail,
+        ORPHAN_TAIL_LEN, ROOT_INODE_MODE, STATE_CLEAN, STATE_ERRORS, SUPERBLOCK_MAGIC, SuperBlock,
+        TIME_SECS_MAX, TIME_SECS_MIN, decode_acl, decode_time, dx_limit, dx_tail_offset,
+        encode_acl, encode_time, extra_isize_for, min_rec_len, orphan_entries_len,
+        orphan_tail_bytes, read_dx_countlimit, read_dx_entries, read_dx_root_info,
+        read_orphan_tail, rec_len_from_disk, rec_len_to_disk, superblock_checksum,
+        time_is_representable, unpadded, write_dir_tail, write_dx_entries, write_dx_node_header,
+        write_dx_root_header, write_dx_tail,
     };
 }
 /// The bounds a read is held to.
@@ -160,7 +161,8 @@ pub use crate::materialize::{
 pub use crate::model::{FsModel, ModelConfig, ModelError, build_model};
 pub use crate::ondisk::ParseError;
 pub use crate::read::{
-    Anomaly, Category, Entry, Location, OpenOptions, ReadError, Reader, ScanReport, WalkEntry,
+    Anomaly, Category, Entry, JournalReplay, Location, OpenOptions, ReadError, Reader, ScanReport,
+    WalkEntry, incompat_name,
 };
 
 // The crate root's family-agnostic vocabulary, reached from here as well — see the note on

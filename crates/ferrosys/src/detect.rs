@@ -277,10 +277,9 @@ mod agnostic_tests {
     /// is the same for every source — which is the whole of what the base build promises,
     /// and is exactly what a build carrying a family cannot check.
     ///
-    /// The condition is every family, not the default one: a build carrying a single
-    /// non-default family does recognize images, so running this there would assert
-    /// something the build does not promise and pass only because the fixtures happen not to
-    /// be that family's.
+    /// The condition is every family, not any one of them: a build carrying a single family
+    /// does recognize images, so running this there would assert something the build does
+    /// not promise and pass only because the fixtures happen not to be that family's.
     #[cfg(not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")))]
     #[test]
     fn a_build_with_no_family_recognizes_nothing() {

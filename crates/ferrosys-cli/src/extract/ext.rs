@@ -97,14 +97,9 @@ fn describe(
         kind,
         size: inode.size,
         attrs: Attributes::read(
-            Metadata {
-                mode: inode.mode & 0o7777,
-                uid: inode.uid,
-                gid: inode.gid,
-                atime: inode.atime,
-                ctime: inode.ctime,
-                mtime: inode.mtime,
-            },
+            Metadata::new(inode.mode & 0o7777, inode.mtime)
+                .owned_by(inode.uid, inode.gid)
+                .with_times(inode.atime, inode.ctime, inode.mtime),
             xattrs,
         ),
         number: Some(u64::from(number)),

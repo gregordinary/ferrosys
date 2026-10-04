@@ -1042,6 +1042,13 @@ Nothing is written until every copy has been read and every check has passed, so
 leaves the image exactly as it was. There is no --atomic: an image is rewritten where it
 lies, and a temporary copy would mean writing every byte of it to change sixteen.
 
+A run cut short partway through the writing is finished by running the same command again,
+whichever copies reached the disk. Success is reported once the writes are on the disk.
+
+A filesystem needing journal recovery is refused: recovery at its next mount would write
+the journal's copy of the superblock back over the new identity. Mount it, or run e2fsck,
+first.
+
 A filesystem with metadata_csum and without metadata_csum_seed seeds every checksum it
 holds from the UUID itself, so changing the UUID would invalidate all of them at once.
 That is refused, and --set-checksum-seed is the way through: it records the seed the

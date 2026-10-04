@@ -39,8 +39,22 @@ pub(crate) const SUPERBLOCK_SIZE: usize = 1024;
 /// built and patched as raw bytes, since nothing reads its fields back as a record. A module
 /// of offsets is what an unmodelled structure has instead of a type to hang them on.
 pub(crate) mod offset {
+    /// `s_blocksize`.
+    pub const BLOCK_SIZE: usize = 0x0c;
+    /// `s_maxlen`: the blocks the log spans, its superblock included.
+    pub const MAX_LEN: usize = 0x10;
+    /// `s_first`: the first block of the log proper, after the superblock.
+    pub const FIRST: usize = 0x14;
+    /// `s_sequence`: the sequence number of the first transaction a recovery expects.
+    pub const SEQUENCE: usize = 0x18;
+    /// `s_start`: the block the log begins at, or zero for an empty log.
+    pub const START: usize = 0x1c;
+    /// `s_feature_compat`.
+    pub const FEATURE_COMPAT: usize = 0x24;
     /// `s_feature_incompat`.
     pub const FEATURE_INCOMPAT: usize = 0x28;
+    /// `s_feature_ro_compat`.
+    pub const FEATURE_RO_COMPAT: usize = 0x2c;
     /// `s_uuid`: the filesystem this log serves, as the log records it.
     pub const UUID: usize = 0x30;
     /// `s_checksum_type`.
@@ -58,6 +72,49 @@ pub(crate) const INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
 /// `JBD2_CRC32C_CHKSUM`: the checksum type a `csum_v2` or `csum_v3` log names, and the only
 /// one jbd2 accepts for either.
 pub(crate) const CRC32C_CHKSUM: u8 = 4;
+
+/// The version 1 journal-superblock block type, which carries no feature words.
+pub(crate) const JBD2_SUPERBLOCK_V1: u32 = 3;
+
+/// The descriptor block type: a list of tags, each naming the home of one data block that
+/// follows it in the log.
+pub(crate) const BLOCKTYPE_DESCRIPTOR: u32 = 1;
+
+/// The commit block type, which closes a transaction.
+pub(crate) const BLOCKTYPE_COMMIT: u32 = 2;
+
+/// The revoke block type: blocks whose earlier copies a recovery must not apply.
+pub(crate) const BLOCKTYPE_REVOKE: u32 = 5;
+
+/// `JBD2_FEATURE_COMPAT_CHECKSUM`: a commit block carries a crc32 over its transaction.
+pub(crate) const COMPAT_CHECKSUM: u32 = 0x0000_0001;
+
+/// `JBD2_FEATURE_INCOMPAT_REVOKE`: the log carries revoke blocks.
+pub(crate) const INCOMPAT_REVOKE: u32 = 0x0000_0001;
+
+/// `JBD2_FEATURE_INCOMPAT_64BIT`: a tag carries the upper half of its block number, and a
+/// revoke record is eight bytes rather than four.
+pub(crate) const INCOMPAT_64BIT: u32 = 0x0000_0002;
+
+/// `JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT`: commits are written without waiting for their
+/// transaction.
+pub(crate) const INCOMPAT_ASYNC_COMMIT: u32 = 0x0000_0004;
+
+/// `JBD2_FEATURE_INCOMPAT_FAST_COMMIT`: the log has a fast-commit area.
+pub(crate) const INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
+
+/// The tag flag marking a data block whose first four bytes were the magic and were logged
+/// as zeroes.
+pub(crate) const TAG_ESCAPED: u32 = 0x1;
+
+/// The tag flag marking a tag with no UUID after it, because it shares the previous one's.
+pub(crate) const TAG_SAME_UUID: u32 = 0x2;
+
+/// The tag flag marking a block the transaction deleted.
+pub(crate) const TAG_DELETED: u32 = 0x4;
+
+/// The tag flag marking the last tag of a descriptor block.
+pub(crate) const TAG_LAST: u32 = 0x8;
 
 /// Whether a log whose superblock is `record` carries a checksum in that superblock.
 ///

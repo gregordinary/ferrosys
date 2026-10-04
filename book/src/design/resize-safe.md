@@ -11,8 +11,11 @@ group-descriptor table. If nothing was set aside for that table to grow, the ker
 converts the filesystem to a distributed descriptor layout the first time it grows. That
 in-place conversion can corrupt the filesystem.
 
-`ferrosys` writes a geometry that never needs that conversion. Two structures make growth
-safe, and the planner fixes both before any byte is written:
+`ferrosys` writes a geometry that never needs that conversion. The reader still opens a
+filesystem that has had it, since an image grown elsewhere arrives in that layout, called
+`meta_bg`. The writer never produces one.
+
+Two structures make growth safe, and the planner fixes both before any byte is written:
 
 ## Reserved descriptor blocks
 

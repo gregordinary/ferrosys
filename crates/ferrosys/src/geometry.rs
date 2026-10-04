@@ -476,6 +476,30 @@ pub(crate) fn sparse_super_has_copy(g: u32) -> bool {
     g == 0 || g == 1 || is_power_of(g, 3) || is_power_of(g, 5) || is_power_of(g, 7)
 }
 
+/// `sparse_super2`, the `compat` bit that names the groups holding superblock copies in
+/// [`SuperBlock::backup_bgs`](crate::ondisk::SuperBlock::backup_bgs). This crate does not
+/// write it, so it is a bit an existing filesystem's superblock is read for rather than a
+/// feature a formatter may be asked for.
+const COMPAT_SPARSE_SUPER2: u32 = 0x0200;
+
+/// Whether group `g` of an existing filesystem carries a superblock copy, by the rule its
+/// own superblock records: every group without `sparse_super`; with it, the groups
+/// [`sparse_super_has_copy`] names; and with `sparse_super2`, which takes precedence, group 0
+/// and the groups `s_backup_bgs` names and no others. Under `meta_bg` a meta-group's
+/// descriptor block follows the copy in each of its groups that carries one, so the reader
+/// asks this as well as a rewrite that patches every copy.
+#[must_use]
+pub(crate) fn carries_superblock(g: u32, sb: &crate::ondisk::SuperBlock) -> bool {
+    if g == 0 {
+        return true;
+    }
+    if sb.feature_compat & COMPAT_SPARSE_SUPER2 != 0 {
+        return sb.backup_bgs.contains(&g);
+    }
+    sb.feature_ro_compat & crate::feature::RoCompat::SPARSE_SUPER.bits() == 0
+        || sparse_super_has_copy(g)
+}
+
 /// The `mke2fs.conf` bytes-per-inode ratio for a filesystem of `total_blocks`
 /// blocks, selected by the size-thresholded `fs_types` buckets.
 fn inode_ratio(total_blocks: u64, block_size: u32) -> u64 {
@@ -1635,6 +1659,26 @@ mod tests {
             plan_geo(bytes, GrowReservation::UpTo(bytes), FeatureSet::default()),
             Err(GeometryError::BlockCountTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn a_superblock_copy_is_in_the_groups_the_superblock_names() {
+        let mut sb = crate::ondisk::SuperBlock::default();
+        // Without sparse_super, every group.
+        assert!((0..20).all(|g| carries_superblock(g, &sb)));
+        // With it, 0, 1, and the powers of 3, 5, and 7.
+        sb.feature_ro_compat = crate::feature::RoCompat::SPARSE_SUPER.bits();
+        let with: Vec<u32> = (0..50).filter(|&g| carries_superblock(g, &sb)).collect();
+        assert_eq!(with, [0, 1, 3, 5, 7, 9, 25, 27, 49]);
+        // With sparse_super2 as well, 0 and the two groups recorded, and nothing else.
+        sb.feature_compat = COMPAT_SPARSE_SUPER2;
+        sb.backup_bgs = [1, 64];
+        let with: Vec<u32> = (0..100).filter(|&g| carries_superblock(g, &sb)).collect();
+        assert_eq!(with, [0, 1, 64]);
+        // A slot recording no group names none, group 0 included only as the primary.
+        sb.backup_bgs = [0, 0];
+        let with: Vec<u32> = (0..100).filter(|&g| carries_superblock(g, &sb)).collect();
+        assert_eq!(with, [0]);
     }
 
     #[test]

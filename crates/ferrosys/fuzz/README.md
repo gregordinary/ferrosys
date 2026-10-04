@@ -11,10 +11,29 @@ Requires a nightly toolchain and [`cargo-fuzz`](https://github.com/rust-fuzz/car
 
 ```sh
 cargo install cargo-fuzz
-cargo +nightly fuzz run reader_scan corpus/reader_scan seeds/reader_scan
-cargo +nightly fuzz run fat_reader corpus/fat_reader seeds/fat_reader
+limits='-malloc_limit_mb=2048 -rss_limit_mb=8192'
+cargo +nightly fuzz run reader_scan corpus/reader_scan seeds/reader_scan \
+    -- -max_len=16777216 $limits
+cargo +nightly fuzz run fat_reader corpus/fat_reader seeds/fat_reader \
+    -- -max_len=16777216 $limits
+cargo +nightly fuzz run exfat_reader corpus/exfat_reader seeds/exfat_reader \
+    -- -max_len=8388608 $limits
+cargo +nightly fuzz run btrfs_reader corpus/btrfs_reader seeds/btrfs_reader \
+    -- -max_len=83886080 -malloc_limit_mb=2048 -rss_limit_mb=24576
 cargo +nightly fuzz run archive_parse corpus/archive_parse seeds/archive_parse
 ```
+
+`-max_len` is the largest seed in the target's directory, and it is not optional. Without
+it libFuzzer caps an input at 1 MiB and truncates every seed to that when it loads them, so
+an exFAT seed loses its whole cluster heap — which begins past the first MiB — and a btrfs
+seed loses every tree. The fuzzer then mutates boot sectors and superblocks and never
+reaches a directory. A seed added larger than the figure here raises it.
+
+The two memory limits answer different questions. libFuzzer holds its whole corpus in
+memory, so with inputs of megabytes its resident size passes the default 2 GiB on its own
+within minutes, and reports that as the input's fault. `-rss_limit_mb` is raised to hold
+that corpus. `-malloc_limit_mb` stays at 2 GiB, so a single allocation sized from a number
+the input claims, which is the bug these targets exist to find, still fails the run.
 
 The first corpus directory is where libFuzzer writes what it learns, and it must be
 `corpus/<target>`: libFuzzer treats the first directory it is given as its working
@@ -33,8 +52,9 @@ archive to mutate, either run would exercise the header check and nothing past i
 
 `seeds/<target>/` holds the starting inputs, one filesystem per file for the reader targets
 and one tar archive per file for the archive target. Every one is small on purpose, so the
-fuzzer mutates them quickly: the images are 2 to 16 MiB at a 1 KiB block size, and the
-archive is a few members with short bodies. The images are almost entirely zeros, so the
+fuzzer mutates them quickly: the ext images are 2 to 16 MiB at a 1 KiB block size, the FAT
+and exFAT ones 2 to 16 MiB, the btrfs ones 48 to 80 MiB, and the archive
+a few members with short bodies. The images are almost entirely zeros, so the
 repository stores them in on the order of a hundred kilobytes however many megabytes they
 occupy once checked out.
 
@@ -48,6 +68,21 @@ occupy once checked out.
   extent, and attribute parsers are all reachable.
 - `ext4-multigroup` — two block groups, so descriptor iteration and the per-group
   bitmap and inode-table paths are exercised.
+- `ext4-needs-recovery` — a 4 MiB filesystem left needing recovery: its journal carries three
+  checksummed transactions written by `debugfs`, the last revoking a block the first logged,
+  so reading it replays the log before anything else. The journal superblock, the tags, the
+  revoke records, and the commit checksums are all reachable from the first input.
+- `ext4-kernel-htree` — a directory with a two-level hash index that a Linux kernel grew a
+  name at a time: 600 names of 200 bytes linked into an 8 MiB ext4 at 1 KiB blocks, every
+  fifth removed, a run of names sharing one hash split across leaves, and names at the end of
+  the hash space. It is the test suite's `ext4-kernel-htree` fixture expanded, and the one
+  seed from which a lookup descends an index rather than reading a directory whole.
+- `ext4-meta-bg` — `meta_bg` with 256-block groups, so an 8 MiB filesystem has 33 groups
+  across three meta-groups, each meta-group's descriptor block in its own first group. Made
+  by the pinned `mke2fs` from a small tree, since this crate does not write `meta_bg`.
+- `ext4-unclean` — a 4 MiB ext4 without a journal that a Linux kernel had mounted, written
+  to, and not unmounted, so its state word records the unclean shutdown. It is the test
+  suite's `ext4-kernel-unclean` fixture expanded.
 - `ext2-populated` — an ext2 tree (no journal, no extents, no checksums) with a nested
   directory, a symlink, and a file large enough to reach the single-indirect block, so
   the classic direct/indirect block map and its walk are represented rather than only
@@ -64,6 +99,31 @@ occupy once checked out.
   size is what they test before counting anything, so it reaches the whole FAT32 path — the
   information sector, the backup boot sector, the root as a cluster chain — at a fraction of
   the 33 MiB a conformant FAT32 needs.
+- `fat16-dirty` — a 16 MiB FAT16 a Linux kernel had mounted, written to, and not unmounted,
+  so its boot sector carries the mark a Linux driver records that in. The test suite's
+  `fat16-kernel-unclean` fixture expanded.
+- `fat12-long-dir` — 200 files with long names in one directory, which spans several
+  clusters, so a lookup that stops at its name and a listing that reads to the end take
+  different paths through it.
+- `exfat-populated`, `exfat-chained`, `exfat-512b-clusters` — a tree on an 8 MiB exFAT at
+  4 KiB clusters, the same with its streams chained through the allocation table rather
+  than contiguous, and the tree again at 512-byte clusters.
+- `exfat-empty` — a 4 MiB exFAT holding nothing but its root, bitmap, and up-case table.
+- `exfat-dirty` — an 8 MiB exFAT a Linux kernel had mounted, written to, and not unmounted,
+  with `VolumeDirty` set. The test suite's `exfat-kernel-unclean` fixture expanded.
+- `exfat-long-dir` — the 200 long names of `fat12-long-dir` on an 8 MiB exFAT.
+- `btrfs-min` — an empty btrfs, every tree present and none holding a file.
+- `btrfs-populated` — a btrfs holding a tree, with a default subvolume.
+- `btrfs-4k-node` — a tree on a btrfs whose tree blocks are 4 KiB rather than 16 KiB, so a
+  leaf holds a quarter as much and the trees are deeper for the same items.
+- `btrfs-damaged-copy` — a btrfs with `dup` metadata whose root tree's first copy has its
+  checksum damaged: a lenient read takes the second copy and a scan names the block, so the
+  read-through to a later copy is reachable from the first input. Made with
+  `mkfs.btrfs -m dup -d single -r` over a small tree, the copy located with
+  `btrfs-map-logical`. The pinned `mkfs.btrfs` makes such a filesystem no smaller than
+  114 MiB, and the file ends at 80 MiB, past the last block the filesystem uses: every
+  seed stays under the 100 MB a repository host accepts in one file, and the seed gate
+  holds them to it.
 - `inspect-huge-group-count` — `ext4-min` with `s_blocks_count` set to `2^64 - 1`,
   the crafted superblock the `reader_inspect` target exists to guard: the group count
   it implies must not size an allocation.
@@ -127,6 +187,11 @@ PY
   (grown from the descriptors that exist, never pre-sized from the claimed count),
   scan, and render the report as JSON, as a table, and as SARIF. Guards the
   inspection path against a superblock that claims billions of groups.
+- `exfat_reader` — the same over the exFAT family: a strict walk and a lookup of every path
+  it reaches, a lenient scan and its projections, and a second open at a nonzero base offset.
+- `btrfs_reader` — the address space and the trees through `Volume`, then the filesystem
+  view through `Reader`: a walk, a lookup and a read of every file it reaches, a
+  verification of each file's data checksums, and a scan.
 - `archive_parse` — both tar entry points: `ArchiveSource::from_reader`, which reads
   every body, and `ArchiveSource::from_path`, which locates each body and leaves it on
   disk. The seeking one computes an offset from a declared size, and a PAX `size`

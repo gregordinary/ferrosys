@@ -8,7 +8,8 @@ userspace, over ordinary byte streams, in safe Rust. It has four filesystem fami
 - exFAT
 - btrfs
 
-Each family is a Cargo feature, so a build takes only the families you name.
+Each family is a Cargo feature. The default build carries all four, and a build that turns
+the default off takes only the families you name.
 
 This Cargo workspace has two crates:
 

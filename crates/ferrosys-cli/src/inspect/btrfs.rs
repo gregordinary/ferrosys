@@ -34,19 +34,15 @@ pub fn report(
     args: &InspectArgs,
     dialect: Dialect,
 ) -> Result<Report, Error> {
-    // A block group is ext's unit of self-description. btrfs has block *groups* of its own and
-    // they are a different thing entirely — an allocation profile over a chunk, not a region of
-    // the device that describes itself — so answering `--groups` with them would answer a
-    // different question under the same word. Refused rather than passed over, which is the
-    // answer both other families give.
-    if args.groups {
-        return Err(Error::NotForFamily {
-            option: "--groups",
-            family: "btrfs",
-            reason: "block groups are how an ext filesystem divides itself, and a btrfs is \
-                     divided by a chunk tree that maps a logical address space onto the device",
-        });
-    }
+    // btrfs has block *groups* of its own and they are a different thing entirely — an
+    // allocation profile over a chunk, not a region of the device that describes itself — so
+    // answering `--groups` with them would answer a different question under the same word.
+    super::refuse_groups(
+        args,
+        "btrfs",
+        "block groups are how an ext filesystem divides itself, and a btrfs is divided by a \
+         chunk tree that maps a logical address space onto the device",
+    )?;
 
     // A scan reads every tree in the filesystem and verifies every metadata block it reaches.
     // It does not read file data: the checksums covering that are per sector over the whole
@@ -102,6 +98,10 @@ struct Described {
     sector_size: u32,
     node_size: u32,
     generation: u64,
+    /// Where the log tree the superblock still points at begins, or zero for none: a
+    /// filesystem that was not cleanly unmounted holds writes there the committed trees do
+    /// not.
+    log_root: u64,
     /// Every feature the three words advertise, in the words `format -O` reads.
     ///
     /// One list rather than three, for the reason `-O` takes one list: which word a feature
@@ -161,6 +161,7 @@ impl Described {
             sector_size: sb.sectorsize,
             node_size: sb.nodesize,
             generation: sb.generation,
+            log_root: sb.log_root,
             features,
             unknown_features: [
                 ("compat", sb.compat_flags.unknown_bits()),
@@ -233,6 +234,10 @@ fn table(described: &Described) -> String {
     let mut line = |k: &str, v: String| rows.row(k, v);
 
     line("Label:", label_text(&described.label));
+    line(
+        "Filesystem state:",
+        render::volume_state(described.log_root != 0, false),
+    );
     line("Metadata identifier:", render::uuid(&described.metadata_id));
     line("Generation:", described.generation.to_string());
     line("Bytes used:", described.bytes_used.to_string());
@@ -301,6 +306,7 @@ fn json(described: &Described) -> String {
     s.bytes("label", &described.label);
     s.str("metadata_uuid", &render::uuid(&described.metadata_id));
     s.u64("generation", described.generation);
+    s.u64("log_root", described.log_root);
     s.u64("total_bytes", described.total_bytes);
     s.u64("bytes_used", described.bytes_used);
     s.u64("sector_size", u64::from(described.sector_size));

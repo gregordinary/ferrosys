@@ -14,6 +14,15 @@
 //!
 //! This module is pure. The major hash always has its low bit clear: that bit is
 //! reserved in a directory index to mark a hash that continues into the next block.
+//!
+//! # Sources
+//!
+//! MD4's functions, round constants, shifts, and initial registers are RFC 1320's, and the
+//! TEA round is Wheeler and Needham's (*TEA, a Tiny Encryption Algorithm*, 1994). How the two
+//! are applied to a name — the words of each round, the packing of a name into words, and the
+//! sixteen TEA cycles — follows ext4-view (MIT OR Apache-2.0). The legacy hash, the unsigned
+//! forms, the minor hash, and the end of the hash space follow FreeBSD's ext2fs
+//! (BSD-2-Clause). Every variant is held to what e2fsprogs's `debugfs dx_hash` reports.
 
 /// The hash algorithm a directory index is ordered by (`s_def_hash_version`).
 ///
@@ -141,30 +150,13 @@ pub struct DirHash {
     pub minor: u32,
 }
 
-/// The transform's initial state when the filesystem's hash seed is all zero.
-const DEFAULT_SEED: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+/// The state a hash starts from where the filesystem's hash seed is all zero: MD4's initial
+/// registers.
+const MD4_INITIAL: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
-/// The value a major hash may not take: it marks the end of a directory's hash
-/// space. A hash landing here is nudged down to the previous even value by
-/// [`clamp_from_eof`].
-const EOF_HASH: u32 = 0x7fff_ffff << 1;
-
-/// Move a major hash off the end-of-space sentinel. A hash equal to [`EOF_HASH`] is
-/// replaced by the previous representable value, `(0x7fff_fffe) << 1`, which — like
-/// every valid major hash — keeps its low bit clear so it is never mistaken for a
-/// hash continued into the next index block. Any other hash is returned unchanged.
-#[must_use]
-const fn clamp_from_eof(major: u32) -> u32 {
-    if major == EOF_HASH {
-        (0x7fff_ffff - 1) << 1
-    } else {
-        major
-    }
-}
-
-const TEA_DELTA: u32 = 0x9e37_79b9;
-const MD4_K2: u32 = 0x5a82_7999;
-const MD4_K3: u32 = 0x6ed9_eba1;
+/// The end of a directory's hash space, which an index uses to mean past every name. No major
+/// hash takes this value; see [`off_the_end`].
+const END_OF_SPACE: u32 = 0x7fff_ffff << 1;
 
 /// Hash `name` for a directory index.
 ///
@@ -177,183 +169,212 @@ pub fn dir_hash(
     signedness: HashSignedness,
     seed: &[u8; 16],
 ) -> DirHash {
-    let signed = matches!(signedness, HashSignedness::Signed);
-    let mut buf = decode_seed(seed);
-
-    let (mut major, minor) = match version {
-        HashVersion::Legacy => (legacy_hash(name, signed), 0),
+    let (major, minor) = match version {
+        HashVersion::Legacy => (legacy(name, signedness), 0),
         HashVersion::HalfMd4 => {
-            let mut input = [0u32; 8];
-            let mut off = 0;
-            while off < name.len() {
-                str2hashbuf(&name[off..], signed, &mut input);
-                half_md4_transform(&mut buf, &input);
-                off += 32;
+            let mut state = initial_state(seed);
+            for chunk in name.chunks(32) {
+                half_md4(&mut state, &pack(chunk, signedness));
             }
-            (buf[1], buf[2])
+            (state[1], state[2])
         }
         HashVersion::Tea => {
-            let mut input = [0u32; 4];
-            let mut off = 0;
-            while off < name.len() {
-                str2hashbuf(&name[off..], signed, &mut input);
-                tea_transform(&mut buf, &input);
-                off += 16;
+            let mut state = initial_state(seed);
+            for chunk in name.chunks(16) {
+                tea(&mut state, &pack(chunk, signedness));
             }
-            (buf[0], buf[1])
+            (state[0], state[1])
         }
     };
-
     // The low bit of a major hash marks a hash continued into the next index block,
     // so it is never part of the hash itself.
-    major &= !1;
-    major = clamp_from_eof(major);
-    DirHash { major, minor }
-}
-
-/// The four seed words, or the transform's built-in state when the seed is all zero.
-fn decode_seed(seed: &[u8; 16]) -> [u32; 4] {
-    let mut buf = [0u32; 4];
-    for (word, chunk) in buf.iter_mut().zip(seed.as_chunks::<4>().0) {
-        *word = u32::from_le_bytes(*chunk);
+    DirHash {
+        major: off_the_end(major & !1),
+        minor,
     }
-    if buf == [0; 4] { DEFAULT_SEED } else { buf }
 }
 
-/// One name byte as the hash sees it: sign-extended when names hash as signed.
-fn byte(b: u8, signed: bool) -> u32 {
-    if signed { b as i8 as u32 } else { u32::from(b) }
+/// The state a hash of a name starts from: the seed's four words, or MD4's initial registers
+/// where the seed is all zero.
+fn initial_state(seed: &[u8; 16]) -> [u32; 4] {
+    let state: [u32; 4] = std::array::from_fn(|word| crate::bytes::get_u32(seed, 4 * word));
+    if state == [0; 4] { MD4_INITIAL } else { state }
 }
 
-/// The legacy hash. It consumes the whole name a byte at a time and has no minor
-/// hash and no seed.
-fn legacy_hash(name: &[u8], signed: bool) -> u32 {
-    let (mut hash0, mut hash1) = (0x12a3_fe2du32, 0x37ab_e8f9u32);
-    for &b in name {
-        let mut hash = hash1.wrapping_add(hash0 ^ byte(b, signed).wrapping_mul(7_152_373));
-        if hash & 0x8000_0000 != 0 {
-            hash = hash.wrapping_sub(0x7fff_ffff);
-        }
-        hash1 = hash0;
-        hash0 = hash;
-    }
-    hash0 << 1
-}
-
-/// Pack the front of `name` into `out` as big-endian words, padding the remainder
-/// with a word derived from the name's remaining length.
+/// Move a major hash off [`END_OF_SPACE`]: that value becomes the one below it with the low
+/// bit still clear, so it is never mistaken for a hash continued into the next index block,
+/// and every other hash is returned as it is.
 ///
-/// The pad encodes the length *before* the name is clipped to what `out` holds, so
-/// a long name's first chunk pads differently from its last.
-fn str2hashbuf(name: &[u8], signed: bool, out: &mut [u32]) {
-    let num = out.len();
-    let pad = {
-        let len = name.len() as u32;
-        let p = len | (len << 8);
-        p | (p << 16)
-    };
+/// The end of the hash space is where a directory's position reads as past its last name, so
+/// no name may hash there. A Linux kernel moves such a hash the same way, which is observed in
+/// the positions its `readdir` reports.
+const fn off_the_end(major: u32) -> u32 {
+    if major == END_OF_SPACE {
+        (0x7fff_ffff - 1) << 1
+    } else {
+        major
+    }
+}
 
-    let mut val = pad;
-    let mut written = 0usize;
-    for (i, &b) in name.iter().take(num * 4).enumerate() {
-        val = byte(b, signed).wrapping_add(val << 8);
-        if i % 4 == 3 {
-            out[written] = val;
-            written += 1;
-            val = pad;
+/// The major hash a name has where a writer leaves a hash where it fell, for a name this
+/// crate hashes to `major`: the end of the hash space where `major` is the value
+/// [`off_the_end`] moves it to, and nothing otherwise.
+///
+/// A lookup asks this so it finds a name in an index whichever way its writer read the end of
+/// the space. Only the end of the space is in question; every other hash is the same either
+/// way.
+pub(crate) const fn unmoved_major(major: u32) -> Option<u32> {
+    if major == off_the_end(END_OF_SPACE) {
+        Some(END_OF_SPACE)
+    } else {
+        None
+    }
+}
+
+impl HashSignedness {
+    /// A name's byte as a hash reads it: its value, or sign-extended where names hash as
+    /// signed.
+    const fn widen(self, byte: u8) -> u32 {
+        match self {
+            Self::Unsigned => byte as u32,
+            Self::Signed => byte as i8 as u32,
         }
     }
-    // The partial final word, then pad out whatever remains.
-    if written < num {
-        out[written] = val;
-        written += 1;
-    }
-    for slot in &mut out[written..] {
-        *slot = pad;
-    }
 }
 
-fn rol32(x: u32, s: u32) -> u32 {
-    x.rotate_left(s)
-}
-
-fn md4_f(x: u32, y: u32, z: u32) -> u32 {
-    z ^ (x & (y ^ z))
-}
-
-fn md4_g(x: u32, y: u32, z: u32) -> u32 {
-    (x & y).wrapping_add((x ^ y) & z)
-}
-
-fn md4_h(x: u32, y: u32, z: u32) -> u32 {
-    x ^ y ^ z
-}
-
-/// The half-MD4 transform: three rounds over eight input words, folded into `buf`.
+/// The legacy hash: no seed and no minor hash, and the whole name consumed a byte at a time.
 ///
-/// The first round adds nothing to each input word; the second and third add the
-/// two MD4 round constants. Within a round the four working words rotate, so each
-/// takes a turn as the accumulator.
-fn half_md4_transform(buf: &mut [u32; 4], input: &[u32; 8]) {
-    let (mut a, mut b, mut c, mut d) = (buf[0], buf[1], buf[2], buf[3]);
-
-    macro_rules! round {
-        ($f:expr, $a:ident, $b:ident, $c:ident, $d:ident, $x:expr, $s:expr) => {
-            $a = rol32($a.wrapping_add($f($b, $c, $d)).wrapping_add($x), $s);
-        };
+/// Two running values. Each byte makes a new one out of the older value and the newer one
+/// mixed with the byte, folded back below the top bit; the newest, shifted left one, is the
+/// hash.
+fn legacy(name: &[u8], signedness: HashSignedness) -> u32 {
+    let (mut newer, mut older) = (0x12a3_fe2d_u32, 0x37ab_e8f9_u32);
+    for &byte in name {
+        let mut next = older.wrapping_add(newer ^ signedness.widen(byte).wrapping_mul(0x006d_22f5));
+        if next & 0x8000_0000 != 0 {
+            next = next.wrapping_sub(0x7fff_ffff);
+        }
+        older = newer;
+        newer = next;
     }
-
-    round!(md4_f, a, b, c, d, input[0], 3);
-    round!(md4_f, d, a, b, c, input[1], 7);
-    round!(md4_f, c, d, a, b, input[2], 11);
-    round!(md4_f, b, c, d, a, input[3], 19);
-    round!(md4_f, a, b, c, d, input[4], 3);
-    round!(md4_f, d, a, b, c, input[5], 7);
-    round!(md4_f, c, d, a, b, input[6], 11);
-    round!(md4_f, b, c, d, a, input[7], 19);
-
-    round!(md4_g, a, b, c, d, input[1].wrapping_add(MD4_K2), 3);
-    round!(md4_g, d, a, b, c, input[3].wrapping_add(MD4_K2), 5);
-    round!(md4_g, c, d, a, b, input[5].wrapping_add(MD4_K2), 9);
-    round!(md4_g, b, c, d, a, input[7].wrapping_add(MD4_K2), 13);
-    round!(md4_g, a, b, c, d, input[0].wrapping_add(MD4_K2), 3);
-    round!(md4_g, d, a, b, c, input[2].wrapping_add(MD4_K2), 5);
-    round!(md4_g, c, d, a, b, input[4].wrapping_add(MD4_K2), 9);
-    round!(md4_g, b, c, d, a, input[6].wrapping_add(MD4_K2), 13);
-
-    round!(md4_h, a, b, c, d, input[3].wrapping_add(MD4_K3), 3);
-    round!(md4_h, d, a, b, c, input[7].wrapping_add(MD4_K3), 9);
-    round!(md4_h, c, d, a, b, input[2].wrapping_add(MD4_K3), 11);
-    round!(md4_h, b, c, d, a, input[6].wrapping_add(MD4_K3), 15);
-    round!(md4_h, a, b, c, d, input[1].wrapping_add(MD4_K3), 3);
-    round!(md4_h, d, a, b, c, input[5].wrapping_add(MD4_K3), 9);
-    round!(md4_h, c, d, a, b, input[0].wrapping_add(MD4_K3), 11);
-    round!(md4_h, b, c, d, a, input[4].wrapping_add(MD4_K3), 15);
-
-    buf[0] = buf[0].wrapping_add(a);
-    buf[1] = buf[1].wrapping_add(b);
-    buf[2] = buf[2].wrapping_add(c);
-    buf[3] = buf[3].wrapping_add(d);
+    newer << 1
 }
 
-/// The TEA transform: sixteen rounds over four input words, folded into `buf`.
-fn tea_transform(buf: &mut [u32; 4], input: &[u32; 4]) {
+/// Pack one chunk of a name into `N` words, the first of each four bytes the most significant.
+///
+/// Every word starts from a pad that repeats the chunk's length in all four of its bytes, and
+/// each byte of the chunk is added in after shifting the word left by eight. So a word the
+/// chunk fills keeps none of the pad, a word the chunk ends inside keeps some, and every word
+/// past the chunk is the pad.
+fn pack<const N: usize>(chunk: &[u8], signedness: HashSignedness) -> [u32; N] {
+    // A chunk is at most thirty-two bytes, so its length is one byte.
+    let pad = u32::from(chunk.len() as u8) * 0x0101_0101;
+    let mut words = [pad; N];
+    for (word, bytes) in words.iter_mut().zip(chunk.chunks(4)) {
+        *word = bytes.iter().fold(pad, |word, &byte| {
+            (word << 8).wrapping_add(signedness.widen(byte))
+        });
+    }
+    words
+}
+
+/// MD4's three boolean functions, each applied bit by bit.
+#[derive(Clone, Copy)]
+enum Mix {
+    /// Where the first bit is set, the second; otherwise the third.
+    Conditional,
+    /// Whichever value at least two of the three bits hold.
+    Majority,
+    /// Set where an odd number of the three bits are.
+    Parity,
+}
+
+impl Mix {
+    const fn of(self, x: u32, y: u32, z: u32) -> u32 {
+        match self {
+            Self::Conditional => (x & y) | (!x & z),
+            Self::Majority => (x & y) | (x & z) | (y & z),
+            Self::Parity => x ^ y ^ z,
+        }
+    }
+}
+
+/// One of half-MD4's three rounds.
+struct Round {
+    /// The round's boolean function.
+    mix: Mix,
+    /// What is added with each word.
+    constant: u32,
+    /// The rotations its steps cycle through.
+    shifts: [u32; 4],
+    /// The order it reads the eight words in.
+    order: [usize; 8],
+}
+
+/// MD4's three rounds, eight steps each over eight words.
+const HALF_MD4: [Round; 3] = [
+    Round {
+        mix: Mix::Conditional,
+        constant: 0,
+        shifts: [3, 7, 11, 19],
+        order: [0, 1, 2, 3, 4, 5, 6, 7],
+    },
+    Round {
+        mix: Mix::Majority,
+        constant: 0x5a82_7999,
+        shifts: [3, 5, 9, 13],
+        order: [1, 3, 5, 7, 0, 2, 4, 6],
+    },
+    Round {
+        mix: Mix::Parity,
+        constant: 0x6ed9_eba1,
+        shifts: [3, 9, 11, 15],
+        order: [3, 7, 2, 6, 1, 5, 0, 4],
+    },
+];
+
+/// Fold eight words into `state` through half-MD4.
+///
+/// Each step replaces the first of the four registers with itself plus the round's function
+/// of the other three, a word, and the round's constant, rotated; then the four turn one
+/// place, so the register replaced cycles A, D, C, B and a round of eight steps ends where it
+/// began. Once every round has run, each register is added into the state.
+fn half_md4(state: &mut [u32; 4], words: &[u32; 8]) {
+    let [mut a, mut b, mut c, mut d] = *state;
+    for round in &HALF_MD4 {
+        for (step, &word) in round.order.iter().enumerate() {
+            let replaced = a
+                .wrapping_add(round.mix.of(b, c, d))
+                .wrapping_add(words[word])
+                .wrapping_add(round.constant)
+                .rotate_left(round.shifts[step % 4]);
+            (a, b, c, d) = (d, replaced, b, c);
+        }
+    }
+    for (held, register) in state.iter_mut().zip([a, b, c, d]) {
+        *held = held.wrapping_add(register);
+    }
+}
+
+/// TEA's cycle constant.
+const TEA_DELTA: u32 = 0x9e37_79b9;
+
+/// Sixteen cycles of TEA over the state's first two words, keyed by the chunk's four words,
+/// and the result added into those two.
+fn tea(state: &mut [u32; 4], key: &[u32; 4]) {
+    let (mut v0, mut v1) = (state[0], state[1]);
     let mut sum = 0u32;
-    let (mut b0, mut b1) = (buf[0], buf[1]);
-    let (a, b, c, d) = (input[0], input[1], input[2], input[3]);
-
     for _ in 0..16 {
         sum = sum.wrapping_add(TEA_DELTA);
-        b0 = b0.wrapping_add(
-            ((b1 << 4).wrapping_add(a)) ^ b1.wrapping_add(sum) ^ ((b1 >> 5).wrapping_add(b)),
+        v0 = v0.wrapping_add(
+            (v1 << 4).wrapping_add(key[0]) ^ v1.wrapping_add(sum) ^ (v1 >> 5).wrapping_add(key[1]),
         );
-        b1 = b1.wrapping_add(
-            ((b0 << 4).wrapping_add(c)) ^ b0.wrapping_add(sum) ^ ((b0 >> 5).wrapping_add(d)),
+        v1 = v1.wrapping_add(
+            (v0 << 4).wrapping_add(key[2]) ^ v0.wrapping_add(sum) ^ (v0 >> 5).wrapping_add(key[3]),
         );
     }
-
-    buf[0] = buf[0].wrapping_add(b0);
-    buf[1] = buf[1].wrapping_add(b1);
+    state[0] = state[0].wrapping_add(v0);
+    state[1] = state[1].wrapping_add(v1);
 }
 
 #[cfg(test)]
@@ -570,18 +591,31 @@ mod tests {
     }
 
     #[test]
-    fn the_eof_sentinel_is_nudged_down_to_the_previous_even_value() {
-        // A major hash landing on the end-of-space sentinel (0xFFFF_FFFE) must move to
-        // the previous representable value (0xFFFF_FFFC), keeping its low bit clear —
-        // the kernel's convention. Setting the low bit (0xFFFF_FFFF) would both pick the
-        // wrong value and collide with the continued-hash flag. The branch is ~2^-31 per
-        // name, so it is exercised through the clamp directly.
-        assert_eq!(clamp_from_eof(EOF_HASH), 0xFFFF_FFFC);
-        assert_eq!(clamp_from_eof(EOF_HASH) & 1, 0, "the low bit stays clear");
+    fn the_end_of_the_hash_space_is_never_a_major_hash() {
+        // Three names found by search, one per algorithm, whose major hash under the all-zero
+        // seed lands on the end of the hash space before the rule moves it. The minor hash is
+        // untouched. A Linux 7.1 kernel's directory positions put each at the moved value, and
+        // e2fsprogs 1.47.0's `dx_hash` reports each at 0xFFFF_FFFE, unmoved; an index split at
+        // the moved value is reached by either.
+        for (name, version, minor) in [
+            (&b"i9zfid0q"[..], HashVersion::Legacy, 0),
+            (b"s29n0k5q", HashVersion::HalfMd4, 0x3272_81df),
+            (b"48w0qib1", HashVersion::Tea, 0xde74_5bee),
+        ] {
+            for signedness in [HashSignedness::Signed, HashSignedness::Unsigned] {
+                let hash = dir_hash(name, version, signedness, &SEED_Z);
+                assert_eq!(
+                    (hash.major, hash.minor),
+                    (0xFFFF_FFFC, minor),
+                    "{version:?}"
+                );
+            }
+        }
         // Every other value passes through untouched.
-        assert_eq!(clamp_from_eof(0), 0);
-        assert_eq!(clamp_from_eof(0x1234_5678), 0x1234_5678);
-        assert_eq!(clamp_from_eof(0xFFFF_FFFC), 0xFFFF_FFFC);
+        assert_eq!(off_the_end(END_OF_SPACE), 0xFFFF_FFFC);
+        assert_eq!(off_the_end(0), 0);
+        assert_eq!(off_the_end(0x1234_5678), 0x1234_5678);
+        assert_eq!(off_the_end(0xFFFF_FFFC), 0xFFFF_FFFC);
     }
 
     #[test]

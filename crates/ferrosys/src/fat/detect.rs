@@ -81,6 +81,7 @@ mod tests {
         let layout = plan_layout(request).expect("plan");
         let volume = VolumeInfo {
             drive_number: 0x80,
+            reserved: 0,
             ext_boot_signature: crate::fat::ondisk::EXTENDED_BOOT_SIGNATURE,
             volume_id: 0x1234_abcd,
             label: VolumeInfo::NO_NAME,

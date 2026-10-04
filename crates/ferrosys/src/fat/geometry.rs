@@ -2328,6 +2328,7 @@ mod tests {
     fn volume_info(fs_type: &[u8; 8]) -> VolumeInfo {
         VolumeInfo {
             drive_number: 0x80,
+            reserved: 0,
             ext_boot_signature: 0x29,
             volume_id: 0x1234_abcd,
             label: VolumeInfo::NO_NAME,

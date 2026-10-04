@@ -25,6 +25,19 @@ use crate::finding::Family;
 use crate::source::Metadata;
 use crate::xattr::Xattr;
 
+/// The most bytes of a file a sink asks [`FsTree::read_bytes`] for at a time. Large enough
+/// that a big file is not a read per block, small enough that the buffer is not worth
+/// thinking about.
+///
+/// It is a ceiling rather than the size: a file shorter than this gets a buffer its own size,
+/// so a root filesystem of many small files does not allocate and zero a mebibyte per entry
+/// to move a few hundred bytes through it.
+#[cfg(any(
+    feature = "tar",
+    all(feature = "dir", any(target_os = "linux", target_os = "android"))
+))]
+pub(crate) const BODY_WINDOW: usize = 1 << 20;
+
 /// A failure reading a filesystem through the extraction surface.
 ///
 /// The classification is shared: whether the source could not be read at all, whether the

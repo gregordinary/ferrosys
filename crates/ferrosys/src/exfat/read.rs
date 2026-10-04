@@ -899,10 +899,10 @@ pub enum ReadError {
     /// The format records this, and it is the format working rather than failing: every field
     /// is what a driver is supposed to have written. It is the one condition under which what
     /// the metadata says and what the volume contains are allowed to differ.
-    #[error("this volume was not cleanly unmounted, so its metadata may not describe its contents")]
+    #[error("{}", crate::finding::NOT_CLEANLY_UNMOUNTED)]
     VolumeDirty,
     /// The driver that last had the volume open recorded a failure of the underlying medium.
-    #[error("a driver recorded a failure of the medium this volume is on")]
+    #[error("{}", crate::finding::MEDIUM_FAILURE)]
     MediaFailure,
     /// A path names nothing in the volume.
     #[error("no such path: {}", crate::escape::printable(.path))]
@@ -2331,12 +2331,40 @@ impl<R: Read + Seek> Reader<R> {
         self.parse_dir(node, &mut OnDeviation::Policy(policy))
     }
 
-    /// The shared directory parser, which is the one place an entry's bytes become a name.
+    /// A directory's entries gathered into a list, held to [`Limits::max_walk_entries`] and
+    /// the volume's whole directory capacity.
     fn parse_dir(
         &mut self,
         node: &Node,
         deviations: &mut OnDeviation<'_>,
     ) -> Result<Vec<Entry>, ReadError> {
+        // The directory's own entries are held, and its storage is not: a crafted directory is
+        // bounded by what a caller allowed rather than by how many clusters it chained
+        // together. The structural half of the cap is the volume's whole directory capacity,
+        // which a well-formed directory can never reach.
+        let cap = self.limits.max_walk_entries.min(self.max_names());
+        let mut out: Vec<Entry> = Vec::new();
+        self.parse_entries(node, deviations, |_, entry| {
+            if out.len() >= cap {
+                return Err(ReadError::WalkTooLarge { limit: cap });
+            }
+            out.push(entry);
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(out)
+    }
+
+    /// The shared directory parser, which is the one place an entry's bytes become a name.
+    ///
+    /// Each entry is handed to `each` as its set is completed, and `each` says whether to go
+    /// on, so a lookup stops at the name it came for rather than reading the directory to its
+    /// end. Nothing is held but the set in flight.
+    fn parse_entries(
+        &mut self,
+        node: &Node,
+        deviations: &mut OnDeviation<'_>,
+        mut each: impl FnMut(&mut Self, Entry) -> Result<ControlFlow<()>, ReadError>,
+    ) -> Result<(), ReadError> {
         if !node.is_dir() {
             return Err(ReadError::NotADirectory { path: Vec::new() });
         }
@@ -2346,17 +2374,10 @@ impl<R: Read + Seek> Reader<R> {
         // names the root's first cluster is `Storage::Chain(root)` and is not the root, and a
         // bitmap, up-case or label entry inside it is misplaced like any other.
         let is_root = node.times.is_none();
-        // The directory's own entries are held, and its storage is not: a crafted directory is
-        // bounded by what a caller allowed rather than by how many clusters it chained
-        // together. The structural half of the cap is the volume's whole directory capacity,
-        // which a well-formed directory can never reach.
-        let cap = self.limits.max_walk_entries.min(self.max_names());
-        let mut out: Vec<Entry> = Vec::new();
         let mut set: Option<PendingSet> = None;
         // The cluster the end-of-directory marker sat in, once one has been met.
         let mut ended: Option<u32> = None;
         let mut reported_after_end = false;
-        let mut too_many = false;
 
         self.for_each_slot::<ReadError>(node, |reader, slot| {
             let at = slot.location();
@@ -2394,7 +2415,7 @@ impl<R: Read + Seek> Reader<R> {
                     if pending.is_complete() {
                         let finished = set.take().expect("just checked");
                         if let Some(entry) = reader.finish_set(finished, deviations)? {
-                            out.push(entry);
+                            return each(reader, entry);
                         }
                     }
                     return Ok(ControlFlow::Continue(()));
@@ -2430,10 +2451,6 @@ impl<R: Read + Seek> Reader<R> {
 
             match entry_type {
                 EntryType::FILE => {
-                    if out.len() >= cap {
-                        too_many = true;
-                        return Ok(ControlFlow::Break(()));
-                    }
                     let file = FileEntry::read_from(&slot.bytes)?;
                     if file.secondary_count == 0 {
                         deviations.record(
@@ -2491,9 +2508,6 @@ impl<R: Read + Seek> Reader<R> {
             Ok(ControlFlow::Continue(()))
         })?;
 
-        if too_many {
-            return Err(ReadError::WalkTooLarge { limit: cap });
-        }
         // A directory whose last set runs past its end is a set that was never completed.
         if let Some(unfinished) = set {
             deviations.record(
@@ -2508,7 +2522,7 @@ impl<R: Read + Seek> Reader<R> {
                 },
             )?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Turn a complete entry set into the one name it describes, or nothing where a deviation
@@ -2851,11 +2865,16 @@ impl<R: Read + Seek> Reader<R> {
     /// It is an ascent and not a lookup, this format storing no entry of that name in any
     /// directory.
     ///
+    /// Each directory is read only as far as the name it resolves and nothing is gathered, so
+    /// [`Limits::max_walk_entries`] does not govern a lookup, and an entry set past the name
+    /// is not read. A name found only through the up-case table reads on to the directory's
+    /// end, since an exact match further on would be the one returned.
+    ///
     /// # Errors
     ///
     /// [`ReadError::NotFound`] where no such path exists, [`ReadError::NotADirectory`] where
-    /// one traverses through something that is not a directory, and the errors of
-    /// [`read_dir`](Self::read_dir).
+    /// one traverses through something that is not a directory, and the errors of reading
+    /// each directory as far as the name, which are [`read_dir`](Self::read_dir)'s.
     pub fn lookup(&mut self, path: &[u8]) -> Result<Node, ReadError> {
         crate::resolve::drive(self, path, true)
     }
@@ -3361,18 +3380,26 @@ impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
         // up-case-folded match is remembered in case none is exact. The needle folds
         // once; each entry folds at most once, and only until a folded candidate is in
         // hand — where two passes folded every name of the directory per lookup.
-        let entries = self.read_dir(dir)?;
+        //
+        // The directory is streamed, as ext's is, and nothing is gathered: an exact match
+        // ends the read where it is, so neither the walk's cap nor an entry past the match
+        // can fail a lookup that found its name. A folded match reads on to the end, in case
+        // an exact one follows.
         let folded = self.fold_name(name);
+        let policy = self.policy;
+        let mut exact = None;
         let mut fallback = None;
-        for e in &entries {
+        self.parse_entries(dir, &mut OnDeviation::Policy(policy), |reader, e| {
             if e.name == name {
-                return Ok(Some(e.node));
+                exact = Some(e.node);
+                return Ok(ControlFlow::Break(()));
             }
-            if fallback.is_none() && self.fold_name(&e.name) == folded {
+            if fallback.is_none() && reader.fold_name(&e.name) == folded {
                 fallback = Some(e.node);
             }
-        }
-        Ok(fallback)
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(exact.or(fallback))
     }
 
     fn not_found(&self, path: &[u8]) -> ReadError {
@@ -3837,6 +3864,73 @@ mod tests {
     }
 
     // -- the round trip -----------------------------------------------------------------
+
+    /// A directory of ten files, `n0.txt` to `n9.txt`, which the writer lays down in that
+    /// order.
+    fn ten_names() -> Vec<u8> {
+        let mut tree = TreeBuilder::new().directory(b"/d".to_vec(), meta(0o755));
+        for i in 0..10 {
+            tree = tree.file(format!("/d/n{i}.txt").into_bytes(), b"x", meta(0o644));
+        }
+        image_of(tree)
+    }
+
+    #[test]
+    fn a_lookup_reads_a_directory_only_as_far_as_its_name() {
+        // A lookup streams the directory as ext's does: it gathers nothing, so the cap on
+        // what a walk gathers is not its business, and a directory longer than the cap still
+        // resolves every name in it.
+        let bytes = ten_names();
+        let mut r = Reader::open_with(
+            Cursor::new(bytes.as_slice()),
+            &OpenOptions::new().limits(Limits::new().max_walk_entries(3)),
+        )
+        .expect("open");
+        let dir = r.lookup(b"/d").expect("the directory");
+        assert!(matches!(
+            r.read_dir(&dir),
+            Err(ReadError::WalkTooLarge { limit: 3 })
+        ));
+        for name in [&b"/d/n0.txt"[..], b"/d/n9.txt", b"/D/N9.TXT"] {
+            assert!(
+                r.lookup(name).is_ok(),
+                "{} is past the cap and found",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_past_the_match_does_not_refuse_a_strict_lookup() {
+        // The lookup stops at its name, so an entry set it never reads cannot refuse it. One
+        // it does read on the way still does, as a listing of the directory does.
+        let mut bytes = ten_names();
+        let dir = reader(&bytes)
+            .lookup(b"/d")
+            .expect("look up")
+            .storage
+            .first_cluster()
+            .expect("a directory has an allocation");
+        let set = set_at(&bytes, dir, "n5.txt");
+        bytes[set + 2] ^= 0xff;
+        let mut r = reader(&bytes);
+        let dir = r.lookup(b"/d").expect("the directory");
+        assert!(matches!(
+            r.read_dir(&dir),
+            Err(ReadError::SetChecksumMismatch { .. })
+        ));
+        assert!(r.lookup(b"/d/n2.txt").is_ok(), "before the bad set");
+        assert!(
+            matches!(
+                r.lookup(b"/d/n8.txt"),
+                Err(ReadError::SetChecksumMismatch { .. })
+            ),
+            "past it, the lookup reads it on the way"
+        );
+        // A name matched through the up-case table reads on to the end in case an exact one
+        // follows, so it meets the bad set too.
+        assert!(r.lookup(b"/d/N2.TXT").is_err());
+    }
 
     #[test]
     fn a_tree_written_by_this_crate_reads_back_whole() {

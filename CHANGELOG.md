@@ -7,6 +7,199 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [0.6.0] - 2026-10-04
+
+The ext reader reads what a used filesystem holds. It replays a journal left needing
+recovery, looks a name up through its directory's hash index, and reads a filesystem whose
+descriptors a kernel split into meta-groups as it grew it. Every family reports a filesystem
+left mounted, in one sentence. A default build carries all four families.
+
+A breaking release, and these are the changes a caller can see:
+
+- The default features are `ext`, `fat`, `exfat`, `btrfs`, `zlib`, `lzo` and `zstd`. In a
+  default build `detect` and `open` name FAT, exFAT and btrfs images, and `miniz_oxide` and
+  `ruzstd` join the dependency graph.
+- `Metadata`, `SourceEntry` and `ReadPolicy` are `#[non_exhaustive]`.
+- `fat::ondisk::VolumeInfo` has a `reserved` field.
+- `ext::IdentityError::ChecksumSeedPointless` carries no field.
+- A scan of a filesystem left mounted reports one cosmetic finding where it reported none,
+  and a FAT volume whose table records that state is cosmetic rather than a conformance
+  finding.
+- A FAT or exFAT lookup no longer answers to `Limits::max_walk_entries`.
+
+To migrate: a build that wants ext alone, as the 0.5 default was, names it, with
+`default-features = false, features = ["ext"]`. A `Metadata` is built with `Metadata::new`
+and its builders, and a `SourceEntry` with `SourceEntry::new` and `with_xattrs`. A `match`
+over `ReadPolicy` gains a wildcard arm. A `VolumeInfo` literal names `reserved: 0`, and a
+pattern on `ChecksumSeedPointless` drops its field.
+
+### Added
+
+- **The ext reader replays a journal that needs recovery, in memory.** A filesystem carrying
+  `needs_recovery` is read as a mount presents it, under the strict policy as under the
+  lenient one, and the image is not written. Recovery applies the rules e2fsprogs's recovery
+  applies, and a test holds every block the reader presents to e2fsprogs's own recovery
+  across the six journal tag layouts. `Reader::journal_replay` reports what was applied,
+  `Reader::needs_recovery` whether the filesystem needed it, and `Reader::read_block` returns
+  any block as the reader presents it.
+- **Three `ext::ReadError` variants for a journal that cannot be replayed.**
+  `JournalUnsupported` names what the reader does not replay: a journal on another device,
+  fast commits, asynchronous commits, and the version 1 commit checksum.
+  `JournalMalformed` names a log that does not describe one, and `JournalCopyChecksum` a
+  copy whose checksum fails, which recovery skips. A strict open refuses all three. A lenient
+  one reads what recovery can apply, and a scan reports the rest.
+- **The ext reader looks a name up through its directory's hash index.** A lookup hashes the
+  name with the algorithm the index records and reads the root, any interior node, and the
+  leaf the hash leads to, and the leaves after it while a run of names sharing the hash
+  continues. In a directory of 800 names it reads three of its two hundred blocks. A name
+  whose hash lands at the end of the hash space is found whether its writer moved that
+  hash, as a Linux kernel and this crate do, or left it, as e2fsprogs does. A directory
+  without an index this reader follows is read whole, with the same answer. A gate holds
+  the lookup to a two-level index a Linux kernel built, with a run of names sharing one
+  hash across a split.
+- **`ext::ReadError::IndexMisplacesName`, and a scan that reports it.** A lookup trusts the
+  index as a mount does, so `ext::Reader::scan` holds every name of an indexed directory to
+  the leaf its hash leads to and reports one that sits elsewhere.
+- **A lenient btrfs read takes a mirrored tree block's next copy where its first fails its
+  checks.** `btrfs::Reader::scan` names each block read that way, and which copy served it.
+  A strict read refuses the block, as it refuses a damaged copy of the superblock. This reads
+  the images 0.5.0 and 0.5.1 wrote with one damaged copy of a tree block, and says which.
+- **The ext reader reads a filesystem with `meta_bg`**, under the strict policy as under the
+  lenient one. Its group descriptors are found in each meta-group's own first group, after
+  the superblock copy where that group carries one, and the meta-groups before
+  `s_first_meta_bg` keep the contiguous table. That is the layout `mke2fs` writes from
+  800 GiB at 1 KiB blocks, or wherever it is asked to, and the layout a Linux kernel
+  converts a filesystem to when it grows it online past its reserved descriptor blocks. A
+  gate holds every group's descriptor to what `dumpe2fs` reads over six `mke2fs` layouts
+  and one filesystem a kernel converted. `ext::rewrite_identity` re-identifies one, since
+  its superblock copies sit where they always do. The writer still never produces
+  `meta_bg`. `ferrosys inspect` prints `First meta block group` where `dumpe2fs` does.
+- **`ext::ondisk::SuperBlock::backup_bgs`**, the two groups `sparse_super2` keeps
+  superblock copies in. The reader and `ext::rewrite_identity` find the copies of a
+  filesystem with that feature where its superblock says they are, so a `meta_bg`
+  filesystem with it reads every descriptor, and a re-identification reaches every copy
+  rather than refusing the filesystem.
+- **`SourceEntry::new` and `SourceEntry::with_xattrs`.** A `Source` written outside the
+  crate builds its entries with them: `new` takes the path, the kind and the metadata, and
+  `with_xattrs` sets the extended attributes.
+- **Every family reports a filesystem a driver had mounted and did not unmount cleanly, in the
+  same words.** A scan gives one cosmetic finding, "the filesystem was not cleanly unmounted,
+  so its metadata may not describe its contents", and a strict read and a verdict drawn at the
+  conformance line are unaffected by it. ext reports it as
+  `ext::ReadError::NotCleanlyUnmounted`, whether a driver recorded it as `needs_recovery` on a
+  filesystem with a journal or by clearing the clean bit of the superblock's state on one
+  without, and reports a driver's record that it found errors as
+  `ext::ReadError::ErrorsDetected`. `ext::Reader::state_on_disk` returns the state word as the
+  last driver left it, and `ext::ondisk::STATE_CLEAN` and `STATE_ERRORS` name its two bits.
+  FAT reports it as `fat::ReadError::VolumeDirty`, and a medium failure recorded in table
+  entry 1 as `fat::ReadError::MediaFailure`, with `fat::Reader::volume_dirty` and
+  `media_failure` beside them. exFAT and btrfs already reported it, and say it in the same
+  words.
+- **`fat::ondisk::VolumeInfo::reserved`**, the boot sector byte a Linux driver marks a mounted
+  volume in, with `fat::ondisk::VOLUME_DIRTY` naming the bit it sets.
+  `fat::ondisk::BootSectorTail::volume` and `volume_offset` give the volume information record
+  and its place whichever type the tail is, and `fat::table::status_bits` the two status bits
+  of table entry 1.
+- **`ferrosys inspect` says how every filesystem was left.** FAT gains the `Volume state` line
+  exFAT has, and btrfs a `Filesystem state` line, in the same words, with `volume_dirty`,
+  `media_failure` and `log_root` in the JSON report. ext's `Filesystem state` line adds
+  ` with errors` where a driver recorded errors, as `dumpe2fs` does, and its JSON report gains
+  `errors` beside `clean`.
+- **`ext::incompat_name`** gives the name `dumpe2fs` prints for any `incompat` bit ext4
+  defines, whether or not this crate models it.
+- **`ferrosys inspect` reports journal recovery.** A `Journal recovery:` line, and a
+  `journal_recovery` object in the JSON report, say what was replayed. The features line names
+  every `incompat` bit ext4 defines, `needs_recovery` among them, and counts only the bits it
+  does not define as unknown.
+- **A gate holding every tracked file to naming no other implementation's internals.**
+  `ci/provenance.sh` fails on a routine, a source path, or an internal macro of another
+  implementation of these formats. The structure names the formats' own documentation uses
+  pass, each recorded with the page that names it.
+
+### Changed
+
+- **The btrfs reader holds the tree blocks it returns to.** A volume keeps the 1 MiB of tree
+  blocks it read most recently, verified, so a search passes through the top of a tree it
+  has already read without reading or checksumming it again. Listing a btrfs image of
+  24,000 files asks the source for about 1,900 blocks where it asked for about 78,000, and
+  takes 0.05 s, about what the same tree takes as ext4. What a read returns, and how a read
+  of a damaged image fails, are unchanged.
+- **The directory-name hashes are stated from published and permissively licensed sources.**
+  MD4's functions and constants are RFC 1320's, the TEA round is Wheeler and Needham's,
+  and how each applies to a name follows ext4-view and FreeBSD's ext2fs, as the module
+  documentation records. Every hash is unchanged, and a gate holds all six variants to
+  e2fsprogs's `dx_hash` over generated names under a run of seeds.
+- **`crc32c` folds eight bytes a step.** Every checksum an ext4 or btrfs filesystem carries
+  is computed through it, and the values are unchanged. Listing a btrfs image of 24,000
+  files takes about a quarter of the time it took, formatting one about half, and an image
+  formatted either way is the same bytes.
+- **The ext reader reads a file's adjacent blocks in one request, and holds the table blocks
+  a walk returns to.** Streaming a contiguous file asks the source once per 256 KiB rather
+  than once per block. A walk asks for each group descriptor and inode table block once
+  rather than twice per inode, and a reader holds at most 256 KiB of them. What a read
+  returns, and how a read of a damaged or truncated image fails, are unchanged.
+- **The archive sink reads a member's body up to a mebibyte at a time**, the window the
+  directory sink reads through, rather than in the few kilobytes `tar` copies at once.
+- **`ferrosys extract --to-tar` and `--cat` gather up to a mebibyte of output before
+  writing it.** Over a tree of 24,000 files, a tar stream that took about 470,000 system
+  calls takes about 52,000, with byte-identical output.
+- **The default build carries all four families and the three decoders**: `ext`, `fat`,
+  `exfat`, `btrfs`, `zlib`, `lzo` and `zstd`. A default build reads what a Linux kernel
+  mounts, a btrfs whose files are compressed with Zstandard included. The change itself
+  breaks no code, but in a default build `detect` and `open` name FAT, exFAT and btrfs
+  images they reported as unrecognized, and `miniz_oxide` and `ruzstd` join the dependency
+  graph. A build that wants ext alone, as the 0.5 default was, names it:
+  `default-features = false, features = ["ext"]`. `tar`, `dir` and `serde` stay off by
+  default. The command line carries every family already, so its behaviour is unchanged.
+- **`fat::ondisk::VolumeInfo` has a `reserved` field.** A `VolumeInfo` written as a literal
+  names it, and a formatter writes zero there.
+- **A FAT volume whose table entry 1 has its clean-shutdown or hard-error bit cleared is
+  reported as the state that bit records**, `VolumeDirty` or `MediaFailure` at the cosmetic
+  severity, rather than as `BadReservedEntry` at the conformance severity. `BadReservedEntry`
+  is for the rest of the entry.
+- **The exFAT and btrfs unclean-shutdown findings say "the filesystem" rather than "this
+  volume"**, in the sentence every family uses.
+- **`Metadata`, `SourceEntry` and `ReadPolicy` are `#[non_exhaustive]`.** A field either
+  struct gains, or a policy the enum gains, is then an addition rather than a break. Outside
+  the crate a `Metadata` is built with `Metadata::new` and its builders, a `SourceEntry` with
+  `SourceEntry::new`, and a `match` over a `ReadPolicy` carries a wildcard arm. Both
+  structs' fields stay public, to read and to assign.
+- **A FAT or exFAT lookup reads each directory only as far as the name**, as an ext lookup
+  does. It gathers nothing, so `Limits::max_walk_entries` no longer governs it and a
+  directory longer than the cap still resolves every name, and an entry past the name is
+  not read, so under the strict policy a malformed one there no longer refuses the lookup.
+  A name matched only without regard to case reads on to the directory's end, since an
+  exact match further on is the one returned. The entries are assembled by the same parser
+  a listing and a scan use.
+- **`ext::rewrite_identity` refuses a filesystem needing recovery**, with
+  `IdentityError::NeedsRecovery`. A recovery at the next mount writes any journaled copy of
+  the superblock home over the new identity.
+- **`ext::IdentityError::ChecksumSeedPointless` carries no field, and is raised only for a
+  filesystem without `metadata_csum`.** Asking for the checksum seed on a filesystem that
+  records one already sets nothing new, and the rewrite goes ahead.
+
+### Fixed
+
+- **A FAT volume a Linux kernel had mounted and did not unmount cleanly was reported as
+  clean, or as a stale backup.** The Linux driver records the state in the boot sector's
+  reserved byte and not in the allocation table, so a FAT12 or FAT16 volume pulled out of a
+  Linux machine scanned clean. On FAT32 the driver marks only the primary boot sector, so the
+  scan reported the backup as not a copy of sector 0, at the conformance severity, and
+  `ferrosys inspect --fail-on conformance` failed the volume. Both report the unclean
+  shutdown, and the backup is compared with that bit set aside.
+- **An ext filesystem a driver had not unmounted cleanly scanned clean.** It reports the
+  unclean shutdown, and the errors a driver recorded.
+- **`ferrosys inspect` reported an ext filesystem whose driver had recorded errors as
+  `clean`.** The state line reads the errors bit as `dumpe2fs` does.
+- **A rewrite of an ext filesystem's identity cut short after its primary superblock was
+  written could not be finished.** Run again with `set_checksum_seed`, the rewrite refused
+  the image, because its primary already carried `metadata_csum_seed`. Its backups were
+  left without the seed their checksums need. Every copy whose UUID moves takes the
+  primary's recorded seed, so a second run of the same change reaches the bytes of an
+  uninterrupted one, whichever of the writes reached the image.
+- **`ferrosys identity` reported success before its writes were on the disk.** It
+  synchronizes the image before it reports.
+
 ## [0.5.2] - 2026-10-04
 
 A btrfs writer fix. The public API, the command line's options, and the minimum supported
@@ -2034,6 +2227,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.6.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.6.0
 [0.5.2]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.2
 [0.5.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.1
 [0.5.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.0

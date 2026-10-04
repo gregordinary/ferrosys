@@ -101,14 +101,9 @@ fn describe(
         kind: kind_of(&node),
         size: node.item.size,
         attrs: Attributes::read(
-            Metadata {
-                mode: mode_bits(node.item.mode),
-                uid: node.item.uid,
-                gid: node.item.gid,
-                atime: node.item.atime,
-                ctime: node.item.ctime,
-                mtime: node.item.mtime,
-            },
+            Metadata::new(mode_bits(node.item.mode), node.item.mtime)
+                .owned_by(node.item.uid, node.item.gid)
+                .with_times(node.item.atime, node.item.ctime, node.item.mtime),
             attributes,
         ),
         number: Some(node.inode),

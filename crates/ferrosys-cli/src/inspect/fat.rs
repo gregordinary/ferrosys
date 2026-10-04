@@ -31,18 +31,12 @@ pub fn report(
     args: &InspectArgs,
     dialect: Dialect,
 ) -> Result<Report, Error> {
-    // A block group is ext's unit of self-description and a FAT volume has nothing of the
-    // kind, so the option is refused rather than passed over. A report that quietly omitted
-    // the section would read as a volume with no groups in it, which is a different claim
-    // from the question not applying.
-    if args.groups {
-        return Err(Error::NotForFamily {
-            option: "--groups",
-            family: "fat",
-            reason: "block groups are how an ext filesystem divides itself, and a FAT volume \
-                     has one flat cluster heap",
-        });
-    }
+    super::refuse_groups(
+        args,
+        "fat",
+        "block groups are how an ext filesystem divides itself, and a FAT volume has one flat \
+         cluster heap",
+    )?;
 
     // A scan follows every chain in the volume, compares the allocation tables against each
     // other, and reads every directory, so it is the expensive part and the part that
@@ -62,8 +56,10 @@ pub fn report(
 
     let layout = *reader.layout();
     let boot = *reader.boot_sector();
-    let volume = match boot.tail {
-        BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => volume,
+    let volume = *boot.tail.volume();
+    let state = State {
+        volume_dirty: reader.volume_dirty(),
+        media_failure: reader.media_failure(),
     };
 
     let head = Head {
@@ -76,8 +72,8 @@ pub fn report(
         identifier: render::volume_serial(volume.volume_id),
     };
     let body = match dialect {
-        Dialect::Table => table(&layout, &boot, label.as_ref(), info.as_ref()),
-        Dialect::Json => json(&layout, &boot, label.as_ref(), info.as_ref()),
+        Dialect::Table => table(&layout, &boot, state, label.as_ref(), info.as_ref()),
+        Dialect::Json => json(&layout, &boot, state, label.as_ref(), info.as_ref()),
         Dialect::None => String::new(),
     };
     Ok(Report {
@@ -85,6 +81,15 @@ pub fn report(
         findings,
         body,
     })
+}
+
+/// How the last driver to have the volume put it down, as the reader found it recorded.
+#[derive(Clone, Copy)]
+struct State {
+    /// The volume was mounted and has not been cleanly unmounted since.
+    volume_dirty: bool,
+    /// A driver met a medium failure and recorded it.
+    media_failure: bool,
 }
 
 /// The volume label as a person reads it.
@@ -117,17 +122,20 @@ fn mirroring(ext_flags: u16) -> String {
 fn table(
     layout: &FatLayout,
     boot: &BootSector,
+    state: State,
     label: Result<&Option<Vec<u8>>, &ReadError>,
     info: Result<&Option<FsInfo>, &ReadError>,
 ) -> String {
     let mut rows = render::Rows::report();
     let mut line = |k: &str, v: String| rows.row(k, v);
 
-    let volume = match boot.tail {
-        BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => volume,
-    };
+    let volume = boot.tail.volume();
 
     line("Volume label:", label_text(label));
+    line(
+        "Volume state:",
+        render::volume_state(state.volume_dirty, state.media_failure),
+    );
     line(
         "Volume serial number:",
         render::volume_serial(volume.volume_id),
@@ -224,12 +232,11 @@ fn unrecorded_or(hint: Option<u32>) -> String {
 fn json(
     layout: &FatLayout,
     boot: &BootSector,
+    state: State,
     label: Result<&Option<Vec<u8>>, &ReadError>,
     info: Result<&Option<FsInfo>, &ReadError>,
 ) -> String {
-    let volume = match boot.tail {
-        BootSectorTail::Fat1216 { volume } | BootSectorTail::Fat32 { volume, .. } => volume,
-    };
+    let volume = boot.tail.volume();
 
     let mut out = String::new();
     let mut fat = crate::json::Object::new(&mut out);
@@ -251,6 +258,8 @@ fn json(
         volume.ext_boot_signature == EXTENDED_BOOT_SIGNATURE,
     );
     b.u64("drive_number", u64::from(volume.drive_number));
+    b.bool("volume_dirty", state.volume_dirty);
+    b.bool("media_failure", state.media_failure);
     b.bytes("oem_name", unpadded(&boot.oem_name));
     b.u64("media", u64::from(boot.media));
     b.u64("bytes_per_sector", u64::from(layout.bytes_per_sector));

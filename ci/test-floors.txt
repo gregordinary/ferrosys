@@ -26,6 +26,12 @@ relatime|1550
 # cargo test -p ferrosys --no-default-features --lib  (61 today)
 base-lib|55
 
+# cargo test -p ferrosys --lib  (1157 today)
+default-lib|1120
+
+# cargo test -p ferrosys --no-default-features --features ext --lib  (532 today)
+ext-only|510
+
 # cargo test -p ferrosys --no-default-features --features fat --lib  (290 today)
 fat-only|270
 

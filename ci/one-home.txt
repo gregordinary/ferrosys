@@ -110,6 +110,10 @@ rule|crates/ferrosys/src/escape.rs|all|escape::printable / escape::push_json_str
 # A closed set of variants a caller names states its vocabulary once, in one table.
 rule|crates/ferrosys/src/naming.rs|all|naming::named_choice!|fn from_name
 
+# What an inspect body refuses because its family has no block groups. Three families refuse
+# it and each says how it divides itself instead; the refusal is the envelope's.
+rule|crates/ferrosys-cli/src/inspect.rs|code|inspect::refuse_groups|option: "--groups"
+
 # --- the exceptions -------------------------------------------------------------------
 
 skip|crates/ferrosys/src/source.rs:SeekFrom::Start|a host file's own contents at a caller's offset, not image bytes: FileRange::read opens a named file and reads a range of it, and a short read there is the file having changed rather than a filesystem reference out of range

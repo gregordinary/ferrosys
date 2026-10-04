@@ -1,0 +1,159 @@
+# No tracked file names another implementation's internals.
+#
+# This crate is licensed MIT OR Apache-2.0, and that grant is one it can make only for code
+# that derives from nothing licensed otherwise. The filesystems it reads and writes are
+# implemented, in the kernel and in their reference tools, under the GPL. So a rule here is
+# described in the format's own terms: the structures the format's documentation names, and
+# what a tool or a kernel is observed to do. It is not described by the routine in another
+# implementation that applies it.
+#
+# A name is not a copy, and a file free of them is not thereby clean. But a comment naming a
+# routine reads as code derived from it, whether or not it is, and it points the next reader
+# at that routine's source. That is the part a lexical gate can hold, and this is the gate.
+#
+#   ci/provenance.sh            check
+#   ci/provenance.sh --list     print the rules without running them
+#
+# What it denies, anywhere in a tracked text file:
+#
+#   prefix   a lowercase identifier with one of these prefixes that this tree does not
+#            itself define. `fat_type` is a field here and passes; a routine of another
+#            implementation with the same prefix does not.
+#   name     an identifier another implementation uses for one of its routines, without a
+#            prefix to find it by. Denied even where this tree defines it.
+#   path     a path into another implementation's source tree, or a link to one.
+#   macro    another implementation's internal macro.
+#
+# What accounts for a hit:
+#
+#   format       a name the format's own documentation gives a structure. Those describe the
+#                bytes, and every implementation of the format uses them.
+#   interface    a name in a library's interface that this tree calls, as an oracle.
+#   operational  a file that builds or drives an oracle, and so names the oracle's own files.
+#                Exempt from the path rule only.
+#   known        one spelling in one file, recorded when the gate began. A `known` line only
+#                ever leaves: a spelling that is gone fails the gate until its line goes too,
+#                and a new spelling is never added here.
+#
+# Every entry carries its reason. An entry with no reason is not an entry.
+#
+# format:  prefix|<prefix>|<whose identifiers it starts>
+#          name|<identifier>|<whose routine it is>
+#          path|<whose source it names>|<extended regex, runs to end of line>
+#          macro|<what it is>|<extended regex, runs to end of line>
+#          format|<identifier>|<the document that names it>
+#          interface|<identifier>|<the interface, and what calls it>
+#          operational|<file>|<the oracle it builds or drives>
+#          known|<file>|<spelling>|<why it stands>
+
+# --- what is denied -------------------------------------------------------------------
+
+prefix|ext2_|the ext2 implementation in Linux, and e2fsprogs
+prefix|ext3_|the ext3 implementation in Linux
+prefix|ext4_|the ext4 implementation in Linux
+prefix|ext2fs_|e2fsprogs's libext2fs
+prefix|e2p_|e2fsprogs's libe2p
+prefix|e2fsck_|e2fsprogs's checker
+prefix|jbd_|the journalling layer in Linux
+prefix|jbd2_|the journalling layer in Linux
+prefix|btrfs_|the btrfs implementation in Linux, and btrfs-progs
+prefix|fat_|the FAT implementation in Linux, and dosfstools
+prefix|vfat_|the FAT implementation in Linux
+prefix|msdos_|the FAT implementation in Linux
+prefix|exfat_|the exFAT implementation in Linux, exfatprogs, and relan/exfat
+prefix|lzo1x_|the LZO library, and its port in Linux
+prefix|lzo_|the LZO library, and its port in Linux
+
+name|str2hashbuf|the directory-index hash input packing in Linux and e2fsprogs
+name|dx_hack_hash|the legacy directory-index hash in Linux and e2fsprogs
+name|TEA_transform|the TEA directory-index hash round in Linux
+name|halfMD4Transform|the half-MD4 directory-index hash round in Linux
+name|dx_probe|the directory-index lookup in Linux
+name|do_split|the directory-index leaf split in Linux
+name|make_indexed_dir|the directory-index conversion in Linux
+
+path|the Linux kernel's filesystem sources|\bfs/(ext2|ext3|ext4|jbd2|btrfs|fat|exfat|unicode)/
+path|a link into the Linux kernel's sources|github\.com/torvalds/linux/(blob|tree)/|git\.kernel\.org/[^ ]*/tree/|elixir\.bootlin\.com/
+path|e2fsprogs's library sources|\blib/(ext2fs|e2p|support)/
+path|e2fsprogs's program sources|\b(e2fsck|misc|resize|debugfs)/[A-Za-z0-9_-]+\.[ch]\b
+path|btrfs-progs's sources|\b(kernel-shared|kernel-lib|cmds|check)/[A-Za-z0-9_/-]*\.[ch]\b|\bmkfs/[A-Za-z0-9_-]+\.[ch]\b
+path|relan/exfat's library sources|\blibexfat/
+path|a line of a C source file|\b[A-Za-z0-9_-]+\.[ch]:[0-9]+
+
+macro|an internal macro of the ext4 implementation in Linux|\bEXT4_FITS_IN_INODE\b
+macro|a function-like macro of another implementation|\b(EXT[234]|JBD2|BTRFS|EXFAT|MSDOS|VFAT)_[A-Z0-9_]+\(
+macro|the kernel's byte-order and buffer interface|\b(le|be)(16|32|64)_to_cpu\b|\bcpu_to_(le|be)(16|32|64)\b|\bbuffer_head\b|\bsb_bread\b|\bbrelse\b
+
+# --- the format's own names -----------------------------------------------------------
+#
+# The ext4 pages are under https://docs.kernel.org/filesystems/ext4/, and the btrfs one is
+# the Data Structures page of the btrfs wiki's archive at archive.kernel.org.
+
+format|ext4_dir_entry_2|the ext4 documentation, Directory Entries
+format|ext4_dir_entry_tail|the ext4 documentation, Directory Entries
+format|ext4_extent|the ext4 documentation, The Contents of inode.i_block
+format|ext4_extent_header|the ext4 documentation, The Contents of inode.i_block
+format|ext4_extent_idx|the ext4 documentation, The Contents of inode.i_block
+format|ext4_extent_tail|the ext4 documentation, The Contents of inode.i_block
+format|ext4_group_desc|the ext4 documentation, Block Group Descriptors
+format|ext4_inode|the ext4 documentation, Index Nodes
+format|ext4_xattr_header|the ext4 documentation, Extended Attributes
+format|ext4_xattr_entry|the ext4 documentation, Extended Attributes
+format|ext4_xattr_|the ext4 documentation, Extended Attributes: the family of structure names it gives them, written as a prefix
+format|btrfs_timespec|the btrfs wiki, Data Structures
+
+# --- an oracle's interface ------------------------------------------------------------
+#
+# ci/exfat-populate.c fills an exFAT volume through relan/exfat's libexfat, because the
+# format's own tools write no files. These are the library's interface as that program
+# calls it; the library itself is built from its release tarball and is not read.
+
+interface|exfat_cleanup_node|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_flush_node|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_generic_pwrite|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_lookup|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_mkdir|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_mknod|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_mount|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_node|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_put_node|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_set_label|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_truncate|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_tzset|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_unlink|libexfat's interface, called by ci/exfat-populate.c
+interface|exfat_unmount|libexfat's interface, called by ci/exfat-populate.c
+
+operational|ci/build-exfat-populate.sh|builds libexfat from its release tarball, and names the files the build produces
+
+# --- spellings recorded when the gate began -------------------------------------------
+#
+# Each names a routine or a macro of another implementation, in a comment describing a
+# rule this crate applies. They are recorded rather than reworded, because the wording is
+# a record of where each rule was taken from, and that record is what a review of the code
+# beside it reads. A line leaves when its spelling does.
+
+known|CHANGELOG.md|ext4_acl_from_disk|recorded when the gate began
+known|CHANGELOG.md|ext4_inode_bitmap_csum_set|recorded when the gate began
+known|crates/ferrosys/src/compress/lzo.rs|lzo1x_1_compress|recorded when the gate began
+known|crates/ferrosys/src/csum.rs|ext4_block_bitmap_csum_set|recorded when the gate began
+known|crates/ferrosys/src/csum.rs|ext4_inode_bitmap_csum_set|recorded when the gate began
+known|crates/ferrosys/src/materialize.rs|ext4_block_bitmap_csum_set|recorded when the gate began
+known|crates/ferrosys/src/materialize.rs|ext4_calculate_overhead|recorded when the gate began
+known|crates/ferrosys/src/materialize.rs|ext4_inode_bitmap_csum_set|recorded when the gate began
+known|crates/ferrosys/src/model.rs|ext2fs_needs_large_file_feature|recorded when the gate began
+known|crates/ferrosys/src/model.rs|ext4_xattr_set|recorded when the gate began
+known|crates/ferrosys/src/ondisk/dirent.rs|ext4_rec_len_from_disk|recorded when the gate began
+known|crates/ferrosys/src/ondisk/dirent.rs|ext4_rec_len_to_disk|recorded when the gate began
+known|crates/ferrosys/src/ondisk/inode.rs|ext4_decode_extra_time|recorded when the gate began
+known|crates/ferrosys/src/ondisk/inode.rs|ext4_inode_csum_verify|recorded when the gate began
+known|crates/ferrosys/src/ondisk/inode.rs|EXT4_FITS_IN_INODE|recorded when the gate began
+known|crates/ferrosys/src/ondisk/inode.rs|EXT4_FITS_IN_INODE(|recorded when the gate began
+known|crates/ferrosys/src/ondisk/superblock.rs|ext2_super_block|recorded when the gate began
+known|crates/ferrosys/src/ondisk/xattr.rs|ext2fs_ext_attr_hash_entry|recorded when the gate began
+known|crates/ferrosys/src/ondisk/xattr.rs|ext4_xattr_hash_entry|recorded when the gate began
+known|crates/ferrosys/src/ondisk/xattr.rs|ext4_xattr_rehash|recorded when the gate began
+known|crates/ferrosys/src/path.rs|ext4_check_dir_entry|recorded when the gate began
+known|crates/ferrosys/src/read.rs|ext4_check_dir_entry|recorded when the gate began
+known|crates/ferrosys/src/read.rs|ext4_iget|recorded when the gate began
+known|crates/ferrosys/src/read.rs|ext4_inode_blocks|recorded when the gate began
+known|crates/ferrosys/tests/foreign.rs|ext4_check_dir_entry|recorded when the gate began

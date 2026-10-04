@@ -641,6 +641,24 @@ impl<A: Deviation> ScanReport<A> {
     }
 }
 
+/// What every family says of a filesystem a driver had mounted and did not put down.
+///
+/// One sentence for every family, because it is one fact each format records in a place of
+/// its own: a FAT volume's boot sector or table, an exFAT volume's flags, an ext superblock's
+/// state or its journal's recovery flag, and a btrfs superblock's log tree. It says what the
+/// record means rather than which field held it, so a caller reads the same line whichever
+/// family answered. The record is the format working rather than failing, so every family
+/// reports it at [`Severity::Cosmetic`], and a strict read is unaffected by it.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) const NOT_CLEANLY_UNMOUNTED: &str =
+    "the filesystem was not cleanly unmounted, so its metadata may not describe its contents";
+
+/// What FAT and exFAT say of a volume whose driver recorded a failure of the medium under
+/// it. Both formats keep the record beside the unmount state, and it means the same in each.
+#[cfg(any(feature = "fat", feature = "exfat"))]
+pub(crate) const MEDIUM_FAILURE: &str =
+    "a driver recorded a failure of the medium this filesystem is on";
+
 /// A bounded accumulator of deviations, which is what a scan collects into.
 ///
 /// The bound is the whole reason it exists: how many deviations a filesystem yields is that

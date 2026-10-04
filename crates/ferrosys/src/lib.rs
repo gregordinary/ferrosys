@@ -57,7 +57,7 @@ has matched its way to one has that family's whole surface."
     feature = "ext",
     doc = "\n The [`ext`] module implements the ext2/ext3/ext4 family — the \
 [`format`](ext::format) writer, the [`Reader`](ext::Reader) opened over any `Read + Seek` \
-source, and the byte-exact on-disk structures — and is on by default. Its images are \
+source, and the byte-exact on-disk structures. Its images are \
 byte-reproducible: the UUID, hash seed, and timestamps are inputs, never read from the \
 clock or a random source. It re-exports the root vocabulary above, so a caller formatting \
 an ext image names one namespace rather than two."
@@ -104,23 +104,25 @@ checksums covering the bytes on the volume. The byte-exact on-disk structures ar
 //!
 //! # Features
 //!
-//! A build takes the filesystem families it names. `ext` is on by default; a build that
-//! turns off every family compiles the root substrate and no family code at all, and
-//! [`detect`](fn@detect) then recognizes nothing. Granularity is per *family* rather than
-//! per format — `ext` is ext2, ext3, and ext4 together, and `fat` is FAT12, FAT16, and
-//! FAT32 together, since each set is one lineage sharing its on-disk structures.
+//! A build takes the filesystem families it names. The default build carries all four —
+//! `ext`, `fat`, `exfat` and `btrfs` — and the three decoders, so it reads what a Linux
+//! kernel mounts, a compressed btrfs included. A build that turns off every family compiles
+//! the root substrate and no family code at all, and [`detect`](fn@detect) then recognizes
+//! nothing. Granularity is per *family* rather than per format — `ext` is ext2, ext3, and
+//! ext4 together, and `fat` is FAT12, FAT16, and FAT32 together, since each set is one
+//! lineage sharing its on-disk structures.
 //!
 //! Cargo unifies features across a dependency graph, so selecting a subset is a property of
 //! a leaf application rather than of a library deep in someone's tree: anything else in the
 //! build that pulls this crate with a family turns that family on for everyone in it —
 //! including the answers [`detect`](fn@detect) then gives.
 //!
-//! Nine more features are off by default, so a build that wants none of them depends only
-//! on `thiserror`. Each stands alone and none implies a family — the two ends of a tree are
-//! the root's vocabulary, so a source feeds whichever family is being written and a sink
-//! drains whichever one was opened, and a decoder undoes an encoding whichever family
-//! stored a run of bytes in it:
+//! Each feature stands alone and none implies another — the two ends of a tree are the
+//! root's vocabulary, so a source feeds whichever family is being written and a sink drains
+//! whichever one was opened, and a decoder undoes an encoding whichever family stored a run
+//! of bytes in it. The seven the default build carries:
 //!
+//! - **`ext`** adds the ext2/ext3/ext4 family. It has no dependencies of its own.
 //! - **`fat`** adds the FAT12/FAT16/FAT32 family. It has no dependencies of its own.
 //! - **`exfat`** adds the exFAT family, which shares a name with the one above and none of
 //!   its structures. It has no dependencies of its own.
@@ -129,12 +131,16 @@ checksums covering the bytes on the volume. The byte-exact on-disk structures ar
 //! - **`zlib`**, **`lzo`** and **`zstd`** each add a decoder, so that a file whose extents
 //!   are stored in that encoding reads as the file rather than as a refusal naming the
 //!   algorithm. btrfs is the family here that stores runs that way, and a decoder reaches
-//!   bytes only through a family that stores some — name one beside `btrfs`, as
-//!   `--features btrfs,zstd`; alone it compiles its dependency and decodes nothing, since
-//!   no reachable read stores runs that way. `lzo` takes no dependency, its decoder being
-//!   in this crate; the other two depend on `miniz_oxide` and `ruzstd`. None of them is
-//!   needed to *verify* a filesystem: the checksums it records cover the bytes it stored,
-//!   so a compressed extent is checked without being expanded.
+//!   bytes only through a family that stores some — a build naming its features names one
+//!   beside `btrfs`, as `--features btrfs,zstd`; alone it compiles its dependency and
+//!   decodes nothing, since no reachable read stores runs that way. `lzo` takes no
+//!   dependency, its decoder being in this crate; the other two depend on `miniz_oxide`
+//!   and `ruzstd`. None of them is needed to *verify* a filesystem: the checksums it
+//!   records cover the bytes it stored, so a compressed extent is checked without being
+//!   expanded.
+//!
+//! Three more are off by default, so the default build's dependencies are `thiserror` and
+//! the two decoders':
 //! - **`tar`** adds the tar/PAX archive source and sink: a filesystem built from an
 //!   archive, and one written back out as one. It depends on `tar`.
 //! - **`dir`** adds the host-directory source and sink: a filesystem built by walking a
@@ -181,6 +187,12 @@ mod compress;
 // boundary form is a fixed little-endian record that the family-agnostic substrate parses,
 // so a build carrying no family still reads fields out of a buffer.
 mod bytes;
+
+// The blocks a reader returns to, held so the source is asked for each once. Which blocks
+// are worth holding is the family's; how many are held and which goes first is the same
+// answer for every reader that holds any.
+#[cfg(any(feature = "ext", feature = "btrfs"))]
+mod cache;
 
 // The byte boundary, in both directions. Deciding what a byte is, and finding the structure
 // that holds it, belong to the family; seeking to an offset and moving exactly that many
@@ -334,7 +346,7 @@ mod host;
 #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
 pub use host::{DirectorySink, DirectorySource, ExtractReport, HostError};
 
-// ── The ext family: the `ext` module, behind the default-on `ext` feature ──
+// ── The ext family: the `ext` module, behind the `ext` feature ──
 //
 // The family's modules live at the crate root as private modules — so their cross-module
 // paths stay `crate::` — and are presented to callers only through [`ext`]. The feature
@@ -369,12 +381,14 @@ mod ondisk;
 #[cfg(feature = "ext")]
 mod read;
 #[cfg(feature = "ext")]
+mod replay;
+#[cfg(feature = "ext")]
 mod sealed;
 
 #[cfg(feature = "ext")]
 pub mod ext;
 
-// ── The FAT family: the `fat` module, behind the off-by-default `fat` feature ──
+// ── The FAT family: the `fat` module, behind the `fat` feature ──
 //
 // A family of its own, sharing only the root substrate with ext. Its layers live under the
 // module rather than at the crate root, so nothing about a FAT boot sector is reachable
@@ -382,7 +396,7 @@ pub mod ext;
 #[cfg(feature = "fat")]
 pub mod fat;
 
-// ── The exFAT family: the `exfat` module, behind the off-by-default `exfat` feature ──
+// ── The exFAT family: the `exfat` module, behind the `exfat` feature ──
 //
 // A family of its own, and not a member of the one it shares a name with: the two have a
 // different boot region, a different directory entry format, a different name encoding, and
@@ -392,7 +406,7 @@ pub mod fat;
 #[cfg(feature = "exfat")]
 pub mod exfat;
 
-// ── The btrfs family: the `btrfs` module, behind the off-by-default `btrfs` feature ──
+// ── The btrfs family: the `btrfs` module, behind the `btrfs` feature ──
 //
 // Same arrangement again, over a format built differently from all three above: B-trees over
 // a logical address space that a chunk tree maps onto the device, with a checksum on every

@@ -392,9 +392,14 @@ impl std::fmt::Debug for FileRange {
 /// The `mode` is the permission and set-user/group/sticky bits only; the file-type
 /// bits come from the entry's [`EntryKind`]. Access, change, and modification times
 /// are carried independently, matching what ext4 stores and what an archive can
-/// supply; the creation time is derived from the modification time by the model,
-/// since no archive format records a birth time.
+/// supply. A creation time is not part of the vocabulary: a family whose format records
+/// one records the modification time there.
+///
+/// Built with [`new`](Self::new) and the builders beside it, or by assigning a public
+/// field of a value one of them returned. The type is `#[non_exhaustive]`, so a field it
+/// gains is an addition rather than a break.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct Metadata {
     /// Permission and `setuid`/`setgid`/sticky bits (the low twelve bits of the
     /// mode).
@@ -493,7 +498,12 @@ pub enum EntryKind {
 
 /// One thing to place in the filesystem: where it goes, what it is, its metadata,
 /// and any extended attributes.
+///
+/// Built with [`new`](Self::new), and [`with_xattrs`](Self::with_xattrs) where the entry
+/// carries attributes. The type is `#[non_exhaustive]`, so a field it gains is an addition
+/// rather than a break; its public fields stay readable and assignable.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct SourceEntry {
     /// Path from the filesystem root, e.g. `b"/etc/hostname"`. Leading and repeated
     /// slashes are ignored, as is a `.` component; a `..` component is rejected by the
@@ -507,6 +517,26 @@ pub struct SourceEntry {
     /// Extended attributes attached to this entry, each a fully-qualified name and
     /// its value in the boundary form [`Xattr`] describes. Empty for an entry with none.
     pub xattrs: Vec<Xattr>,
+}
+
+impl SourceEntry {
+    /// An entry placing `kind` at `path` with `meta`, carrying no extended attributes.
+    #[must_use]
+    pub fn new(path: impl Into<Vec<u8>>, kind: EntryKind, meta: Metadata) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            meta,
+            xattrs: Vec::new(),
+        }
+    }
+
+    /// Set the entry's extended attributes, replacing any it carries.
+    #[must_use]
+    pub fn with_xattrs(mut self, xattrs: Vec<Xattr>) -> Self {
+        self.xattrs = xattrs;
+        self
+    }
 }
 
 /// Something that produces the entries to write into a filesystem.
@@ -674,12 +704,7 @@ impl TreeBuilder {
     }
 
     fn push(&mut self, path: impl Into<Vec<u8>>, kind: EntryKind, meta: Metadata) {
-        self.entries.push(SourceEntry {
-            path: path.into(),
-            kind,
-            meta,
-            xattrs: Vec::new(),
-        });
+        self.entries.push(SourceEntry::new(path, kind, meta));
     }
 }
 
@@ -982,6 +1007,26 @@ mod tests {
         assert_eq!(entries[0].path, b"/etc");
         assert!(matches!(entries[1].kind, EntryKind::File(_)));
         assert!(matches!(entries[2].kind, EntryKind::Symlink(_)));
+    }
+
+    #[test]
+    fn an_entry_built_by_its_constructor_is_the_one_the_builder_adds() {
+        let built = SourceEntry::new(b"/etc/hostname".to_vec(), EntryKind::Fifo, meta());
+        assert!(built.xattrs.is_empty());
+        let added = TreeBuilder::new()
+            .fifo(b"/etc/hostname".to_vec(), meta())
+            .into_entries();
+        assert_eq!(added, vec![built.clone()]);
+
+        let attribute = Xattr {
+            name: b"user.a".to_vec(),
+            value: b"1".to_vec(),
+        };
+        let carried = built.with_xattrs(vec![attribute.clone()]);
+        assert_eq!(carried.xattrs, vec![attribute.clone()]);
+        // Setting the list replaces it rather than appending to it.
+        let replaced = carried.with_xattrs(Vec::new());
+        assert!(replaced.xattrs.is_empty());
     }
 
     /// The paths a composition yields, in order, as readable strings.

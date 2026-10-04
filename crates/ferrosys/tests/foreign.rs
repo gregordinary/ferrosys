@@ -460,6 +460,376 @@ fn mke2fs_formatted_images_read_clean() {
     }
 }
 
+/// A filesystem whose group descriptors are split into meta-groups, which this crate reads
+/// and never writes.
+///
+/// With `meta_bg` each run of groups whose descriptors fill one block keeps that block at the
+/// start of its own first group, with copies in its second and last. A reader following the
+/// contiguous table instead reads every group past the first meta-group from blocks that hold
+/// something else entirely. Each case is held three ways: `e2fsck` calls it clean, a strict
+/// open and a scan find nothing, and every group's descriptor names the bitmaps and the inode
+/// table `dumpe2fs` reads for that group. The last is what holds where it matters most, on a
+/// filesystem without checksums, where a descriptor read from the wrong place has no checksum
+/// to fail.
+struct MetaBgCase {
+    what: &'static str,
+    block_size: u32,
+    size: &'static str,
+    /// `-O`, where the case asks for `meta_bg` rather than leaving `mke2fs` to choose it.
+    features: &'static str,
+}
+
+const META_BG_CASES: &[MetaBgCase] = &[
+    MetaBgCase {
+        what: "1 KiB blocks and 64-byte descriptors, sixteen groups to a meta-group: four \
+               whole meta-groups and a fifth whose last group is past the end",
+        block_size: 1024,
+        size: "600M",
+        features: "meta_bg,^resize_inode",
+    },
+    MetaBgCase {
+        what: "32-byte descriptors, so a meta-group is twice as many groups",
+        block_size: 1024,
+        size: "600M",
+        features: "meta_bg,^resize_inode,^64bit",
+    },
+    MetaBgCase {
+        what: "4 KiB blocks, sixty-four groups to a meta-group",
+        block_size: 4096,
+        size: "20G",
+        features: "meta_bg,^resize_inode",
+    },
+    MetaBgCase {
+        what: "no checksums, so only the descriptors' own contents say whether they were read \
+               from the right place",
+        block_size: 2048,
+        size: "3G",
+        features: "meta_bg,^resize_inode,^metadata_csum",
+    },
+    MetaBgCase {
+        what: "sparse_super2, whose two copies are in group 1 and the last group: at this size \
+               the last group opens a meta-group, which sparse_super would never give a copy, so \
+               its descriptor block follows one",
+        block_size: 1024,
+        size: "520M",
+        features: "meta_bg,^resize_inode,sparse_super2",
+    },
+    MetaBgCase {
+        what: "the size where mke2fs turns meta_bg on by itself, because the contiguous table \
+               would no longer fit in a block group",
+        block_size: 1024,
+        size: "800G",
+        features: "^has_journal",
+    },
+];
+
+/// Every group's block bitmap, inode bitmap, and first inode-table block, as `dumpe2fs`
+/// prints them.
+fn dumped_group_metadata(image: &Path) -> Vec<(u64, u64, u64)> {
+    let out = tool("dumpe2fs")
+        .arg(image)
+        .output()
+        .expect("spawn dumpe2fs");
+    assert!(out.status.success(), "dumpe2fs failed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let at = |line: &str, field: &str| -> Option<u64> {
+        let rest = line.trim().strip_prefix(field)?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut groups: Vec<(u64, u64, u64)> = Vec::new();
+    for line in text.lines() {
+        // `Group 7: (Blocks ...`, and not the header's `Group descriptor size:`.
+        if line
+            .strip_prefix("Group ")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            groups.push((0, 0, 0));
+        } else if let Some(last) = groups.last_mut() {
+            if let Some(b) = at(line, "Block bitmap at ") {
+                last.0 = b;
+            } else if let Some(b) = at(line, "Inode bitmap at ") {
+                last.1 = b;
+            } else if let Some(b) = at(line, "Inode table at ") {
+                last.2 = b;
+            }
+        }
+    }
+    groups
+}
+
+/// Hold every group descriptor the reader parses to what `dumpe2fs` reads for that group.
+fn descriptors_agree_with_dumpe2fs(reader: &mut Reader<std::fs::File>, image: &Path, what: &str) {
+    let dumped = dumped_group_metadata(image);
+    assert_eq!(
+        dumped.len(),
+        reader.group_count() as usize,
+        "{what}: dumpe2fs and the reader count different groups"
+    );
+    for (group, want) in dumped.iter().enumerate() {
+        let desc = reader
+            .group_descriptor(group as u32)
+            .unwrap_or_else(|e| panic!("{what}: descriptor {group}: {e}"));
+        assert_eq!(
+            (desc.block_bitmap, desc.inode_bitmap, desc.inode_table),
+            *want,
+            "{what}: group {group}'s descriptor is not the one dumpe2fs reads"
+        );
+    }
+}
+
+#[test]
+fn meta_bg_filesystems_read_clean() {
+    if !available("mke2fs") || !available("e2fsck") || !available("dumpe2fs") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let tree = dir.path().join("tree");
+    build_tree(&tree).expect("build source tree");
+
+    for case in META_BG_CASES {
+        let what = case.what;
+        let image = dir.path().join("meta.img");
+        let _ = std::fs::remove_file(&image);
+        let out = tool("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-O", case.features])
+            .args(["-b", &case.block_size.to_string()])
+            .args(["-U", "f0e17055-0000-4000-8000-000000000000"])
+            .arg("-d")
+            .arg(&tree)
+            .arg(&image)
+            .arg(case.size)
+            .output()
+            .expect("spawn mke2fs");
+        assert!(
+            out.status.success(),
+            "{what}: mke2fs failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        e2fsck_clean(&image)
+            .unwrap_or_else(|e| panic!("{what}: mke2fs built an image e2fsck rejects:\n{e}"));
+
+        let file = std::fs::File::open(&image).expect("open image");
+        let mut reader =
+            Reader::open(file).unwrap_or_else(|e| panic!("{what}: a strict open: {e}"));
+        assert!(
+            reader
+                .feature()
+                .incompat
+                .contains(ferrosys::ext::Incompat::META_BG),
+            "{what}: the image does not carry meta_bg, so the case tests nothing"
+        );
+        let report = reader.scan();
+        assert!(report.is_clean(), "{what}: {:?}", report.anomalies());
+        descriptors_agree_with_dumpe2fs(&mut reader, &image, what);
+        read_back(&mut reader, what);
+    }
+}
+
+/// A filesystem a Linux kernel converted to `meta_bg` as it grew it online, which is the one
+/// way a filesystem in use comes to have the layout.
+///
+/// This crate formatted a 16 MiB ext4 at 4 KiB blocks with no reserved descriptor blocks, and
+/// the ext4 driver of Linux 7.1 grew it to 16 GiB through the pinned `resize2fs`. One
+/// descriptor block covers 64 groups and the filesystem needed two, so the kernel converted
+/// it: groups 0 to 63 keep the contiguous table it had, and groups 64 to 127 are a meta-group
+/// whose block sits in groups 64, 65, and 127. The superblock records that split as
+/// `s_first_meta_bg = 1`, which counts meta-groups rather than groups.
+///
+/// Stored without its zero blocks, as [`util::unsparse`] reads it.
+const KERNEL_META_BG: &[u8] = include_bytes!("fixtures/ext4-kernel-meta-bg.sparse");
+
+#[test]
+fn a_filesystem_a_kernel_converted_to_meta_bg_reads_clean() {
+    // A 16 GiB filesystem, so it is read from a sparse file rather than from memory.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("kernel-meta-bg.img");
+    util::unsparse_to(KERNEL_META_BG, &path);
+    let mut reader =
+        Reader::open(std::fs::File::open(&path).expect("open")).expect("a strict open");
+    assert!(
+        reader
+            .feature()
+            .incompat
+            .contains(ferrosys::ext::Incompat::META_BG)
+    );
+    assert_eq!(reader.superblock().first_meta_bg, 1);
+    assert_eq!(reader.group_count(), 128);
+    let report = reader.scan();
+    assert!(report.is_clean(), "{:?}", report.anomalies());
+    reader.verify_checksums().expect("every checksum verifies");
+    assert!(reader.walk().is_ok());
+
+    // Where the pinned tools are, they read every descriptor where this reader does.
+    if !available("dumpe2fs") || !available("e2fsck") {
+        return;
+    }
+    e2fsck_clean(&path).expect("the kernel's filesystem checks clean");
+    let mut reader = Reader::open(std::fs::File::open(&path).expect("open")).expect("open");
+    descriptors_agree_with_dumpe2fs(&mut reader, &path, "kernel-converted meta_bg");
+}
+
+/// The negative control for the meta-group placement: the descriptor block a meta-group keeps
+/// in its first group is the one read, and the copies in its second and last are not.
+///
+/// A copy is not compared with the block it copies, and on purpose: a kernel updates the
+/// primary as the filesystem changes and leaves the copies as they were, so on a filesystem
+/// that has been used the two differ in every free count and checksum while `e2fsck` calls it
+/// clean. Damage in a copy is therefore not reported, and damage in the block read is.
+#[test]
+fn a_damaged_meta_group_block_is_reported_and_a_damaged_copy_is_not() {
+    if !available("mke2fs") || !available("dumpe2fs") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("meta.img");
+    let out = tool("mke2fs")
+        .args([
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-b",
+            "1024",
+            "-O",
+            "meta_bg,^resize_inode",
+        ])
+        .arg(&image)
+        .arg("600M")
+        .output()
+        .expect("spawn mke2fs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let clean = std::fs::read(&image).expect("read the image");
+
+    // Sixteen 64-byte descriptors to a 1 KiB block, so groups 32 to 47 are meta-group 2. Its
+    // block is the first block of group 32, which carries no superblock copy, and its copies
+    // open groups 33 and 47.
+    let group_start = |g: usize| (1 + g * 8192) * 1024;
+    let scan = |bytes: &[u8]| {
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("a lenient open");
+        let groups: Vec<u32> = r
+            .scan()
+            .anomalies()
+            .iter()
+            .filter_map(|a| a.location.group)
+            .collect();
+        (groups, r.verify_checksums())
+    };
+
+    let mut damaged = clean.clone();
+    damaged[group_start(32) + 3 * 64] ^= 0xff;
+    let (groups, verified) = scan(&damaged);
+    assert!(groups.contains(&35), "the scan names group 35: {groups:?}");
+    assert!(
+        matches!(
+            verified,
+            Err(ferrosys::ext::ReadError::ChecksumMismatch { .. })
+        ),
+        "the strict verifier refuses it: {verified:?}"
+    );
+
+    for copy in [33, 47] {
+        let mut damaged = clean.clone();
+        damaged[group_start(copy) + 3 * 64] ^= 0xff;
+        let (groups, verified) = scan(&damaged);
+        assert!(
+            groups.is_empty(),
+            "a copy in group {copy} was read: {groups:?}"
+        );
+        assert!(verified.is_ok(), "{verified:?}");
+    }
+}
+
+/// A re-identification of a filesystem with `meta_bg`, which no writer here produces.
+///
+/// The rewrite patches every superblock copy and the journal's superblock, and `meta_bg`
+/// moves neither: the superblock copies sit in the groups `sparse_super` names whatever the
+/// descriptors do, as `dumpe2fs` shows. So the image is accepted, and the copies the rewrite
+/// reached are the ones a checker reads.
+#[test]
+fn a_meta_bg_filesystem_takes_a_new_identity() {
+    if !available("mke2fs") || !available("e2fsck") || !available("dumpe2fs") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("meta.img");
+    let out = tool("mke2fs")
+        .args(["-q", "-F", "-t", "ext4", "-b", "1024"])
+        .args(["-O", "meta_bg,^resize_inode,metadata_csum_seed"])
+        .arg(&image)
+        .arg("600M")
+        .output()
+        .expect("spawn mke2fs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut change = ferrosys::ext::IdentityChange::new();
+    change.uuid = Some([0x6d; 16]);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&image)
+        .expect("open for rewriting");
+    let report = ferrosys::ext::rewrite_identity(&mut file, &change).expect("rewrite");
+    drop(file);
+    // Groups 0, 1, 3, 5, 7, 9, 25, 27, and 49 of seventy-five.
+    assert_eq!(report.superblocks, 9, "every copy sparse_super places");
+    e2fsck_clean(&image).expect("a re-identified meta_bg image checks clean");
+    for block in [8193u64, 401_409] {
+        let out = tool("dumpe2fs")
+            .args(["-o", &format!("superblock={block}"), "-o", "blocksize=1024"])
+            .arg("-h")
+            .arg(&image)
+            .output()
+            .expect("spawn dumpe2fs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("6d6d6d6d-6d6d-6d6d-6d6d-6d6d6d6d6d6d"),
+            "the copy at block {block} kept the old UUID:\n{text}"
+        );
+    }
+
+    // Under sparse_super2 the copies are the two groups the superblock names, and a rewrite
+    // that went by sparse_super would look for one in group 3 and find none.
+    let out = tool("mke2fs")
+        .args(["-q", "-F", "-t", "ext4", "-b", "1024"])
+        .args([
+            "-O",
+            "meta_bg,^resize_inode,sparse_super2,metadata_csum_seed",
+        ])
+        .arg(&image)
+        .arg("520M")
+        .output()
+        .expect("spawn mke2fs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&image)
+        .expect("open for rewriting");
+    let report = ferrosys::ext::rewrite_identity(&mut file, &change).expect("rewrite");
+    drop(file);
+    assert_eq!(report.superblocks, 3, "groups 0, 1, and 64");
+    e2fsck_clean(&image).expect("a re-identified sparse_super2 image checks clean");
+}
+
 /// A filesystem that has been *used*, not merely formatted.
 ///
 /// A freshly formatted image leaves untouched every field only a running kernel writes.
@@ -599,6 +969,125 @@ fn a_foreign_two_level_htree_reads_clean() {
         names.contains(&htree_name(HTREE_ENTRIES - 1)),
         "a known name is missing from the foreign index"
     );
+
+    // And a lookup through the index e2fsprogs built finds every one of them, and nothing
+    // that is not there.
+    for name in &names {
+        let mut path = b"/bigdir/".to_vec();
+        path.extend_from_slice(name);
+        reader.lookup(&path).unwrap_or_else(|e| {
+            panic!(
+                "{} is listed and not found through the index: {e}",
+                String::from_utf8_lossy(name)
+            )
+        });
+    }
+    let mut absent = b"/bigdir/".to_vec();
+    absent.extend_from_slice(&htree_name(HTREE_ENTRIES));
+    assert!(
+        reader.lookup(&absent).is_err(),
+        "a name past the last one put in was found"
+    );
+}
+
+/// A two-level directory index a Linux kernel built, one name at a time.
+///
+/// `mke2fs` 1.47.0 formatted an 8 MiB ext4 at 1 KiB blocks with no journal, and the ext4
+/// driver of Linux 7.1 then linked 600 names of 200 bytes and sixteen more into one directory
+/// and removed every fifth of the 600. Four names fill a leaf, so the kernel grew an interior
+/// level. Twelve of the sixteen share one hash, more than a leaf holds, so the kernel split the
+/// run and marked the next leaf's hash continued. The other four hash to the end of the hash
+/// space or the value below it. Every name is a hard link to `/htree/target`, which keeps the
+/// image's live blocks to its directory.
+///
+/// Stored without its zero blocks, as [`util::unsparse`] reads it.
+const KERNEL_HTREE: &[u8] = include_bytes!("fixtures/ext4-kernel-htree.sparse");
+
+/// A source in memory that counts the reads it is asked for.
+struct Counted {
+    inner: std::io::Cursor<Vec<u8>>,
+    reads: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl std::io::Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reads.set(self.reads.get() + 1);
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Seek for Counted {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[test]
+fn a_kernel_built_two_level_index_finds_every_name_through_it() {
+    let image = util::unsparse(KERNEL_HTREE);
+    let mut reader =
+        Reader::open(std::io::Cursor::new(image)).expect("the kernel's filesystem opens strictly");
+    // The scan holds every name to the leaf its hash leads to, so a clean one says the
+    // kernel's index and this crate's hash agree on where every name belongs.
+    let report = reader.scan();
+    assert!(report.is_clean(), "{:?}", report.anomalies());
+
+    let (target, _) = reader.lookup(b"/htree/target").expect("the target");
+    let (_, dir) = reader.lookup(b"/htree/big").expect("the directory");
+    assert!(
+        dir.size / 1024 > 124,
+        "a {}-block directory is not past what one 1 KiB root indexes",
+        dir.size / 1024
+    );
+    let names: Vec<Vec<u8>> = reader
+        .read_dir(&dir)
+        .expect("the listing")
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|name| name != b"." && name != b"..")
+        .collect();
+    assert_eq!(names.len(), 480 + 16, "the names the kernel left");
+    let tagged = |tag: &[u8]| names.iter().filter(|n| n.starts_with(tag)).count();
+    assert_eq!((tagged(b"run-"), tagged(b"eos-")), (12, 4));
+
+    for name in &names {
+        let mut path = b"/htree/big/".to_vec();
+        path.extend_from_slice(name);
+        let (ino, _) = reader.lookup(&path).unwrap_or_else(|e| {
+            panic!(
+                "{} is listed and not found through the index: {e}",
+                String::from_utf8_lossy(name)
+            )
+        });
+        assert_eq!(ino, target, "{}", String::from_utf8_lossy(name));
+    }
+    // Through the index: one more name costs a handful of reads, where the directory is over a
+    // hundred and twenty blocks long and reading it whole would ask for each.
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let mut counted = Reader::open(Counted {
+        inner: std::io::Cursor::new(util::unsparse(KERNEL_HTREE)),
+        reads: std::rc::Rc::clone(&reads),
+    })
+    .expect("the kernel's filesystem opens strictly");
+    let mut path = b"/htree/big/".to_vec();
+    path.extend_from_slice(&names[names.len() / 2]);
+    counted.lookup(b"/htree/big").expect("the directory");
+    let before = reads.get();
+    counted.lookup(&path).expect("the name");
+    let cost = reads.get() - before;
+    assert!(cost < 20, "one lookup asked for {cost} reads");
+
+    // And the names the kernel removed are not found.
+    for i in (0..=600).step_by(5) {
+        let mut name = format!("n{i:04}-").into_bytes();
+        name.resize(200, b'x');
+        let mut path = b"/htree/big/".to_vec();
+        path.extend_from_slice(&name);
+        assert!(
+            reader.lookup(&path).is_err(),
+            "n{i:04} was removed and is found"
+        );
+    }
 }
 
 /// A directory entry that begins in the last twelve bytes of its block.

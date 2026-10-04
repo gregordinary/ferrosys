@@ -33,6 +33,51 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// An image from the sparse form a committed fixture is stored in: a 16-byte magic, the
+/// image's length and its block size, then each block holding a non-zero byte as its index
+/// and its bytes. A fixture a kernel built is mostly zeros, and this keeps it to the blocks
+/// the kernel wrote.
+pub fn unsparse(sparse: &[u8]) -> Vec<u8> {
+    let (len, blocks) = sparse_blocks(sparse);
+    let mut image = vec![0u8; len as usize];
+    for (at, bytes) in blocks {
+        image[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    }
+    image
+}
+
+/// The same image written to `path` as a sparse file: its length set, and only the blocks the
+/// fixture stores written. A fixture of a filesystem grown to gigabytes is a few hundred
+/// kilobytes this way, where expanding it in memory would be the whole filesystem.
+pub fn unsparse_to(sparse: &[u8], path: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+    let (len, blocks) = sparse_blocks(sparse);
+    let mut file = std::fs::File::create(path).expect("create the image");
+    file.set_len(len).expect("size the image");
+    for (at, bytes) in blocks {
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(bytes).expect("write a block");
+    }
+}
+
+/// A sparse fixture's length, and each block it stores as its byte offset and its bytes.
+fn sparse_blocks(sparse: &[u8]) -> (u64, Vec<(u64, &[u8])>) {
+    assert_eq!(&sparse[..16], b"ferrosys-sparse\n", "a sparse fixture");
+    let len = u64::from_le_bytes(sparse[16..24].try_into().expect("eight bytes"));
+    let block = u32::from_le_bytes(sparse[24..28].try_into().expect("four bytes")) as usize;
+    let mut blocks = Vec::new();
+    let mut at = 28;
+    while at < sparse.len() {
+        let index = u32::from_le_bytes(sparse[at..at + 4].try_into().expect("four bytes"));
+        blocks.push((
+            u64::from(index) * block as u64,
+            &sparse[at + 4..at + 4 + block],
+        ));
+        at += 4 + block;
+    }
+    (len, blocks)
+}
+
 /// The `e2fsprogs` release the ext gates are written against: the version CI builds
 /// from source, and the one whose observed behavior pinned every expected value in
 /// these tests. `ci/build-e2fsprogs.sh` builds exactly this version.

@@ -76,7 +76,7 @@ use crate::host::{HostError, io_at};
 use crate::path::{canonical_parts, is_hostile_component};
 use crate::source::Metadata;
 use crate::time::Timestamp;
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError};
 use crate::xattr::Xattr;
 
 /// `/lost+found`, the one path an extraction must not write: every filesystem makes it for
@@ -90,14 +90,6 @@ const LOST_FOUND: &[u8] = b"/lost+found";
 /// place. Nothing else may enter it in between: the mode is narrower than most trees record,
 /// not wider.
 const BUILDING: Mode = Mode::from_bits_retain(0o700);
-
-/// The most bytes of a file that move at a time. Large enough that a big file is not a
-/// syscall per block, small enough that the buffer is not worth thinking about.
-///
-/// It is a ceiling rather than the size: a file shorter than this gets a buffer its own size,
-/// so a root filesystem of many small files does not allocate and zero a mebibyte per entry
-/// to move a few hundred bytes through it.
-const WINDOW: usize = 1 << 20;
 
 /// What an extraction wrote, and what it left out.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -609,7 +601,7 @@ impl Extraction<'_> {
         // The window is a ceiling, not the size: most entries in a root filesystem are a few
         // hundred bytes, and a mebibyte allocated and zeroed for each of them is the cost of
         // the tree rather than of the largest file in it.
-        let window = usize::try_from(size).unwrap_or(usize::MAX).min(WINDOW);
+        let window = usize::try_from(size).unwrap_or(usize::MAX).min(BODY_WINDOW);
         let mut buf = vec![0u8; window];
         let mut offset = 0u64;
         // Bounded by the length the walk reported as well as by what the reads yield, so a

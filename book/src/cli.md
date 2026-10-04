@@ -13,9 +13,9 @@ $ ferrosys detect  [options] IMAGE
 $ ferrosys identity [options] IMAGE
 ```
 
-The library is modular, and a program that wants one filesystem compiles one. This binary
-is the deliberate exception: it carries every family, so `detect` and `inspect` identify an
-image whatever it turns out to hold. `format -t` is where you say which one to write.
+Like the library's default build, this binary carries every family, so `detect` and
+`inspect` identify an image whatever it turns out to hold. A program that wants one family
+turns the library's defaults off. `format -t` is where you say which one to write.
 
 Install it from the workspace:
 
@@ -650,6 +650,8 @@ Filesystem identifier:      f0e17055-0000-4000-8000-000000000000
 Filesystem UUID:            f0e17055-0000-4000-8000-000000000000
 Filesystem magic number:    0xEF53
 Filesystem features:        has_journal ext_attr resize_inode dir_index orphan_file ...
+Filesystem state:           clean
+...
 Inode count:                16384
 Block count:                16384
 ...
@@ -666,6 +668,25 @@ Everything after them is that family's own:
 - An exFAT volume describes itself in its boot region.
 - A btrfs describes itself in its superblock, its chunk map, and its trees.
 
+An ext filesystem left needing recovery is reported as a mount would present it. Its journal
+is replayed in memory first, and a `Journal recovery:` line gives the transactions and blocks
+applied, or says the journal was not replayed. The JSON report carries the same under
+`journal_recovery`. Every command that reads an image reads it that way, except `identity`,
+which refuses one needing recovery.
+
+A filesystem a driver had mounted and did not unmount cleanly is reported the same way in
+every family. A scan gives one cosmetic finding, and its words are the same for all four:
+`the filesystem was not cleanly unmounted, so its metadata may not describe its contents`.
+The record is the format working rather than failing. A strict read of a card pulled out of
+a reader therefore succeeds, and `--fail-on conformance` passes it.
+
+Each body also says how the filesystem was left. FAT and exFAT print a `Volume state` line,
+and btrfs a `Filesystem state` line. All three use the same words: `clean`, `not cleanly
+unmounted`, and a recorded medium failure where a FAT or exFAT driver met one. ext prints
+`Filesystem state` in `dumpe2fs`'s words, `clean` or `not clean`, with ` with errors` where
+a driver recorded errors. A driver records an unclean shutdown of an ext filesystem with a
+journal as `needs_recovery` in its features, and leaves its state `clean`.
+
 So a tool that only wants to know what an image is, and whether it is sound, reads the head
 and stops:
 
@@ -678,6 +699,7 @@ Allocation unit:            512
 Filesystem identifier:      1A2B-3C4D
 
 Volume label:               ESP
+Volume state:               clean
 Volume serial number:       1A2B-3C4D
 Type string:                FAT32
 OEM name:                   ferrosys
@@ -725,10 +747,8 @@ nowhere but in the root directory. The format stores them as ordinary directory 
 Those lines are therefore what a reading of that directory recovered, rather than a field
 read off the boot sector.
 
-`Volume state` is the other thing only this family reports. It is the two flags a mounted
-driver writes, which sit outside the boot checksum precisely so it can. A volume that was
-not cleanly unmounted is reported and is not a fault. A strict read of a card somebody
-pulled out of a reader therefore still succeeds.
+`Volume state` is the two flags a mounted driver writes, which sit outside the boot checksum
+precisely so it can.
 
 A btrfs report is the same envelope again, over the one body in this tool that describes two
 layers, because the format has two. Above is a logical address space with the trees on it.
@@ -745,6 +765,7 @@ Allocation unit:            4096
 Filesystem identifier:      1b4e28ba-2fa1-11d2-883f-0016d3cca427
 
 Label:                      fedora
+Filesystem state:           clean
 Metadata identifier:        1b4e28ba-2fa1-11d2-883f-0016d3cca427
 Generation:                 42
 Bytes used:                 1735983104
@@ -840,12 +861,13 @@ thing whatever the image holds, then a body named for the family:
 $ ferrosys inspect --json rootfs.img
 {"schema":2,"family":"ext","variant":"ext4","size":67108864,"allocation_unit":4096,
  "identifier":"f0e17055-...","offset":0,"findings":{"schema":2,"clean":true,"count":0,
- "truncated":false,"findings":[]},"ext":{"superblock":{...},"features":{...}}}
+ "truncated":false,"findings":[]},"ext":{"superblock":{...},"features":{...},
+ "journal_recovery":{...}}}
 ```
 
-The head is six fields and the findings. The body under `"ext"` carries the superblock, the
-feature names split by word, the unknown feature bits, and with `--groups` every group
-descriptor. The unknown bits are reported whether or not there are any. An image carrying a
+The head is six fields and the findings. The body under `"ext"` carries the superblock,
+with its `clean` and `errors` state. It also carries the feature names split by word, the
+unknown feature bits, the journal recovery, and with `--groups` every group descriptor. The unknown bits are reported whether or not there are any. An image carrying a
 feature the tool does not know can therefore never read as one it understood.
 
 A consumer that reads only the head never learns what a block group is. One that wants
@@ -1040,7 +1062,7 @@ interpret through:
 
 ```console
 $ ferrosys extract odd.img --to-dir unpacked
-ferrosys: reading odd.img leniently: unsupported incompat features: 0x400
+ferrosys: reading odd.img leniently: ext image refused: unsupported incompatible feature bits 0x00000400: the reader cannot be certain it interprets the on-disk format correctly
 ferrosys: what it holds is interpreted best-effort; --strict refuses instead
 ```
 
@@ -1283,6 +1305,11 @@ Nothing is written until every copy has been read and every check has passed, so
 leaves the image exactly as it was. There is no `--atomic`. An image is rewritten in place,
 and a sibling temporary file would mean copying every byte of it to change sixteen.
 
+A run cut short partway through the writing is finished by running the same command again.
+That holds whichever copies reached the disk, which after a power loss is any subset of them.
+The second run leaves the image byte for byte as one uninterrupted run would have. Success
+is reported only once the writes are on the disk.
+
 The journal keeps its own copy of the UUID, and on most images a checksum over it. Linux
 sets `csum_v3` on the log of any `metadata_csum` filesystem the first time it mounts one. An
 image that has ever been used therefore carries a crc32c covering the whole journal
@@ -1293,6 +1320,10 @@ so the log stays one the kernel will load.
 A journal whose stored checksum does not match its contents is refused, as a damaged
 filesystem superblock is. Writing a correct checksum over wrong bytes would replace a fault
 a checker finds with one it does not.
+
+A filesystem needing journal recovery is refused too. Recovery at its next mount would write
+the journal's copy of the superblock back over the new identity. Mount it, or run `e2fsck`,
+first.
 
 At least one of `--uuid`, `--label`, and `--set-checksum-seed` is required. A run that would
 write nothing is a command line that meant to say something.

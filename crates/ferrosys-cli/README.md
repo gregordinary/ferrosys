@@ -68,7 +68,7 @@ anomaly:
 
 | Family | What a scan walks |
 |---|---|
-| ext | Group descriptors, bitmaps, inodes, and extent trees |
+| ext | Group descriptors, bitmaps, inodes, extent trees, directory hash indexes, and the journal |
 | FAT | Both allocation tables and every chain |
 | exFAT | The allocation bitmap, the up-case table, and every entry set |
 | btrfs | The chunk map, every tree, and every metadata block's checksum |
@@ -97,7 +97,8 @@ way it crosses a directory.
 
 `identity` changes what an existing ext filesystem is known by: its UUID, its volume
 label, and the seed its metadata checksums derive from. It writes every superblock copy,
-and the journal's own record of the UUID. It writes nothing until every check has passed.
+and the journal's own record of the UUID. It writes nothing until every check has passed,
+and refuses a filesystem needing journal recovery, which its next mount would undo.
 
 ## Streams and exit codes
 

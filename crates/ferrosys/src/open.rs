@@ -14,8 +14,8 @@
 //!
 //! The module is compiled only where at least one family is, since with none there is
 //! nothing an image could be opened as. The condition is the disjunction of every family
-//! feature, not the default one: reaching a family's reader without naming the family is
-//! exactly what a build carrying one non-default family needs.
+//! feature, not any one of them: reaching a family's reader without naming the family is
+//! exactly what a build carrying a single family needs.
 
 use std::io::{Read, Seek};
 
@@ -260,9 +260,9 @@ mod tests {
 
     #[test]
     fn every_compiled_in_family_is_reachable_without_being_named() {
-        // The seam's whole claim, and the one a build carrying a single non-default family
-        // most needs: `open` reaches that family's reader, the reader says which family it
-        // is, and `FsTree` walks it.
+        // The seam's whole claim, and the one a build carrying a single family most needs:
+        // `open` reaches that family's reader, the reader says which family it is, and
+        // `FsTree` walks it.
         for (family, bytes) in images() {
             let reader = open(Cursor::new(&bytes))
                 .unwrap_or_else(|e| panic!("{}: open: {e}", family.as_str()));

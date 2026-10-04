@@ -185,6 +185,14 @@ pub struct Reader<R> {
 }
 
 impl<R: Read + Seek> Reader<R> {
+    /// This reader with a tree-block cache of `capacity` blocks. See
+    /// [`Volume::with_cache_capacity`].
+    #[cfg(test)]
+    fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.volume = self.volume.with_cache_capacity(capacity);
+        self
+    }
+
     /// Open the filesystem at the start of `src`, strictly, with the default limits.
     ///
     /// # Errors
@@ -678,9 +686,11 @@ impl<R: Read + Seek> Reader<R> {
     /// cannot be read becomes a finding rather than an error. An empty report is a filesystem
     /// nothing here objects to.
     ///
-    /// Two of what it reports are this family's alone: **a live log tree**, which means the
-    /// committed trees are stale with respect to writes this crate never replays, and **item
-    /// types this reader has no opinion about**, which are skipped, counted, and named.
+    /// Three of what it reports are this family's own: **a live log tree**, which means the
+    /// committed trees are stale with respect to writes this reader does not replay, reported
+    /// in the sentence every family uses for a filesystem left mounted; **a tree block read
+    /// through a later copy** because its first failed its checks; and **item types this
+    /// reader has no opinion about**, which are skipped, counted, and named.
     ///
     /// What it does *not* do is verify file data. That is
     /// [`verify_data`](Self::verify_data), per file, because it reads every byte of the volume
@@ -713,9 +723,11 @@ impl<R: Read + Seek> Reader<R> {
                 Severity::Cosmetic,
                 None,
                 Some(self.volume.superblock().log_root),
-                "the filesystem was not cleanly unmounted and holds a log tree; what is read \
-                 here is the last committed transaction, without the writes the log holds"
-                    .to_string(),
+                format!(
+                    "{}; what is read here is the last committed transaction, without the \
+                     writes its log tree holds",
+                    crate::finding::NOT_CLEANLY_UNMOUNTED
+                ),
             );
         }
 
@@ -756,6 +768,19 @@ impl<R: Read + Seek> Reader<R> {
             }
         }
         self.scan_uuid_mapping(&roots, &mut scan);
+        for (&logical, through) in self.volume.read_through() {
+            scan.at(
+                Category::Tree,
+                Severity::Integrity,
+                None,
+                Some(logical),
+                format!(
+                    "the first copy of this tree block failed its checks ({}), and it was read \
+                     through copy {}",
+                    through.fault, through.copy
+                ),
+            );
+        }
         scan.finish()
     }
 
@@ -2686,8 +2711,16 @@ mod tests {
             .collect();
         assert_eq!(logged.len(), 1);
         assert_eq!(logged[0].severity, Severity::Cosmetic);
+        // The sentence every family says of a filesystem left mounted, and then what this
+        // family's record adds to it.
+        assert!(
+            logged[0]
+                .detail
+                .starts_with(crate::finding::NOT_CLEANLY_UNMOUNTED),
+            "{}",
+            logged[0].detail
+        );
         assert!(logged[0].detail.contains("last committed transaction"));
-        assert!(logged[0].detail.contains("not cleanly unmounted"));
         // A scan reports rather than refuses, so the filesystem still reads.
         let node = reader.lookup(b"/hello.txt").expect("the file");
         assert_eq!(reader.read_data(&node).expect("its bytes"), b"hello\n");
@@ -2830,5 +2863,165 @@ mod tests {
         // file — and that is the escape hatch the cap leaves.
         let mut out = Vec::new();
         assert_eq!(reader.read_data_to(&node, &mut out).expect("streaming"), 6);
+    }
+
+    // -- what a read costs ------------------------------------------------------------------
+    //
+    // These pin the shape of the reads a walk issues, not their count on one build: the count
+    // moves with the tree, and the shape is the property.
+
+    use crate::io::Counting;
+
+    /// A filesystem whose trees have levels above their leaves: six thousand files in twenty
+    /// directories, each small enough to be stored in the metadata.
+    fn read_cost_image() -> Vec<u8> {
+        use crate::source::{Metadata, TreeBuilder};
+
+        let time = crate::Timestamp::from_secs(1_700_000_000);
+        let mut tree = TreeBuilder::new();
+        for d in 0..20u32 {
+            tree = tree.directory(format!("/d{d}").into_bytes(), Metadata::new(0o755, time));
+            for f in 0..300u32 {
+                let len = ((d * 61 + f * 389) % 3000) as usize;
+                tree = tree.file(
+                    format!("/d{d}/f{f}").into_bytes(),
+                    vec![(d + f) as u8; len],
+                    Metadata::new(0o644, time),
+                );
+            }
+        }
+        crate::btrfs::format(
+            tree,
+            1 << 30,
+            crate::btrfs::FormatOptions::new([0x11; 16], time),
+        )
+        .expect("a formattable tree")
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_walk_reads_each_tree_block_once() {
+        // A walk looks every entry up again under its inode, and each search passes through
+        // the top of the tree it searches. With those held, every block the walk needs is
+        // fetched once: each read is one block, and no block is asked for twice.
+        let (source, reads) = Counting::new(read_cost_image());
+        let mut reader = Reader::open(source).expect("this crate reads what it wrote");
+        reads.borrow_mut().clear();
+        let entries = reader.walk().expect("a walk");
+        assert!(entries.len() > 6000, "the walk reached {}", entries.len());
+
+        let mut blocks: Vec<u64> = reads
+            .borrow()
+            .iter()
+            .map(|&(at, len)| {
+                assert_eq!(len, 16384, "a read of {len} bytes at {at}");
+                at
+            })
+            .collect();
+        let read = blocks.len();
+        blocks.sort_unstable();
+        blocks.dedup();
+        assert_eq!(blocks.len(), read, "a tree block was read twice");
+    }
+
+    #[test]
+    fn a_search_reads_the_top_of_a_tree_once_rather_than_once_per_search() {
+        // Every lookup descends from the root of the tree it searches, so without the cache
+        // the upper levels are read and checksummed once per lookup. Measured over a walk and
+        // a lookup of every seventh path, with no cache and with the default one. That a
+        // larger cache never misses where a smaller one hits is the cache's own property, and
+        // is held there.
+        let bytes = read_cost_image();
+        let reads_with = |capacity: Option<usize>| {
+            let (source, reads) = Counting::new(bytes.clone());
+            let mut reader = Reader::open(source).expect("this crate reads what it wrote");
+            if let Some(capacity) = capacity {
+                reader = reader.with_cache_capacity(capacity);
+            }
+            reads.borrow_mut().clear();
+            let entries = reader.walk().expect("a walk");
+            for entry in entries.iter().step_by(7) {
+                reader
+                    .lookup(&entry.path)
+                    .expect("every path walked resolves");
+            }
+            reads.borrow().len()
+        };
+        let (none, held) = (reads_with(Some(0)), reads_with(None));
+        assert!(
+            held * 10 < none,
+            "holding tree blocks cut {none} reads only to {held}"
+        );
+    }
+
+    #[test]
+    fn a_tree_block_with_a_damaged_first_copy_is_read_through_the_second_leniently() {
+        use crate::btrfs::Volume;
+        use crate::{OpenOptions, ReadPolicy};
+
+        // The filesystem tree's root, in a block group whose metadata is mirrored by default.
+        let healthy = read_cost_image();
+        let (logical, copies) = {
+            let mut volume = Volume::open(std::io::Cursor::new(&healthy[..])).expect("healthy");
+            let root = volume
+                .tree_roots()
+                .expect("the root tree")
+                .into_iter()
+                .find(|root| root.objectid == objectid::FS_TREE)
+                .expect("a filesystem tree");
+            let chunk = volume.chunk_map().chunk_at(root.bytenr).expect("mapped");
+            let copies: Vec<u64> = chunk
+                .copies
+                .iter()
+                .map(|&copy| copy + (root.bytenr - chunk.logical))
+                .collect();
+            (root.bytenr, copies)
+        };
+        assert_eq!(copies.len(), 2, "the block is mirrored");
+        let damage = |bytes: &mut Vec<u8>, copy: u64| bytes[copy as usize + 200] ^= 0xff;
+        let lenient = OpenOptions::new().policy(ReadPolicy::Lenient);
+        let expected = Reader::open(std::io::Cursor::new(healthy.clone()))
+            .expect("healthy")
+            .walk()
+            .expect("a walk");
+
+        let mut first = healthy.clone();
+        damage(&mut first, copies[0]);
+        // A strict read takes the first copy and refuses the block.
+        let mut strict = Reader::open(std::io::Cursor::new(first.clone())).expect("it opens");
+        assert!(matches!(
+            strict.walk(),
+            Err(ReadError::BadChecksum { at, .. }) if at == logical
+        ));
+        // A lenient one reads it through the second, and the scan names it.
+        let mut reader =
+            Reader::open_with(std::io::Cursor::new(first), &lenient).expect("it opens");
+        assert_eq!(
+            reader.walk().expect("read through the second copy"),
+            expected
+        );
+        let report = reader.scan();
+        let named: Vec<_> = report
+            .anomalies()
+            .iter()
+            .filter(|anomaly| anomaly.logical == Some(logical))
+            .collect();
+        assert_eq!(named.len(), 1, "{:?}", report.anomalies());
+        assert_eq!(named[0].category, Category::Tree);
+        assert!(
+            named[0].detail.contains("read through copy 1"),
+            "{:?}",
+            named[0]
+        );
+
+        // With both copies damaged there is nothing to read it through.
+        let mut both = healthy;
+        damage(&mut both, copies[0]);
+        damage(&mut both, copies[1]);
+        let mut reader = Reader::open_with(std::io::Cursor::new(both), &lenient).expect("it opens");
+        assert!(matches!(
+            reader.walk(),
+            Err(ReadError::BadChecksum { at, .. }) if at == logical
+        ));
     }
 }
