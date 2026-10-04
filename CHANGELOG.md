@@ -7,6 +7,39 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [0.5.1] - 2026-10-03
+
+A dependency release. The public API, the command line's behaviour, and the minimum
+supported Rust version, 1.88, are unchanged. Both crates move to `0.5.1` together.
+
+### Changed
+
+- **Each dependency requirement's floor is a release the crate is built and tested
+  against.** The floors are thiserror 2.0.21, tar 0.4.46, rustix 1.1.5, serde 1.0.229,
+  miniz_oxide 0.9.1, and ruzstd 0.9.0. A project whose own lockfile holds an older
+  release is moved up to one of these when it adds the crate. `ci/minimal-versions.sh`
+  resolves every requirement to its floor and checks the crate there, so each floor stays
+  one the crate compiles against.
+- **The `tar` floor is above every release RUSTSEC-2026-0067 and RUSTSEC-2026-0068
+  cover.** Neither advisory reaches the archive source, which frames the stream itself and
+  applies a PAX `size` record unconditionally. A requirement that admits an affected
+  release is still one an audit of a dependent's graph reports.
+- **The `zlib` feature takes `miniz_oxide` with no features of its own.** The decoder
+  writes into a caller's buffer, which needs no allocator. A build carrying `zlib`
+  compiles neither the encoder nor the allocating helpers that `with-alloc` adds.
+
+### Fixed
+
+- **The `0.5.0` requirements admitted releases the crate does not compile against.**
+  `serde = "1"` reached serde 1.0.0, which predates what the `serde` feature's derives
+  emit. `tar = "0.4"` reached tar 0.4.0, which lacks `EntryType` constants the archive
+  source names. A project whose lockfile already held such a release was given it. The
+  floors above close this.
+- **`exfat::ondisk::write_checksum_sector` panics for a sector that is not a whole number
+  of four-byte words, as its documentation states.** It filled the whole words and left
+  the remainder as it found it. Every sector size the format defines is a multiple of
+  four, so no volume this crate writes reaches the panic.
+
 ## [0.5.0] - 2026-08-18
 
 Two filesystem families, and one crate rearranged to hold four. ferrosys writes and reads
@@ -1976,6 +2009,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.5.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.1
 [0.5.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.0
 [0.4.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.4.0
 [0.3.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.3.1
