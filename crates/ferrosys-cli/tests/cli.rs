@@ -3830,14 +3830,58 @@ const FSID: &str = "5f2ac1de-0000-4000-8000-000000000001";
 /// Both passes, because they are two checkers rather than one loud one: a file whose bytes
 /// have been altered is a clean filesystem to the first and a fault to the second, so an image
 /// that has only met the first has not been asked about its data at all.
+///
+/// And a zero exit is not the whole verdict: where one copy of a mirrored tree block fails its
+/// checksum, the checker says so, reads the other copy, and exits zero. So every line it
+/// prints must be one [`is_clean_check_line`] admits.
 fn btrfs_check_clean(image: &Path) {
     for extra in [&[][..], &["--check-data-csum"][..]] {
-        let mut cmd = tool("btrfs");
-        cmd.args(["check", "--readonly"]).args(extra).arg(image);
-        if let Err(report) = checked(&mut cmd, "btrfs check") {
-            panic!("btrfs check faulted an image this tool wrote\n{report}");
-        }
+        let out = tool("btrfs")
+            .args(["check", "--readonly"])
+            .args(extra)
+            .arg(image)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn btrfs check: {e}"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let unexpected: Vec<&str> = stdout
+            .lines()
+            .chain(stderr.lines())
+            .filter(|line| !is_clean_check_line(line))
+            .collect();
+        assert!(
+            out.status.success() && unexpected.is_empty(),
+            "btrfs check {extra:?} faulted an image this tool wrote: exited {:?}, reported \
+             {unexpected:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status.code()
+        );
     }
+}
+
+/// Whether `line` is one `btrfs check` prints for an image it found nothing to report about:
+/// a stage heading, the opening, the filesystem's identity, or a summary count. The pinned
+/// release's clean output is all of them and nothing else.
+fn is_clean_check_line(line: &str) -> bool {
+    const SUMMARY: &[&str] = &[
+        "Opening filesystem to check...",
+        "Checking filesystem on ",
+        "UUID: ",
+        "total csum bytes: ",
+        "total tree bytes: ",
+        "total fs tree bytes: ",
+        "total extent tree bytes: ",
+        "btree space waste bytes: ",
+        "file data blocks allocated: ",
+        " referenced ",
+    ];
+    let stage = line
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] checking "))
+        .is_some_and(|(step, _)| step.ends_with("/8"));
+    line.is_empty()
+        || stage
+        || SUMMARY.iter().any(|start| line.starts_with(start))
+        || (line.starts_with("found ") && line.ends_with(" bytes used, no error found"))
 }
 
 /// A source tree with one of everything the round trip below asserts on.

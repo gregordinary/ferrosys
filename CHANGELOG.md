@@ -7,6 +7,28 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [Unreleased]
+
+### Fixed
+
+- **A btrfs image could hold a tree block or file data where a superblock copy is
+  written.** The copies sit at fixed device offsets, 64 MiB and, on a volume that large,
+  256 GiB. A block group whose chunk covers one handed out the addresses that map there,
+  and the copy, written last, replaced 4 KiB of what was allocated. Under the default
+  `dup` metadata profile this takes more than about 27 MiB of tree blocks, and it damages
+  one copy of one tree block. The kernel and `btrfs check` read the other copy, and this
+  crate's reader refused the image. Under the `single` metadata profile the bytes replaced
+  were a tree block with no other copy, or 4 KiB of a file, which a verified read of that
+  file reports as a checksum failure. A block group that covers a copy leaves the 64 KiB
+  stripe holding it unallocated and records that stripe as free space, as `mkfs.btrfs`
+  does, and the planner counts the stripe out of the room it plans. `btrfs check
+  --check-data-csum` reports the damage in an image 0.5.0 or 0.5.1 wrote, and formatting
+  the tree again writes the image without it.
+- **The btrfs gates read every line `btrfs check` prints, as well as its exit status.**
+  The checker reports a damaged copy of a mirrored tree block, reads the other copy, and
+  exits zero, which is how the image above passed them. A gate accepts the checker's
+  verdict only when each line is one a clean check prints.
+
 ## [0.5.1] - 2026-10-03
 
 A dependency release. The public API, the command line's behaviour, and the minimum

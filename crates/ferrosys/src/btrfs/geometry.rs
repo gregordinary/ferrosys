@@ -53,8 +53,8 @@ use super::MappedChunk;
 use super::btree::levels_above;
 use super::ondisk::{
     BlockGroupFlags, ChecksumType, Chunk, CompatRoFlags, DevItem, DirItem, Header, IncompatFlags,
-    InodeItem, InodeRef, Item, KeyPtr, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, MIRRORS, RootItem, Stripe,
-    holds_mirror,
+    InodeItem, InodeRef, Item, KeyPtr, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, MIRRORS, RootItem,
+    SUPER_INFO_SIZE, Stripe, holds_mirror,
 };
 
 #[cfg(feature = "serde")]
@@ -674,23 +674,36 @@ pub fn plan_layout(request: &PlanRequest) -> Result<BtrfsLayout, GeometryError> 
         });
     }
 
-    let metadata_blocks = reserve_metadata(request, sector_size, node_size, compat_ro);
-    let pending = pending_chunks(
+    let superblock_mirrors = held_mirrors(request.volume_bytes);
+    let metadata_blocks = reserve_metadata(
         request,
-        metadata_blocks.saturating_mul(u64::from(node_size)),
-    )?;
+        sector_size,
+        node_size,
+        compat_ro,
+        superblock_mirrors.len() as u64,
+    );
+    let metadata_bytes = metadata_blocks.saturating_mul(u64::from(node_size));
+
+    // A block group loses a window to every superblock copy one of its chunks lies over, and
+    // which chunk lies over one is known only once the chunks are placed. So the chunks are
+    // counted, placed, and counted again with what that placement lost, until a placement
+    // loses no more than it was counted with. What is counted as lost only grows from round to
+    // round, and no placement loses more than two windows a copy, so the rounds end.
+    let mut lost = Lost::NONE;
+    let chunks = loop {
+        let pending = pending_chunks(request, metadata_bytes, lost)?;
+        let chunks = place_pending(&pending, request.volume_bytes);
+        let placed = Lost::of(&chunks, &superblock_mirrors);
+        if placed.within(lost) {
+            break chunks;
+        }
+        lost = lost.max(placed);
+    };
     let reservation = Reservation {
         metadata_blocks,
-        system_blocks: reserve_system(&pending, node_size)?,
+        system_blocks: reserve_system(&chunks, &superblock_mirrors, node_size)?,
         node_size,
     };
-    let chunks = place_pending(pending, request.volume_bytes);
-
-    let superblock_mirrors = MIRRORS
-        .iter()
-        .copied()
-        .filter(|&at| holds_mirror(request.volume_bytes, at))
-        .collect();
 
     Ok(BtrfsLayout {
         volume_bytes: request.volume_bytes,
@@ -899,13 +912,13 @@ struct Pending {
 /// Every chunk to be laid down, in the order the format's own tooling arrives at, before any
 /// has an address.
 ///
-/// This list is what the system reservation is derived from as well as what placement consumes:
-/// the metadata bound decides how many extra chunks the content appends here, and the chunks
-/// appended here decide how large the chunk tree recording them must be. Computing the list
-/// once, ahead of placement, is what lets both read the same count.
+/// The metadata bound and the content's data decide how many extra chunks are appended here,
+/// and `lost` is what each kind of block group gives up to superblock copies on top of that:
+/// space inside a chunk that holds no block is space the content cannot be counted against.
 fn pending_chunks(
     request: &PlanRequest,
     metadata_bytes: u64,
+    lost: Lost,
 ) -> Result<Vec<Pending>, GeometryError> {
     let volume = request.volume_bytes;
     let metadata = request.metadata_profile;
@@ -979,9 +992,17 @@ fn pending_chunks(
             .sum()
     };
     let metadata_each = chunk_length(meta, metadata, volume);
-    let extra_metadata = shortfall(metadata_bytes, held(meta), metadata_each);
+    let extra_metadata = shortfall(
+        metadata_bytes.saturating_add(lost.metadata),
+        held(meta),
+        metadata_each,
+    );
     let data_each = chunk_length(dat, data, volume);
-    let extra_data = shortfall(request.content.data_bytes, held(dat), data_each);
+    let extra_data = shortfall(
+        request.content.data_bytes.saturating_add(lost.data),
+        held(dat),
+        data_each,
+    );
 
     let placed: u64 = pending
         .iter()
@@ -1020,7 +1041,7 @@ fn pending_chunks(
 }
 
 /// Lay every pending chunk out, advancing the logical and device cursors together.
-fn place_pending(pending: Vec<Pending>, volume: u64) -> Vec<MappedChunk> {
+fn place_pending(pending: &[Pending], volume: u64) -> Vec<MappedChunk> {
     let mut chunks = Vec::with_capacity(pending.len());
     let mut logical = RESERVED_HEAD;
     let mut physical = RESERVED_HEAD;
@@ -1051,6 +1072,99 @@ const fn shortfall(needed: u64, held: u64, each: u64) -> u64 {
     match needed.checked_sub(held) {
         Some(0) | None => 0,
         Some(short) => short.div_ceil(each),
+    }
+}
+
+/// How much of a block group is left unallocated where a copy of its chunk lies over a
+/// superblock copy: one stripe length.
+pub(crate) const MIRROR_WINDOW: u64 = STRIPE_LEN;
+
+/// Every superblock copy a device this long holds, in ascending order.
+fn held_mirrors(volume_bytes: u64) -> Vec<u64> {
+    MIRRORS
+        .iter()
+        .copied()
+        .filter(|&at| holds_mirror(volume_bytes, at))
+        .collect()
+}
+
+/// Where in `chunk` no block may be allocated: the logical address each window begins at,
+/// ascending, each [`STRIPE_LEN`] long.
+///
+/// A superblock copy sits at a fixed offset on the device whatever chunk covers it, so a chunk
+/// whose copy lies over one cannot hand out the logical addresses that map there: the superblock
+/// is written over whatever block holds them. A mirrored chunk has a window wherever **either**
+/// of its copies lies over a superblock copy, since every block is written to both.
+///
+/// The window is the stripe the superblock copy falls in, measured from the start of the
+/// chunk's copy. That is what the pinned baseline leaves unallocated, in metadata and data block
+/// groups alike, and it records the window as free space. It is observed rather than
+/// documented: the format's documentation places the superblock copies on the device and says
+/// nothing of a chunk that covers one. A chunk is a whole number of stripes long, so a window
+/// never runs past the chunk's end.
+pub(crate) fn mirror_windows(chunk: &MappedChunk, mirrors: &[u64]) -> Vec<u64> {
+    let mut windows = Vec::new();
+    for &copy in &chunk.copies {
+        let copy_end = copy + chunk.length;
+        for &at in mirrors {
+            let end = at + SUPER_INFO_SIZE as u64;
+            if end <= copy || at >= copy_end {
+                continue;
+            }
+            let first = (at.max(copy) - copy) / MIRROR_WINDOW;
+            let last = (end.min(copy_end) - 1 - copy) / MIRROR_WINDOW;
+            windows.extend((first..=last).map(|stripe| chunk.logical + stripe * MIRROR_WINDOW));
+        }
+    }
+    windows.sort_unstable();
+    windows.dedup();
+    windows
+}
+
+/// Bytes of `chunk` its mirror windows take.
+fn window_bytes(chunk: &MappedChunk, mirrors: &[u64]) -> u64 {
+    mirror_windows(chunk, mirrors).len() as u64 * MIRROR_WINDOW
+}
+
+/// Bytes each kind of block group gives up to superblock copies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Lost {
+    metadata: u64,
+    data: u64,
+}
+
+impl Lost {
+    const NONE: Self = Self {
+        metadata: 0,
+        data: 0,
+    };
+
+    /// What these chunks give up to these superblock copies.
+    fn of(chunks: &[MappedChunk], mirrors: &[u64]) -> Self {
+        let lost = |kind: BlockGroupFlags| -> u64 {
+            chunks
+                .iter()
+                .filter(|chunk| chunk.flags.contains(kind))
+                .map(|chunk| window_bytes(chunk, mirrors))
+                .sum()
+        };
+        Self {
+            metadata: lost(BlockGroupFlags::METADATA),
+            data: lost(BlockGroupFlags::DATA),
+        }
+    }
+
+    /// Whether this loses no more of either kind than `counted` allowed for.
+    const fn within(self, counted: Self) -> bool {
+        self.metadata <= counted.metadata && self.data <= counted.data
+    }
+
+    /// The larger loss of each kind.
+    fn max(self, other: Self) -> Self {
+        Self {
+            metadata: self.metadata.max(other.metadata),
+            data: self.data.max(other.data),
+        }
     }
 }
 
@@ -1088,15 +1202,21 @@ fn blocks_for(records: u64, record_bytes: u64, node_size: u32) -> u64 {
 /// bound that wrapped would be *small*, which is the one way a reservation can be wrong that
 /// nothing downstream would notice until a writer had run out of room. What follows a saturated
 /// bound is a volume that cannot hold it, which is a typed refusal.
+///
+/// `mirrors` is how many superblock copies the device holds. A data extent that reaches the
+/// window a block group leaves around one is split there, so each copy can add one extent to
+/// the content's own count, wherever the chunks turn out to be placed.
 fn reserve_metadata(
     request: &PlanRequest,
     sector_size: u32,
     node_size: u32,
     compat_ro: CompatRoFlags,
+    mirrors: u64,
 ) -> u64 {
     let content = &request.content;
     let name_bytes = u64::from(content.longest_name);
     let subvolumes = content.subvolumes.saturating_add(1);
+    let data_extents = content.data_extents.saturating_add(mirrors);
 
     // The root tree: a record naming every tree, plus the directory that names the subvolumes.
     // Six trees are always there — the extent, device, filesystem, checksum, uuid, and data
@@ -1133,7 +1253,7 @@ fn reserve_metadata(
         .saturating_add(content.files.saturating_mul(2))
         .saturating_add(content.names.saturating_mul(3))
         .saturating_add(content.xattrs)
-        .saturating_add(content.data_extents);
+        .saturating_add(data_extents);
     let fs_trees = blocks_for(
         fs_records,
         (InodeItem::SIZE as u64)
@@ -1173,7 +1293,7 @@ fn reserve_metadata(
     let capacity = u64::from(node_size) - Header::SIZE as u64;
     let per_leaf = (capacity / (Item::SIZE as u64 + EXTENT_RECORD_BYTES)).max(2);
     let outside_records = outside_extent_tree
-        .saturating_add(content.data_extents)
+        .saturating_add(data_extents)
         .saturating_mul(2);
     let extent_tree = blocks_for(
         outside_records.saturating_add(outside_records.div_ceil(per_leaf - 1)),
@@ -1195,29 +1315,36 @@ fn reserve_metadata(
 /// appends grow that count with the content. A bound fixed here would be the one kind of bound
 /// that fails exactly when the content is large — after every block of it has been written.
 ///
-/// The bound is also checked against the system chunk's own capacity while the map is still
-/// arithmetic. That chunk is planned before the content's chunks exist, its length fixed by the
-/// volume and the metadata profile, so a chunk map that outgrows it is refused as
-/// [`GeometryError::ChunkMapTooLarge`] here rather than surfacing from the writer as an
-/// exceeded reservation.
-fn reserve_system(pending: &[Pending], node_size: u32) -> Result<u64, GeometryError> {
-    let kept = || pending.iter().filter(|entry| entry.keep);
-    // One record per kept chunk and one for the device, each charged at the widest record the
-    // chunk tree will hold: a chunk record is a fixed head plus one stripe per copy.
-    let chunks = kept().count() as u64;
-    let record_bytes = kept()
-        .map(|entry| Chunk::SIZE as u64 + entry.profile.copies() * Stripe::SIZE as u64)
+/// The bound is also checked against the system chunk's own capacity, less any window a
+/// superblock copy takes from it, while the map is still arithmetic. That chunk's length is
+/// fixed by the volume and the metadata profile rather than by the content, so a chunk map that
+/// outgrows it is refused as [`GeometryError::ChunkMapTooLarge`] here rather than surfacing from
+/// the writer as an exceeded reservation.
+fn reserve_system(
+    chunks: &[MappedChunk],
+    mirrors: &[u64],
+    node_size: u32,
+) -> Result<u64, GeometryError> {
+    // One record per chunk and one for the device, each charged at the widest record the chunk
+    // tree will hold: a chunk record is a fixed head plus one stripe per copy.
+    let count = chunks.len() as u64;
+    let record_bytes = chunks
+        .iter()
+        .map(|chunk| Chunk::SIZE as u64 + chunk.copies.len() as u64 * Stripe::SIZE as u64)
         .max()
         .unwrap_or(Chunk::SIZE as u64)
         .max(DevItem::SIZE as u64);
-    let needed_blocks = blocks_for(chunks.saturating_add(1), record_bytes, node_size);
+    let needed_blocks = blocks_for(count.saturating_add(1), record_bytes, node_size);
 
-    let available_blocks = kept()
-        .find(|entry| entry.kind.contains(BlockGroupFlags::SYSTEM))
-        .map_or(0, |entry| entry.length / u64::from(node_size));
+    let available_blocks = chunks
+        .iter()
+        .find(|chunk| chunk.flags.contains(BlockGroupFlags::SYSTEM))
+        .map_or(0, |chunk| {
+            (chunk.length - window_bytes(chunk, mirrors)) / u64::from(node_size)
+        });
     if needed_blocks > available_blocks {
         return Err(GeometryError::ChunkMapTooLarge {
-            chunks,
+            chunks: count,
             needed_blocks,
             available_blocks,
         });
@@ -1623,9 +1750,11 @@ mod tests {
                 let Ok(layout) = plan_layout(&PlanRequest::new(volume).content(content)) else {
                     continue;
                 };
+                // What the chunks can hold, which is their length less any window a superblock
+                // copy takes from one of them.
                 let planned: u64 = layout
                     .chunks_of(BlockGroupFlags::METADATA)
-                    .map(|chunk| chunk.length)
+                    .map(|chunk| chunk.length - window_bytes(chunk, &layout.superblock_mirrors))
                     .sum();
                 assert!(
                     planned >= layout.reservation.metadata_bytes(),
@@ -1633,6 +1762,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_window_is_the_stripe_a_superblock_copy_falls_in_through_either_copy_of_a_chunk() {
+        let chunk = |logical: u64, length: u64, copies: &[u64]| MappedChunk {
+            logical,
+            length,
+            flags: BlockGroupFlags::METADATA | BlockGroupFlags::DUP,
+            copies: copies.to_vec(),
+        };
+        // The first mirrored metadata chunk of a default one-gibibyte volume: its first copy
+        // begins at thirty-seven mebibytes, so the copy at sixty-four is twenty-seven in.
+        let first = chunk(30_408_704, 53_673_984, &[38_797_312, 92_471_296]);
+        assert_eq!(
+            mirror_windows(&first, &MIRRORS),
+            [30_408_704 + (64 * MIB - 38_797_312)]
+        );
+        // The same chunk with its copies the other way round: the window is where the copy that
+        // covers the superblock copy maps it, whichever copy that is.
+        let second = chunk(30_408_704, 53_673_984, &[92_471_296, 38_797_312]);
+        assert_eq!(
+            mirror_windows(&second, &MIRRORS),
+            mirror_windows(&first, &MIRRORS)
+        );
+        // A superblock copy the device does not hold takes nothing.
+        assert!(mirror_windows(&first, &MIRRORS[..1]).is_empty());
+        // A copy that begins exactly at the superblock copy has its window at its start, and one
+        // that ends exactly there has none.
+        let at = chunk(5 * MIB, 8 * MIB, &[64 * MIB]);
+        assert_eq!(mirror_windows(&at, &MIRRORS), [5 * MIB]);
+        let before = chunk(5 * MIB, 8 * MIB, &[56 * MIB]);
+        assert!(mirror_windows(&before, &MIRRORS).is_empty());
+        // A copy that does not begin on a stripe boundary still windows the stripe of the copy
+        // that holds the superblock copy, measured from the copy's own start.
+        let ragged = chunk(5 * MIB, 8 * MIB, &[64 * MIB - 4096]);
+        assert_eq!(mirror_windows(&ragged, &MIRRORS), [5 * MIB]);
+    }
+
+    #[test]
+    fn data_block_groups_hold_their_content_once_the_windows_are_taken_out() {
+        // With nothing replicated, the data chunks a populated filesystem appends run straight
+        // through the device past sixty-four mebibytes, so one of them holds that superblock copy
+        // whenever the content reaches it. Content that fills the chunks to within a window of
+        // their length is the case a planner counting lengths alone would leave a window short.
+        let mut covered = 0;
+        for data in (40 * MIB..120 * MIB).step_by((STRIPE_LEN / 4) as usize) {
+            let request = PlanRequest::new(GIB)
+                .metadata_profile(Profile::Single)
+                .content(Content {
+                    files: 1,
+                    names: 1,
+                    longest_name: 8,
+                    data_bytes: data,
+                    data_extents: data.div_ceil(MIB) * 2,
+                    ..Content::EMPTY
+                });
+            let layout = plan_layout(&request).expect("the content fits the volume");
+            let usable: u64 = layout
+                .chunks_of(BlockGroupFlags::DATA)
+                .map(|chunk| chunk.length - window_bytes(chunk, &layout.superblock_mirrors))
+                .sum();
+            assert!(
+                usable >= data,
+                "{data} bytes of content planned into {usable} bytes of data block groups"
+            );
+            covered += layout
+                .chunks_of(BlockGroupFlags::DATA)
+                .filter(|chunk| !mirror_windows(chunk, &layout.superblock_mirrors).is_empty())
+                .count();
+        }
+        assert!(covered > 0, "no data chunk ever held a superblock copy");
     }
 
     #[test]

@@ -394,6 +394,11 @@ pub fn fsck_exfat_clean(path: &Path) -> Result<String, String> {
 /// contract. It repairs nothing unless asked to with `--repair`, so the exit status is a
 /// verdict rather than a report of what was fixed and the image is never modified.
 ///
+/// **The exit status is not the whole verdict.** Where a mirrored block group holds a copy of a
+/// tree block that fails its checksum, the checker says so on a line of its own, reads the other
+/// copy, and exits zero with "no error found". So a clean check here is a zero exit *and* output
+/// made of nothing but the lines [`is_clean_check_line`] admits.
+///
 /// `extra` is what the caller adds ahead of the image — `--check-data-csum` reads every
 /// data extent back and verifies it against the checksum tree, which is a second question
 /// about the same image and the one gate no other family here has an analogue for.
@@ -408,19 +413,53 @@ pub fn btrfs_check_clean(path: &Path, extra: &[&str]) -> Result<String, String> 
         .arg(path)
         .output()
         .map_err(|e| format!("spawn btrfs check: {e}"))?;
-    let said = format!(
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+    if !out.status.success() {
+        return Err(format!(
+            "btrfs check exited {:?}\n{said}",
+            out.status.code()
+        ));
+    }
+    let unexpected: Vec<&str> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter(|line| !is_clean_check_line(line))
+        .collect();
+    if unexpected.is_empty() {
         Ok(said)
     } else {
         Err(format!(
-            "btrfs check exited {:?}\n{said}",
-            out.status.code()
+            "btrfs check exited 0 and reported {unexpected:?}\n{said}"
         ))
     }
+}
+
+/// Whether `line` is one `btrfs check` prints for an image it found nothing to report about:
+/// a stage heading, the opening, the filesystem's identity, or a summary count. The pinned
+/// release's clean output is all of them and nothing else.
+pub fn is_clean_check_line(line: &str) -> bool {
+    const SUMMARY: &[&str] = &[
+        "Opening filesystem to check...",
+        "Checking filesystem on ",
+        "UUID: ",
+        "total csum bytes: ",
+        "total tree bytes: ",
+        "total fs tree bytes: ",
+        "total extent tree bytes: ",
+        "btree space waste bytes: ",
+        "file data blocks allocated: ",
+        " referenced ",
+    ];
+    let stage = line
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] checking "))
+        .is_some_and(|(step, _)| step.ends_with("/8"));
+    line.is_empty()
+        || stage
+        || SUMMARY.iter().any(|start| line.starts_with(start))
+        || (line.starts_with("found ") && line.ends_with(" bytes used, no error found"))
 }
 
 /// Run `exfat-populate` over `image`, driving it with `script`.

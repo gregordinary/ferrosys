@@ -1628,6 +1628,55 @@ fn a_tree_block_whose_checksum_no_longer_covers_it_is_rejected() {
     );
 }
 
+/// A tree block with one damaged copy of two is a clean exit and is still rejected here.
+///
+/// The checker finds the damaged copy, says so, reads the other, and exits zero with "no error
+/// found" — so a gate that read only the exit status would accept a writer that put a tree block
+/// where something else is later written over one of its copies. What the gate reads instead is
+/// every line the checker printed, and this is the control that makes that a gate: the exit
+/// status is asserted clean here, and the verdict is asserted to be a refusal anyway.
+#[test]
+#[cfg(feature = "btrfs")]
+fn a_tree_block_with_one_damaged_copy_exits_clean_and_is_rejected_anyway() {
+    if !suite_ready() {
+        return;
+    }
+    let lab = Lab::new();
+    let healthy = lab.formatted("copy-healthy.img", ORDINARY, &["-s", "4096"]);
+    btrfs_check_clean(&healthy, &[]).expect("the image is healthy before the damage");
+
+    let damaged = copy_of(&lab, &healthy, "copy-damaged.img");
+    let leaf = fs_tree_leaf(&damaged);
+    let chunk = observed_chunks(&damaged)
+        .into_iter()
+        .find(|chunk| chunk.logical <= leaf && leaf < chunk.logical + chunk.length)
+        .expect("a chunk holds the leaf");
+    assert_eq!(
+        chunk.copies.len(),
+        2,
+        "the leaf is in a mirrored block group"
+    );
+    // Past the checksum and the header, inside the first copy only.
+    flip_byte(&damaged, chunk.copies[0] + (leaf - chunk.logical) + 200);
+
+    let out = tool("btrfs")
+        .arg("check")
+        .arg(&damaged)
+        .output()
+        .expect("run btrfs check");
+    assert!(
+        out.status.success(),
+        "the checker reads the second copy and exits clean:\n{}",
+        said(&out)
+    );
+    let refusal = btrfs_check_clean(&damaged, &[])
+        .expect_err("the gate must refuse what the checker reported and then recovered from");
+    assert!(
+        refusal.contains("checksum verify failed"),
+        "and refuse it for the damaged copy rather than for something else:\n{refusal}"
+    );
+}
+
 /// A leaf whose item offsets no longer describe its items is rejected.
 ///
 /// The defect class this family has and the earlier ones do not: a leaf grows an item
@@ -5151,6 +5200,207 @@ mod populated {
             &mut out,
         );
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // A block group a superblock copy falls inside
+
+    /// The superblock copy that falls inside a block group at the volume size these gates use:
+    /// the second. The first is inside the reserved head, and the third is past the end.
+    const COVERED_MIRROR: u64 = MIRRORS[1];
+
+    /// The span both writers leave unallocated around it: one stripe.
+    const WINDOW: u64 = 64 << 10;
+
+    /// Files in the metadata-heavy tree. Enough, at [`STORED_INLINE`] bytes each, that the first
+    /// mirrored metadata chunk fills past the twenty-seven mebibytes at which its first copy
+    /// reaches the superblock copy.
+    const WINDOW_FILES: usize = 10_000;
+
+    /// A file small enough to be stored inside the metadata and large enough to cost a fifth of
+    /// a leaf, so the tree is mostly tree blocks rather than names.
+    const STORED_INLINE: usize = 3000;
+
+    /// A tree that is almost all tree blocks: [`WINDOW_FILES`] files stored inside the metadata,
+    /// spread over a hundred directories.
+    fn metadata_heavy_tree(lab: &Lab) -> PathBuf {
+        let root = lab.path().join("metadata-heavy");
+        for index in 0..WINDOW_FILES {
+            let dir = root.join(format!("d{:03}", index % 100));
+            if index < 100 {
+                fs::create_dir_all(&dir).expect("create a directory");
+            }
+            fs::write(
+                dir.join(format!("f{index:05}")),
+                contents(index as u64, 0, STORED_INLINE),
+            )
+            .expect("write a file");
+        }
+        root
+    }
+
+    /// A tree that is almost all file data: eighty mebibytes in eight files, which under
+    /// unreplicated metadata fills the data block groups past the one the superblock copy falls
+    /// in.
+    fn data_heavy_tree(lab: &Lab) -> PathBuf {
+        let root = lab.path().join("data-heavy");
+        fs::create_dir_all(&root).expect("create the tree");
+        for index in 0..8u64 {
+            fs::write(root.join(format!("f{index}")), contents(index, 0, 10 << 20))
+                .expect("write a file");
+        }
+        root
+    }
+
+    /// Where `image`'s own chunk map puts the window around [`COVERED_MIRROR`]: the logical
+    /// address the stripe holding it begins at, and the kind of block group it is in.
+    fn covered_window(image: &Path) -> (u64, String) {
+        let mut found: Vec<(u64, String)> = Vec::new();
+        for chunk in observed_chunks(image) {
+            for &copy in &chunk.copies {
+                if copy <= COVERED_MIRROR && COVERED_MIRROR < copy + chunk.length {
+                    let stripe = (COVERED_MIRROR - copy) / WINDOW * WINDOW;
+                    found.push((chunk.logical + stripe, chunk.kind.clone()));
+                }
+            }
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "one chunk copy covers the superblock copy in {image:?}: {found:?}"
+        );
+        found.remove(0)
+    }
+
+    /// Every extent `image`'s extent tree records, as where it begins and where it ends.
+    fn allocated(image: &Path, node: u64) -> Vec<(u64, u64)> {
+        let at = |word: &str| -> u64 { word.trim_start_matches('(').parse().expect("an address") };
+        inspect(image, &["dump-tree", "-t", "extent"])
+            .lines()
+            .filter_map(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                match words.as_slice() {
+                    // `item 4 key (30425088 METADATA_ITEM 0) ...`: keyed by level, a node long.
+                    ["item", _, "key", start, "METADATA_ITEM", ..] => {
+                        Some((at(start), at(start) + node))
+                    }
+                    // `item 9 key (13631488 EXTENT_ITEM 65536) ...`
+                    ["item", _, "key", start, "EXTENT_ITEM", length, ..] => {
+                        let length: u64 = length
+                            .trim_end_matches(')')
+                            .parse()
+                            .expect("an extent length");
+                        Some((at(start), at(start) + length))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Every free run `image`'s free-space tree records, as where it begins and how long it is.
+    fn free_runs(image: &Path) -> Vec<(u64, u64)> {
+        inspect(image, &["dump-tree", "-t", "free-space"])
+            .lines()
+            .filter_map(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                // `item 5 key (58720256 FREE_SPACE_EXTENT 65536) itemoff 16259 itemsize 0`
+                match words.as_slice() {
+                    ["item", _, "key", start, "FREE_SPACE_EXTENT", length, ..] => Some((
+                        start
+                            .trim_start_matches('(')
+                            .parse()
+                            .expect("a run's start"),
+                        length
+                            .trim_end_matches(')')
+                            .parse()
+                            .expect("a run's length"),
+                    )),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// No block either writer allocates lies over a superblock copy, and the window each leaves
+    /// around one is the same window.
+    ///
+    /// A superblock copy sits at a fixed offset on the device, so a block group whose chunk
+    /// covers one holds logical addresses that map onto it, and a block allocated there is
+    /// overwritten when the superblock copies are written. A mirrored block group hides that
+    /// from the checker, which finds the damaged copy, reads the other, and exits clean. So this
+    /// asks each image's extent tree directly: nothing allocated in the window, something
+    /// allocated right past it, so the window was reached and stepped over rather than never
+    /// reached, and the window recorded as free space. One row per kind of block group, because
+    /// tree blocks and file data are allocated by different paths.
+    #[test]
+    fn no_block_lies_over_a_superblock_copy_and_the_window_is_the_baselines() {
+        use ferrosys::btrfs::format_to;
+
+        if !suite_ready() {
+            return;
+        }
+        let lab = Lab::new();
+        let base: &[&str] = &["-s", "4096", "-n", "16384"];
+        let single: &[&str] = &["-s", "4096", "-n", "16384", "-m", "single"];
+        for (kind, source, args) in [
+            ("METADATA|DUP", metadata_heavy_tree(&lab), base),
+            ("DATA|single", data_heavy_tree(&lab), single),
+        ] {
+            let tag = kind.replace('|', "-");
+            let mine = lab.sparse(&format!("mine-{tag}.img"), ORDINARY);
+            let file = File::options()
+                .write(true)
+                .open(&mine)
+                .expect("open the destination this gate just created");
+            let walked =
+                ferrosys::DirectorySource::from_path(&source).expect("walk the generated tree");
+            format_to(
+                file,
+                walked,
+                ORDINARY,
+                writer_options().plan(request_for(ORDINARY, args)),
+            )
+            .unwrap_or_else(|e| panic!("this crate refused a tree the baseline takes: {e}"));
+            let mut baseline_args = args.to_vec();
+            baseline_args.extend(["-r", source.to_str().expect("a UTF-8 scratch path")]);
+            let theirs = lab.formatted(&format!("theirs-{tag}.img"), ORDINARY, &baseline_args);
+
+            for (who, image) in [("this crate", &mine), ("the baseline", &theirs)] {
+                let (window, covering) = covered_window(image);
+                assert_eq!(
+                    covering, kind,
+                    "{who}: the superblock copy is in another kind"
+                );
+                let end = window + WINDOW;
+                let extents = allocated(image, 16384);
+                let over: Vec<_> = extents
+                    .iter()
+                    .filter(|&&(start, stop)| start < end && window < stop)
+                    .collect();
+                assert!(
+                    over.is_empty(),
+                    "{who} allocated {over:?} over the window {window}..{end} in {kind}"
+                );
+                assert!(
+                    extents
+                        .iter()
+                        .any(|&(start, _)| (end..end + (1 << 20)).contains(&start)),
+                    "{who} allocated nothing right past the window in {kind}, so it was never \
+                     reached and this row tests nothing"
+                );
+                assert!(
+                    free_runs(image)
+                        .iter()
+                        .any(|&(start, length)| start <= window && end <= start + length),
+                    "{who} does not record the window {window}..{end} as free space"
+                );
+            }
+            btrfs_check_clean(&mine, &["--check-data-csum"])
+                .unwrap_or_else(|e| panic!("the checker rejected the {kind} row: {e}"));
+            read_back(&mine)
+                .unwrap_or_else(|e| panic!("the reader refused the {kind} row strictly: {e}"));
+        }
     }
 }
 

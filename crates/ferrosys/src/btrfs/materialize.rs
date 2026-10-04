@@ -18,8 +18,9 @@
 //! advance, and it is the difference between building a filesystem and maintaining one.
 //!
 //! It shows in the result, in two ways worth naming. Every block group is filled from its start
-//! and left with **one** run of free space, where a filesystem that has had blocks freed has
-//! several. And each tree's leaves are packed full in key order, where a tree grown by
+//! and left with **one** run of free space behind what it holds, where a filesystem that has had
+//! blocks freed has several; the only gap inside what it holds is a window a superblock copy
+//! takes. And each tree's leaves are packed full in key order, where a tree grown by
 //! inserting one record at a time and splitting a full block down the middle ends up with
 //! leaves half full.
 //!
@@ -59,8 +60,9 @@ use crate::source::Source;
 use super::MappedChunk;
 use super::btree::levels_above;
 use super::geometry::{
-    BtrfsLayout, CSUM_BYTES_PER_SECTOR, GeometryError, MAX_CSUM_RECORD, PlanRequest, Pool,
-    RESERVED_HEAD, ReservationExceeded, STRIPE_LEN, Slack, block_sizes, plan_layout,
+    BtrfsLayout, CSUM_BYTES_PER_SECTOR, GeometryError, MAX_CSUM_RECORD, MIRROR_WINDOW, PlanRequest,
+    Pool, RESERVED_HEAD, ReservationExceeded, STRIPE_LEN, Slack, block_sizes, mirror_windows,
+    plan_layout,
 };
 use super::model::{
     BtrfsModel, DirEntry, EntryTarget, MAX_EXTENT_BYTES, ModelError, ModelObject, ModelSubvolume,
@@ -848,14 +850,22 @@ fn encode(len: usize, fill: impl FnOnce(&mut [u8])) -> Vec<u8> {
 /// What has been allocated out of each block group, so that the free-space tree and the
 /// block-group tree are written from one account rather than from two.
 ///
-/// Every block group is filled from its start and the blocks in it are contiguous, so what it
-/// holds is a prefix and what is free is the single run behind that prefix. That is a property
-/// of writing a filesystem once, and it is why one written here has a single free run per block
-/// group where one the format's own tooling writes has several.
+/// Every block group is filled from its start, in one direction, so what it holds is a prefix
+/// and what is free is the run behind that prefix — and, inside the prefix, any window a
+/// superblock copy takes ([`mirror_windows`]), which allocation steps over rather than fills.
+/// That is a property of writing a filesystem once, and it is why one written here has one
+/// free run per block group, plus one per window it has passed, where one the format's own
+/// tooling writes has several.
 #[derive(Clone)]
 struct Allocation {
-    /// Bytes allocated from the start of each chunk, in the layout's own order.
+    /// Bytes allocated in each chunk, in the layout's own order: what its block-group record
+    /// says is used.
     used: Vec<u64>,
+    /// How far into each chunk allocation has reached. Everything before it is allocated or a
+    /// window stepped over, and everything from it on is free.
+    reached: Vec<u64>,
+    /// Each chunk's mirror windows, as offsets from its start, ascending.
+    windows: Vec<Vec<u64>>,
     node_size: u64,
     /// The first chunk [`take_data`](Self::take_data) still considers; every one before it
     /// is a data chunk it filled or a chunk of another kind it stepped past.
@@ -867,9 +877,28 @@ impl Allocation {
     fn new(layout: &BtrfsLayout) -> Self {
         Self {
             used: vec![0; layout.chunks.len()],
+            reached: vec![0; layout.chunks.len()],
+            windows: layout
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    mirror_windows(chunk, &layout.superblock_mirrors)
+                        .into_iter()
+                        .map(|logical| logical - chunk.logical)
+                        .collect()
+                })
+                .collect(),
             node_size: u64::from(layout.node_size),
             data_cursor: 0,
         }
+    }
+
+    /// Where the window overlapping `len` bytes at `offset` into chunk `index` ends, if one does.
+    fn window_across(&self, index: usize, offset: u64, len: u64) -> Option<u64> {
+        self.windows[index]
+            .iter()
+            .find(|&&window| window < offset + len && offset < window + MIRROR_WINDOW)
+            .map(|&window| window + MIRROR_WINDOW)
     }
 
     /// Hand out `count` block addresses from the block groups of `kind`, in ascending order.
@@ -887,8 +916,15 @@ impl Allocation {
             if !chunk.flags.contains(kind) {
                 continue;
             }
-            while out.len() as u64 != count && self.used[index] + self.node_size <= chunk.length {
-                out.push(chunk.logical + self.used[index]);
+            while out.len() as u64 != count && self.reached[index] + self.node_size <= chunk.length
+            {
+                let at = self.reached[index];
+                if let Some(past) = self.window_across(index, at, self.node_size) {
+                    self.reached[index] = past;
+                    continue;
+                }
+                out.push(chunk.logical + at);
+                self.reached[index] += self.node_size;
                 self.used[index] += self.node_size;
             }
         }
@@ -898,10 +934,10 @@ impl Allocation {
     /// Hand out up to `bytes` of consecutive data space, from wherever the data block groups
     /// have room.
     ///
-    /// It grants **less than asked** where the block group it is filling ends first, which is
-    /// what keeps every block group filled from its start with one run of free space behind —
-    /// the property the free-space tree and the block-group accounting both rest on. A caller
-    /// asks again for the rest, and the file gains an extent boundary there.
+    /// It grants **less than asked** where the block group it is filling ends first, or where a
+    /// mirror window begins, which is what keeps every block group filled from its start — the
+    /// property the free-space tree and the block-group accounting both rest on. A caller asks
+    /// again for the rest, and the file gains an extent boundary there.
     ///
     /// [`None`] where no data block group has room left, which the planner sizes them against.
     fn take_data(&mut self, layout: &BtrfsLayout, bytes: u64) -> Option<(u64, u64)> {
@@ -916,17 +952,47 @@ impl Allocation {
                 self.data_cursor += 1;
                 continue;
             }
-            let free = chunk.length - self.used[index];
+            let at = self.reached[index];
+            if let Some(past) = self.window_across(index, at, 1) {
+                self.reached[index] = past;
+                continue;
+            }
+            let stop = self.windows[index]
+                .iter()
+                .copied()
+                .find(|&window| window > at)
+                .unwrap_or(chunk.length);
+            let free = stop - at;
             if free == 0 {
                 self.data_cursor += 1;
                 continue;
             }
             let granted = bytes.min(free);
-            let logical = chunk.logical + self.used[index];
+            self.reached[index] += granted;
             self.used[index] += granted;
-            return Some((logical, granted));
+            return Some((chunk.logical + at, granted));
         }
         None
+    }
+
+    /// The runs of chunk `index` that hold nothing, as offsets from its start and lengths,
+    /// ascending: every window allocation stepped over, and everything past where it reached.
+    /// Runs that meet are one run.
+    fn free_runs(&self, index: usize, length: u64) -> Vec<(u64, u64)> {
+        let reached = self.reached[index];
+        let passed = self.windows[index]
+            .iter()
+            .filter(|&&window| window < reached)
+            .map(|&window| (window, MIRROR_WINDOW));
+        let tail = (reached < length).then_some((reached, length - reached));
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for (start, len) in passed.chain(tail) {
+            match runs.last_mut() {
+                Some(last) if last.0 + last.1 == start => last.1 += len,
+                _ => runs.push((start, len)),
+            }
+        }
+        runs
     }
 
     /// Blocks handed out from the block groups of `kind`.
@@ -2184,30 +2250,30 @@ fn block_group_records(layout: &BtrfsLayout, allocation: &Allocation) -> Vec<Rec
         .collect()
 }
 
-/// The free-space tree: per block group, how its free space is written down, and the run that
-/// is free.
+/// The free-space tree: per block group, how its free space is written down, and the runs that
+/// are free.
 ///
-/// One run per block group, because a block group written once is filled from its start. The
-/// count is stated rather than assumed: a group filled to its very end has none, and the record
-/// that says how many follow has to say zero.
+/// One run behind what a block group holds, because a block group written once is filled from
+/// its start, and one for each mirror window inside what it holds. The count is stated rather
+/// than assumed: a group filled to its very end has none, and the record that says how many
+/// follow has to say zero.
 fn free_space_tree_records(layout: &BtrfsLayout, allocation: &Allocation) -> Vec<Record> {
     let mut records = Vec::new();
     for (index, chunk) in layout.chunks.iter().enumerate() {
-        let used = allocation.used[index];
-        let free = chunk.length - used;
+        let runs = allocation.free_runs(index, chunk.length);
         records.push(Record {
             key: DiskKey::new(chunk.logical, ItemType::FREE_SPACE_INFO, chunk.length),
             data: encode(FreeSpaceInfo::SIZE, |buf| {
                 FreeSpaceInfo {
-                    extent_count: u32::from(free > 0),
+                    extent_count: runs.len() as u32,
                     flags: 0,
                 }
                 .write_to(buf);
             }),
         });
-        if free > 0 {
+        for (start, len) in runs {
             records.push(Record {
-                key: DiskKey::new(chunk.logical + used, ItemType::FREE_SPACE_EXTENT, free),
+                key: DiskKey::new(chunk.logical + start, ItemType::FREE_SPACE_EXTENT, len),
                 // A free run is its key and nothing else: where it begins and how long it is
                 // are both in the key, so the item carries no data at all.
                 data: Vec::new(),
@@ -2254,8 +2320,8 @@ fn free_space_tree_settled(
     let mut own_blocks = 1u64;
     for _ in 0..LAYOUT_ROUNDS {
         // Three takes follow this tree's placement, and one take of their sum fills the same
-        // block groups to the same levels: an allocation is a prefix per group, and a prefix
-        // does not care where its parts came from.
+        // block groups to the same levels: an allocation advances through each group in one
+        // direction, and how far it reaches does not depend on how the takes were split.
         let mut settled = allocation.clone();
         settled
             .take(
@@ -4146,6 +4212,104 @@ mod tests {
         let entry = reader.lookup(b"/span.bin").expect("the file is there");
         assert_eq!(reader.read_data(&entry).expect("bytes"), content);
         reader.verify_data(&entry).expect("its checksums");
+        assert!(reader.scan().is_clean(), "{:?}", reader.scan().anomalies());
+    }
+
+    #[test]
+    fn tree_blocks_step_over_the_window_a_superblock_copy_takes_and_leave_it_free() {
+        // The first mirrored metadata chunk of a default volume reaches the copy at sixty-four
+        // mebibytes twenty-seven mebibytes in, which is further than any tree here grows. So the
+        // allocator is driven directly, past the window, and asked what it handed out and what it
+        // left free.
+        let layout = plan_layout(&PlanRequest::new(GIB)).expect("a default volume");
+        let (index, chunk) = layout
+            .chunks
+            .iter()
+            .enumerate()
+            .find(|(_, chunk)| !mirror_windows(chunk, &layout.superblock_mirrors).is_empty())
+            .expect("a chunk holds the copy at sixty-four mebibytes");
+        assert!(chunk.flags.contains(BlockGroupFlags::METADATA));
+        let window = mirror_windows(chunk, &layout.superblock_mirrors)[0];
+        let node = u64::from(layout.node_size);
+
+        let mut allocation = Allocation::new(&layout);
+        let past = (window - chunk.logical) / node + 8;
+        let blocks = allocation
+            .take(&layout, BlockGroupFlags::METADATA, past)
+            .expect("the chunk has room past the window");
+        assert!(
+            blocks
+                .iter()
+                .all(|&at| at + node <= window || at >= window + MIRROR_WINDOW),
+            "a block was handed out inside the window at {window}"
+        );
+        assert_eq!(
+            blocks.last().copied(),
+            Some(window + MIRROR_WINDOW + 7 * node),
+            "allocation resumed right past the window"
+        );
+        assert_eq!(
+            allocation.used[index],
+            past * node,
+            "the window is not counted as used"
+        );
+        assert_eq!(
+            allocation.free_runs(index, chunk.length),
+            [
+                (window - chunk.logical, MIRROR_WINDOW),
+                (
+                    allocation.reached[index],
+                    chunk.length - allocation.reached[index]
+                ),
+            ],
+            "the window is a free run of its own, ahead of the run behind what is held"
+        );
+    }
+
+    #[test]
+    fn file_data_steps_over_the_window_a_superblock_copy_takes_and_reads_back_whole() {
+        // Unreplicated metadata leaves the data chunks a populated filesystem appends running
+        // straight through the device, so fifty-six mebibytes of file data reach the data chunk
+        // that holds the copy at sixty-four mebibytes, and an extent meets its window. Each file
+        // repeats a cycle of its own, so bytes read from the wrong place differ.
+        let meta = Metadata::new(0o644, TIME);
+        let mut source = TreeBuilder::new();
+        let mut contents = Vec::new();
+        for index in 0..7u8 {
+            let cycle: Vec<u8> = (0..251u8).map(|n| n ^ index).collect();
+            let content: Vec<u8> = cycle
+                .iter()
+                .copied()
+                .cycle()
+                .take((8 * MIB) as usize)
+                .collect();
+            source = source.file(format!("/f{index}").into_bytes(), content.clone(), meta);
+            contents.push(content);
+        }
+        let plan = PlanRequest::new(0).metadata_profile(Profile::Single);
+        let image = format(source, GIB, options().plan(plan)).expect("a formattable tree");
+
+        // The copy is still a superblock: nothing was written over it.
+        let at = MIRRORS[1] as usize;
+        let sb = SuperBlock::read_from(&image.as_bytes()[at..at + SUPER_INFO_SIZE])
+            .expect("a superblock at sixty-four mebibytes");
+        assert_eq!(sb.bytenr, MIRRORS[1]);
+
+        let layout = image.layout();
+        let windows: Vec<u64> = layout
+            .chunks_of(BlockGroupFlags::DATA)
+            .flat_map(|chunk| mirror_windows(chunk, &layout.superblock_mirrors))
+            .collect();
+        assert_eq!(windows.len(), 1, "a data chunk holds the copy");
+
+        let mut reader = read(&image);
+        for (index, content) in contents.iter().enumerate() {
+            let entry = reader
+                .lookup(format!("/f{index}").as_bytes())
+                .expect("the file is there");
+            assert_eq!(&reader.read_data(&entry).expect("bytes"), content);
+            reader.verify_data(&entry).expect("its checksums");
+        }
         assert!(reader.scan().is_clean(), "{:?}", reader.scan().anomalies());
     }
 }
