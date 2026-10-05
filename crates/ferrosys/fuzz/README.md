@@ -124,9 +124,11 @@ occupy once checked out.
   114 MiB, and the file ends at 80 MiB, past the last block the filesystem uses: every
   seed stays under the 100 MB a repository host accepts in one file, and the seed gate
   holds them to it.
-- `inspect-huge-group-count` — `ext4-min` with `s_blocks_count` set to `2^64 - 1`,
-  the crafted superblock the `reader_inspect` target exists to guard: the group count
-  it implies must not size an allocation.
+- `inspect-huge-group-count` — `ext4-min` claiming as many block groups as its 32-bit
+  inode total can count, sixteen million of them, with `s_blocks_count` and
+  `s_inodes_count` both agreeing with that many: the crafted superblock the
+  `reader_inspect` target exists to guard. It opens, and the group count it implies must
+  not size an allocation.
 - `rootfs-pax.tar` — the archive seed: a PAX tarball carrying one of each shape the parser
   resolves, so a mutation lands somewhere that matters. A `g` global header, PAX timestamps
   and ownership, a binary `SCHILY.xattr.*` value whose NUL bytes are why records are
@@ -161,14 +163,25 @@ ferrosys format --size 16M $common -O "$off"                                 ext
 # The block-mapped family: `-t ext2` selects the ext2 feature words directly, so the
 # tree maps through the classic direct/indirect block map instead of an extent tree.
 ferrosys format --size  4M $common -t ext2 --from-tar tree.tar               ext2-populated.img
-# s_blocks_count_lo is at superblock offset 0x04 and _hi at 0x150.
+# The most groups a 32-bit inode total counts, with the block and inode totals agreeing
+# with them, since a superblock whose totals disagree with its group count is refused at
+# open. s_inodes_count is at superblock offset 0x00, s_first_data_block at 0x14,
+# s_blocks_per_group at 0x20, s_inodes_per_group at 0x28, s_blocks_count_lo at 0x04 and
+# _hi at 0x150.
 python3 - <<'PY'
-import shutil
+import shutil, struct
 shutil.copy("ext4-min.img", "inspect-huge-group-count.img")
 with open("inspect-huge-group-count.img", "r+b") as f:
-    for off in (0x04, 0x150):
-        f.seek(1024 + off)
-        f.write((0xFFFFFFFF).to_bytes(4, "little"))
+    f.seek(1024)
+    sb = bytearray(f.read(1024))
+    first, per_group, inodes = (struct.unpack_from("<I", sb, o)[0] for o in (0x14, 0x20, 0x28))
+    groups = 0xFFFFFFFF // inodes
+    blocks = groups * per_group + first
+    struct.pack_into("<I", sb, 0x00, groups * inodes)
+    struct.pack_into("<I", sb, 0x04, blocks & 0xFFFFFFFF)
+    struct.pack_into("<I", sb, 0x150, blocks >> 32)
+    f.seek(1024)
+    f.write(sb)
 PY
 ```
 

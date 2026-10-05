@@ -62,6 +62,12 @@
 //! that stays sparse. An empty volume is [`TreeBuilder::new`](crate::TreeBuilder), which places
 //! nothing.
 //!
+//! What the destination held before does not matter: a format writes every byte a reader or a
+//! prober could consult, so a reused card or a file holding an earlier volume comes out the
+//! same as a fresh one. [`FormatPlan::stages`] hands the write back as ordered stages of
+//! pieces, for a caller that does its own I/O — streaming a file it declared by length alone,
+//! from wherever it holds the bytes.
+//!
 //! Two formats of the same tree and the same parameters produce the same bytes, and one input
 //! is the whole of what that costs: [`FormatOptions::volume_serial`], the only value a
 //! formatter would conventionally draw from the clock. The times an entry records come from the
@@ -150,7 +156,8 @@ pub use geometry::{
     conventional_cluster_size, plan_layout,
 };
 pub use materialize::{
-    FormatError, FormatOptions, FormatPlan, Image, LabelError, VolumeLabel, format, format_to,
+    FormatError, FormatOptions, FormatPlan, Image, LabelError, Piece, Pieces, Stage, StageKind,
+    VolumeLabel, format, format_to,
 };
 pub use model::{MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES, ModelError, TimeField};
 pub use name::{MAX_NAME_UNITS, NameError};

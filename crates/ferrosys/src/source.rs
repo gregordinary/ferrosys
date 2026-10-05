@@ -14,7 +14,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,10 +21,10 @@ use crate::path::canonical_key;
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
 
-/// A regular file's contents: either bytes in memory, or a range of a file on the host
-/// read at the moment it is placed.
+/// A regular file's contents: bytes in memory, a range of a file on the host read at the
+/// moment it is placed, or a length alone, whose bytes a caller writing the image supplies.
 ///
-/// The two coexist in one entry list, deliberately. A source that maps an on-host archive
+/// The first two coexist in one entry list, deliberately. A source that maps an on-host archive
 /// yields handles; a caller that computes an entry's bytes — rewriting one file of a tree
 /// it is otherwise passing through — supplies them owned, in the same `Vec<SourceEntry>`.
 ///
@@ -33,8 +32,8 @@ use crate::xattr::Xattr;
 ///
 /// A format's peak memory is otherwise the sum of every file it writes, because every
 /// file's bytes are built before the first block is placed. A handle defers the bytes
-/// until the file is written, so the peak becomes the largest single file rather than the
-/// total.
+/// until the file is written, and a writer places a handle's bytes a window at a time, so
+/// what a file costs in memory while it is placed is one window rather than its length.
 ///
 /// The [`len`](Self::len) is known without reading, which is what lets the model check a
 /// file against the `large_file` feature — and name the offending path — before any bytes
@@ -46,7 +45,28 @@ pub enum FileContent {
     Owned(Vec<u8>),
     /// A range of a file on the host, read when the content is placed.
     Range(FileRange),
+    /// A file declared by its length alone. The source holds none of its bytes: a caller
+    /// that writes the image itself puts them where the plan places the file, and knows the
+    /// file by `key`, which it chose.
+    ///
+    /// Only a plan that hands its writes back to the caller can place one, which is the exFAT
+    /// family's `FormatPlan::stages`. Every other family's writer reads a file's bytes itself,
+    /// and refuses a declared one when the plan is made.
+    Declared {
+        /// The file's length in bytes.
+        len: u64,
+        /// The caller's name for the file, handed back with the place its bytes go.
+        key: u64,
+    },
 }
+
+/// The most bytes of one file a writer holds at once while placing it.
+///
+/// A whole number of blocks and sectors in every family, since each of those is a power of
+/// two no larger than this, so a window boundary is never inside a block a writer has to
+/// fill whole.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+pub(crate) const CONTENT_WINDOW: usize = 1 << 20;
 
 impl FileContent {
     /// The file's length in bytes, without reading it.
@@ -55,6 +75,64 @@ impl FileContent {
         match self {
             Self::Owned(bytes) => bytes.len() as u64,
             Self::Range(range) => range.len(),
+            Self::Declared { len, .. } => *len,
+        }
+    }
+
+    /// Fill `buf` with the file's bytes from offset `at` onward.
+    ///
+    /// The read names its own position, so a caller copying a large file through a buffer of
+    /// its choosing holds that buffer and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] if `at` plus the buffer's length runs past the
+    /// end of the file, and otherwise what [`FileRange::read_at`] reports for a range. An
+    /// owned entry fails only on the bound. A declared one is
+    /// [`std::io::ErrorKind::Unsupported`], since it has no bytes to read.
+    pub fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        match self {
+            Self::Owned(bytes) => {
+                let within = usize::try_from(at).ok().filter(|from| {
+                    from.checked_add(buf.len())
+                        .is_some_and(|end| end <= bytes.len())
+                });
+                let Some(from) = within else {
+                    return Err(past_the_end(at, buf.len(), bytes.len() as u64));
+                };
+                buf.copy_from_slice(&bytes[from..from + buf.len()]);
+                Ok(())
+            }
+            Self::Range(range) => range.read_at(at, buf),
+            Self::Declared { key, .. } => Err(not_held(*key)),
+        }
+    }
+
+    /// Hand the file's bytes to `each` in order, a window at a time: each window's offset
+    /// within the file, and its bytes.
+    ///
+    /// Every window but the last is [`CONTENT_WINDOW`] bytes, so each offset is a multiple of
+    /// it. Owned bytes are lent in place; a range is read into one buffer that every window
+    /// reuses. An empty file calls `each` not at all.
+    ///
+    /// The ext and FAT writers call this. The exFAT writer holds a range's piece rather than
+    /// the content, and reaches [`FileRange::for_each_window`]; the btrfs writer steps its
+    /// extents by the window itself, through [`read_at`](Self::read_at).
+    #[cfg(any(feature = "ext", feature = "fat"))]
+    pub(crate) fn for_each_window<E: From<std::io::Error>>(
+        &self,
+        mut each: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self {
+            Self::Owned(bytes) => {
+                for (n, window) in bytes.chunks(CONTENT_WINDOW).enumerate() {
+                    each((n * CONTENT_WINDOW) as u64, window)?;
+                }
+                Ok(())
+            }
+            Self::Range(range) => range.for_each_window(each),
+            Self::Declared { len: 0, .. } => Ok(()),
+            Self::Declared { key, .. } => Err(not_held(*key).into()),
         }
     }
 
@@ -69,7 +147,8 @@ impl FileContent {
     /// Bytes already held are borrowed, not copied: reading an [`Owned`](Self::Owned)
     /// entry costs nothing, so a caller that reads every entry in turn never holds two
     /// copies of one file. Only a [`Range`](Self::Range) allocates, and only for as long
-    /// as the caller keeps what it returned.
+    /// as the caller keeps what it returned — the whole range at once, which
+    /// [`read_at`](Self::read_at) is the bounded alternative to.
     ///
     /// # Errors
     ///
@@ -80,6 +159,7 @@ impl FileContent {
         match self {
             Self::Owned(bytes) => Ok(Cow::Borrowed(bytes)),
             Self::Range(range) => Ok(Cow::Owned(range.read()?)),
+            Self::Declared { key, .. } => Err(not_held(*key)),
         }
     }
 }
@@ -128,37 +208,60 @@ impl From<String> for FileContent {
 /// A range of bytes within a file on the host, read at the moment the content is placed.
 ///
 /// The handle is a plain owned value: no lifetime parameter reaches [`SourceEntry`], and a
-/// caller may hold, clone, sort, and splice a list of them freely.
+/// caller may hold, clone, sort, and splice a list of them freely. Clones share what backs
+/// them and may be read concurrently: every read names its own offset, so two reads of one
+/// file never move a cursor the other depends on.
 ///
-/// # Two forms, and what each costs
+/// # Three forms, and what each costs
 ///
 /// [`new`](Self::new) carries an open descriptor, shared, so a whole archive's worth of
 /// ranges into one file costs one descriptor. [`at_path`](Self::at_path) carries only the
 /// path and opens it for each read, which is what lets a source name a range in each of a
 /// hundred thousand separate files without holding a descriptor for every one.
 ///
+/// The third form is the one a walked host directory yields, and only the walk builds it. It
+/// carries the walk's handle to the tree's root, the file's place beneath that root, and the
+/// file's identity on the host. A read reaches the file from the root one name at a time,
+/// following no symbolic link at any step, and refuses a file that is not the one the walk
+/// recorded. So what reaches the image is a file the walk found inside the tree, whatever was
+/// renamed or linked into the tree after it.
+///
 /// # The file must not change while the source is alive
 ///
 /// The bytes are read when the file is placed, not when the source is built, so an edit in
 /// between reaches the image — as wrong bytes rather than as an error, unless the file
-/// shrank enough for the read to run short.
+/// shrank enough for the read to run short. The format's own destination is one such edit:
+/// writing an image over a file its source reads truncates that file, and what is read back
+/// is the image being written rather than the source.
 ///
 /// Which edits reach it depends on the form. A held descriptor names an inode: a
 /// replacement written to a new file and renamed into place leaves the original inode
 /// readable and the format unaffected, and only an **in-place** modification or a
 /// truncation of that inode is seen. A path is resolved afresh at each read, so whatever
-/// the name resolves to then is what reaches the image.
+/// the name resolves to then is what reaches the image. A walked file is the inode the walk
+/// recorded or an error: an in-place modification is seen, and a replacement is refused.
 #[derive(Clone)]
 pub struct FileRange {
-    /// The open file, when the range was built from one. Shared so a handle is owned
-    /// rather than borrowed. `None` for a range named by path alone, which opens `path`
-    /// when it is read.
-    file: Option<Arc<File>>,
+    /// Where the bytes are fetched from.
+    backing: Backing,
     /// The path the bytes come from: what a range built from a descriptor names for
-    /// diagnostics and identity, and what one built by path opens.
+    /// diagnostics and identity, what one built by path opens, and what a walked file is
+    /// called on the host.
     path: Arc<PathBuf>,
     offset: u64,
     len: u64,
+}
+
+/// What a [`FileRange`] reads its bytes through.
+#[derive(Clone)]
+enum Backing {
+    /// An open descriptor, shared by every range into one file.
+    Descriptor(Arc<File>),
+    /// The range's path, opened at each read without following a final symbolic link.
+    Path,
+    /// A file a host directory walk recorded, reached again from the walk's root.
+    #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+    Walked(crate::host::Walked),
 }
 
 impl FileRange {
@@ -169,7 +272,7 @@ impl FileRange {
     #[must_use]
     pub fn new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self {
         Self {
-            file: Some(file),
+            backing: Backing::Descriptor(file),
             path: Arc::new(path.into()),
             offset,
             len,
@@ -182,11 +285,29 @@ impl FileRange {
     /// This is the form for a source that names ranges in many separate files: it holds no
     /// descriptor, so the number of files it can name is unbounded. The cost is that the
     /// path is resolved at each read, so a file replaced under that name between building
-    /// the source and formatting reaches the image.
+    /// the source and formatting reaches the image. The final component is opened without
+    /// following a symbolic link; the directories above it are resolved as any path is.
     #[must_use]
     pub fn at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self {
         Self {
-            file: None,
+            backing: Backing::Path,
+            path: Arc::new(path.into()),
+            offset,
+            len,
+        }
+    }
+
+    /// A handle to `len` bytes at `offset` in a file a host directory walk recorded, which
+    /// is called `path` on the host.
+    #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+    pub(crate) fn walked(
+        walked: crate::host::Walked,
+        path: impl Into<PathBuf>,
+        offset: u64,
+        len: u64,
+    ) -> Self {
+        Self {
+            backing: Backing::Walked(walked),
             path: Arc::new(path.into()),
             offset,
             len,
@@ -219,30 +340,14 @@ impl FileRange {
 
     /// Read the range's bytes.
     ///
-    /// Every failure names the path, the offset, and the length, since that is what a
-    /// caller has to act on: the error surfaces through a family's own format error
-    /// transparently, so what this message says is the whole of what a person sees. A short read in particular — the file
-    /// changed after the source was built — is otherwise indistinguishable from any
-    /// other truncation, and names neither the file that changed nor the range that was
-    /// lost.
+    /// The whole range is read into one buffer of its length; [`read_at`](Self::read_at) is
+    /// the same read a piece at a time.
     ///
     /// # Errors
     ///
-    /// [`std::io::Error`] if the file cannot be opened or read, or if it is shorter than
-    /// the range claims — which is what a file edited after the source was built looks
-    /// like.
+    /// What [`read_at`](Self::read_at) reports, and an error naming the range if it is longer
+    /// than this platform addresses in memory.
     pub fn read(&self) -> std::io::Result<Vec<u8>> {
-        let context = |e: std::io::Error| {
-            std::io::Error::new(
-                e.kind(),
-                format!(
-                    "{}: reading {} bytes at offset {}: {e}",
-                    crate::escape::printable_path(&self.path),
-                    self.len,
-                    self.offset
-                ),
-            )
-        };
         let len = usize::try_from(self.len).map_err(|_| {
             std::io::Error::other(format!(
                 "{}: {} bytes at offset {} is more than this platform addresses",
@@ -251,24 +356,148 @@ impl FileRange {
                 self.offset
             ))
         })?;
-        // An independent descriptor, so the read carries its own cursor: a shared one
-        // would make two handles into the same file interfere. A range named by path
-        // alone opens it here, which is the whole of what it defers.
-        let mut handle = match &self.file {
-            Some(file) => file.try_clone().map_err(context)?,
-            // Opened without following a final symbolic link. A walk records a symlink as a
-            // symlink and never reads through one, and this is where that promise would
-            // otherwise end: a local writer replacing a staged name with a link between the
-            // walk and the placement would put the target's bytes into the image, with no
-            // error and nothing in the fidelity report. The "must not change" caveat on a
-            // range covers content changing; it does not cover the name becoming a different
-            // kind of thing.
-            None => open_no_follow(self.path.as_path()).map_err(context)?,
-        };
-        handle.seek(SeekFrom::Start(self.offset)).map_err(context)?;
         let mut buf = vec![0u8; len];
-        handle.read_exact(&mut buf).map_err(context)?;
+        self.read_at(0, &mut buf)?;
         Ok(buf)
+    }
+
+    /// Fill `buf` with the range's bytes from `at` onward, `at` counting from the start of
+    /// the range rather than of the file.
+    ///
+    /// Every failure names the path, the offset, and the length, since that is what a
+    /// caller has to act on: the error surfaces through a family's own format error
+    /// transparently, so what this message says is the whole of what a person sees. A
+    /// short read in particular — the file changed after the source was built — is
+    /// otherwise indistinguishable from any other truncation, and names neither the file
+    /// that changed nor the range that was lost.
+    ///
+    /// A range named by path, or recorded by a walk, is opened afresh by each call, and a
+    /// walked file is checked to be the file the walk recorded each time.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] if `at` plus the buffer's length runs past the
+    /// end of the range. Otherwise [`std::io::Error`] if the file cannot be opened or read,
+    /// or if it is shorter than the range claims — which is what a file edited after the
+    /// source was built looks like. A walked file that is no longer the file the walk
+    /// recorded is an error too.
+    pub fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let len = buf.len();
+        let context = |e: std::io::Error| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{}: reading {len} bytes at offset {}: {e}",
+                    crate::escape::printable_path(&self.path),
+                    self.offset.saturating_add(at)
+                ),
+            )
+        };
+        let start = at
+            .checked_add(len as u64)
+            .filter(|end| *end <= self.len)
+            .and_then(|_| self.offset.checked_add(at))
+            .ok_or_else(|| context(past_the_end(at, len, self.len)))?;
+        match &self.backing {
+            Backing::Descriptor(file) => read_exact_at(file, buf, start),
+            // Opened without following a final symbolic link. A walk records a symlink as a
+            // symlink and never reads through one, and a caller naming files by path gets
+            // the same promise for the last name: one replaced with a link between building
+            // the source and the placement is an error rather than the target's bytes.
+            Backing::Path => open_no_follow(self.path.as_path())
+                .and_then(|file| read_exact_at(&file, buf, start)),
+            #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+            Backing::Walked(walked) => walked
+                .open()
+                .and_then(|file| read_exact_at(&file, buf, start)),
+        }
+        .map_err(context)
+    }
+
+    /// Hand the range's bytes to `each` in order, a window at a time, through one buffer
+    /// every window reuses: each window's offset within the range, and its bytes.
+    ///
+    /// Every window but the last is [`CONTENT_WINDOW`] bytes. An empty range calls `each`
+    /// not at all.
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat"))]
+    pub(crate) fn for_each_window<E: From<std::io::Error>>(
+        &self,
+        mut each: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        // Bounded by the window, so neither conversion can lose a value.
+        let mut buffer = vec![0u8; self.len.min(CONTENT_WINDOW as u64) as usize];
+        let mut at = 0u64;
+        while at < self.len {
+            let n = (self.len - at).min(CONTENT_WINDOW as u64) as usize;
+            self.read_at(at, &mut buffer[..n])?;
+            each(at, &buffer[..n])?;
+            at += n as u64;
+        }
+        Ok(())
+    }
+}
+
+/// The error for a read of a file declared by its length alone, under `key`, which holds no
+/// bytes to read.
+fn not_held(key: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("a file declared by its length alone, under key {key}, holds no bytes to read"),
+    )
+}
+
+/// The error for a read of `len` bytes at `at` in contents `size` bytes long, which runs past
+/// their end.
+fn past_the_end(at: u64, len: usize, size: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("{len} bytes at {at} run past the end of {size} bytes of contents"),
+    )
+}
+
+/// Fill `buf` from `file` at `offset`, at a position the read names rather than through
+/// the descriptor's cursor.
+///
+/// Every range into one archive shares one open file, and a cursor belongs to the open file
+/// rather than to a handle — a duplicated descriptor moves the same one — so a seek and then
+/// a read are two steps another range's read can land between, and both then return the
+/// wrong bytes. A positional read is one step and leaves no cursor for another read to move.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt as _;
+        // Each call reads at the offset it names, and may return fewer bytes than asked for
+        // without being at the end, so the range is filled a call at a time.
+        let mut done = 0;
+        while done < buf.len() {
+            let at = offset
+                .checked_add(done as u64)
+                .ok_or_else(|| std::io::Error::other("the range ends past the 64-bit range"))?;
+            match file.seek_read(&mut buf[done..], at) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(read) => done += read,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        use std::io::{Read as _, Seek as _};
+        // A platform with no positional read: the seek and the read are made one step by
+        // holding one lock across both, for every range there is.
+        static CURSOR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = CURSOR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = file;
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        file.read_exact(buf)
     }
 }
 
@@ -558,6 +787,14 @@ impl SourceEntry {
 pub trait Source {
     /// Produce the entries, consuming the source.
     fn into_entries(self) -> Vec<SourceEntry>;
+}
+
+/// A list of entries is a source as it stands: what a caller that takes another source's
+/// entries to look at them, or to change some, hands on to a format.
+impl Source for Vec<SourceEntry> {
+    fn into_entries(self) -> Vec<SourceEntry> {
+        self
+    }
 }
 
 /// An in-memory, programmatic source: add entries, then hand it to the model.
@@ -1294,6 +1531,137 @@ mod tests {
         let read = content.read().expect("read the range");
         assert!(matches!(read, std::borrow::Cow::Owned(_)));
         assert_eq!(read.as_ref(), b"eight");
+    }
+
+    #[test]
+    fn a_positional_read_counts_from_the_start_of_the_range_and_stops_at_its_end() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("archive");
+        std::fs::write(&path, b"leadXYZABCtrail").expect("write the backing file");
+        let range = FileContent::Range(FileRange::at_path(&path, 4, 6));
+        let owned = FileContent::Owned(b"XYZABC".to_vec());
+
+        for content in [&range, &owned] {
+            let mut buf = [0u8; 3];
+            content.read_at(2, &mut buf).expect("inside the contents");
+            assert_eq!(&buf, b"ZAB", "{content:?}");
+            content
+                .read_at(3, &mut buf)
+                .expect("ending at the last byte");
+            assert_eq!(&buf, b"ABC", "{content:?}");
+
+            // One byte past the end is refused rather than read from what follows the range
+            // in its file, or answered short.
+            let err = content.read_at(4, &mut buf).expect_err("past the end");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{content:?}");
+            let err = content
+                .read_at(u64::MAX, &mut buf)
+                .expect_err("an offset that wraps");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn a_declared_file_has_a_length_and_no_bytes_to_read() {
+        let content = FileContent::Declared { len: 300, key: 42 };
+        assert_eq!(content.len(), 300);
+        // Every way of reading it says there is nothing here to read, and names the key the
+        // caller will recognize, rather than handing back zeros as though they were the file.
+        let err = content.read().expect_err("no bytes");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("42"), "{err}");
+        let err = content.read_at(0, &mut [0u8; 4]).expect_err("no bytes");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    #[cfg(any(feature = "ext", feature = "fat"))]
+    #[test]
+    fn contents_come_in_windows_that_tile_the_file_in_order() {
+        let len = 2 * CONTENT_WINDOW + 5;
+        let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("big");
+        std::fs::write(&path, &bytes).expect("write the backing file");
+
+        let owned = FileContent::Owned(bytes.clone());
+        let range = FileContent::Range(FileRange::at_path(&path, 0, len as u64));
+        for content in [&owned, &range] {
+            let mut seen: Vec<(u64, usize)> = Vec::new();
+            let mut joined = Vec::new();
+            content
+                .for_each_window(|at, window| {
+                    seen.push((at, window.len()));
+                    joined.extend_from_slice(window);
+                    Ok::<(), std::io::Error>(())
+                })
+                .expect("the contents read");
+            let window = CONTENT_WINDOW as u64;
+            assert_eq!(
+                seen,
+                [
+                    (0, CONTENT_WINDOW),
+                    (window, CONTENT_WINDOW),
+                    (2 * window, 5)
+                ]
+            );
+            assert!(joined == bytes, "the windows did not rejoin as the file");
+        }
+
+        // An empty file has no window at all, rather than one empty one.
+        let mut calls = 0;
+        FileContent::Owned(Vec::new())
+            .for_each_window(|_, _| {
+                calls += 1;
+                Ok::<(), std::io::Error>(())
+            })
+            .expect("nothing to read");
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn ranges_sharing_one_descriptor_read_their_own_bytes_concurrently() {
+        // Every range into one archive shares one open file. A cursor belongs to the open
+        // file, not to a handle, so a seek and a read through any handle to it are two steps
+        // another range's read can land between — and both then return another member's
+        // bytes, successfully. Each range here holds a byte value of its own, so any read
+        // that came back with another's is the failure.
+        const REGION: usize = 256 * 1024;
+        const RANGES: usize = 8;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("archive");
+        let bytes: Vec<u8> = (0..RANGES)
+            .flat_map(|i| std::iter::repeat_n(i as u8 + 1, REGION))
+            .collect();
+        std::fs::write(&path, &bytes).expect("write the backing file");
+        let file = Arc::new(File::open(&path).expect("open the backing file"));
+
+        let start = Arc::new(std::sync::Barrier::new(RANGES));
+        let readers: Vec<_> = (0..RANGES)
+            .map(|i| {
+                let range =
+                    FileRange::new(Arc::clone(&file), &path, (i * REGION) as u64, REGION as u64);
+                let start = Arc::clone(&start);
+                // Every thread reaches every barrier whatever its reads return, so a wrong
+                // read is counted rather than panicked on: a panic here would leave the
+                // others waiting for a thread that is gone.
+                std::thread::spawn(move || {
+                    let mut wrong = 0;
+                    for _ in 0..20 {
+                        start.wait();
+                        match range.read() {
+                            Ok(read) if read.iter().all(|&b| b == i as u8 + 1) => {}
+                            _ => wrong += 1,
+                        }
+                    }
+                    wrong
+                })
+            })
+            .collect();
+        let wrong: usize = readers
+            .into_iter()
+            .map(|reader| reader.join().expect("the reader thread runs to its end"))
+            .sum();
+        assert_eq!(wrong, 0, "reads that failed or held another range's bytes");
     }
 
     #[cfg(unix)]

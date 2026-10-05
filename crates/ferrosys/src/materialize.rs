@@ -612,17 +612,18 @@ pub fn format(
 ///   and extended attributes — is materialized before the first block is written, and the
 ///   inode model built from it is held until the last one is. This grows with the number
 ///   of entries, not with their size.
-/// - **A file's contents, while it is placed.** How long that is depends on what the
-///   source supplies. A [`FileContent::Owned`](crate::source::FileContent::Owned) entry
-///   holds its bytes from the moment the source is built, so a list of them costs the sum
-///   of every file. A [`FileContent::Range`](crate::source::FileContent::Range) is read at
-///   placement and dropped after, so a list of them costs the largest single file.
+/// - **One window of a file's contents, while it is placed.** How long a file's bytes are
+///   held depends on what the source supplies. A
+///   [`FileContent::Owned`](crate::source::FileContent::Owned) entry holds its bytes from the
+///   moment the source is built, so a list of them costs the sum of every file. A
+///   [`FileContent::Range`](crate::source::FileContent::Range) is read at placement a
+///   mebibyte at a time, so a list of them costs one mebibyte however large the files are.
 ///   `ArchiveSource::from_path` is the difference for a tar source.
 /// - **The allocator's used-block bitmap**, for the whole run, at one bit per filesystem
 ///   block: `total_blocks / 8` bytes, 128 MiB for a 4 TiB image at a 4 KiB block.
 ///
-/// So peak memory grows with the entry count, the largest file, and the filesystem's
-/// block count — never with the image's size in bytes.
+/// So peak memory grows with the entry count and the filesystem's block count — never with
+/// the image's size in bytes.
 ///
 /// # Errors
 ///
@@ -1533,19 +1534,26 @@ impl<'a, S: Sink> Writer<'a, S> {
                 // known without reading it. That is what lets a fit search place a file
                 // without opening it — and it is the same count the bytes below chunk
                 // into, because a content that read short is a file that changed since the
-                // source named it, which `FileContent::read` refuses rather than reports.
+                // source named it, which `FileContent::for_each_window` refuses rather than
+                // reports.
                 let count = content.len().div_ceil(self.block_size as u64);
                 let physical = self.map_data_blocks(minode.number, &mut inode, count, "file")?;
                 if self.sink.keeps_bytes() {
                     // The bytes are read here, at placement, rather than held from the
-                    // moment the source was built: peak memory is the largest single file
-                    // rather than every file at once. A source that supplied them owned
-                    // pays nothing extra — the read hands back what it already holds.
-                    let bytes = content.read()?;
+                    // moment the source was built, and a window at a time: a file costs one
+                    // window of memory and the runs its blocks form, however large it is. A
+                    // source that supplied them owned pays nothing extra — each window is
+                    // lent from what it holds. The windows come in order and every one but
+                    // the last is a whole number of blocks, so one walk of the blocks serves
+                    // them all and only the file's final block is ever padded.
                     let block_size = self.block_size;
-                    for (data, &phys) in block_chunks(&bytes, block_size).zip(&physical) {
-                        self.write_block(phys, data.as_ref())?;
-                    }
+                    let mut blocks = physical.blocks();
+                    content.for_each_window(|_, window| {
+                        for (data, phys) in block_chunks(window, block_size).zip(&mut blocks) {
+                            self.write_block(phys, data.as_ref())?;
+                        }
+                        Ok::<(), FormatError>(())
+                    })?;
                 }
                 inode.size = content.len();
             }
@@ -1640,7 +1648,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         inode: &mut Inode,
         count: u64,
         what: &'static str,
-    ) -> Result<Vec<u64>, FormatError> {
+    ) -> Result<BlockRuns, FormatError> {
         // Refused from the count, before a block is allocated, so the bound fires without a
         // filesystem large enough to hold the file existing. The exact charge is checked
         // again once the mapping's own blocks are known, since those only add to it.
@@ -1648,10 +1656,9 @@ impl<'a, S: Sink> Writer<'a, S> {
         if self.feature.has_extents() {
             inode.flags = InodeFlags::EXTENTS;
             let ranges = self.alloc.allocate(count)?;
-            let physical = flatten(&ranges);
             let meta = self.root_extent_tree(ino, inode, &ranges)?;
             self.charge_sectors(inode, (count + meta) * self.sectors_per_block(), what)?;
-            Ok(physical)
+            Ok(BlockRuns::from_ranges(ranges))
         } else {
             self.build_classic_map(inode, count, what)
         }
@@ -1673,7 +1680,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         // chunks that borrow their source rather than a materialized copy of it.
         let count = blocks.len();
         let physical = self.map_data_blocks(ino, inode, count as u64, "file")?;
-        for (data, &phys) in blocks.zip(&physical) {
+        for (data, phys) in blocks.zip(physical.blocks()) {
             self.write_block(phys, data.as_ref())?;
         }
         if inode.size == 0 {
@@ -1684,8 +1691,8 @@ impl<'a, S: Sink> Writer<'a, S> {
 
     /// Lay out a classic (ext2/ext3) block map for `n` logical data blocks: allocate the
     /// data and the indirect blocks that map them, fill the inode's fifteen-word block
-    /// area, and write every indirect block. Returns the physical block of each logical
-    /// block `0..n`, in order, for the caller to write the data into — the map's
+    /// area, and write every indirect block. Returns the physical blocks of logical blocks
+    /// `0..n`, in order, for the caller to write the data into — the map's
     /// structure and its data are placed in one pass but written separately, so a file
     /// whose blocks are mostly zero (the journal) writes only the blocks it must.
     ///
@@ -1699,7 +1706,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         inode: &mut Inode,
         n: u64,
         what: &'static str,
-    ) -> Result<Vec<u64>, FormatError> {
+    ) -> Result<BlockRuns, FormatError> {
         // Reached directly by the journal as well as through `map_data_blocks`, so the
         // charge bound is checked here too, before a block is allocated.
         self.check_sectors(n * self.sectors_per_block(), what)?;
@@ -1717,7 +1724,7 @@ impl<'a, S: Sink> Writer<'a, S> {
             });
         }
         inode.flags = InodeFlags::NONE;
-        let mut physical = Vec::new();
+        let mut physical = BlockRuns::default();
         let mut meta = 0u64;
 
         // Twelve direct pointers: logical blocks 0..11 in words 0..11.
@@ -1730,7 +1737,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         // Single-, double-, and triple-indirect trees hang off words 12, 13, 14. Each is
         // built only when the data reaches it, and allocated at the moment it is entered.
         for level in 1..=INDIRECT_LEVELS {
-            if physical.len() as u64 >= n {
+            if physical.len() >= n {
                 break;
             }
             let root = self.build_indirect(level as u32, n, &mut physical, &mut meta)?;
@@ -1757,7 +1764,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         &mut self,
         level: u32,
         n: u64,
-        physical: &mut Vec<u64>,
+        physical: &mut BlockRuns,
         meta: &mut u64,
     ) -> Result<u64, FormatError> {
         let ind_block = self.alloc.allocate_one()?;
@@ -1765,7 +1772,7 @@ impl<'a, S: Sink> Writer<'a, S> {
         let ppb = self.block_size / 4;
         let mut ptrs = vec![0u8; self.block_size];
         for slot in 0..ppb {
-            if physical.len() as u64 >= n {
+            if physical.len() >= n {
                 break;
             }
             let child = if level == 1 {
@@ -2023,9 +2030,13 @@ impl<'a, S: Sink> Writer<'a, S> {
             let physical = self
                 .build_classic_map(&mut inode, u64::from(blocks), "journal")
                 .map_err(journal_space)?;
-            // As above: `blocks` is at least `MIN_JOURNAL_BLOCKS`, and the map holds one
-            // entry per logical block, so there is a first one.
-            self.write_block(physical[0], &sb)?;
+            // As above: `blocks` is at least `MIN_JOURNAL_BLOCKS`, and the map holds every
+            // logical block, so there is a first one.
+            let first = physical
+                .blocks()
+                .next()
+                .expect("a journal of at least the minimum length maps a first block");
+            self.write_block(first, &sb)?;
         }
         inode.size = size;
 
@@ -2509,9 +2520,8 @@ impl<'a, S: Sink> Writer<'a, S> {
 /// Split content into block-sized chunks for placement, zero-padding the final chunk.
 ///
 /// The chunks borrow the source. Only a final short chunk is copied, into a padded block
-/// of its own, so placing a file costs one block beyond the file's own bytes rather than a
-/// second copy of it — which is what lets the contract be "peak memory is the largest
-/// single file" rather than twice that.
+/// of its own, so placing a window of a file costs one block beyond the window rather than
+/// a second copy of it.
 fn block_chunks(bytes: &[u8], block_size: usize) -> impl ExactSizeIterator<Item = Cow<'_, [u8]>> {
     bytes.chunks(block_size).map(move |chunk| {
         if chunk.len() == block_size {
@@ -2524,13 +2534,47 @@ fn block_chunks(bytes: &[u8], block_size: usize) -> impl ExactSizeIterator<Item 
     })
 }
 
-/// Flatten allocated ranges into the physical block numbers they cover, in order.
-fn flatten(ranges: &[BlockRange]) -> Vec<u64> {
-    let mut out = Vec::new();
-    for r in ranges {
-        out.extend(r.start..r.end());
+/// The physical blocks of an inode's data, in logical order, held as the runs they form.
+///
+/// A file's blocks are a few long runs, broken only where the allocator moved on or a block
+/// map's indirect block sits between two of them. So what this costs grows with how the
+/// mapping is broken up rather than with the file's length, and a file placed a window at a
+/// time holds a window and its runs rather than a word for every block.
+#[derive(Default)]
+struct BlockRuns {
+    runs: Vec<BlockRange>,
+    /// Blocks across every run.
+    count: u64,
+}
+
+impl BlockRuns {
+    /// The runs an allocation returned, in the order it returned them.
+    fn from_ranges(runs: Vec<BlockRange>) -> Self {
+        let count = runs.iter().map(|run| run.len).sum();
+        Self { runs, count }
     }
-    out
+
+    /// Append `block` as the next logical block, extending the last run where it follows it.
+    fn push(&mut self, block: u64) {
+        match self.runs.last_mut() {
+            Some(run) if run.end() == block => run.len += 1,
+            _ => self.runs.push(BlockRange {
+                start: block,
+                len: 1,
+            }),
+        }
+        self.count += 1;
+    }
+
+    /// How many blocks are held.
+    const fn len(&self) -> u64 {
+        self.count
+    }
+
+    /// Every block, in logical order.
+    fn blocks(&self) -> impl Iterator<Item = u64> + '_ {
+        self.runs.iter().flat_map(|run| run.start..run.end())
+    }
 }
 
 /// Inodes in use within group `group`, given the first free inode number.
@@ -2563,6 +2607,29 @@ mod tests {
 
     fn pinned_plan() -> FormatPlan {
         FormatPlan::new(TreeBuilder::new(), 64 * MIB, pinned_options()).expect("plan")
+    }
+
+    #[test]
+    fn block_runs_hold_a_mapping_as_its_runs_and_hand_back_every_block_in_order() {
+        // A block map's shape: twelve direct blocks, an indirect block between them and the
+        // next data, then data again. Three runs, however many blocks.
+        let mut runs = BlockRuns::default();
+        let order: Vec<u64> = (100..112).chain(113..1137).chain([2000, 2001]).collect();
+        for &block in &order {
+            runs.push(block);
+        }
+        assert_eq!(runs.len(), order.len() as u64);
+        assert_eq!(runs.runs.len(), 3);
+        assert!(runs.blocks().eq(order.iter().copied()));
+
+        // An allocation's ranges are taken as they are.
+        let ranges = vec![
+            BlockRange { start: 7, len: 3 },
+            BlockRange { start: 40, len: 2 },
+        ];
+        let runs = BlockRuns::from_ranges(ranges);
+        assert_eq!(runs.len(), 5);
+        assert!(runs.blocks().eq([7, 8, 9, 40, 41]));
     }
 
     #[test]

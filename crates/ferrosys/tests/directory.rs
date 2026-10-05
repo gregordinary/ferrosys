@@ -999,11 +999,11 @@ fn a_tree_of_unsearchable_directories_is_refused_rather_than_running_out_of_hand
 #[test]
 fn a_file_read_at_placement_time_does_not_follow_a_link_swapped_in_behind_the_walk() {
     // A walk records a symlink as a symlink and never reads through one. A file's *bytes*,
-    // though, are read when the file is placed, by the name the walk recorded — so a local
-    // writer replacing a staged name with a link between the walk and the format would put
-    // the target's bytes into the image, with no error and nothing in the fidelity report.
-    // The "must not change" caveat on a recorded range covers content changing; it does not
-    // cover the name becoming a different kind of thing.
+    // though, are read when the file is placed — so a local writer replacing a staged name
+    // with a link between the walk and the format would put the target's bytes into the
+    // image, with no error and nothing in the fidelity report. The "must not change" caveat
+    // on a recorded range covers content changing; it does not cover the name becoming a
+    // different kind of thing, and the format refuses it.
     let host = tempfile::tempdir().expect("temp dir");
     let staged = host.path().join("payload");
     std::fs::write(&staged, b"the real contents\n").expect("write");
@@ -1018,19 +1018,70 @@ fn a_file_read_at_placement_time_does_not_follow_a_link_swapped_in_behind_the_wa
     std::fs::remove_file(&staged).expect("remove");
     std::os::unix::fs::symlink(&secret, &staged).expect("symlink");
 
-    // A format that refused the link is the answer; one that succeeded must at least not
-    // have read through it.
-    if let Ok(image) = format(source, 16 * MIB, opts()) {
-        let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
-        let tree = walk_tree(&mut reader);
-        if let Some(inode) = tree.get(&b"/payload"[..]) {
-            let bytes = reader.read_data(inode).unwrap_or_default();
-            assert_ne!(
-                bytes, b"not for the image\n",
-                "the format read through a link swapped in behind the walk"
-            );
-        }
-    }
+    let err = format(source, 16 * MIB, opts())
+        .err()
+        .expect("a link swapped in behind the walk is refused");
+    assert!(err.to_string().contains("payload"), "{err}");
+}
+
+#[test]
+fn a_directory_swapped_for_a_link_behind_the_walk_is_not_a_way_out_of_the_tree() {
+    // The last name refusing a link is not enough: every directory above the file is a name
+    // too. Replacing `sub` with a link to a directory outside the tree, after the walk, would
+    // otherwise put whatever that directory holds under the recorded name into the image.
+    let host = tempfile::tempdir().expect("temp dir");
+    let tree = host.path().join("tree");
+    std::fs::create_dir_all(tree.join("sub")).expect("tree/sub");
+    std::fs::write(tree.join("sub/data"), b"public").expect("write");
+    let outside = host.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside");
+    std::fs::write(outside.join("data"), b"secret").expect("write");
+
+    let source = DirectorySource::from_path(&tree)
+        .expect("walk the tree")
+        .owner(0, 0);
+
+    std::fs::rename(tree.join("sub"), host.path().join("aside")).expect("rename aside");
+    std::os::unix::fs::symlink(&outside, tree.join("sub")).expect("symlink");
+
+    let err = format(source, 16 * MIB, opts())
+        .err()
+        .expect("a directory swapped for a link behind the walk is refused");
+    assert!(err.to_string().contains("sub/data"), "{err}");
+}
+
+#[test]
+fn a_file_replaced_under_its_name_behind_the_walk_is_refused_rather_than_read() {
+    // The bytes placed are the recorded file's. Another file renamed over the name between
+    // the walk and the format is a tree that changed, and reading it would put one file's
+    // bytes under metadata the walk read from another.
+    let host = tempfile::tempdir().expect("temp dir");
+    std::fs::write(host.path().join("kept"), b"recorded").expect("write");
+    std::fs::write(host.path().join("other"), b"replaced").expect("write");
+
+    let source = DirectorySource::from_path(host.path())
+        .expect("walk the tree")
+        .owner(0, 0);
+    std::fs::rename(host.path().join("other"), host.path().join("kept")).expect("rename over");
+
+    let err = format(source, 16 * MIB, opts())
+        .err()
+        .expect("a file replaced behind the walk is refused");
+    assert!(err.to_string().contains("kept"), "{err}");
+    assert!(err.to_string().contains("replaced"), "{err}");
+
+    // An edit in place is the same file, and is what the format reads.
+    let host = tempfile::tempdir().expect("temp dir");
+    std::fs::write(host.path().join("kept"), b"recorded").expect("write");
+    let source = DirectorySource::from_path(host.path())
+        .expect("walk the tree")
+        .owner(0, 0);
+    std::fs::write(host.path().join("kept"), b"rewrites").expect("rewrite in place");
+    let image = format(source, 16 * MIB, opts()).expect("format the edited tree");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let tree = walk_tree(&mut reader);
+    let inode = tree.get(&b"/kept"[..]).expect("the file is in the image");
+    assert_eq!(reader.read_data(inode).expect("read"), b"rewrites");
 }
 
 #[test]

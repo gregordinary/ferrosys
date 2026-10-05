@@ -1028,6 +1028,137 @@ fn atomic_publishes_the_image_only_once_it_is_whole() {
     );
 }
 
+/// A USTAR archive holding `/payload`, six bytes, and nothing else.
+fn payload_archive() -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_ustar();
+    h.set_path("payload").expect("path");
+    h.set_size(6);
+    h.set_mode(0o644);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_mtime(1_700_000_000);
+    h.set_entry_type(tar::EntryType::Regular);
+    h.set_cksum();
+    b.append(&h, &b"ORIGIN"[..]).expect("append");
+    b.into_inner().expect("finish the archive")
+}
+
+/// A format of `args` written to `dest`, which must be refused as a file the run reads and
+/// left exactly as it was.
+fn refused_as_its_own_source(args: &[&str], dest: &Path) {
+    let before = std::fs::read(dest).expect("read the destination");
+    let mut argv = args.to_vec();
+    argv.push(dest.to_str().expect("a text path"));
+    let out = run(&argv);
+    assert_eq!(
+        code(&out),
+        OPERATIONAL,
+        "{argv:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is a file this run reads"),
+        "the refusal says why: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dest).expect("the destination still exists"),
+        before,
+        "{argv:?} changed a destination it refused"
+    );
+}
+
+#[test]
+fn a_format_written_over_its_own_archive_is_refused_by_any_name() {
+    // The members are read as each is placed, so an archive truncated by the destination's
+    // open is read back as zeros or as the image's own bytes — and every step of that
+    // succeeds. A name is not what decides it: the same path, a hard link, and a symbolic
+    // link all name the one file.
+    let dir = scratch();
+    let archive = at(&dir, "aliased-input.tar");
+    std::fs::write(&archive, payload_archive()).expect("write the archive");
+    let tar = archive.to_str().expect("a text path");
+    let base = [
+        "format",
+        "-t",
+        "ext2",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-tar",
+        tar,
+    ];
+
+    refused_as_its_own_source(&base, &archive);
+    let hard = at(&dir, "hard-link.tar");
+    std::fs::hard_link(&archive, &hard).expect("hard link");
+    refused_as_its_own_source(&base, &hard);
+    #[cfg(unix)]
+    {
+        let soft = at(&dir, "soft-link.tar");
+        std::os::unix::fs::symlink(&archive, &soft).expect("symlink");
+        refused_as_its_own_source(&base, &soft);
+    }
+
+    // `--atomic` reads everything before the rename replaces the archive, so the same
+    // command is carried out, and carries the archive's bytes.
+    let mut atomic = base.to_vec();
+    atomic.push("--atomic");
+    atomic.push(tar);
+    let out = run(&atomic);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(ok(&["extract", "--cat", "/payload", tar]), b"ORIGIN");
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_format_written_over_a_file_in_its_own_tree_is_refused() {
+    // A destination inside the tree being walked is one of the files the format reads, when
+    // it is already there to be walked.
+    let dir = scratch();
+    let tree = at(&dir, "staging");
+    std::fs::create_dir(&tree).expect("staging");
+    std::fs::write(tree.join("data"), b"tree contents").expect("data");
+    let inside = tree.join("previous.img");
+    std::fs::write(&inside, b"an image already in the tree").expect("previous image");
+    let staged = tree.to_str().expect("a text path");
+    let base = [
+        "format",
+        "-t",
+        "ext2",
+        "--size",
+        "16M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--from-dir",
+        staged,
+    ];
+    refused_as_its_own_source(&base, &inside);
+    let outside = at(&dir, "hard-link.img");
+    std::fs::hard_link(tree.join("data"), &outside).expect("hard link");
+    refused_as_its_own_source(&base, &outside);
+}
+
+#[test]
+fn an_archive_extracted_over_its_own_image_is_refused() {
+    // The image is read while the archive is written, so an archive written in place over
+    // the image would truncate what is left to read.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "16M", None)), OK);
+    let path = image.to_str().expect("a text path");
+    refused_as_its_own_source(&["extract", path, "--to-tar"], &image);
+    let hard = at(&dir, "hard-link.img");
+    std::fs::hard_link(&image, &hard).expect("hard link");
+    refused_as_its_own_source(&["extract", path, "--to-tar"], &hard);
+}
+
 /// The temporary files `--atomic` writes through, by name, so a gate can assert there are
 /// none.
 fn temp_siblings(dir: &Path) -> Vec<String> {
@@ -1499,6 +1630,22 @@ fn inspect_reports_every_group_and_scans_by_default() {
     assert!(text.contains("no findings"));
 }
 
+/// Make an ext superblock claim about four billion block groups of one block and one inode
+/// each, with its block and inode totals agreeing with that many — a superblock that opens,
+/// and whose group count no image holds.
+///
+/// The primary superblock sits at byte 1024: `s_inodes_count` at 0x00, `s_blocks_count_lo` at
+/// 0x04, `s_first_data_block` at 0x14, `s_blocks_per_group` at 0x20 and `s_inodes_per_group`
+/// at 0x28, each a little-endian u32.
+fn claim_four_billion_groups(bytes: &mut [u8]) {
+    let first = u32::from_le_bytes(bytes[1024 + 0x14..1024 + 0x18].try_into().expect("a word"));
+    let groups = u32::MAX - first;
+    bytes[1024..1024 + 0x04].copy_from_slice(&groups.to_le_bytes());
+    bytes[1024 + 0x04..1024 + 0x08].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[1024 + 0x20..1024 + 0x24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[1024 + 0x28..1024 + 0x2c].copy_from_slice(&1u32.to_le_bytes());
+}
+
 #[test]
 fn inspect_groups_survives_a_hostile_group_count() {
     // A crafted superblock can claim ~4 billion block groups (`blocks_count` maxed,
@@ -1514,10 +1661,7 @@ fn inspect_groups_survives_a_hostile_group_count() {
     assert_eq!(code(&format(&image, "16M", None)), OK);
 
     let mut bytes = std::fs::read(&image).expect("read the image");
-    // The primary superblock sits at byte 1024. `s_blocks_count_lo` is at 0x04 and
-    // `s_blocks_per_group` at 0x20, both little-endian u32.
-    bytes[1024 + 0x04..1024 + 0x08].copy_from_slice(&u32::MAX.to_le_bytes());
-    bytes[1024 + 0x20..1024 + 0x24].copy_from_slice(&1u32.to_le_bytes());
+    claim_four_billion_groups(&mut bytes);
     std::fs::write(&image, &bytes).expect("write the image");
 
     let out = run(&["inspect", "--groups", image.to_str().expect("a text path")]);
@@ -1600,8 +1744,7 @@ fn inspect_groups_is_bounded_by_more_than_the_length_the_image_claims() {
     assert_eq!(code(&format(&image, "16M", None)), OK);
 
     let mut bytes = std::fs::read(&image).expect("read the image");
-    bytes[1024 + 0x04..1024 + 0x08].copy_from_slice(&u32::MAX.to_le_bytes());
-    bytes[1024 + 0x20..1024 + 0x24].copy_from_slice(&1u32.to_le_bytes());
+    claim_four_billion_groups(&mut bytes);
     std::fs::write(&image, &bytes).expect("write the image");
     // Sparse: the length is a claim, and the file still occupies what it did.
     std::fs::OpenOptions::new()

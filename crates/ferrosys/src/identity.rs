@@ -609,6 +609,21 @@ mod tests {
         bytes[1024 + field..1024 + field + 4].copy_from_slice(&value.to_le_bytes());
     }
 
+    /// Make the primary superblock claim groups of `blocks_per_group` blocks, as many of them
+    /// as its 32-bit block and inode counts can describe, with both counts agreeing with that
+    /// many groups — a geometry that opens, and that the image cannot hold.
+    fn claim_groups(bytes: &mut [u8], blocks_per_group: u32) -> u64 {
+        let sb = &bytes[1024..2048];
+        let first_data_block = u32::from_le_bytes(sb[0x14..0x18].try_into().expect("a word"));
+        let inodes_per_group = u32::from_le_bytes(sb[0x28..0x2c].try_into().expect("a word"));
+        let groups =
+            (u32::MAX / inodes_per_group).min((u32::MAX - first_data_block) / blocks_per_group);
+        put_u32(bytes, 0x20, blocks_per_group);
+        put_u32(bytes, 0x04, groups * blocks_per_group + first_data_block);
+        put_u32(bytes, 0x00, groups * inodes_per_group);
+        u64::from(groups)
+    }
+
     #[test]
     fn a_superblock_claiming_more_groups_than_the_image_holds_is_refused() {
         // The group count is `s_blocks_count / s_blocks_per_group`, and opening a filesystem
@@ -621,10 +636,9 @@ mod tests {
         // The image's own length is what bounds it: a backup past the end of the file is a
         // backup no read could reach, and the rewrite says so rather than working toward it.
         let mut bytes = image(Profile::Ext2);
-        // 4 GiB of 1 KiB blocks in eight-block groups: 536,870,912 groups claimed by an
-        // 8 MiB file.
-        put_u32(&mut bytes, 0x04, u32::MAX);
-        put_u32(&mut bytes, 0x20, 8);
+        // Eight-block groups, as many as the inode total counts: millions of them, claimed
+        // by an 8 MiB file.
+        assert!(claim_groups(&mut bytes, 8) > 1_000_000);
 
         let mut change = IdentityChange::new();
         change.uuid = Some([0x5a; 16]);
@@ -648,8 +662,9 @@ mod tests {
         // remains because nothing in this function should depend on a bound another one
         // applies.
         let mut bytes = image(Profile::Ext2);
-        put_u32(&mut bytes, 0x04, u32::MAX);
-        put_u32(&mut bytes, 0x20, 8 * 4096);
+        let block_size = 1024u32
+            << u32::from_le_bytes(bytes[1024 + 0x18..1024 + 0x1c].try_into().expect("a word"));
+        claim_groups(&mut bytes, 8 * block_size);
 
         let mut change = IdentityChange::new();
         change.uuid = Some([0x5a; 16]);

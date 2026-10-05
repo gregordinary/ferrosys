@@ -13,9 +13,31 @@
 //! [`crate::acl`]).
 //!
 //! A regular file's contents become a [`FileRange`] naming the file on the host, read only
-//! when that file is placed, so a format's peak memory is the largest single file rather
-//! than the tree. No descriptor is held between the walk and the format, so the number of
-//! files a tree may hold is bounded by nothing this source imposes.
+//! when that file is placed and then a window at a time, so a format's peak memory is one
+//! window rather than the tree. One descriptor is held between the walk and the format, the
+//! tree root's, so the number of files a tree may hold is bounded by nothing this source
+//! imposes.
+//!
+//! # Nothing outside the tree is read
+//!
+//! The walk follows no symbolic link below the root, and neither does anything that reads
+//! the tree after it. Each directory is listed through a handle opened beneath its parent's,
+//! and each name in it is opened as a handle to itself rather than to anything it points at,
+//! so a directory renamed away and replaced with a link to somewhere else is not entered —
+//! during the walk or afterwards. A file's bytes are read at placement from the tree root's
+//! handle one name at a time, following nothing, and only if the file there is the one the
+//! walk recorded. What reaches the image is what the walk found inside the tree, or an
+//! error.
+//!
+//! Extended attributes are read through a handle wherever one can be held: a directory's
+//! through the handle it is listed by, a regular file's through a handle to the file. A
+//! symbolic link, a device node, a FIFO, a socket, and a file this process may not open for
+//! reading are read by name, as `/proc/self/fd/<n>/<name>` with `<n>` the held handle to the
+//! directory the name is in — the same path the sink writes such an attribute through, and
+//! for the same reason: Linux has no attribute call that takes a directory handle before
+//! 6.13. That is the walk's one dependency on `/proc` being mounted. Where it is absent, a
+//! tree holding one of those kinds fails as an ordinary I/O error against the entry, naming
+//! `ENOENT`.
 //!
 //! # Determinism
 //!
@@ -47,14 +69,22 @@
 //!
 //! Metadata is read during the walk and a regular file's bytes when that file is placed, so
 //! an edit in between reaches the image — as wrong bytes rather than as an error, unless
-//! the file shrank enough for the read to run short.
+//! the file shrank enough for the read to run short. A file replaced under its name in
+//! between is an error rather than either file's bytes, and so is a directory replaced
+//! while the walk is listing it: [`HostError::Replaced`].
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::ffi::CString;
+use std::ffi::{CStr, CString, OsStr};
+use std::fs::File;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 
 mod sink;
 
@@ -62,6 +92,7 @@ pub use sink::{DirectorySink, ExtractReport};
 
 use crate::acl::Acl;
 use crate::escape::{printable, printable_path};
+use crate::path::canonical_parts;
 use crate::source::{EntryKind, FileContent, FileRange, Metadata, Source, SourceEntry};
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
@@ -289,6 +320,24 @@ pub enum HostError {
         /// The path the directory was already reached by.
         first: PathBuf,
     },
+    /// A name was replaced while the tree was walked: what the walk opened through it is not
+    /// what it found there a moment before.
+    ///
+    /// The walk reads each name's metadata through a handle to the name itself, and then
+    /// opens a directory to list it or a file to read its attributes. The two are the same
+    /// object unless something renamed another into place in between, and recording one
+    /// object's metadata beside another's contents describes neither. A tree being edited
+    /// while it is walked is a failure of the tree, so this is distinct from
+    /// [`Io`](Self::Io): walking it again once it settles is the answer.
+    #[error(
+        "{}: was replaced while the tree was walked",
+        printable_path(.path)
+    )]
+    #[non_exhaustive]
+    Replaced {
+        /// The offending path on the host.
+        path: PathBuf,
+    },
 }
 
 /// What kept changing, for [`HostError::UnstableXattrs`]'s message: one named attribute's
@@ -328,10 +377,12 @@ impl DirectorySource {
     ///
     /// Symlinks are recorded as symlinks and never followed, so a link pointing outside
     /// the tree is written as the link it is — and that holds of what the *format* reads as
-    /// well as of what the walk records: a file's bytes are read at placement time, by a
-    /// name, and that open does not follow a link either. A local writer replacing a staged
-    /// name with a link between the walk and the placement gets an error rather than the
-    /// target's bytes in the image. Every directory below `root` is descended,
+    /// well as of what the walk records. Every directory is listed through a handle opened
+    /// beneath its parent's without following a link, and a file's bytes are read at
+    /// placement from the root's handle one name at a time, following nothing, and only from
+    /// the file the walk recorded. A local writer replacing a staged file, or any directory
+    /// above it, with a link between the walk and the placement gets an error rather than
+    /// the target's bytes in the image. Every directory below `root` is descended,
     /// including one on another mounted filesystem — but each is descended once: two paths
     /// naming a single directory, which a bind mount produces, is
     /// [`HostError::RepeatedDirectory`] rather than a second copy of that subtree in the
@@ -340,18 +391,30 @@ impl DirectorySource {
     /// # Errors
     ///
     /// A [`HostError`] if `root` is not a directory, if any path under it cannot be read,
-    /// if a stored ACL cannot be translated, or if one directory is reached by two paths.
+    /// if a stored ACL cannot be translated, if one directory is reached by two paths, or if
+    /// a name is replaced while it is walked.
     pub fn from_path(root: impl AsRef<Path>) -> Result<Self, HostError> {
         let root = root.as_ref();
         // The root is followed if it is itself a symlink — it names the tree to walk, and
-        // a link to a directory names one. Everything inside it is read with the link
-        // intact.
-        let meta = std::fs::metadata(root).map_err(io_at(root))?;
-        if !meta.is_dir() {
-            return Err(HostError::NotADirectory {
+        // a link to a directory names one. Everything inside it is reached through this
+        // handle, with every link intact, and the handle is held for as long as a file
+        // beneath it may still be read.
+        let root_dir = rustix::fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|e| match e {
+            Errno::NOTDIR => HostError::NotADirectory {
                 path: root.to_path_buf(),
-            });
-        }
+            },
+            e => io_at(root)(e.into()),
+        })?;
+        let meta = root_dir.metadata().map_err(io_at(root))?;
+        let xattrs = xattrs_of(&Attrs::Open(&root_dir), root)?;
+        let names = names_in(&root_dir).map_err(io_at(root))?;
+        let root_dir = Arc::new(root_dir);
 
         // Which directory each path reached, by the identity the host gives it. Symlinks
         // are never followed, so the one shape that still puts a directory in the tree
@@ -364,68 +427,140 @@ impl DirectorySource {
             BTreeMap::from([((meta.dev(), meta.ino()), root.to_path_buf())]);
         // The whole tree is collected before any entry is built, so the sort that fixes
         // which name owns a shared inode happens over the complete list.
-        let mut found: Vec<(Vec<u8>, PathBuf, std::fs::Metadata)> =
-            vec![(b"/".to_vec(), root.to_path_buf(), meta)];
-        // An explicit stack rather than recursion: a tree's depth is the host's to choose,
-        // and a deep one must not be a stack overflow.
-        let mut pending: Vec<(PathBuf, Vec<u8>)> = vec![(root.to_path_buf(), b"/".to_vec())];
-        while let Some((host_dir, image_dir)) = pending.pop() {
-            for entry in std::fs::read_dir(&host_dir).map_err(io_at(&host_dir))? {
-                let entry = entry.map_err(io_at(&host_dir))?;
-                let host_path = entry.path();
-                let image_path = join(&image_dir, entry.file_name().as_bytes());
-                // `DirEntry::metadata` does not follow symlinks, so a link's own metadata
-                // is what is recorded and a link to a directory is not descended into.
-                let meta = entry.metadata().map_err(io_at(&host_path))?;
-                if meta.is_dir() {
-                    match entered.entry((meta.dev(), meta.ino())) {
-                        Entry::Occupied(first) => {
-                            return Err(HostError::RepeatedDirectory {
-                                path: host_path,
-                                first: first.get().clone(),
-                            });
-                        }
-                        Entry::Vacant(slot) => {
-                            slot.insert(host_path.clone());
-                        }
+        let mut found = vec![Found {
+            image: b"/".to_vec(),
+            meta,
+            kind: EntryKind::Directory,
+            xattrs,
+        }];
+        // One open directory per level of the current path, and no more: a tree's depth is
+        // the host's to choose, so the walk is a loop over an explicit stack rather than a
+        // recursion, and its breadth costs names rather than descriptors.
+        let mut stack = vec![Frame {
+            dir: Arc::clone(&root_dir),
+            names: names.into_iter(),
+            image: b"/".to_vec(),
+            host: root.to_path_buf(),
+            relative: Vec::new(),
+        }];
+        while let Some(frame) = stack.last_mut() {
+            let Some(name) = frame.names.next() else {
+                stack.pop();
+                continue;
+            };
+            let host_path = frame.host.join(OsStr::from_bytes(name.to_bytes()));
+            let image_path = join(&frame.image, name.to_bytes());
+            let relative = if frame.relative.is_empty() {
+                name.to_bytes().to_vec()
+            } else {
+                join(&frame.relative, name.to_bytes())
+            };
+            // A handle to the name itself, following nothing: a symbolic link is held as the
+            // link, and a device or a FIFO is held without being opened for I/O, which for
+            // either would be an action rather than a look. Everything recorded about the
+            // name is read through this handle or checked against it.
+            let node = rustix::fs::openat(
+                &*frame.dir,
+                &*name,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|e| io_at(&host_path)(e.into()))?;
+            let meta = node.metadata().map_err(io_at(&host_path))?;
+            let file_type = meta.file_type();
+            let mut child = None;
+            let (kind, xattrs) = if file_type.is_dir() {
+                match entered.entry((meta.dev(), meta.ino())) {
+                    Entry::Occupied(first) => {
+                        return Err(HostError::RepeatedDirectory {
+                            path: host_path,
+                            first: first.get().clone(),
+                        });
                     }
-                    pending.push((host_path.clone(), image_path.clone()));
+                    Entry::Vacant(slot) => {
+                        slot.insert(host_path.clone());
+                    }
                 }
-                found.push((image_path, host_path, meta));
+                // Opened through the handle already held, so the directory listed is the one
+                // whose metadata was just read.
+                let dir = rustix::fs::openat(
+                    &node,
+                    c".",
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map(File::from)
+                .map_err(|e| io_at(&host_path)(e.into()))?;
+                let xattrs = xattrs_of(&Attrs::Open(&dir), &host_path)?;
+                let names = names_in(&dir).map_err(io_at(&host_path))?;
+                child = Some(Frame {
+                    dir: Arc::new(dir),
+                    names: names.into_iter(),
+                    image: image_path.clone(),
+                    host: host_path.clone(),
+                    relative: relative.clone(),
+                });
+                (EntryKind::Directory, xattrs)
+            } else if file_type.is_file() {
+                let xattrs = file_xattrs(&frame.dir, &name, &meta, &host_path)?;
+                // The contents are named, not read: the bytes are fetched when the file is
+                // placed, so the walk holds neither them nor a descriptor for them.
+                let walked = Walked {
+                    root: Arc::clone(&root_dir),
+                    relative: relative.into(),
+                    identity: (meta.dev(), meta.ino()),
+                };
+                let range = FileRange::walked(walked, &host_path, 0, meta.len());
+                (EntryKind::File(FileContent::Range(range)), xattrs)
+            } else {
+                let kind = kind_of(&node, &meta, &host_path)?;
+                let named = fd_path(&*frame.dir, name.to_bytes());
+                (kind, xattrs_of(&Attrs::Named(&named), &host_path)?)
+            };
+            found.push(Found {
+                image: image_path,
+                meta,
+                kind,
+                xattrs,
+            });
+            if let Some(child) = child {
+                stack.push(child);
             }
         }
-        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found.sort_by(|a, b| a.image.cmp(&b.image));
 
         // The first name for an inode, in sorted path order, carries the file; every later
         // name for it is a hard link to that first one. Directories are excluded: their
         // link counts are `.` and their subdirectories' `..`, not several names.
         let mut first_name: BTreeMap<(u64, u64), Vec<u8>> = BTreeMap::new();
         let mut entries = Vec::with_capacity(found.len());
-        for (image_path, host_path, meta) in found {
-            let mut linked: Option<Vec<u8>> = None;
+        for Found {
+            image,
+            meta,
+            mut kind,
+            mut xattrs,
+        } in found
+        {
             if !meta.is_dir() && meta.nlink() > 1 {
                 match first_name.entry((meta.dev(), meta.ino())) {
-                    Entry::Occupied(held) => linked = Some(held.get().clone()),
+                    // A hard link is another name for an inode the first name already
+                    // described, so it carries neither contents nor attributes of its own.
+                    Entry::Occupied(held) => {
+                        kind = EntryKind::HardLink {
+                            target: held.get().clone(),
+                        };
+                        xattrs = Vec::new();
+                    }
                     Entry::Vacant(slot) => {
-                        slot.insert(image_path.clone());
+                        slot.insert(image.clone());
                     }
                 }
             }
-            let kind = match linked {
-                Some(target) => EntryKind::HardLink { target },
-                None => kind_of(&host_path, &meta)?,
-            };
-            // A hard link is another name for an inode the first name already described,
-            // so it carries neither metadata nor attributes of its own.
-            let (meta, xattrs) = if matches!(kind, EntryKind::HardLink { .. }) {
-                (metadata_of(&meta), Vec::new())
-            } else {
-                (metadata_of(&meta), xattrs_of(&host_path)?)
-            };
             entries.push(SourceEntry {
-                path: image_path,
+                path: image,
                 kind,
-                meta,
+                meta: metadata_of(&meta),
                 xattrs,
             });
         }
@@ -491,6 +626,136 @@ impl Source for DirectorySource {
     }
 }
 
+/// A directory on the walk's current path, and the names in it not yet visited.
+struct Frame {
+    /// The directory, open for reading: what its names were listed from, and what each one
+    /// is opened beneath.
+    dir: Arc<File>,
+    /// The names it holds that the walk has not reached yet.
+    names: std::vec::IntoIter<CString>,
+    /// Its path inside the image.
+    image: Vec<u8>,
+    /// Its path on the host, which is what a failure names.
+    host: PathBuf,
+    /// Its path below the root, empty for the root itself.
+    relative: Vec<u8>,
+}
+
+/// One name the walk found, with everything about it read while its directory was open.
+struct Found {
+    /// Its path inside the image.
+    image: Vec<u8>,
+    /// The host's metadata for it, read through a handle to the name itself.
+    meta: std::fs::Metadata,
+    /// What it is. A regular file here may yet become a hard link to an earlier name, once
+    /// the sort has decided which name is first.
+    kind: EntryKind,
+    /// Its extended attributes, in name order.
+    xattrs: Vec<Xattr>,
+}
+
+/// A regular file the walk recorded, as the [`FileRange`] naming it reaches the file again
+/// when it is placed.
+#[derive(Clone)]
+pub(crate) struct Walked {
+    /// The directory the walk started from, held from the walk to the last read beneath it.
+    root: Arc<File>,
+    /// The file's path below the root: single names, joined by separators.
+    relative: Arc<[u8]>,
+    /// The device and inode number the walk recorded for the file.
+    identity: (u64, u64),
+}
+
+impl Walked {
+    /// Open the file the walk recorded, for reading.
+    ///
+    /// Every directory between the root and the file is opened beneath the one before it
+    /// without following a link, so a directory replaced with a link to somewhere outside
+    /// the tree is a failure rather than a way out of it. The file itself is looked at before
+    /// it is opened and checked again through the handle that reads it, and either look
+    /// finding anything but the file the walk recorded is a refusal: one before the open
+    /// means a node swapped in is never opened — which for a device would be an action —
+    /// and one after it covers a name replaced between the two. The open does not wait on
+    /// a FIFO swapped in at that moment.
+    pub(crate) fn open(&self) -> std::io::Result<File> {
+        // The walk built the path from the names a directory listing returned, so it holds
+        // no `.`, no `..`, and no empty component for the split to drop or keep.
+        let names = canonical_parts(&self.relative);
+        let Some((&last, parents)) = names.split_last() else {
+            return Err(std::io::ErrorKind::NotFound.into());
+        };
+        let mut dir: Option<File> = None;
+        for &name in parents {
+            let at = dir.as_ref().map_or(self.root.as_fd(), AsFd::as_fd);
+            let next = rustix::fs::openat(
+                at,
+                name,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            dir = Some(File::from(next));
+        }
+        let at = dir.as_ref().map_or(self.root.as_fd(), AsFd::as_fd);
+        let node = rustix::fs::openat(
+            at,
+            last,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        self.check(&File::from(node))?;
+        let file = File::from(rustix::fs::openat(
+            at,
+            last,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        self.check(&file)?;
+        Ok(file)
+    }
+
+    /// Whether `file` is the regular file the walk recorded.
+    fn check(&self, file: &File) -> std::io::Result<()> {
+        let meta = file.metadata()?;
+        if meta.file_type().is_file() && (meta.dev(), meta.ino()) == self.identity {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                "the name holds a different file from the one the walk recorded, so it was \
+                 replaced after the tree was walked",
+            ))
+        }
+    }
+}
+
+/// The names a directory holds, without `.` and `..`, read through the handle to it.
+fn names_in(dir: &File) -> std::io::Result<Vec<CString>> {
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// The path that names `name` inside the directory `dir` refers to, without resolving the
+/// directory again: `/proc/self/fd/<n>/<name>`, with `<n>` the handle.
+///
+/// `/proc/self/fd/<n>` is the kernel's own name for an open handle: resolving it yields the
+/// file that handle refers to, whatever the path it was opened by has since become. Joining a
+/// single component onto it therefore reaches exactly what an `*at` call on `dir` would, and
+/// nothing swapped in above the directory can redirect it. Used with a call that does not
+/// follow its final component, the only name resolved from a string is the entry itself.
+/// Both directions use it, for the one call Linux takes no directory handle for before 6.13:
+/// an extended attribute on something that cannot be opened.
+fn fd_path(dir: impl AsFd, name: &[u8]) -> PathBuf {
+    let mut path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_fd().as_raw_fd()));
+    path.push(OsStr::from_bytes(name));
+    path
+}
+
 /// Attach a path to an I/O failure, so every message names the file it concerns. Both
 /// directions use it: a walk names what could not be read, a sink what could not be written.
 fn io_at(path: &Path) -> impl Fn(std::io::Error) -> HostError + '_ {
@@ -512,24 +777,23 @@ fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
     path
 }
 
-/// What to write at a path, from the file type the host recorded.
-fn kind_of(host_path: &Path, meta: &std::fs::Metadata) -> Result<EntryKind, HostError> {
+/// What to write for a name that is neither a directory nor a regular file, from the file
+/// type the host recorded and, for a symbolic link, its target read through `node`, the
+/// handle to the link itself.
+fn kind_of(
+    node: &File,
+    meta: &std::fs::Metadata,
+    host_path: &Path,
+) -> Result<EntryKind, HostError> {
     use std::os::unix::fs::FileTypeExt;
 
     let file_type = meta.file_type();
-    let kind = if file_type.is_dir() {
-        EntryKind::Directory
-    } else if file_type.is_file() {
-        // The contents are named, not read: the bytes are fetched when the file is
-        // placed, so the walk holds neither them nor a descriptor for them.
-        EntryKind::File(FileContent::Range(FileRange::at_path(
-            host_path,
-            0,
-            meta.len(),
-        )))
-    } else if file_type.is_symlink() {
-        let target = std::fs::read_link(host_path).map_err(io_at(host_path))?;
-        EntryKind::Symlink(target.as_os_str().as_bytes().to_vec())
+    let kind = if file_type.is_symlink() {
+        // An empty name reads the link the handle holds, so the target recorded is the one
+        // the metadata above was read from.
+        let target = rustix::fs::readlinkat(node, c"", Vec::new())
+            .map_err(|e| io_at(host_path)(e.into()))?;
+        EntryKind::Symlink(target.into_bytes())
     } else if file_type.is_char_device() {
         let (major, minor) = device_numbers(meta.rdev());
         EntryKind::CharDevice { major, minor }
@@ -580,7 +844,70 @@ fn device_numbers(rdev: u64) -> (u32, u32) {
     (major as u32, minor as u32)
 }
 
-/// Every extended attribute a path carries, sorted by name.
+/// Where an entry's extended attributes are read from.
+enum Attrs<'a> {
+    /// A handle to the entry itself.
+    Open(&'a File),
+    /// A path that reaches the entry without following it: the held handle to its directory,
+    /// spelled through `/proc/self/fd`, and its own name. See [`fd_path`].
+    Named(&'a Path),
+}
+
+impl Attrs<'_> {
+    /// The entry's attribute names, run together: the size of the list when `buf` is empty.
+    fn list(&self, buf: &mut [u8]) -> rustix::io::Result<usize> {
+        match self {
+            Self::Open(file) => rustix::fs::flistxattr(file, buf),
+            Self::Named(path) => rustix::fs::llistxattr(*path, buf),
+        }
+    }
+
+    /// One attribute's value: its size when `buf` is empty.
+    fn get(&self, name: &CStr, buf: &mut [u8]) -> rustix::io::Result<usize> {
+        match self {
+            Self::Open(file) => rustix::fs::fgetxattr(file, name, buf),
+            Self::Named(path) => rustix::fs::lgetxattr(*path, name, buf),
+        }
+    }
+}
+
+/// A regular file's extended attributes, read through a handle to the file.
+///
+/// The handle is opened beneath `dir` without following a link, and checked to be the file
+/// whose metadata the walk read as `meta`. Opening a file for reading asks for a permission
+/// the rest of the walk does not, so a file this process may not open has its attributes read
+/// by name instead, which asks only for search permission on its directory.
+fn file_xattrs(
+    dir: &File,
+    name: &CStr,
+    meta: &std::fs::Metadata,
+    host_path: &Path,
+) -> Result<Vec<Xattr>, HostError> {
+    let opened = rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    );
+    match opened {
+        Ok(fd) => {
+            let file = File::from(fd);
+            let held = file.metadata().map_err(io_at(host_path))?;
+            if (held.dev(), held.ino()) != (meta.dev(), meta.ino()) {
+                return Err(HostError::Replaced {
+                    path: host_path.to_path_buf(),
+                });
+            }
+            xattrs_of(&Attrs::Open(&file), host_path)
+        }
+        Err(Errno::ACCESS | Errno::PERM) => {
+            xattrs_of(&Attrs::Named(&fd_path(dir, name.to_bytes())), host_path)
+        }
+        Err(e) => Err(io_at(host_path)(e.into())),
+    }
+}
+
+/// Every extended attribute an entry carries, sorted by name.
 ///
 /// A POSIX ACL arrives in the version-2 form the syscall boundary speaks, which ext does
 /// not store: it is decoded and re-encoded into the compact form, exactly as an ACL
@@ -588,10 +915,10 @@ fn device_numbers(rdev: u64) -> (u32, u32) {
 ///
 /// A filesystem that does not support extended attributes reports none rather than
 /// failing: a tree on such a filesystem simply has no attributes to carry.
-fn xattrs_of(host_path: &Path) -> Result<Vec<Xattr>, HostError> {
+fn xattrs_of(attrs: &Attrs<'_>, host_path: &Path) -> Result<Vec<Xattr>, HostError> {
     let mut xattrs = Vec::new();
-    for name in list_xattrs(host_path)? {
-        let Some(value) = get_xattr(host_path, &name)? else {
+    for name in list_xattrs(attrs, host_path)? {
+        let Some(value) = get_xattr(attrs, host_path, &name)? else {
             // The attribute was removed between the listing and the read. It is not
             // carried, which is what the tree now holds.
             continue;
@@ -621,12 +948,12 @@ fn xattrs_of(host_path: &Path) -> Result<Vec<Xattr>, HostError> {
 /// source does not promise to survive.
 const XATTR_ATTEMPTS: usize = 4;
 
-/// The names of a path's extended attributes, from the symlink itself rather than from
+/// The names of an entry's extended attributes, from the entry itself rather than from
 /// what it points at.
-fn list_xattrs(host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
+fn list_xattrs(attrs: &Attrs<'_>, host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
     for _ in 0..XATTR_ATTEMPTS {
         // A zero-length buffer asks for the size rather than the value.
-        let size = match rustix::fs::llistxattr(host_path, &mut [0u8; 0][..]) {
+        let size = match attrs.list(&mut []) {
             Ok(size) => size,
             Err(e) if unsupported(e) => return Ok(Vec::new()),
             Err(e) => return Err(io_at(host_path)(e.into())),
@@ -635,7 +962,7 @@ fn list_xattrs(host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; size];
-        match rustix::fs::llistxattr(host_path, &mut buf[..]) {
+        match attrs.list(&mut buf) {
             Ok(len) => {
                 // The list is the names run together, each terminated by a NUL, so the
                 // split leaves a trailing empty element that is not a name.
@@ -646,7 +973,7 @@ fn list_xattrs(host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
                     .collect());
             }
             // The set grew between the size query and the read; ask again.
-            Err(rustix::io::Errno::RANGE) => continue,
+            Err(Errno::RANGE) => continue,
             Err(e) if unsupported(e) => return Ok(Vec::new()),
             Err(e) => return Err(io_at(host_path)(e.into())),
         }
@@ -659,7 +986,11 @@ fn list_xattrs(host_path: &Path) -> Result<Vec<Vec<u8>>, HostError> {
 }
 
 /// One extended attribute's value, or `None` if it is gone by the time it is read.
-fn get_xattr(host_path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+fn get_xattr(
+    attrs: &Attrs<'_>,
+    host_path: &Path,
+    name: &[u8],
+) -> Result<Option<Vec<u8>>, HostError> {
     // An attribute name cannot hold a NUL — the kernel's own list is NUL-separated — so
     // this fails only for a name that came from somewhere else.
     let name = CString::new(name).map_err(|_| HostError::Io {
@@ -667,7 +998,7 @@ fn get_xattr(host_path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>, HostError
         source: std::io::Error::other("an extended-attribute name holds a NUL byte"),
     })?;
     for _ in 0..XATTR_ATTEMPTS {
-        let size = match rustix::fs::lgetxattr(host_path, &name, &mut [0u8; 0][..]) {
+        let size = match attrs.get(&name, &mut []) {
             Ok(size) => size,
             Err(e) if gone(e) => return Ok(None),
             Err(e) if unsupported(e) => return Ok(None),
@@ -678,13 +1009,13 @@ fn get_xattr(host_path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>, HostError
             return Ok(Some(Vec::new()));
         }
         let mut buf = vec![0u8; size];
-        match rustix::fs::lgetxattr(host_path, &name, &mut buf[..]) {
+        match attrs.get(&name, &mut buf) {
             Ok(len) => {
                 buf.truncate(len);
                 return Ok(Some(buf));
             }
             // The value grew between the size query and the read; ask again.
-            Err(rustix::io::Errno::RANGE) => continue,
+            Err(Errno::RANGE) => continue,
             Err(e) if gone(e) => return Ok(None),
             Err(e) => return Err(io_at(host_path)(e.into())),
         }
@@ -697,13 +1028,13 @@ fn get_xattr(host_path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>, HostError
 }
 
 /// Whether the failure is the filesystem saying it holds no extended attributes at all.
-fn unsupported(e: rustix::io::Errno) -> bool {
-    e == rustix::io::Errno::NOTSUP || e == rustix::io::Errno::OPNOTSUPP
+fn unsupported(e: Errno) -> bool {
+    e == Errno::NOTSUP || e == Errno::OPNOTSUPP
 }
 
 /// Whether the failure is the attribute no longer being there.
-fn gone(e: rustix::io::Errno) -> bool {
-    e == rustix::io::Errno::NODATA
+fn gone(e: Errno) -> bool {
+    e == Errno::NODATA
 }
 
 #[cfg(test)]
@@ -841,7 +1172,7 @@ mod tests {
 
     #[test]
     fn a_regular_files_contents_are_named_rather_than_read() {
-        // The peak memory of a format is the largest single file only if the walk holds no
+        // The peak memory of a format is one window of one file only if the walk holds no
         // file's bytes: what it records is where they are.
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("motd"), b"welcome\n").expect("motd");

@@ -55,7 +55,7 @@ use std::io::{Cursor, Seek, Write};
 use crate::Timestamp;
 use crate::fidelity::FidelityReport;
 use crate::io::ByteSink;
-use crate::source::Source;
+use crate::source::{CONTENT_WINDOW, Source};
 
 use super::MappedChunk;
 use super::btree::levels_above;
@@ -690,9 +690,11 @@ pub fn format(
 ///
 /// Only the blocks the filesystem occupies are written and nothing is read back, so a file
 /// destination stays sparse and the image never exists in memory. What this costs in memory is
-/// the source's entry records and the largest single file's bytes — each file is read whole as
-/// it is placed — neither of which grows with the volume, so a volume far larger than this
-/// machine's memory is a file that stays sparse.
+/// the source's entry records, the records of every tree built from them, and one window of a
+/// file's bytes — a file named by range is read a mebibyte at a time as it is placed. Of those
+/// trees, the checksum tree grows with the bytes the files hold, four bytes for each sector of
+/// them, and the rest with the number of entries. None of it grows with the volume, so a volume
+/// far larger than this machine's memory is a file that stays sparse.
 ///
 /// The sink is extended to `volume_bytes`, and every byte of it that is not written must read
 /// back as zero — a freshly created file, or one truncated to zero length, satisfies that.
@@ -1018,7 +1020,7 @@ impl Allocation {
 // Everything here is decided before a tree is built, because the records naming these addresses
 // are what the trees are made of. What is *not* decided here is a single checksum: a record's
 // key and its length follow from the extents alone, and its bytes are filled as the data is
-// written, so the whole filesystem's checksums never exist in memory at once.
+// written, so each file's bytes are read once, by the pass that writes them.
 
 /// One run of a file's bytes on the volume.
 ///
@@ -1212,10 +1214,10 @@ impl<'a> CsumFill<'a> {
 
 /// Write every file's bytes, checksumming each sector on the way past.
 ///
-/// One read per file and one buffer at a time, so what this costs in memory is the largest
-/// single file rather than the sum of them — which is what [`FileContent`](crate::FileContent)
-/// exists to make possible. The bytes go to every copy of the logical space holding them, so a
-/// replicated data block group protects what is in it.
+/// One window of one extent at a time, so what a file's bytes cost in memory is a window rather
+/// than the file — which is what [`FileContent`](crate::FileContent) exists to make possible.
+/// The bytes go to every copy of the logical space holding them, so a replicated data block
+/// group protects what is in it.
 fn write_data<W: Write + Seek>(
     sink: &mut ByteSink<W>,
     model: &BtrfsModel,
@@ -1233,21 +1235,29 @@ fn write_data<W: Write + Seek>(
             let ObjectKind::File { content, .. } = object.kind else {
                 unreachable!("only a regular file is given data extents")
             };
-            let bytes = model.contents[content].read()?;
+            let content = &model.contents[content];
             for extent in extents {
-                // The run's bytes, and zeros where the file stops inside its last sector. A
-                // sector is checksummed whole, so what is past the end of the file has to be a
-                // value rather than whatever the destination happened to hold.
-                buffer.clear();
-                let from = extent.offset as usize;
-                let to = (from + extent.length as usize).min(bytes.len());
-                buffer.extend_from_slice(&bytes[from.min(bytes.len())..to]);
-                buffer.resize(extent.length as usize, 0);
-                for at in (0..buffer.len()).step_by(sector) {
-                    csums.push(crc32c_over(&buffer[at..at + sector]));
-                }
-                for offset in copies_of(layout, extent.logical) {
-                    sink.write_at(offset, &buffer)?;
+                // The run a window at a time. A window is a whole number of sectors, so every
+                // sector is checksummed whole and in order however the run divides.
+                let mut done = 0u64;
+                while done < extent.length {
+                    let n = (extent.length - done).min(CONTENT_WINDOW as u64);
+                    // The file's bytes, and zeros where the file stops inside its last sector.
+                    // A sector is checksummed whole, so what is past the end of the file has to
+                    // be a value rather than whatever the destination happened to hold.
+                    let from = extent.offset + done;
+                    let held = content.len().saturating_sub(from).min(n);
+                    // Both bounded by the window, so neither conversion can lose a value.
+                    buffer.clear();
+                    buffer.resize(n as usize, 0);
+                    content.read_at(from, &mut buffer[..held as usize])?;
+                    for at in (0..buffer.len()).step_by(sector) {
+                        csums.push(crc32c_over(&buffer[at..at + sector]));
+                    }
+                    for offset in copies_of(layout, extent.logical) {
+                        sink.write_at(offset + done, &buffer)?;
+                    }
+                    done += n;
                 }
             }
         }

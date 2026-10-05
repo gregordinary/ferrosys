@@ -336,8 +336,27 @@ fn flip_byte(image: &Path, offset: u64) {
 /// A copy of `image` under `name`, so a corruption never touches the image a sibling gate
 /// is asserting about.
 fn copy_of(lab: &Lab, image: &Path, name: &str) -> PathBuf {
+    // Sparse, as the image is. `fs::copy` writes every byte, holes included, so a copy costs
+    // the image's whole length on a filesystem that stores zeros — a tmpfs among them, and
+    // the namespace tier runs the suite over one of eight gibibytes, in parallel. Only the
+    // pieces holding something are written, and the length is set to match.
     let path = lab.path().join(name);
-    fs::copy(image, &path).expect("copy the image");
+    let mut from = File::open(image).expect("open the image");
+    let mut to = File::create(&path).expect("create the copy");
+    let mut buf = vec![0u8; 64 << 10];
+    let mut at = 0u64;
+    loop {
+        let read = from.read(&mut buf).expect("read the image");
+        if read == 0 {
+            break;
+        }
+        if buf[..read].iter().any(|&b| b != 0) {
+            to.seek(SeekFrom::Start(at)).expect("seek the copy");
+            to.write_all(&buf[..read]).expect("write the copy");
+        }
+        at += read as u64;
+    }
+    to.set_len(at).expect("size the copy");
     path
 }
 
@@ -2295,6 +2314,273 @@ fn each_corruption_the_checker_rejects_is_one_this_reader_rejects() {
             })
         ),
         "a superblock damaged in every copy: {refusal:?}"
+    );
+}
+
+/// Rewrite the tree block at `logical` through `edit` in every copy the chunk map gives it,
+/// and re-checksum each, so what a reader meets is the one fault the edit made.
+#[cfg(feature = "btrfs")]
+fn amend_tree_block(image: &Path, logical: u64, edit: impl Fn(&mut [u8])) {
+    use ferrosys::btrfs::{Volume, ondisk::checksum};
+
+    let volume = Volume::open(File::open(image).expect("open the image")).expect("it opens");
+    let node = volume.node_size() as usize;
+    let chunk = volume
+        .chunk_map()
+        .chunk_at(logical)
+        .expect("the block is mapped");
+    let copies: Vec<u64> = chunk
+        .copies
+        .iter()
+        .map(|&copy| copy + (logical - chunk.logical))
+        .collect();
+    drop(volume);
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .expect("open the image for writing");
+    for at in copies {
+        let mut block = vec![0u8; node];
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.read_exact(&mut block).expect("read a copy");
+        edit(&mut block);
+        let digest = checksum(&block);
+        block[..4].copy_from_slice(&digest.to_le_bytes());
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(&block).expect("write a copy");
+    }
+}
+
+/// A tree whose pointers lead to blocks they do not describe is rejected by the checker and
+/// refused here, strictly, and named by a lenient scan.
+///
+/// Two ways of arriving at the wrong block, each with a valid checksum, address and
+/// filesystem: a block from another transaction than the root item or the parent's pointer
+/// records, and a node key that is not the first key of the block it leads to. A walk of
+/// every block in order meets every item whatever the node's keys say, so what makes the
+/// second visible is holding each key to the block it leads to.
+#[test]
+#[cfg(feature = "btrfs")]
+fn a_tree_that_leads_to_blocks_it_does_not_describe_is_rejected_and_refused() {
+    use ferrosys::btrfs::ondisk::{DiskKey, Header, KeyPtr, objectid};
+    use ferrosys::btrfs::{OpenOptions, ReadPolicy, Reader, Volume};
+
+    if !suite_ready() {
+        return;
+    }
+    let lab = Lab::new();
+    // Six hundred names put the filesystem tree's root a level above its leaves, so it has
+    // child pointers to damage.
+    let tree = lab.path().join("many");
+    fs::create_dir(&tree).expect("create the tree");
+    for i in 0..600 {
+        fs::write(tree.join(format!("n{i:04}")), b"x").expect("write a file");
+    }
+    let healthy = lab.formatted(
+        "many.img",
+        COMPACT,
+        &["-r", tree.to_str().expect("a utf-8 path")],
+    );
+    btrfs_check_clean(&healthy, &[]).expect("the control is clean");
+    let (root, second) = {
+        let mut volume = Volume::open(File::open(&healthy).expect("open")).expect("it opens");
+        let root = volume
+            .tree_roots()
+            .expect("the root tree")
+            .into_iter()
+            .find(|root| root.objectid == objectid::FS_TREE)
+            .expect("a filesystem tree");
+        let block = volume.read_block(root.bytenr).expect("its root block");
+        (root, block.key_ptr(1).expect("a second child").key)
+    };
+    assert!(root.level >= 1, "the filesystem tree is more than one leaf");
+
+    let pointer_at = |index: usize| Header::SIZE + index * KeyPtr::SIZE;
+    let with_key = |index: usize, key: DiskKey| {
+        move |block: &mut [u8]| {
+            let at = pointer_at(index);
+            let mut pointer = KeyPtr::read_from(&block[at..]).expect("a pointer");
+            pointer.key = key;
+            pointer.write_to(&mut block[at..]);
+        }
+    };
+    let below = DiskKey {
+        offset: second
+            .offset
+            .checked_sub(1)
+            .expect("an offset to step below"),
+        ..second
+    };
+    let above = DiskKey {
+        offset: second.offset + 1,
+        ..second
+    };
+    type Edit = Box<dyn Fn(&mut [u8])>;
+    let rows: [(&str, Edit); 5] = [
+        (
+            "the root block records another transaction than its root item",
+            Box::new(|block: &mut [u8]| {
+                let mut header = Header::read_from(block).expect("a header");
+                header.generation = 9999;
+                header.write_to(block);
+            }),
+        ),
+        (
+            "a child pointer records another transaction than its child",
+            Box::new(move |block: &mut [u8]| {
+                let at = pointer_at(0);
+                let mut pointer = KeyPtr::read_from(&block[at..]).expect("a pointer");
+                pointer.generation = 9999;
+                pointer.write_to(&mut block[at..]);
+            }),
+        ),
+        (
+            "a node key below every key",
+            Box::new(with_key(1, DiskKey::MIN)),
+        ),
+        (
+            "a node key just below the first key of its block",
+            Box::new(with_key(1, below)),
+        ),
+        (
+            "a node key just above the first key of its block",
+            Box::new(with_key(1, above)),
+        ),
+    ];
+    for (index, (what, edit)) in rows.into_iter().enumerate() {
+        let image = copy_of(&lab, &healthy, &format!("misled-{index}.img"));
+        amend_tree_block(&image, root.bytenr, edit);
+        assert!(
+            btrfs_check_clean(&image, &[]).is_err(),
+            "{what}: the checker rejects it, so this is a control"
+        );
+        assert!(
+            read_back(&image).is_err(),
+            "{what}: a strict read refuses it"
+        );
+        let mut lenient = Reader::open_with(
+            File::open(&image).expect("open"),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("it opens leniently");
+        let report = lenient.scan();
+        assert!(
+            !report.is_clean(),
+            "{what}: the scan names it\n{:?}",
+            report.anomalies()
+        );
+    }
+}
+
+/// The two places the superblock records the map from logical addresses onto the device, and
+/// the copies of the superblock itself, are each held to say the same thing.
+///
+/// The chunk tree repeats the bootstrap array's system chunk, and a repeated record that maps
+/// the chunk somewhere else is a second answer for every address in it: the checker reports
+/// the stripe it now cannot match, a strict read refuses it, and a lenient one keeps the
+/// mapping that read the chunk tree and names the chunk. A copy of the superblock at the live
+/// generation is the live record but for its checksum and its own location, and one naming
+/// another filesystem is not a copy of it — a fault the checker does not look for.
+#[test]
+#[cfg(feature = "btrfs")]
+fn a_mapping_or_a_superblock_copy_that_contradicts_the_live_one_is_refused() {
+    use ferrosys::btrfs::ondisk::{Chunk, DiskKey, Header, Item, ItemType, checksum};
+    use ferrosys::btrfs::{Category, Mirror, OpenOptions, ReadError, ReadPolicy, Reader, Volume};
+
+    if !suite_ready() {
+        return;
+    }
+    let lab = Lab::new();
+    let source = source_tree(&lab);
+    let healthy = lab.formatted(
+        "healthy.img",
+        COMPACT,
+        &["-r", source.to_str().expect("a utf-8 path")],
+    );
+    let lenient = OpenOptions::new().policy(ReadPolicy::Lenient);
+
+    // The chunk tree's record of the system chunk, moved 64 KiB along the device.
+    let (leaf, system, index) = {
+        let mut volume = Volume::open(File::open(&healthy).expect("open")).expect("it opens");
+        // The chunk the bootstrap array carries, which is the first key in it.
+        let system = DiskKey::read_from(
+            volume
+                .superblock()
+                .sys_chunk_bytes()
+                .expect("a bootstrap array"),
+        )
+        .expect("a key")
+        .offset;
+        let leaf = volume.chunk_tree();
+        assert_eq!(leaf.level, 0, "the chunk tree is one leaf");
+        let block = volume.read_block(leaf.bytenr).expect("the chunk tree");
+        let index = (0..block.count().expect("a count"))
+            .find(|&i| {
+                let key = block.item(i).expect("an item").key;
+                key.kind == ItemType::CHUNK_ITEM && key.offset == system
+            })
+            .expect("the chunk tree records the bootstrap's chunk");
+        (leaf.bytenr, system, index)
+    };
+    let moved = copy_of(&lab, &healthy, "moved.img");
+    amend_tree_block(&moved, leaf, |block| {
+        let item = Item::read_from(&block[Header::SIZE + index * Item::SIZE..]).expect("the item");
+        let stripe = Header::SIZE + item.offset as usize + Chunk::SIZE + 8;
+        let at = u64::from_le_bytes(block[stripe..stripe + 8].try_into().expect("eight bytes"));
+        block[stripe..stripe + 8].copy_from_slice(&(at + (64 << 10)).to_le_bytes());
+    });
+    assert!(
+        btrfs_check_clean(&moved, &[]).is_err(),
+        "the checker reports the stripe it cannot match"
+    );
+    assert!(matches!(
+        read_back(&moved),
+        Err(ReadError::BadChunk { logical, .. }) if logical == system
+    ));
+    let mut reader =
+        Reader::open_with(File::open(&moved).expect("open"), &lenient).expect("it opens");
+    assert!(
+        reader
+            .scan()
+            .anomalies()
+            .iter()
+            .any(|a| a.category == Category::ChunkMap && a.logical == Some(system)),
+        "a lenient scan names the chunk"
+    );
+
+    // The second copy of the superblock, at the live generation, naming another filesystem.
+    let foreign = copy_of(&lab, &healthy, "foreign.img");
+    let at = MIRRORS[1];
+    assert!(has_mirror(&foreign, at), "the volume has a second copy");
+    let mut copy = read_super(&foreign, at).expect("the second copy");
+    copy[32] ^= 1;
+    let digest = checksum(&copy);
+    copy[..4].copy_from_slice(&digest.to_le_bytes());
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(&foreign)
+        .expect("open for writing");
+    file.seek(SeekFrom::Start(at)).expect("seek");
+    file.write_all(&copy).expect("write the copy");
+    drop(file);
+    assert!(matches!(
+        Volume::open(File::open(&foreign).expect("open")).err(),
+        Some(ReadError::MirrorDisagreement { mirror: 1, .. })
+    ));
+    let mut reader =
+        Reader::open_with(File::open(&foreign).expect("open"), &lenient).expect("it opens");
+    assert!(matches!(
+        reader.volume().mirrors()[1],
+        Mirror::Diverged { .. }
+    ));
+    assert!(
+        reader
+            .scan()
+            .anomalies()
+            .iter()
+            .any(|a| a.category == Category::Superblock),
+        "a lenient scan names the copy"
     );
 }
 

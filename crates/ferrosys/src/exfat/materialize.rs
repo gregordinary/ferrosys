@@ -1,15 +1,19 @@
 //! The materializer: turn a planned [`ExfatLayout`] and a modelled tree into image bytes.
 //!
-//! Everything this layer writes was decided by the pure layers below it. It lays down the two
-//! boot regions — the main one at sector 0 and its backup twelve sectors behind it, each
-//! carrying its own computed checksum — then the allocation table with the two entries the
-//! format reserves at its head and the chains for what the format itself allocates, then the
-//! allocation bitmap, the up-case table, and every directory and file.
+//! Everything this layer writes was decided by the pure layers below it. A format is five
+//! stages, applied in order. The first zeroes everything before the cluster heap and the end
+//! of the volume. The second lays down the allocation table's head, with the two entries the
+//! format reserves and the chains for what the format itself allocates, then the allocation
+//! bitmap, the up-case table, and every directory and file. The last three write the boot
+//! regions, the backup first and the main boot sector last, each region carrying its own
+//! computed checksum.
 //!
-//! Bytes go to any seekable writer. [`format()`] collects them into an in-memory [`Image`];
-//! [`format_to`] streams them straight out, touching only the sectors it writes, so a volume
-//! far larger than memory can be created into a file that stays sparse. Nothing is ever read
-//! back from the destination.
+//! Every byte a reader or a prober could consult is written, so what the destination held
+//! before does not matter. [`format()`] collects the bytes into an in-memory [`Image`];
+//! [`format_to`] streams them to any seekable writer and reads nothing back, so a volume far
+//! larger than memory can be created into a file that stays sparse across the free clusters
+//! of its heap. [`FormatPlan::stages`] hands the same write back as pieces, for a caller that
+//! does its own I/O.
 //!
 //! # What the allocation table holds, and what it does not
 //!
@@ -28,11 +32,12 @@
 //! entry records come from the source that named the entry, and the creation time is derived
 //! from the modification time rather than read from a clock.
 
+use std::borrow::Cow;
 use std::io::{Cursor, Seek, Write};
 
 use crate::fidelity::{AcceptedLoss, FidelityReport, LossPolicy, Synthesis};
 use crate::io::ByteSink;
-use crate::source::Source;
+use crate::source::{FileContent, FileRange, Source};
 
 use super::geometry::{ExfatLayout, GeometryError, PlanRequest, plan_layout};
 use super::model::{
@@ -63,16 +68,26 @@ const DRIVE_SELECT: u8 = 0x80;
 /// reads it as though it were the same thing.
 const NUMBER_OF_FATS: u8 = 1;
 
-/// Allocation table entries written in one call.
+/// Allocation table entries in one piece.
 ///
-/// The table's head is the only part of it a format fills — everything past the residents is
-/// free, which is zero, and is left untouched so a file destination stays sparse. Writing that
-/// head a batch at a time is what keeps the memory a format costs constant however many
-/// clusters the allocation bitmap spans.
+/// The table's head is the only part of it holding anything but zeros — everything past the
+/// residents is free. Building that head a batch at a time is what keeps the memory a format
+/// costs constant however many clusters the allocation bitmap spans. Sixteen kibibytes, a
+/// whole number of sectors at every sector size, so no two batches share a sector.
 const TABLE_BATCH_ENTRIES: usize = 4096;
 
-/// Allocation bitmap bytes written in one call, for the same reason.
+/// Allocation bitmap bytes in one piece, for the same reasons.
 const BITMAP_BATCH_BYTES: usize = 16 << 10;
+
+/// How much of the end of the volume a format zeroes, wherever the clusters there are free.
+///
+/// Some formats keep their labels at the end of a device rather than at its start, and a
+/// prober reads both ends. The allocator fills the heap from the front, so this much of the
+/// end is free on any volume that is not nearly full.
+const TAIL_BYTES: u64 = 1 << 20;
+
+/// Zero bytes written in one call, so zeroing a long run costs one constant buffer.
+const ZERO_BATCH_BYTES: usize = 64 << 10;
 
 /// A volume label: up to eleven UTF-16 code units, as the root directory's first entry records
 /// it.
@@ -119,13 +134,21 @@ impl VolumeLabel {
     ///
     /// # Errors
     ///
-    /// [`LabelError::TooLong`] beyond [`MAX_UNITS`](Self::MAX_UNITS) UTF-16 code units, and
+    /// [`LabelError::TooLong`] beyond [`MAX_UNITS`](Self::MAX_UNITS) UTF-16 code units,
     /// [`LabelError::NulUnit`] for a label containing `U+0000` — which is what the field's
     /// padding is, so a label holding one is a label every implementation that reads the field
-    /// as terminated rather than counted would read differently.
+    /// as terminated rather than counted would read differently — and
+    /// [`LabelError::ForbiddenCharacter`] for any other character a name may not hold, which
+    /// a label reserves as a name does.
     pub fn new(name: &str) -> Result<Self, LabelError> {
         let mut units = [0u16; MAX_LABEL_UNITS];
         let mut len = 0usize;
+        if let Some(ch) = name
+            .chars()
+            .find(|ch| *ch != '\0' && crate::path::is_reserved_name_char(*ch))
+        {
+            return Err(LabelError::ForbiddenCharacter { ch });
+        }
         for unit in name.encode_utf16() {
             if unit == 0 {
                 return Err(LabelError::NulUnit { at: len });
@@ -197,6 +220,14 @@ pub enum LabelError {
     NulUnit {
         /// Which unit of the label it is.
         at: usize,
+    },
+    /// The label contains a character a name may not hold: a control code, or one of the
+    /// nine a path or a pattern gives a meaning to. A label reserves the same ones.
+    #[error("a volume label may not contain {ch:?}")]
+    #[non_exhaustive]
+    ForbiddenCharacter {
+        /// The first such character.
+        ch: char,
     },
 }
 
@@ -352,6 +383,20 @@ pub enum FormatError {
         /// Bytes its clusters hold.
         capacity: u64,
     },
+    /// The source declared a file by its length alone, and a write to a sink has no bytes to
+    /// put there.
+    ///
+    /// A plan holding one is applied through [`FormatPlan::stages`], whose pieces say where
+    /// the caller's bytes go. The write is refused before the sink is touched.
+    #[error(
+        "a file declared by its length alone, under key {key}, holds no bytes for a write to \
+         place; the plan's stages say where they go"
+    )]
+    #[non_exhaustive]
+    ContentsNotHeld {
+        /// The key the file was declared with.
+        key: u64,
+    },
     /// The image is larger than this platform addresses in memory. Only [`format()`] can reach
     /// this; [`format_to`] never holds an image.
     #[error("an image of {bytes} bytes is larger than this platform addresses in memory")]
@@ -442,7 +487,8 @@ impl Image {
 /// worth having in advance: a hard link is written as a second copy of its file, and the plan
 /// is where the size that costs is a number a caller reads rather than discovers.
 ///
-/// [`write_to`](Self::write_to) is the half that can only fail on I/O.
+/// [`write_to`](Self::write_to) is the half that can only fail on I/O, and
+/// [`stages`](Self::stages) hands the same write back as pieces for a caller that does its own.
 ///
 /// # Example
 ///
@@ -535,31 +581,128 @@ impl FormatPlan {
         &self.model.fidelity
     }
 
+    /// The format as stages of pieces, for a caller that does its own I/O.
+    ///
+    /// The five stages come back in the order they must be applied, and each must be complete
+    /// — written, and durable where the destination can lose a write — before the next
+    /// begins. Within a stage the pieces never share a sector and may go down in any order.
+    /// Applied that way, an interruption once the first stage is complete leaves either
+    /// nothing a driver mounts or the whole volume: the first stage invalidates whatever the
+    /// destination held, and the main boot sector, which every reader checks first, is the
+    /// last sector written. An interruption during the first stage leaves what the destination
+    /// held, part of it zeroed.
+    ///
+    /// The pieces cover every byte a reader or a prober could consult, so what the
+    /// destination held before does not matter. [`write_to`](Self::write_to) is these stages
+    /// applied to a seekable sink.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ferrosys::exfat::{FormatOptions, FormatPlan, Piece};
+    /// use ferrosys::{FileContent, Metadata, Timestamp, TreeBuilder};
+    ///
+    /// let meta = Metadata::new(0o644, Timestamp::from_secs(1_426_325_212));
+    /// let source = TreeBuilder::new()
+    ///     .file(b"/eflasher.conf".to_vec(), b"autostart=yes\n", meta)
+    ///     // The image is the caller's to stream: the plan learns its length and nothing else.
+    ///     .file(b"/os.img".to_vec(), FileContent::Declared { len: 300 << 20, key: 7 }, meta);
+    /// let plan = FormatPlan::new(source, 1 << 30, FormatOptions::new(0x1234_abcd))?;
+    ///
+    /// let mut image = None;
+    /// for stage in plan.stages() {
+    ///     for piece in stage.pieces() {
+    ///         match piece? {
+    ///             // Write the caller's own bytes here, through whatever I/O it has.
+    ///             Piece::Declared { offset, len, key, .. } => image = Some((offset, len, key)),
+    ///             // Bytes, zeros, and ranges go down as they are.
+    ///             _ => {}
+    ///         }
+    ///     }
+    ///     // Flush here, so this stage is durable before the next begins.
+    /// }
+    /// let (offset, len, key) = image.expect("the image was placed");
+    /// assert_eq!((len, key), (300 << 20, 7));
+    /// assert_eq!(offset % u64::from(plan.layout().bytes_per_cluster), 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn stages(&self) -> [Stage<'_>; 5] {
+        StageKind::ORDER.map(|kind| Stage { plan: self, kind })
+    }
+
     /// Write the planned volume to `sink`, returning the geometry it realizes.
     ///
-    /// Only the sectors the filesystem occupies are written, and nothing is read back, so a
-    /// file destination stays sparse. The sink is extended to
-    /// [`volume_bytes`](Self::volume_bytes) — the size the format was asked for — and every
-    /// byte it holds that is not written must read back as zero; a freshly created file, or
-    /// one truncated to zero length, satisfies that.
+    /// The [`stages`](Self::stages) are applied in order, with the sink flushed between
+    /// them, so a sink whose flush makes its writes durable keeps the order across a power
+    /// cut. Every byte a reader or a prober could consult is written, so what the sink held
+    /// before does not matter: a reused medium or a file holding an earlier volume is
+    /// formatted as a fresh one is. Nothing is read back.
+    ///
+    /// The sink is extended to [`volume_bytes`](Self::volume_bytes) — the size the format was
+    /// asked for — and a file destination stays sparse across the free clusters of the heap,
+    /// which on a fresh volume is all of it but the last mebibyte.
     ///
     /// The plan is not consumed, so the report is readable on either side of the write and one
     /// plan may be written more than once. Two writes of one plan produce the same bytes,
-    /// unless a file a [`FileRange`](crate::FileRange) names changed in between.
+    /// unless a file a [`FileRange`] names changed in between.
     ///
     /// # Errors
     ///
-    /// [`FormatError::Io`] if writing to `sink` fails, or if a file the source named by range
-    /// cannot be read — which is what a file edited after the source was built looks like.
+    /// [`FormatError::ContentsNotHeld`] before the sink is touched, if the source declared a
+    /// file of one byte or more by its length alone: there are no bytes here to put there, and
+    /// [`stages`](Self::stages) is how such a plan is applied. A declared file of no bytes needs
+    /// none, and is written as any empty file is. [`FormatError::Io`] if writing to `sink`
+    /// fails, or if a file the source named by range cannot be read — which is what a file
+    /// edited after the source was built looks like.
     pub fn write_to(&self, sink: impl Write + Seek) -> Result<ExfatLayout, FormatError> {
-        write_volume(
-            sink,
-            &self.layout,
-            &self.options,
-            &self.model,
-            self.volume_bytes,
-        )?;
+        if let Some(key) = self.declared_key() {
+            return Err(FormatError::ContentsNotHeld { key });
+        }
+        let mut sink = ByteSink::new(sink);
+        // The destination is the volume's length before the first stage, so the last stage is
+        // the last write. A volume whose final cluster ends inside a file has no piece
+        // reaching its end, and this is what makes the destination that long anyway.
+        sink.extend_to(self.volume_bytes)?;
+        let zeros = vec![0u8; ZERO_BATCH_BYTES];
+        for stage in self.stages() {
+            for piece in stage.pieces() {
+                match piece? {
+                    Piece::Bytes { offset, bytes } => sink.write_at(offset, &bytes)?,
+                    Piece::Zeros { offset, len } => {
+                        let mut done = 0u64;
+                        while done < len {
+                            let n = (len - done).min(ZERO_BATCH_BYTES as u64);
+                            // Bounded by the batch, so the conversion cannot lose a value.
+                            sink.write_at(offset + done, &zeros[..n as usize])?;
+                            done += n;
+                        }
+                    }
+                    Piece::Range { offset, range } => {
+                        range.for_each_window(|at, window| sink.write_at(offset + at, window))?;
+                    }
+                    // Refused above, before the sink was touched; answered the same way here
+                    // rather than assumed away.
+                    Piece::Declared { key, .. } => {
+                        return Err(FormatError::ContentsNotHeld { key });
+                    }
+                }
+            }
+            sink.flush()?;
+        }
         Ok(self.layout)
+    }
+
+    /// The key of the first file the source declared by its length alone and gave bytes to,
+    /// if it declared any.
+    fn declared_key(&self) -> Option<u64> {
+        self.model
+            .contents
+            .iter()
+            .find_map(|content| match content {
+                FileContent::Declared { len, key } if *len > 0 => Some(*key),
+                _ => None,
+            })
     }
 }
 
@@ -627,11 +770,11 @@ pub fn format(
 /// Format an exFAT volume of `volume_bytes` populated from `source`, streaming its bytes into
 /// `sink` and returning the plan they realize.
 ///
-/// Only the sectors the filesystem occupies are written, and nothing is read back, so a file
-/// destination stays sparse and the whole image never exists in memory. The sink is extended to
-/// `volume_bytes`, the size the format was asked for, and every byte it holds that is not
-/// written must read back as zero — a freshly created file, or one truncated to zero length,
-/// satisfies that.
+/// Every byte a reader or a prober could consult is written and nothing is read back, so what
+/// the sink held before does not matter and the whole image never exists in memory. A file
+/// destination stays sparse across the free clusters of the heap, and is extended to
+/// `volume_bytes`, the size the format was asked for. [`FormatPlan::write_to`] says what is
+/// written and in what order.
 ///
 /// The [`FormatPlan`] comes back rather than the layout alone, because a format into a
 /// filesystem that cannot hold everything a source offers owes the caller an account of what it
@@ -644,13 +787,14 @@ pub fn format(
 /// - **The model.** Every entry's name, times, and cluster run, held until the last byte is
 ///   written. It grows with the number of entries, not with their size — an allocation is a
 ///   first cluster and a count, because a fresh volume has nothing to allocate around.
-/// - **A file's contents, while it is placed.** A
-///   [`FileContent::Owned`](crate::FileContent::Owned) entry holds its bytes from the moment
+/// - **One window of a file's contents, while it is placed.** A
+///   [`FileContent::Owned`] entry holds its bytes from the moment
 ///   the source is built, so a list of them costs the sum of every file. A
-///   [`FileContent::Range`](crate::FileContent::Range) is read at placement and dropped after,
-///   so a list of them costs the largest single file.
-/// - **One directory's entries, while it is written**, and one batch of the allocation table
-///   and of the allocation bitmap. None of them grows with the volume.
+///   [`FileContent::Range`] is read at placement a mebibyte at a
+///   time, so a list of them costs one mebibyte however large the files are.
+/// - **One directory's clusters, while it is written**, one batch of the allocation table or
+///   of the allocation bitmap, and one buffer of zeros. Only the first grows, with the
+///   directory's entries and not with the volume.
 /// - **One boot region and the up-case table**, both of them constants.
 ///
 /// # Errors
@@ -676,42 +820,6 @@ fn plan(volume_bytes: u64, options: &FormatOptions) -> Result<ExfatLayout, Forma
     let mut request = options.plan;
     request.volume_bytes = volume_bytes;
     Ok(plan_layout(&request)?)
-}
-
-/// Lay down every structure the volume has, in ascending offset order.
-///
-/// `volume_bytes` is the size the format was asked for rather than the size the filesystem
-/// came to: a volume whose size is not a whole number of sectors keeps the remainder, past the
-/// filesystem's end, exactly as the slack at the end of a partition does.
-fn write_volume<W: Write + Seek>(
-    sink: W,
-    layout: &ExfatLayout,
-    options: &FormatOptions,
-    model: &ExfatModel,
-    volume_bytes: u64,
-) -> Result<(), FormatError> {
-    let mut sink = ByteSink::new(sink);
-
-    // The two boot regions are the same twelve sectors written twice: the backup is a copy,
-    // checksum sector and all, which is what lets a driver recover a volume whose first
-    // sectors were overwritten.
-    let region = boot_region(layout, options, model)?;
-    for which in 0..2 {
-        let Some(sector) = layout.boot_region_sector(which) else {
-            break;
-        };
-        sink.write_at(at_sector(layout, sector), &region)?;
-    }
-
-    write_table(&mut sink, layout, model)?;
-    write_bitmap(&mut sink, layout, model)?;
-    write_upcase(&mut sink, layout)?;
-    write_tree(&mut sink, layout, options, model)?;
-
-    // The volume is the size it was asked for. Its last sectors hold nothing, so nothing has
-    // written them and the destination would otherwise end where the tree does.
-    sink.extend_to(volume_bytes)?;
-    Ok(())
 }
 
 /// One boot region's twelve sectors, checksum sector included.
@@ -779,45 +887,484 @@ fn boot_sector(
     }
 }
 
-/// Write the head of the allocation table: the two reserved entries, and a chain for each of
-/// the three the format itself put in the heap.
+/// One stage of a format, in the order [`FormatPlan::stages`] hands them back.
 ///
-/// Only the head is written, and the head is short. Every stream the *tree* holds declares
-/// `NoFatChain`, so the table says nothing about any of them — a reader follows their clusters
-/// in order and must not consult it. What is left is the bitmap, the up-case table, and the
-/// root directory, which have no flags field to declare anything with and are therefore
-/// chained here. Everything past them is left untouched, which is what keeps a file
-/// destination sparse: for a volume whose table spans megabytes, the difference between
-/// writing a few hundred bytes and writing all of it.
-fn write_table<W: Write + Seek>(
-    sink: &mut ByteSink<W>,
-    layout: &ExfatLayout,
-    model: &ExfatModel,
-) -> Result<(), FormatError> {
-    // The root's chain is as long as the root is, which the tree decides — everything the
-    // format itself allocated ends there.
+/// Stages are applied one after another, each complete before the next begins. Within a
+/// stage the pieces never share a sector, and they may be applied in any order. A sector is
+/// written twice only across stages: the first zeroes what later ones fill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum StageKind {
+    /// Zeros over every byte before the cluster heap and over the end of the volume.
+    ///
+    /// This is what makes the destination's earlier contents irrelevant. Both boot regions of
+    /// an earlier exFAT volume, and a signature another format keeps before the heap or in the
+    /// volume's last mebibyte, are gone before anything new is written, so an interruption
+    /// after this stage leaves nothing a driver mounts or a prober recognizes.
+    Invalidate,
+    /// The allocation table's head, the allocation bitmap, the up-case table, and every
+    /// directory and file.
+    Body,
+    /// The backup boot region, sectors 12 through 23.
+    BackupBootRegion,
+    /// Sectors 1 through 11 of the main boot region: the extended boot sectors, the OEM
+    /// parameters, the reserved sector, and the checksum over the region.
+    MainBootTail,
+    /// Sector 0, the main boot sector: the one every reader checks first, and so the last
+    /// to be written.
+    MainBootSector,
+}
+
+impl StageKind {
+    /// Every stage, in the order a format applies them.
+    const ORDER: [Self; 5] = [
+        Self::Invalidate,
+        Self::Body,
+        Self::BackupBootRegion,
+        Self::MainBootTail,
+        Self::MainBootSector,
+    ];
+}
+
+/// One stage of a planned format: which it is, and the pieces that make it.
+///
+/// Built by [`FormatPlan::stages`], which hands back every stage in the order they must be
+/// applied.
+#[derive(Clone, Copy)]
+pub struct Stage<'p> {
+    plan: &'p FormatPlan,
+    kind: StageKind,
+}
+
+impl<'p> Stage<'p> {
+    /// Which stage this is.
+    #[must_use]
+    pub const fn kind(&self) -> StageKind {
+        self.kind
+    }
+
+    /// The stage's pieces, each built as it is asked for.
+    #[must_use]
+    pub fn pieces(&self) -> Pieces<'p> {
+        match stage_runs(self.plan, self.kind) {
+            Ok(runs) => Pieces {
+                plan: self.plan,
+                runs: runs.into_iter(),
+                pending: None,
+            },
+            Err(e) => Pieces {
+                plan: self.plan,
+                runs: Vec::new().into_iter(),
+                pending: Some(e),
+            },
+        }
+    }
+}
+
+impl core::fmt::Debug for Stage<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Stage")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One run of bytes a format puts on the destination: where it goes, and what it is.
+///
+/// Every piece starts on a sector boundary. A piece of a file's contents is the file's
+/// length, a piece ending where the volume does ends there even inside a sector — which only
+/// a size that is not whole sectors makes happen — and every other piece is a whole number
+/// of sectors.
+///
+/// A byte no piece covers lies in a free cluster, or past the recorded length of the stream
+/// that owns it, so nothing ever reads it. A caller writing whole sectors can therefore pad a
+/// piece's last sector with anything.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Piece<'p> {
+    /// Bytes the plan holds, or builds as the piece is asked for.
+    #[non_exhaustive]
+    Bytes {
+        /// Where the bytes go, from the volume's start.
+        offset: u64,
+        /// The bytes.
+        bytes: Cow<'p, [u8]>,
+    },
+    /// A run of zeros.
+    #[non_exhaustive]
+    Zeros {
+        /// Where the run begins, from the volume's start.
+        offset: u64,
+        /// How many zero bytes it is.
+        len: u64,
+    },
+    /// A file's contents, which are a range of a file on the host.
+    #[non_exhaustive]
+    Range {
+        /// Where the contents go, from the volume's start.
+        offset: u64,
+        /// The range they are read from.
+        range: &'p FileRange,
+    },
+    /// The contents of a file declared by its length alone, which the caller supplies.
+    ///
+    /// A hard link is written as a second copy of its file, so one key can name more than
+    /// one piece.
+    #[non_exhaustive]
+    Declared {
+        /// Where the contents go, from the volume's start.
+        offset: u64,
+        /// How many bytes they are.
+        len: u64,
+        /// The key the file was declared with.
+        key: u64,
+    },
+}
+
+impl Piece<'_> {
+    /// Where the piece begins, in bytes from the volume's start.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        match self {
+            Self::Bytes { offset, .. }
+            | Self::Zeros { offset, .. }
+            | Self::Range { offset, .. }
+            | Self::Declared { offset, .. } => *offset,
+        }
+    }
+
+    /// How many bytes the piece covers.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Bytes { bytes, .. } => bytes.len() as u64,
+            Self::Zeros { len, .. } | Self::Declared { len, .. } => *len,
+            Self::Range { range, .. } => range.len(),
+        }
+    }
+
+    /// Whether the piece covers nothing, which no piece a plan hands back does.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The pieces of one stage, each built as it is asked for.
+///
+/// What is held at once is one directory's clusters, one batch of the allocation table or
+/// the bitmap, or one boot region. A file's contents are named by a piece rather than held
+/// by it. The sequence ends after the first error.
+pub struct Pieces<'p> {
+    plan: &'p FormatPlan,
+    runs: std::vec::IntoIter<Run<'p>>,
+    /// A failure deciding the stage's runs, handed out as the first item.
+    pending: Option<FormatError>,
+}
+
+impl<'p> Iterator for Pieces<'p> {
+    type Item = Result<Piece<'p>, FormatError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(e) = self.pending.take() {
+            return Some(Err(e));
+        }
+        let run = self.runs.next()?;
+        let piece = realize(self.plan, run);
+        if piece.is_err() {
+            self.runs = Vec::new().into_iter();
+        }
+        Some(piece)
+    }
+}
+
+impl core::fmt::Debug for Pieces<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Pieces")
+            .field("remaining", &self.runs.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A piece decided but not yet built: what [`Pieces`] holds between one item and the next.
+enum Run<'p> {
+    /// A piece known in full.
+    Ready(Piece<'p>),
+    /// Allocation table entries `first..first + count`, at `offset`, the last of the
+    /// format's own chains ending at `last`.
+    Table {
+        offset: u64,
+        first: u32,
+        count: u32,
+        last: u32,
+    },
+    /// Bytes `from..from + len` of the allocation bitmap, at `offset`.
+    Bitmap { offset: u64, from: u64, len: u64 },
+    /// The up-case table, padded to `len` bytes, at `offset`.
+    Upcase { offset: u64, len: u64 },
+    /// Directory `index`, all of its clusters, at `offset`.
+    Directory { index: usize, offset: u64 },
+    /// Sectors `from..to` of the boot region, at `offset`.
+    Boot { offset: u64, from: u64, to: u64 },
+}
+
+/// Every run one stage is made of, in ascending order of offset.
+fn stage_runs(plan: &FormatPlan, kind: StageKind) -> Result<Vec<Run<'_>>, FormatError> {
+    let sector = u64::from(plan.layout.bytes_per_sector);
+    Ok(match kind {
+        StageKind::Invalidate => invalidate_runs(plan),
+        StageKind::Body => body_runs(plan)?,
+        StageKind::BackupBootRegion => vec![Run::Boot {
+            offset: BOOT_REGION_SECTORS * sector,
+            from: 0,
+            to: BOOT_REGION_SECTORS,
+        }],
+        StageKind::MainBootTail => vec![Run::Boot {
+            offset: sector,
+            from: 1,
+            to: BOOT_REGION_SECTORS,
+        }],
+        StageKind::MainBootSector => vec![Run::Boot {
+            offset: 0,
+            from: 0,
+            to: 1,
+        }],
+    })
+}
+
+/// The zeros that come first: everything before the cluster heap, and the end of the volume.
+///
+/// The end runs from the first free cluster or a mebibyte before the volume's last sector,
+/// whichever is later — but never from past the heap's end, so the clusters the heap has no
+/// room for, and the remainder of a size that is not whole sectors, are always covered.
+fn invalidate_runs(plan: &FormatPlan) -> Vec<Run<'_>> {
+    let layout = &plan.layout;
+    let heap_at = u64::from(layout.cluster_heap_offset) * u64::from(layout.bytes_per_sector);
+    let heap_end = heap_at + layout.heap_bytes();
+    // Allocation is one ascending pass with no gaps from the heap's first cluster, so the
+    // clusters in use are exactly the first `used_clusters` of it.
+    let free_from =
+        heap_at + u64::from(plan.model.used_clusters) * u64::from(layout.bytes_per_cluster);
+    let tail_from = free_from.max(heap_end.min(layout.total_bytes().saturating_sub(TAIL_BYTES)));
+    [(0, heap_at), (tail_from, plan.volume_bytes)]
+        .into_iter()
+        .filter(|(from, to)| to > from)
+        .map(|(offset, to)| {
+            Run::Ready(Piece::Zeros {
+                offset,
+                len: to - offset,
+            })
+        })
+        .collect()
+}
+
+/// Everything the volume holds: the allocation table's head, the bitmap, the up-case table,
+/// and each directory followed by the files it names.
+fn body_runs(plan: &FormatPlan) -> Result<Vec<Run<'_>>, FormatError> {
+    let layout = &plan.layout;
+    let model = &plan.model;
+    let sector = u64::from(layout.bytes_per_sector);
+    let cluster = u64::from(layout.bytes_per_cluster);
+    let mut runs = Vec::new();
+
+    // The table's head: the two reserved entries and the chains of the three residents. The
+    // root's chain is as long as the root is, which the tree decides, and everything the
+    // format itself allocated ends there. Every batch but the last is a whole number of
+    // sectors, and the last is padded to one, so no two share a sector.
     let last = layout.first_cluster_of_root + model.dirs[ROOT_DIR].run.count - 1;
-    let mut batch = vec![0u8; TABLE_BATCH_ENTRIES * 4];
     let mut first = 0u32;
     while first <= last {
         let count = (last - first + 1).min(TABLE_BATCH_ENTRIES as u32);
-        for i in 0..count {
-            put_u32(
-                &mut batch,
-                i as usize * 4,
-                table_entry(layout, last, first + i),
-            );
-        }
-        let at = layout
+        let offset = layout
             .fat_entry_byte(first)
             .ok_or(FormatError::ClusterOutsideVolume {
                 region: "the allocation table's entry",
                 cluster: first,
             })?;
-        sink.write_at(at, &batch[..count as usize * 4])?;
+        runs.push(Run::Table {
+            offset,
+            first,
+            count,
+            last,
+        });
         first += count;
     }
-    Ok(())
+
+    // The bitmap: the sectors holding a set bit in batches, and the rest as one run of zeros.
+    // Allocation runs in one ascending pass with no gaps, so the set bits are a run at the
+    // front — the tree is allocated from where the three residents end.
+    let bitmap_at = cluster_start(layout, layout.bitmap_cluster, "the allocation bitmap")?;
+    let set = u64::from(model.used_clusters)
+        .div_ceil(8)
+        .next_multiple_of(sector);
+    let whole = layout.bitmap_bytes.next_multiple_of(sector);
+    let mut from = 0u64;
+    while from < set {
+        let len = (set - from).min(BITMAP_BATCH_BYTES as u64);
+        runs.push(Run::Bitmap {
+            offset: bitmap_at + from,
+            from,
+            len,
+        });
+        from += len;
+    }
+    if whole > set {
+        runs.push(Run::Ready(Piece::Zeros {
+            offset: bitmap_at + set,
+            len: whole - set,
+        }));
+    }
+
+    // The up-case table padded to a sector, and zeros to the end of the clusters it takes.
+    let upcase_at = cluster_start(layout, layout.upcase_cluster, "the up-case table")?;
+    let table = RECOMMENDED_UPCASE_BYTES.next_multiple_of(sector);
+    let clusters = layout.clusters_for(layout.upcase_bytes) * cluster;
+    runs.push(Run::Upcase {
+        offset: upcase_at,
+        len: table,
+    });
+    if clusters > table {
+        runs.push(Run::Ready(Piece::Zeros {
+            offset: upcase_at + table,
+            len: clusters - table,
+        }));
+    }
+
+    // Each directory, whole, then the files it names — the order they were allocated in, so
+    // the offsets ascend.
+    for (index, dir) in model.dirs.iter().enumerate() {
+        runs.push(Run::Directory {
+            index,
+            offset: cluster_start(layout, dir.run.first, "a directory")?,
+        });
+        for entry in &dir.entries {
+            let Node::File { content, size, run } = entry.node else {
+                continue;
+            };
+            if run.is_empty() {
+                continue;
+            }
+            let content = &model.contents[content];
+            // The length the entry records was taken from this content when the model was
+            // built, and the content hands back exactly what it declares or fails — so the two
+            // agree. Checked in every build: a content longer than its entry would run on into
+            // the clusters placed after it, which is the direction nothing downstream can
+            // notice.
+            assert_eq!(
+                content.len(),
+                size,
+                "a file's contents are not the length its entry records"
+            );
+            let offset = cluster_start(layout, run.first, "a file")?;
+            runs.push(Run::Ready(match content {
+                FileContent::Owned(bytes) => Piece::Bytes {
+                    offset,
+                    bytes: Cow::Borrowed(bytes),
+                },
+                FileContent::Range(range) => Piece::Range { offset, range },
+                FileContent::Declared { len, key } => Piece::Declared {
+                    offset,
+                    len: *len,
+                    key: *key,
+                },
+            }));
+        }
+    }
+    Ok(runs)
+}
+
+/// Where cluster `n` begins, or the failure naming what needed it.
+fn cluster_start(layout: &ExfatLayout, n: u32, region: &'static str) -> Result<u64, FormatError> {
+    layout
+        .cluster_start_byte(n)
+        .ok_or(FormatError::ClusterOutsideVolume { region, cluster: n })
+}
+
+/// Build the piece a run describes.
+fn realize<'p>(plan: &'p FormatPlan, run: Run<'p>) -> Result<Piece<'p>, FormatError> {
+    let layout = &plan.layout;
+    let sector = u64::from(layout.bytes_per_sector);
+    let bytes = match run {
+        Run::Ready(piece) => return Ok(piece),
+        Run::Table {
+            offset,
+            first,
+            count,
+            last,
+        } => {
+            let mut batch = vec![0u8; (u64::from(count) * 4).next_multiple_of(sector) as usize];
+            for i in 0..count {
+                put_u32(
+                    &mut batch,
+                    i as usize * 4,
+                    table_entry(layout, last, first + i),
+                );
+            }
+            (offset, batch)
+        }
+        Run::Bitmap { offset, from, len } => {
+            (offset, bitmap_bytes(plan.model.used_clusters, from, len))
+        }
+        Run::Upcase { offset, len } => {
+            let mut table = vec![0u8; len as usize];
+            write_upcase_table(
+                &RECOMMENDED_UPCASE_TABLE,
+                &mut table[..RECOMMENDED_UPCASE_BYTES as usize],
+            )?;
+            (offset, table)
+        }
+        Run::Directory { index, offset } => (offset, directory_clusters(plan, index)?),
+        Run::Boot { offset, from, to } => {
+            let region = boot_region(layout, &plan.options, &plan.model)?;
+            let s = sector as usize;
+            (offset, region[from as usize * s..to as usize * s].to_vec())
+        }
+    };
+    Ok(Piece::Bytes {
+        offset: bytes.0,
+        bytes: Cow::Owned(bytes.1),
+    })
+}
+
+/// Bytes `from..from + len` of an allocation bitmap whose first `used` bits are set.
+///
+/// The low bits of a byte are the earlier clusters: bit 0 of byte 0 is the heap's first
+/// cluster, which is what makes the byte the run ends part way through a mask of its low
+/// bits.
+fn bitmap_bytes(used: u32, from: u64, len: u64) -> Vec<u8> {
+    let whole = u64::from(used) / 8;
+    let remainder = used % 8;
+    (from..from + len)
+        .map(|n| match n.cmp(&whole) {
+            core::cmp::Ordering::Less => 0xFF,
+            core::cmp::Ordering::Equal if remainder != 0 => 0xFF >> (8 - remainder),
+            _ => 0,
+        })
+        .collect()
+}
+
+/// Directory `index`'s clusters: its entries, then zeros to the end of its last cluster.
+///
+/// The zeros are what end the directory. A reader stops at the first slot whose type byte is
+/// zero and the format requires every slot behind it to be one, so the slots past the last
+/// entry set are written rather than left to whatever the destination held.
+fn directory_clusters(plan: &FormatPlan, index: usize) -> Result<Vec<u8>, FormatError> {
+    let mut bytes = directory_bytes(&plan.model, &plan.layout, &plan.options, index)?;
+    // What was planned and what is written are two computations of one number, and the bytes
+    // hide a disagreement between them: a directory written past its own clusters lands on
+    // whatever was placed after it. Checked here, where both numbers are in hand, and in
+    // every build.
+    let run = plan.model.dirs[index].run;
+    let capacity = u64::from(run.count) * u64::from(plan.layout.bytes_per_cluster);
+    if bytes.len() as u64 > capacity {
+        return Err(FormatError::DirectoryOverflowsItsClusters {
+            index,
+            bytes: bytes.len() as u64,
+            capacity,
+        });
+    }
+    bytes.resize(capacity as usize, 0);
+    Ok(bytes)
 }
 
 /// The allocation table entry for cluster `n`, for the clusters a format itself chains.
@@ -837,134 +1384,6 @@ fn table_entry(layout: &ExfatLayout, last: u32, n: u32) -> u32 {
     }
 }
 
-/// Write the allocation bitmap: a bit per cluster, set for the clusters something occupies and
-/// clear for the rest.
-///
-/// Allocation runs in one ascending pass with no gaps, so what goes down is a run of set bits
-/// at the front of the bitmap and nothing else — and that is true of the tree as well as of the
-/// format's own three residents, since the tree is allocated from where they end. Everything
-/// past it is free, which is zero, and is not written.
-///
-/// This and the allocation table come out of the same planned allocation rather than being
-/// maintained separately, which is what makes them agree structurally. It matters more than it
-/// looks: `fsck.exfat` objects when a cluster a file chains through is marked free, and has
-/// nothing at all to say about the other direction or about a stream that declared
-/// `NoFatChain`, so a bitmap and a table that disagreed would pass a check on most of a volume.
-fn write_bitmap<W: Write + Seek>(
-    sink: &mut ByteSink<W>,
-    layout: &ExfatLayout,
-    model: &ExfatModel,
-) -> Result<(), FormatError> {
-    let used = model.used_clusters;
-    let base = layout.cluster_start_byte(layout.bitmap_cluster).ok_or(
-        FormatError::ClusterOutsideVolume {
-            region: "the allocation bitmap",
-            cluster: layout.bitmap_cluster,
-        },
-    )?;
-
-    // Whole bytes of set bits, then the byte the run ends part way through. Splitting them is
-    // what keeps the batch a constant buffer of ones rather than a bitmap built in memory.
-    let whole = used as usize / 8;
-    let remainder = used % 8;
-    let batch = vec![0xFFu8; BITMAP_BATCH_BYTES];
-    let mut written = 0usize;
-    while written < whole {
-        let count = (whole - written).min(BITMAP_BATCH_BYTES);
-        sink.write_at(base + written as u64, &batch[..count])?;
-        written += count;
-    }
-    if remainder != 0 {
-        // The low bits of a byte are the earlier clusters: bit 0 of byte 0 is the heap's first
-        // cluster, which is what makes a partial trailing byte a mask of the low bits.
-        let tail = [0xFFu8 >> (8 - remainder)];
-        sink.write_at(base + whole as u64, &tail)?;
-    }
-    Ok(())
-}
-
-/// Write the up-case table the format recommends into the clusters the layout gave it.
-fn write_upcase<W: Write + Seek>(
-    sink: &mut ByteSink<W>,
-    layout: &ExfatLayout,
-) -> Result<(), FormatError> {
-    let at = layout.cluster_start_byte(layout.upcase_cluster).ok_or(
-        FormatError::ClusterOutsideVolume {
-            region: "the up-case table",
-            cluster: layout.upcase_cluster,
-        },
-    )?;
-    let mut table = vec![0u8; RECOMMENDED_UPCASE_BYTES as usize];
-    write_upcase_table(&RECOMMENDED_UPCASE_TABLE, &mut table)?;
-    sink.write_at(at, &table)?;
-    Ok(())
-}
-
-/// Write every directory and every file's bytes.
-fn write_tree<W: Write + Seek>(
-    sink: &mut ByteSink<W>,
-    layout: &ExfatLayout,
-    options: &FormatOptions,
-    model: &ExfatModel,
-) -> Result<(), FormatError> {
-    for (index, dir) in model.dirs.iter().enumerate() {
-        let bytes = directory_bytes(model, layout, options, index)?;
-        let at =
-            layout
-                .cluster_start_byte(dir.run.first)
-                .ok_or(FormatError::ClusterOutsideVolume {
-                    region: "a directory",
-                    cluster: dir.run.first,
-                })?;
-        // What was planned and what is written are two computations of one number, and the
-        // bytes hide a disagreement between them: a directory written past its own clusters
-        // lands on whatever was placed after it, which is written second and covers the
-        // overflow — so the image reads plausibly and a stream has been overwritten. Checked
-        // here, where both numbers are in hand, and on every write rather than only in a debug
-        // build.
-        let capacity = u64::from(dir.run.count) * u64::from(layout.bytes_per_cluster);
-        if bytes.len() as u64 > capacity {
-            return Err(FormatError::DirectoryOverflowsItsClusters {
-                index,
-                bytes: bytes.len() as u64,
-                capacity,
-            });
-        }
-        sink.write_at(at, &bytes)?;
-
-        for entry in &dir.entries {
-            let Node::File { content, size, run } = entry.node else {
-                continue;
-            };
-            if run.is_empty() {
-                continue;
-            }
-            // Read when the file is placed rather than when the source was built, so a tree of
-            // ranges costs the largest single file rather than the sum of them.
-            let bytes = model.contents[content].read()?;
-            // The length the entry records was taken from this content when the model was
-            // built, and a read hands back exactly what it declared or fails — so the two
-            // agree. Checked in every build: the slice below would panic on contents shorter
-            // than the entry claims, and would silently write a truncated file on contents
-            // longer than it, which is the direction nothing downstream can notice.
-            assert_eq!(
-                bytes.len() as u64,
-                size,
-                "a file's contents are not the length its entry records"
-            );
-            let at =
-                layout
-                    .cluster_start_byte(run.first)
-                    .ok_or(FormatError::ClusterOutsideVolume {
-                        region: "a file",
-                        cluster: run.first,
-                    })?;
-            sink.write_at(at, &bytes)?;
-        }
-    }
-    Ok(())
-}
-
 /// One directory's entries, serialized in the order they are written.
 ///
 /// The root leads with the four entries a format writes on every volume — the volume's name,
@@ -972,8 +1391,8 @@ fn write_tree<W: Write + Seek>(
 /// every other directory leads with nothing at all: exFAT has no `.` and `..` entries, so a
 /// directory is its file sets and only those.
 ///
-/// The terminator behind the last set is the zero byte the cluster already holds. Nothing has
-/// to be written to end a directory.
+/// The terminator behind the last set is the zero byte the rest of the directory's clusters
+/// are filled with, which [`directory_clusters`] writes along with the entries.
 fn directory_bytes(
     model: &ExfatModel,
     layout: &ExfatLayout,
@@ -1080,11 +1499,6 @@ const fn stream_flags(run: ClusterRun) -> u8 {
     } else {
         SECONDARY_ALLOCATION_POSSIBLE | SECONDARY_NO_FAT_CHAIN
     }
-}
-
-/// The byte offset of `sector`.
-const fn at_sector(layout: &ExfatLayout, sector: u64) -> u64 {
-    sector * layout.bytes_per_sector as u64
 }
 
 #[cfg(test)]
@@ -1838,6 +2252,27 @@ mod tests {
     }
 
     #[test]
+    fn a_label_reserves_the_characters_a_name_does() {
+        // The control codes and the nine a path or a pattern gives a meaning to, as for a
+        // name. Everything else a name may hold, a label may: punctuation, spaces, and any
+        // character past ASCII.
+        for bad in [
+            "A/B", "A\\B", "A:B", "A*", "A?", "A\"B", "A<B", "A>B", "A|B", "A\u{1}",
+        ] {
+            assert!(
+                matches!(
+                    VolumeLabel::new(bad),
+                    Err(LabelError::ForbiddenCharacter { .. })
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in ["A.B C", "Ferrosys ×", "x-y_z+1"] {
+            assert!(VolumeLabel::new(good).is_ok(), "{good:?}");
+        }
+    }
+
+    #[test]
     fn a_label_keeps_the_case_and_the_characters_it_was_given() {
         // exFAT stores Unicode and folds only for comparison, so nothing here changes a
         // character — which is what separates this label from the eleven upper-case bytes the
@@ -1848,5 +2283,408 @@ mod tests {
             &"Ferrosys ×".encode_utf16().collect::<Vec<_>>()[..]
         );
         assert_eq!(format!("{label:?}"), "VolumeLabel(\"Ferrosys ×\")");
+    }
+
+    // --- the stages, and what the destination held ------------------------------------
+
+    /// A tree with a subdirectory, an empty file, a file spanning clusters, and a name long
+    /// enough for three name entries, so every kind of body piece is in it.
+    fn populated() -> TreeBuilder {
+        let meta = Metadata::new(0o644, TIME);
+        TreeBuilder::new()
+            .directory(b"/DCIM".to_vec(), Metadata::new(0o755, TIME))
+            .file(b"/DCIM/EMPTY".to_vec(), Vec::new(), meta)
+            .file(
+                b"/DCIM/a name long enough to need three name entries.txt".to_vec(),
+                b"named\n",
+                meta,
+            )
+            .file(
+                b"/big.bin".to_vec(),
+                (0..20_000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>(),
+                meta,
+            )
+            .file(b"/eflasher.conf".to_vec(), b"autostart=yes\n", meta)
+    }
+
+    /// The bytes a caller supplies for the file it declared under `key`.
+    fn declared_bytes(key: u64, len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i as u64 ^ key) as u8).collect()
+    }
+
+    /// Every piece of every stage, built.
+    fn every_piece(plan: &FormatPlan) -> Vec<(StageKind, Piece<'_>)> {
+        plan.stages()
+            .into_iter()
+            .flat_map(|stage| {
+                stage
+                    .pieces()
+                    .map(move |piece| (stage.kind(), piece.expect("every piece builds")))
+            })
+            .collect()
+    }
+
+    /// `plan` applied to `destination` by hand, the way a caller doing its own I/O applies it:
+    /// stage by stage, and within a stage in the order given — reversed if `reverse`.
+    fn apply(plan: &FormatPlan, mut destination: Vec<u8>, reverse: bool) -> Vec<u8> {
+        for stage in plan.stages() {
+            let mut pieces: Vec<Piece<'_>> = stage
+                .pieces()
+                .collect::<Result<_, _>>()
+                .expect("every piece builds");
+            if reverse {
+                pieces.reverse();
+            }
+            for piece in pieces {
+                let at = piece.offset() as usize;
+                let slot = &mut destination[at..at + piece.len() as usize];
+                match piece {
+                    Piece::Bytes { bytes, .. } => slot.copy_from_slice(&bytes),
+                    Piece::Zeros { .. } => slot.fill(0),
+                    Piece::Range { range, .. } => range.read_at(0, slot).expect("the range reads"),
+                    Piece::Declared { key, .. } => {
+                        let len = slot.len();
+                        slot.copy_from_slice(&declared_bytes(key, len));
+                    }
+                }
+            }
+        }
+        destination
+    }
+
+    /// Four destinations a format may be handed: zeros, every bit set, bytes that resemble
+    /// nothing, and an earlier volume holding more than the one about to be written over it.
+    fn destinations(size: usize) -> Vec<(&'static str, Vec<u8>)> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let noise = (0..size)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let meta = Metadata::new(0o644, TIME);
+        let mut earlier =
+            TreeBuilder::new().directory(b"/DCIM".to_vec(), Metadata::new(0o755, TIME));
+        for i in 0..60 {
+            let name = format!("/AN-EARLIER-FILE-WITH-A-LONG-NAME-{i:03}.TXT");
+            earlier = earlier.file(name.into_bytes(), format!("old {i}\n").into_bytes(), meta);
+        }
+        for i in 0..40 {
+            let name = format!("/DCIM/EARLIER-{i:03}.BIN");
+            earlier = earlier.file(name.into_bytes(), vec![0xA5; 3000 + i * 100], meta);
+        }
+        let earlier = format(earlier, size as u64, FormatOptions::new(0x1111_1111))
+            .expect("the earlier volume")
+            .into_bytes();
+        vec![
+            ("zeros", vec![0; size]),
+            ("every bit set", vec![0xFF; size]),
+            ("noise", noise),
+            ("an earlier volume", earlier),
+        ]
+    }
+
+    /// Every path a strict read of `bytes` reaches, with each file's contents, after a scan of
+    /// the whole volume found nothing to report.
+    fn read_back(what: &str, bytes: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut reader = crate::exfat::Reader::open(Cursor::new(bytes))
+            .unwrap_or_else(|e| panic!("{what}: a strict open refused the volume: {e}"));
+        let report = reader.scan();
+        assert!(report.is_clean(), "{what}: the scan found {report:?}");
+        let walk = reader.walk().expect("the walk succeeds");
+        walk.into_iter()
+            .map(|entry| {
+                let contents = (!entry.node.is_dir())
+                    .then(|| reader.read_data(&entry.node).expect("the file reads"));
+                (entry.path, contents)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_format_is_five_stages_and_the_main_boot_sector_is_the_last_write() {
+        let plan = FormatPlan::new(populated(), 8 << 20, FormatOptions::new(1)).expect("plan");
+        let kinds: Vec<StageKind> = plan.stages().iter().map(Stage::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                StageKind::Invalidate,
+                StageKind::Body,
+                StageKind::BackupBootRegion,
+                StageKind::MainBootTail,
+                StageKind::MainBootSector,
+            ]
+        );
+        let sector = u64::from(plan.layout().bytes_per_sector);
+        let place = |kind: StageKind| -> Vec<(u64, u64)> {
+            every_piece(&plan)
+                .into_iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, p)| (p.offset(), p.len()))
+                .collect()
+        };
+        // The first stage zeroes everything before the heap from the first byte, so both boot
+        // regions of whatever the destination held are gone before anything new is written.
+        let heap_at = u64::from(plan.layout().cluster_heap_offset) * sector;
+        assert_eq!(place(StageKind::Invalidate)[0], (0, heap_at));
+        assert_eq!(
+            place(StageKind::BackupBootRegion),
+            [(12 * sector, 12 * sector)]
+        );
+        assert_eq!(place(StageKind::MainBootTail), [(sector, 11 * sector)]);
+        assert_eq!(place(StageKind::MainBootSector), [(0, sector)]);
+    }
+
+    #[test]
+    fn every_piece_starts_on_a_sector_and_no_two_in_a_stage_share_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let host = dir.path().join("host");
+        std::fs::write(&host, vec![7u8; 9_000]).expect("write the host file");
+        let meta = Metadata::new(0o644, TIME);
+        // A root long enough to chain through several clusters at the smallest cluster size,
+        // and one of each kind of file content.
+        let mut tree = populated()
+            .file(
+                b"/ranged".to_vec(),
+                FileContent::Range(FileRange::at_path(&host, 100, 8_000)),
+                meta,
+            )
+            .file(
+                b"/declared".to_vec(),
+                FileContent::Declared {
+                    len: 12_345,
+                    key: 3,
+                },
+                meta,
+            );
+        for i in 0..40 {
+            tree = tree.file(format!("/ROOT-{i:02}.TXT").into_bytes(), b"x", meta);
+        }
+        let requests = [
+            PlanRequest::new(0),
+            PlanRequest::new(0).cluster_size(ClusterSize::Bytes(512)),
+            PlanRequest::new(0).bytes_per_sector(4096),
+            PlanRequest::new(0)
+                .bytes_per_sector(4096)
+                .cluster_size(ClusterSize::Bytes(4096)),
+        ];
+        for (size, request) in [8 << 20, (8 << 20) + 511, 16 << 20, 16 << 20]
+            .into_iter()
+            .zip(requests)
+        {
+            let options = FormatOptions::new(1).plan(request);
+            let plan = FormatPlan::new(tree.clone(), size, options).expect("plan");
+            let sector = u64::from(plan.layout().bytes_per_sector);
+            let pieces = every_piece(&plan);
+            for kind in StageKind::ORDER {
+                let mut ends: Vec<(u64, u64)> = Vec::new();
+                for (k, piece) in &pieces {
+                    if *k != kind {
+                        continue;
+                    }
+                    let (at, len) = (piece.offset(), piece.len());
+                    assert!(len > 0, "{kind:?}: an empty piece at {at}");
+                    assert_eq!(
+                        at % sector,
+                        0,
+                        "{kind:?}: a piece at {at} is inside a sector"
+                    );
+                    let contents = matches!(piece, Piece::Range { .. } | Piece::Declared { .. })
+                        || at + len == size;
+                    let file_bytes = matches!(
+                        piece,
+                        Piece::Bytes {
+                            bytes: Cow::Borrowed(_),
+                            ..
+                        }
+                    );
+                    assert!(
+                        contents || file_bytes || len % sector == 0,
+                        "{kind:?}: a piece at {at} of {len} bytes ends inside a sector"
+                    );
+                    assert!(
+                        at + len <= size,
+                        "{kind:?}: a piece at {at} runs past the volume"
+                    );
+                    ends.push((at, (at + len).next_multiple_of(sector)));
+                }
+                ends.sort_unstable();
+                for pair in ends.windows(2) {
+                    assert!(
+                        pair[0].1 <= pair[1].0,
+                        "{kind:?}: pieces at {} and {} share a sector",
+                        pair[0].0,
+                        pair[1].0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_destination_held_does_not_change_the_volume() {
+        let size = 8 << 20;
+        let options = FormatOptions::new(0x2222_2222);
+        let plan = FormatPlan::new(populated(), size, options).expect("plan");
+        let fresh = format(populated(), size, options)
+            .expect("format")
+            .into_bytes();
+        let expected = read_back("a fresh destination", &fresh);
+        let covered: Vec<std::ops::Range<usize>> = every_piece(&plan)
+            .iter()
+            .map(|(_, p)| p.offset() as usize..(p.offset() + p.len()) as usize)
+            .collect();
+
+        let layout = plan.layout();
+        let heap_at = layout.cluster_heap_offset as usize * layout.bytes_per_sector as usize;
+        for (what, destination) in destinations(size as usize) {
+            let mut sink = Cursor::new(destination);
+            plan.write_to(&mut sink).expect("write");
+            let written = sink.into_inner();
+            // Nothing before the heap is left to what the destination held, whether or not a
+            // driver reads it: a prober does.
+            assert!(
+                written[..heap_at] == fresh[..heap_at],
+                "{what}: a byte before the heap is not the fresh destination's"
+            );
+            // Every byte a piece covers is the byte a fresh destination gets...
+            for range in &covered {
+                let at = written[range.clone()]
+                    .iter()
+                    .zip(&fresh[range.clone()])
+                    .position(|(a, b)| a != b);
+                assert!(
+                    at.is_none(),
+                    "{what}: byte {:?} differs",
+                    at.map(|a| a + range.start)
+                );
+            }
+            // ...and what no piece covers is never read: a strict reader finds the same tree
+            // with the same bytes in it, and a scan of the whole volume finds nothing at all.
+            assert_eq!(read_back(what, &written), expected, "{what}");
+        }
+    }
+
+    #[test]
+    fn pieces_go_down_in_any_order_within_a_stage() {
+        let size = 8 << 20;
+        let plan = FormatPlan::new(populated(), size, FormatOptions::new(5)).expect("plan");
+        let mut sink = Cursor::new(vec![0xFF; size as usize]);
+        plan.write_to(&mut sink).expect("write");
+        assert!(
+            apply(&plan, vec![0xFF; size as usize], true) == sink.into_inner(),
+            "pieces applied in reverse made other bytes than the write"
+        );
+    }
+
+    #[test]
+    fn a_declared_file_comes_back_as_a_piece_and_a_write_to_a_sink_refuses_it_untouched() {
+        let size = 8 << 20;
+        let meta = Metadata::new(0o644, TIME);
+        let source = populated()
+            .file(
+                b"/os.img".to_vec(),
+                FileContent::Declared {
+                    len: 10_000,
+                    key: 7,
+                },
+                meta,
+            )
+            .file(
+                b"/none.img".to_vec(),
+                FileContent::Declared { len: 0, key: 8 },
+                meta,
+            );
+        let plan = FormatPlan::new(source, size, FormatOptions::new(1)).expect("plan");
+
+        // No bytes to put there, so nothing is written at all.
+        let mut sink = Cursor::new(Vec::new());
+        assert!(matches!(
+            plan.write_to(&mut sink),
+            Err(FormatError::ContentsNotHeld { key: 7 })
+        ));
+        assert!(
+            sink.into_inner().is_empty(),
+            "the refused write touched its sink"
+        );
+
+        // One piece names the file, on a cluster boundary, by the key it was declared with. The
+        // empty one occupies no cluster, so it has no piece.
+        let declared: Vec<(u64, u64, u64)> = every_piece(&plan)
+            .into_iter()
+            .filter_map(|(_, p)| match p {
+                Piece::Declared { offset, len, key } => Some((offset, len, key)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared.len(), 1);
+        let (offset, len, key) = declared[0];
+        assert_eq!((len, key), (10_000, 7));
+        assert_eq!(offset % u64::from(plan.layout().bytes_per_cluster), 0);
+
+        // The caller's bytes, put where the piece said, are the file a reader finds.
+        let bytes = apply(&plan, vec![0xFF; size as usize], false);
+        let files = read_back("the declared file filled in", &bytes);
+        let image = files
+            .iter()
+            .find(|(p, _)| p == b"/os.img")
+            .expect("the file is there");
+        assert!(image.1.as_deref() == Some(&declared_bytes(7, 10_000)[..]));
+        let none = files
+            .iter()
+            .find(|(p, _)| p == b"/none.img")
+            .expect("the file is there");
+        assert_eq!(none.1.as_deref(), Some(&[][..]));
+
+        // A declared file with no bytes leaves a write nothing to supply, so it is accepted.
+        let source = populated().file(
+            b"/none".to_vec(),
+            FileContent::Declared { len: 0, key: 9 },
+            meta,
+        );
+        let plan = FormatPlan::new(source, size, FormatOptions::new(1)).expect("plan");
+        plan.write_to(Cursor::new(Vec::new()))
+            .expect("nothing to supply");
+    }
+
+    #[test]
+    fn the_end_of_the_volume_is_zeroed_from_the_heaps_end_whatever_the_cluster_size() {
+        // A mebibyte from the end, where the clusters there are free.
+        let plan = FormatPlan::new(populated(), 64 << 20, FormatOptions::new(1)).expect("plan");
+        let tail = every_piece(&plan)
+            .into_iter()
+            .filter(|(k, _)| *k == StageKind::Invalidate)
+            .map(|(_, p)| (p.offset(), p.len()))
+            .next_back()
+            .expect("the end of the volume is a piece");
+        assert_eq!(tail, ((64 << 20) - (1 << 20), 1 << 20));
+
+        // With clusters larger than that mebibyte, the space the heap has no cluster for can be
+        // larger too, and it is covered whole however large: from the heap's end at the latest
+        // to the last byte of the size asked for, a sub-sector remainder included.
+        let size = (300 << 20) + 12_345;
+        let request = PlanRequest::new(0).cluster_size(ClusterSize::Bytes(32 << 20));
+        let plan =
+            FormatPlan::new(populated(), size, FormatOptions::new(1).plan(request)).expect("plan");
+        let layout = plan.layout();
+        let heap_end = u64::from(layout.cluster_heap_offset) * u64::from(layout.bytes_per_sector)
+            + layout.heap_bytes();
+        assert!(
+            size - heap_end > 1 << 20,
+            "the row must leave more than a mebibyte past the heap"
+        );
+        let (at, len) = every_piece(&plan)
+            .into_iter()
+            .filter(|(k, _)| *k == StageKind::Invalidate)
+            .map(|(_, p)| (p.offset(), p.len()))
+            .next_back()
+            .expect("the end of the volume is a piece");
+        assert!(
+            at <= heap_end,
+            "the end of the volume starts at {at}, past the heap's end at {heap_end}"
+        );
+        assert_eq!(at + len, size);
     }
 }

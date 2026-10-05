@@ -60,10 +60,10 @@ pub use csum::{
     upcase_checksum,
 };
 pub use dirent::{
-    AllocationBitmapEntry, DIR_ENTRY_SIZE, DirEntry, EntryType, FileAttributes, FileEntry,
-    FileNameEntry, MAX_LABEL_UNITS, MAX_NAME_ENTRIES, MAX_NAME_UNITS, MAX_SECONDARY_COUNT,
-    NAME_UNITS_PER_ENTRY, SECONDARY_ALLOCATION_POSSIBLE, SECONDARY_NO_FAT_CHAIN,
-    StreamExtensionEntry, UpcaseTableEntry, VolumeLabelEntry,
+    AllocationBitmapEntry, BITMAP_IDENTIFIER, DIR_ENTRY_SIZE, DirEntry, EntryType, FileAttributes,
+    FileEntry, FileNameEntry, MAX_LABEL_UNITS, MAX_NAME_ENTRIES, MAX_NAME_UNITS,
+    MAX_SECONDARY_COUNT, NAME_UNITS_PER_ENTRY, SECONDARY_ALLOCATION_POSSIBLE,
+    SECONDARY_NO_FAT_CHAIN, StreamExtensionEntry, UpcaseTableEntry, VolumeLabelEntry,
 };
 pub use table::{BAD_CLUSTER, END_OF_CHAIN, FAT_ENTRY_MEDIA, FAT_ENTRY_RESERVED};
 pub use time::{

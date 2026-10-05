@@ -113,6 +113,21 @@ impl SubvolumeRequest {
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelError {
+    /// A file declared by its length alone, whose bytes the source does not hold.
+    ///
+    /// This family checksums every sector of a file's data inside its metadata, and its writer
+    /// computes those checksums from the bytes, so a file with none to read is refused when
+    /// the plan is made rather than part of the way through writing the image.
+    #[error(
+        "{}: its contents are declared by length alone, and this writer checksums a file's \
+         bytes in its metadata",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    ContentsNotHeld {
+        /// The file's path.
+        path: Vec<u8>,
+    },
     /// A path component was `..`, which a source may not use — a path is where an entry goes,
     /// not a traversal to be resolved.
     #[error("path {} has a `..` component", crate::escape::printable(.path))]
@@ -994,6 +1009,11 @@ impl Builder {
         Ok(match kind {
             EntryKind::Directory => ObjectKind::Directory(Vec::new()),
             EntryKind::File(content) => {
+                if matches!(content, FileContent::Declared { .. }) {
+                    return Err(ModelError::ContentsNotHeld {
+                        path: path.to_vec(),
+                    });
+                }
                 let size = content.len();
                 // Small enough to live in the metadata: below one sector, which is what the
                 // format's own tooling uses, and small enough for one record to hold. The second

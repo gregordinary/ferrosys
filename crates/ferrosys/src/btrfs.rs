@@ -80,13 +80,17 @@
 //! from the bytes that came off the device — never from a value re-serialized through its own
 //! types, which would report as damaged every filesystem it did not write.
 //!
-//! A checksum is not the whole of it. A block also records its own logical address and the
-//! filesystem it belongs to, and both are held against what the reader believed when it went
-//! to fetch it — so a block read from the wrong place, or an image carved out of a disk at the
-//! wrong offset, is caught by a check no checksum can make. The same is true one level up: a
-//! superblock records where it lives, so a copy of one written somewhere else verifies
-//! perfectly and says the wrong thing about itself, and [`Volume::mirrors`] is where that is
-//! reported.
+//! A checksum is not the whole of it. A block also records its own logical address, the
+//! filesystem it belongs to, and the transaction that wrote it, and each is held against what
+//! the reader believed when it went to fetch it — so a block read from the wrong place, an
+//! image carved out of a disk at the wrong offset, or a block left from an earlier transaction
+//! at an address since written again, is caught by a check no checksum can make. A node's keys
+//! are held to the blocks they lead to, so a search steers where a walk of every block would
+//! find what it looks for. The same is true one level up: a superblock records where it lives,
+//! so a copy of one written somewhere else verifies perfectly and says the wrong thing about
+//! itself, and a copy at the live transaction is held to say what the live one says;
+//! [`Volume::mirrors`] is where either is reported. And the chunk tree's record of a chunk the
+//! superblock's bootstrap array also maps is held to map it the same way.
 //!
 //! # What a filesystem may carry that this refuses
 //!

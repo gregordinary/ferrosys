@@ -713,6 +713,42 @@ impl<A> Findings<A> {
         }
         self.truncated
     }
+
+    /// Record what `other` holds, and its truncation, as this accumulator's own.
+    ///
+    /// One deviation is copied at a time and the copying stops at the cap, so carrying a
+    /// bounded set into a report costs what the report keeps rather than what the set holds.
+    ///
+    /// Compiled where a family keeps what its open met for a later scan, which is exFAT's
+    /// alone; a family that does the same widens the gate.
+    #[cfg(feature = "exfat")]
+    pub(crate) fn extend_from(&mut self, other: &Findings<A>)
+    where
+        A: Clone,
+    {
+        for anomaly in &other.anomalies {
+            if self.is_full() {
+                break;
+            }
+            self.anomalies.push(anomaly.clone());
+        }
+        self.truncated |= other.truncated;
+    }
+
+    /// The deviations held, in the order they were recorded, and whether any was dropped.
+    ///
+    /// Gated as [`extend_from`](Self::extend_from) is, for the same family.
+    #[cfg(feature = "exfat")]
+    pub(crate) fn into_parts(self) -> (Vec<A>, bool) {
+        (self.anomalies, self.truncated)
+    }
+
+    /// How many deviations are held, and whether any was dropped: what a gate on the bound
+    /// itself asks.
+    #[cfg(all(test, feature = "exfat"))]
+    pub(crate) fn held(&self) -> (usize, bool) {
+        (self.anomalies.len(), self.truncated)
+    }
 }
 
 #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]

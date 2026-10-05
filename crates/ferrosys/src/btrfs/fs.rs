@@ -768,6 +768,17 @@ impl<R: Read + Seek> Reader<R> {
             }
         }
         self.scan_uuid_mapping(&roots, &mut scan);
+        for &logical in self.volume.bootstrap_conflicts() {
+            scan.at(
+                Category::ChunkMap,
+                Severity::Integrity,
+                Some(objectid::CHUNK_TREE),
+                Some(logical),
+                "the chunk tree maps this chunk differently from the superblock's bootstrap \
+                 array; the bootstrap's mapping, which read the chunk tree, is the one used"
+                    .to_string(),
+            );
+        }
         for (&logical, through) in self.volume.read_through() {
             scan.at(
                 Category::Tree,
@@ -2954,30 +2965,95 @@ mod tests {
         );
     }
 
+    /// The filesystem tree's root in `image`, where each of its copies sits on the device, and
+    /// the node size — what a gate damaging one copy of a mirrored block needs.
+    fn mirrored_fs_root(image: &[u8]) -> (TreeRoot, Vec<u64>, usize) {
+        use crate::btrfs::Volume;
+
+        let mut volume = Volume::open(std::io::Cursor::new(image)).expect("healthy");
+        let root = volume
+            .tree_roots()
+            .expect("the root tree")
+            .into_iter()
+            .find(|root| root.objectid == objectid::FS_TREE)
+            .expect("a filesystem tree");
+        let chunk = volume.chunk_map().chunk_at(root.bytenr).expect("mapped");
+        let copies: Vec<u64> = chunk
+            .copies
+            .iter()
+            .map(|&copy| copy + (root.bytenr - chunk.logical))
+            .collect();
+        assert_eq!(copies.len(), 2, "the block is mirrored");
+        (root, copies, volume.node_size() as usize)
+    }
+
+    #[test]
+    fn a_tree_block_whose_first_copy_is_from_another_transaction_is_read_through_the_second() {
+        use crate::btrfs::ondisk::{Header, checksum};
+        use crate::{OpenOptions, ReadPolicy};
+
+        // A copy left from an earlier transaction verifies in every respect but the
+        // generation, so that is what tells the stale copy from the live one — and a lenient
+        // read that recovers through a mirror has to judge it by that too.
+        let healthy = read_cost_image();
+        let (root, copies, node) = mirrored_fs_root(&healthy);
+        let (logical, generation) = (root.bytenr, root.generation);
+        let stale = |bytes: &mut Vec<u8>, copy: u64| {
+            let block = &mut bytes[copy as usize..copy as usize + node];
+            let mut header = Header::read_from(block).expect("a header");
+            header.generation = generation + 1;
+            header.write_to(block);
+            let digest = checksum(block);
+            block[..4].copy_from_slice(&digest.to_le_bytes());
+        };
+        let lenient = OpenOptions::new().policy(ReadPolicy::Lenient);
+        let expected = Reader::open(std::io::Cursor::new(healthy.clone()))
+            .expect("healthy")
+            .walk()
+            .expect("a walk");
+
+        let mut first = healthy.clone();
+        stale(&mut first, copies[0]);
+        let mut strict = Reader::open(std::io::Cursor::new(first.clone())).expect("it opens");
+        assert!(matches!(
+            strict.walk(),
+            Err(ReadError::WrongGeneration { logical: at, .. }) if at == logical
+        ));
+        let mut reader =
+            Reader::open_with(std::io::Cursor::new(first), &lenient).expect("it opens");
+        assert_eq!(
+            reader.walk().expect("read through the second copy"),
+            expected
+        );
+        let report = reader.scan();
+        assert!(
+            report
+                .anomalies()
+                .iter()
+                .any(|anomaly| anomaly.logical == Some(logical)
+                    && anomaly.detail.contains("read through copy 1")),
+            "{:?}",
+            report.anomalies()
+        );
+
+        let mut both = healthy;
+        stale(&mut both, copies[0]);
+        stale(&mut both, copies[1]);
+        let mut reader = Reader::open_with(std::io::Cursor::new(both), &lenient).expect("it opens");
+        assert!(matches!(
+            reader.walk(),
+            Err(ReadError::WrongGeneration { logical: at, .. }) if at == logical
+        ));
+    }
+
     #[test]
     fn a_tree_block_with_a_damaged_first_copy_is_read_through_the_second_leniently() {
-        use crate::btrfs::Volume;
         use crate::{OpenOptions, ReadPolicy};
 
         // The filesystem tree's root, in a block group whose metadata is mirrored by default.
         let healthy = read_cost_image();
-        let (logical, copies) = {
-            let mut volume = Volume::open(std::io::Cursor::new(&healthy[..])).expect("healthy");
-            let root = volume
-                .tree_roots()
-                .expect("the root tree")
-                .into_iter()
-                .find(|root| root.objectid == objectid::FS_TREE)
-                .expect("a filesystem tree");
-            let chunk = volume.chunk_map().chunk_at(root.bytenr).expect("mapped");
-            let copies: Vec<u64> = chunk
-                .copies
-                .iter()
-                .map(|&copy| copy + (root.bytenr - chunk.logical))
-                .collect();
-            (root.bytenr, copies)
-        };
-        assert_eq!(copies.len(), 2, "the block is mirrored");
+        let (root, copies, _) = mirrored_fs_root(&healthy);
+        let logical = root.bytenr;
         let damage = |bytes: &mut Vec<u8>, copy: u64| bytes[copy as usize + 200] ^= 0xff;
         let lenient = OpenOptions::new().policy(ReadPolicy::Lenient);
         let expected = Reader::open(std::io::Cursor::new(healthy.clone()))

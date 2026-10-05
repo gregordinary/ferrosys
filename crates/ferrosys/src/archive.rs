@@ -25,7 +25,7 @@
 //! [`ArchiveSource::from_reader`] takes any stream and reads every body into memory, so a
 //! format needs the sum of the archive's file bytes. [`ArchiveSource::from_path`] opens
 //! the archive itself, records where each body lies, and reads it only when that file is
-//! placed — so a format needs the largest single member. The handles keep the archive
+//! placed, a window at a time — so a format needs one window. The handles keep the archive
 //! open, and it must not be modified in place until the format finishes.
 //!
 //! Framing the tar stream and parsing its PAX records is this module's own work
@@ -196,9 +196,9 @@ impl ArchiveSource {
     /// This is the memory-shaped alternative to [`from_reader`](Self::from_reader): the
     /// entry records, their paths, their metadata, and their extended attributes are read
     /// up front exactly as they are there, but a regular file's *contents* become a
-    /// handle into the archive rather than a buffer. A format's peak memory becomes the
-    /// largest single file rather than the sum of every file, which for a rootfs archive
-    /// is the difference between gigabytes and megabytes.
+    /// handle into the archive rather than a buffer, read a window at a time as the file is
+    /// placed. A format's peak memory becomes one window rather than the sum of every file,
+    /// which for a rootfs archive is the difference between gigabytes and a mebibyte.
     ///
     /// The archive is checked to hold every body it declares, so a truncated archive
     /// fails here rather than part-way through writing an image.

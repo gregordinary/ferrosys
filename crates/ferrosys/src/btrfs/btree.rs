@@ -28,9 +28,17 @@
 //! - **A child at the wrong height.** A child must be exactly one level below its parent, so a
 //!   descent has a decreasing measure independent of the visited set and terminates whatever
 //!   the addresses say.
-//! - **Keys out of order.** A tree that is not sorted is not a tree, and a search over one
-//!   silently misses items rather than failing. Every key a walk visits is held against the
-//!   one before it.
+//! - **A block from another transaction.** A root item and a parent's pointer each record the
+//!   transaction that wrote the block they lead to, and a block at any other is refused: one
+//!   left over from an earlier transaction at an address since written again verifies in
+//!   every other respect.
+//! - **Keys out of order, or out of place.** A tree that is not sorted is not a tree, and a
+//!   search over one silently misses items rather than failing. Every block's keys are held
+//!   against each other when a descent reaches it, a node's as well as a leaf's, and against
+//!   the keys its parent records: its first key is the parent's key for it, and its last is
+//!   below the parent's key for the block after it. A node's keys are what a search steers
+//!   by, so one that does not match the block it leads to hides files a walk of every block
+//!   would still meet.
 //! - **A tree larger than the caller will hold.** [`Limits::max_walk_entries`](crate::Limits::max_walk_entries) caps the items
 //!   one walk visits.
 //!
@@ -189,7 +197,7 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
         let mut visited = BTreeSet::new();
         visited.insert(self.root.bytenr);
         let mut block = self.read_root()?;
-        block.check_leaf_packing()?;
+        let mut below = None;
         loop {
             if block.header().is_leaf() {
                 let at = partition(&block, &key, true)?;
@@ -202,29 +210,44 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
                 }));
             }
             let index = start_index(&block, &key)?;
-            block = self.child_of(&block, index, &mut visited)?;
+            (block, below) = self.child_of(&block, below, index, &mut visited)?;
         }
     }
 
-    /// The child at `index` of `parent`, with every guard a descent applies to one.
+    /// The child at `index` of `parent`, with every guard a descent applies to one, and the
+    /// bound the child's own children sit below.
     ///
-    /// Three of them, and each catches something the others cannot: an address already visited
-    /// is a tree that is not one, a child that is not exactly one level below its parent is a
-    /// descent with no decreasing measure, and a leaf whose items are not packed hands back one
-    /// record's bytes under another record's key. Every descent in this module goes through
-    /// here so that none of the three can be forgotten in one of them.
+    /// Five of them, and each catches something the others cannot: an address already visited
+    /// is a tree that is not one, a block from another transaction than the pointer records is
+    /// not the committed one, a child that is not exactly one level below its parent is a
+    /// descent with no decreasing measure, a leaf whose items are not packed hands back one
+    /// record's bytes under another record's key, and keys out of order or out of the place
+    /// the parent's keys give them steer a search past what the tree holds. Every descent in
+    /// this module goes through here so that none of the five can be forgotten in one of them.
+    ///
+    /// `below` is the bound `parent` itself sits under — the key its own parent records for
+    /// the block after it, or none at the right edge of the tree.
     fn child_of(
         &mut self,
         parent: &TreeBlock,
+        below: Option<DiskKey>,
         index: usize,
         visited: &mut BTreeSet<u64>,
-    ) -> Result<TreeBlock, ReadError> {
+    ) -> Result<(TreeBlock, Option<DiskKey>), ReadError> {
         let level = parent.header().level;
-        let child_at = parent.key_ptr(index)?.blockptr;
+        let pointer = parent.key_ptr(index)?;
+        let child_at = pointer.blockptr;
         if !visited.insert(child_at) {
             return Err(ReadError::TreeCycle { logical: child_at });
         }
-        let child = self.volume.read_block(child_at)?;
+        // The child's upper bound is the parent's key for the block after it, or, for the
+        // last child, the parent's own.
+        let child_below = if index + 1 < parent.count()? {
+            Some(parent.key_ptr(index + 1)?.key)
+        } else {
+            below
+        };
+        let child = self.volume.read_tree_block(child_at, pointer.generation)?;
         // A child exactly one level below its parent is what makes a descent terminate
         // whatever the addresses say, and it is a separate guard from the visited set rather
         // than a cheaper version of it: a crafted tree can point at a fresh block at every step
@@ -237,7 +260,8 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
             });
         }
         child.check_leaf_packing()?;
-        Ok(child)
+        child.check_keys(Some(pointer.key), child_below)?;
+        Ok((child, child_below))
     }
 
     /// How many items the tree holds, having read and verified every block on the way.
@@ -254,13 +278,16 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
         Ok(items)
     }
 
-    /// The tree's top block, checked against what the root item said it would be.
+    /// The tree's top block, checked against what the root item said it would be, and checked
+    /// as every block below it is.
     ///
-    /// The level is recorded in two places — the root item and the block's own header — and
-    /// holding them against each other is what catches a root item pointing at a block that is
-    /// not the one it describes.
+    /// The level and the transaction are each recorded in two places — the root item and the
+    /// block's own header — and holding them against each other is what catches a root item
+    /// pointing at a block that is not the one it describes.
     fn read_root(&mut self) -> Result<TreeBlock, ReadError> {
-        let block = self.volume.read_block(self.root.bytenr)?;
+        let block = self
+            .volume
+            .read_tree_block(self.root.bytenr, self.root.generation)?;
         if block.header().level != self.root.level {
             return Err(ReadError::BadTreeLevel {
                 logical: self.root.bytenr,
@@ -268,6 +295,8 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
                 parent: self.root.level,
             });
         }
+        block.check_leaf_packing()?;
+        block.check_keys(None, None)?;
         Ok(block)
     }
 
@@ -288,14 +317,15 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
         visited.insert(self.root.bytenr);
 
         let root = self.read_root()?;
-        root.check_leaf_packing()?;
         if !on_block(&root) {
             return Ok(());
         }
         let start = start_index(&root, &from)?;
-        let mut stack = vec![(root, start)];
+        // Each frame is a block, how far through it the walk has got, and the bound its keys
+        // sit below. Every key a walk passes was held against its neighbours and against that
+        // bound when its block was read, so the order the items come out in is the tree's.
+        let mut stack = vec![(root, start, None)];
         let mut visits = 0usize;
-        let mut previous: Option<DiskKey> = None;
 
         while let Some(top) = stack.len().checked_sub(1) {
             let count = stack[top].0.count()?;
@@ -315,13 +345,6 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
                     });
                 }
                 let key = stack[top].0.item(index)?.key;
-                if previous.is_some_and(|last| key <= last) {
-                    return Err(ReadError::BadTreeBlock {
-                        logical: stack[top].0.header().bytenr,
-                        fault: "an item's key is not above the one before it",
-                    });
-                }
-                previous = Some(key);
                 let data = stack[top].0.item_data(index)?;
                 if !on_item(&key, data) {
                     return Ok(());
@@ -329,15 +352,15 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
                 continue;
             }
 
-            let child = {
-                let (parent, _) = &stack[top];
-                self.child_of(parent, index, &mut visited)?
+            let (child, below) = {
+                let (parent, _, below) = &stack[top];
+                self.child_of(parent, *below, index, &mut visited)?
             };
             if !on_block(&child) {
                 return Ok(());
             }
             let start = start_index(&child, &from)?;
-            stack.push((child, start));
+            stack.push((child, start, below));
         }
         Ok(())
     }
@@ -355,8 +378,8 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
 /// the binary search lands on zero on its own.
 ///
 /// The search is bounded whatever the block holds, so a block whose keys are not sorted
-/// answers with a wrong index and never with one outside the block. That a tree is sorted is
-/// checked where a walk passes each key, which is where the check is free.
+/// answers with a wrong index and never with one outside the block. That a block is sorted is
+/// checked when a descent reaches it, before any search over it.
 fn start_index(block: &TreeBlock, from: &DiskKey) -> Result<usize, ReadError> {
     if *from == DiskKey::MIN {
         return Ok(0);
@@ -374,8 +397,8 @@ fn start_index(block: &TreeBlock, from: &DiskKey) -> Result<usize, ReadError> {
 ///
 /// The one binary search over a block, in the two readings a descent needs of it. It is bounded
 /// whatever the block holds, so a block whose keys are not sorted answers with a wrong index
-/// and never with one outside the block. That a tree is sorted is checked where a walk passes
-/// each key, which is where the check is free.
+/// and never with one outside the block. That a block is sorted is checked when a descent
+/// reaches it, before any search over it.
 fn partition(block: &TreeBlock, from: &DiskKey, inclusive: bool) -> Result<usize, ReadError> {
     let leaf = block.header().is_leaf();
     let (mut lo, mut hi) = (0usize, block.count()?);
@@ -698,10 +721,144 @@ mod tests {
     }
 
     #[test]
+    fn a_block_from_another_transaction_than_its_pointer_records_is_refused() {
+        use crate::btrfs::forge::GENERATION;
+        use crate::btrfs::ondisk::KeyPtr;
+
+        // The root block of a tree records another transaction than the root item does. Its
+        // checksum, its address and its filesystem all verify, which is exactly what a block
+        // left at an address since written again looks like.
+        let mut forge = Forge::new();
+        forge.root_leaf(&items(1..6));
+        forge.amend(ROOT_TREE_AT, |block| {
+            let mut header = Header::read_from(block).expect("a header");
+            header.generation = 9999;
+            header.write_to(block);
+        });
+        assert!(matches!(
+            walk(&forge),
+            Err(ReadError::WrongGeneration { logical, generation: 9999, expected })
+                if logical == ROOT_TREE_AT && expected == GENERATION
+        ));
+
+        // A parent's pointer records another transaction than the child carries. The walk and
+        // both forms of lookup reach the child through that pointer, and each refuses it.
+        let mut forge = Forge::new();
+        let (left, right) = (FIRST_FREE_AT, FIRST_FREE_AT + NODE_SIZE as u64);
+        forge
+            .block(left, &leaf(left, objectid::ROOT_TREE, &items(1..10)))
+            .block(right, &leaf(right, objectid::ROOT_TREE, &items(10..20)))
+            .root_node(1, &[(key(1), left), (key(10), right)]);
+        forge.amend(ROOT_TREE_AT, |block| {
+            let at = Header::SIZE + KeyPtr::SIZE;
+            let mut pointer = KeyPtr::read_from(&block[at..]).expect("a pointer");
+            pointer.generation = 9999;
+            pointer.write_to(&mut block[at..]);
+        });
+        let stale = |r: Result<_, ReadError>| {
+            matches!(
+                r,
+                Err(ReadError::WrongGeneration { logical, generation, expected: 9999 })
+                    if logical == right && generation == GENERATION
+            )
+        };
+        assert!(stale(walk(&forge).map(|_| ())));
+        let mut volume = Volume::open(forge.source()).expect("the filesystem opens");
+        let root = volume.root_tree();
+        assert!(stale(volume.tree(root).find_first(key(15)).map(|_| ())));
+        assert!(stale(
+            volume.tree(root).find_at_or_before(key(15)).map(|_| ())
+        ));
+        // The left child's pointer is sound, and what sits under it still reads.
+        assert!(
+            volume
+                .tree(root)
+                .find_exact(key(5))
+                .expect("search")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_node_key_that_does_not_match_the_block_it_leads_to_is_refused_on_every_path() {
+        // A node's keys are what a search steers by, and a checksum covers a wrong one as
+        // faithfully as a right one. A walk of every block in order meets every item whatever
+        // the node's keys say, so a check made only where a walk passes each item certifies a
+        // tree whose lookups miss what it holds. Each shape here is refused by the walk and by
+        // both forms of lookup alike.
+        let (left, right) = (FIRST_FREE_AT, FIRST_FREE_AT + NODE_SIZE as u64);
+        // Each shape, and a key whose lookup reaches the block at fault.
+        type Shape = (&'static str, std::ops::Range<u64>, [DiskKey; 2], DiskKey);
+        let shapes: [Shape; 4] = [
+            (
+                "the node's keys are out of order",
+                1..10,
+                [key(10), DiskKey::MIN],
+                key(15),
+            ),
+            (
+                "the key for the right child is below its first key",
+                1..10,
+                [key(1), key(9)],
+                key(15),
+            ),
+            (
+                "the key for the right child is above its first key",
+                1..10,
+                [key(1), key(11)],
+                key(15),
+            ),
+            (
+                "the left child reaches the key the node records for the right one",
+                1..12,
+                [key(1), key(10)],
+                key(5),
+            ),
+        ];
+        for (what, left_items, [first, second], reaches) in shapes {
+            let mut forge = Forge::new();
+            forge
+                .block(left, &leaf(left, objectid::ROOT_TREE, &items(left_items)))
+                .block(right, &leaf(right, objectid::ROOT_TREE, &items(10..20)))
+                .root_node(1, &[(first, left), (second, right)]);
+            let refused =
+                |r: Result<(), ReadError>| matches!(r, Err(ReadError::BadTreeBlock { .. }));
+            assert!(refused(walk(&forge).map(|_| ())), "{what}: the walk");
+            let mut volume = Volume::open(forge.source()).expect("the filesystem opens");
+            let root = volume.root_tree();
+            for probe in [key(5), key(10), key(15)] {
+                let first = volume.tree(root).find_first(probe).map(|_| ());
+                let before = volume.tree(root).find_at_or_before(probe).map(|_| ());
+                // A lookup that steers clear of the faulty child is a lookup the fault does
+                // not affect; one that reaches it must refuse it, never answer from it.
+                for (form, answer) in [("find_first", first), ("find_at_or_before", before)] {
+                    assert!(
+                        answer.is_ok() || refused(answer),
+                        "{what}: {form} {probe:?} failed some other way"
+                    );
+                }
+            }
+            assert!(
+                refused(volume.tree(root).find_first(reaches).map(|_| ())),
+                "{what}: a lookup that reaches the block at fault"
+            );
+        }
+
+        // The control: the same tree with the node's keys each the first key of the block it
+        // leads to, read whole and searched, agrees with itself.
+        let mut forge = Forge::new();
+        forge
+            .block(left, &leaf(left, objectid::ROOT_TREE, &items(1..10)))
+            .block(right, &leaf(right, objectid::ROOT_TREE, &items(10..20)))
+            .root_node(1, &[(key(1), left), (key(10), right)]);
+        assert_eq!(walk(&forge).expect("a well-formed tree").len(), 19);
+    }
+
+    #[test]
     fn a_tree_whose_keys_are_not_in_order_is_refused_rather_than_searched_wrongly() {
         // A binary search over unsorted keys silently misses items instead of failing, so a
-        // tree that is not sorted is refused where a walk passes each key — which is the one
-        // place the check is free.
+        // block whose keys are not sorted is refused when a descent reaches it, before any
+        // search over it.
         let mut forge = Forge::new();
         forge.root_leaf(&items(1..6));
         forge.amend(ROOT_TREE_AT, |block| {

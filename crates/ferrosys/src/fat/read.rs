@@ -811,24 +811,39 @@ impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
     }
 
     fn find_name(&mut self, dir: &Node, name: &[u8]) -> Result<Option<Node>, ReadError> {
-        // The directory is streamed, as ext's is, and nothing is gathered: an exact match
-        // ends the read where it is, so neither the walk's cap nor an entry past the match
-        // can fail a lookup that found its name. The first case-folded match is remembered
-        // in case none is exact, which is the one case that reads on to the end.
+        // An entry answers to its short name as well as to its long one: the 8.3 alias is a
+        // name the volume holds for it, and the one a short-name consumer knows it by.
+        //
+        // The directory is streamed, as ext's is, and nothing is gathered: an exact match on
+        // a long name ends the read where it is, so neither the walk's cap nor an entry past
+        // the match can fail a lookup that found its name. Every weaker match is remembered,
+        // the first of each kind, in case nothing stronger follows — an exact alias, then a
+        // case-folded long name, then a case-folded alias — which is the one case that reads
+        // on to the end. A directory a driver wrote holds no name that is another entry's
+        // alias, so the order decides nothing there; it is what keeps an exact match ahead
+        // of a folded one, and a long name ahead of a short one, in a directory that does.
         let policy = self.policy;
         let mut exact = None;
+        let mut exact_alias = None;
         let mut folded = None;
+        let mut folded_alias = None;
         self.parse_entries(dir, &mut OnDeviation::Policy(policy), |_, e| {
             if e.name == name {
                 exact = Some(e.node);
                 return Ok(ControlFlow::Break(()));
             }
+            if exact_alias.is_none() && e.short_name == name {
+                exact_alias = Some(e.node);
+            }
             if folded.is_none() && e.name.eq_ignore_ascii_case(name) {
                 folded = Some(e.node);
             }
+            if folded_alias.is_none() && e.short_name.eq_ignore_ascii_case(name) {
+                folded_alias = Some(e.node);
+            }
             Ok(ControlFlow::Continue(()))
         })?;
-        Ok(exact.or(folded))
+        Ok(exact.or(exact_alias).or(folded).or(folded_alias))
     }
 
     fn not_found(&self, path: &[u8]) -> ReadError {
@@ -3597,6 +3612,73 @@ mod tests {
                 "{what}: a name that is its own short name took a long-name run"
             );
             assert_eq!(payload.short_name, b"BOOTX64.EFI");
+        }
+    }
+
+    #[test]
+    fn a_name_is_found_by_its_short_alias_as_well_as_by_its_long_name() {
+        // The 8.3 alias is a name the volume holds for an entry, and the one a short-name
+        // consumer knows it by: a listing shows it, so a lookup must reach it, through a
+        // directory reached by its own alias as well as through a file. Exactly and folded
+        // alike, as a long name is.
+        let m = |mode| Metadata::new(mode, TIME);
+        let source = TreeBuilder::new()
+            .directory(b"/Long directory name".to_vec(), m(0o755))
+            .file(
+                b"/Long directory name/Long filename.txt".to_vec(),
+                b"alias contents".to_vec(),
+                m(0o644),
+            );
+        for request in [FatType::Fat12, FatType::Fat16, FatType::Fat32] {
+            let mib = match request {
+                FatType::Fat12 => 2,
+                FatType::Fat16 => 64,
+                FatType::Fat32 => 512,
+            };
+            let opts =
+                options().plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(request)));
+            let image = format(source.clone(), mib << 20, opts).expect("format");
+            let mut r = reader(&image);
+            let root = r.root();
+            let dir = r
+                .read_dir(&root)
+                .expect("read the root")
+                .into_iter()
+                .find(|e| e.name == b"Long directory name")
+                .expect("the directory");
+            let inner = r.read_dir(&dir.node).expect("read the directory");
+            let file = inner
+                .iter()
+                .find(|e| e.name == b"Long filename.txt")
+                .expect("the file");
+            assert!(dir.has_long_name && file.has_long_name, "{request:?}");
+            assert_ne!(file.short_name, file.name, "{request:?}");
+
+            let by_long = r
+                .lookup(b"/Long directory name/Long filename.txt")
+                .expect("the long names resolve");
+            let alias = |bytes: &[u8]| String::from_utf8(bytes.to_vec()).expect("ASCII");
+            let (dir_alias, file_alias) = (alias(&dir.short_name), alias(&file.short_name));
+            for path in [
+                format!("/{dir_alias}/{file_alias}"),
+                format!(
+                    "/{}/{}",
+                    dir_alias.to_lowercase(),
+                    file_alias.to_lowercase()
+                ),
+                format!("/Long directory name/{file_alias}"),
+                format!("/{dir_alias}/Long filename.txt"),
+            ] {
+                let found = r
+                    .lookup(path.as_bytes())
+                    .unwrap_or_else(|e| panic!("{request:?}: {path} does not resolve: {e}"));
+                assert_eq!(found, by_long, "{request:?}: {path}");
+                assert_eq!(
+                    r.read_data(&found).expect("read"),
+                    b"alias contents",
+                    "{request:?}: {path}"
+                );
+            }
         }
     }
 

@@ -13,8 +13,9 @@
 //! 3. Refuse what cannot be read at all: a filesystem spanning several devices, a checksum
 //!    algorithm this crate does not compute, a feature bit it does not implement, a geometry
 //!    the format does not define.
-//! 4. Judge the copies that were *not* chosen against the device's own length, so a missing or
-//!    stale one is reported rather than passed over.
+//! 4. Judge the copies that were *not* chosen against the device's own length and against the
+//!    chosen one, so a missing or stale one, or one at the live generation that is not a copy
+//!    of the live record, is reported rather than passed over.
 //! 5. Load the bootstrap array, translate the chunk root through it, and read the chunk tree —
 //!    which completes the map every read above this point goes through.
 //!
@@ -31,7 +32,7 @@ use crate::{Limits, OpenOptions, ReadPolicy};
 use super::ChunkMap;
 use super::btree::Tree;
 use super::ondisk::{
-    self, ChecksumType, Chunk, Header, IncompatFlags, ItemType, MAX_BLOCK_SIZE, MAX_LEVEL,
+    self, ChecksumType, Chunk, DiskKey, Header, IncompatFlags, ItemType, MAX_BLOCK_SIZE, MAX_LEVEL,
     MIN_BLOCK_SIZE, MIRRORS, ParseError, RootItem, SUPER_INFO_SIZE, SuperBlock, holds_mirror,
     objectid,
 };
@@ -104,6 +105,16 @@ pub enum Mirror {
         /// The transaction that wrote it. The highest across the copies is the live one.
         generation: u64,
     },
+    /// A superblock at the live transaction that is not a copy of the live one: outside its
+    /// checksum and the location it records as its own, its bytes differ.
+    ///
+    /// Every copy a transaction writes is the same record but for those two fields, so one
+    /// that differs anywhere else at the same generation describes another filesystem, or
+    /// this one inconsistently — a checksum that covers it says only that it is intact.
+    Diverged {
+        /// The transaction it records, which is the live one.
+        generation: u64,
+    },
 }
 
 impl Mirror {
@@ -166,6 +177,9 @@ pub struct Volume<R> {
     cache: BlockCache<TreeBlock>,
     /// Tree blocks read through a later copy. See [`read_through`](Self::read_through).
     read_through: BTreeMap<u64, ReadThrough>,
+    /// Chunks the chunk tree maps differently from the bootstrap array, under a lenient read.
+    /// See [`bootstrap_conflicts`](Self::bootstrap_conflicts).
+    bootstrap_conflicts: Vec<u64>,
 }
 
 /// A tree block whose first copy failed its checks and which a lenient read took from a later
@@ -199,13 +213,17 @@ impl<R: Read + Seek> Volume<R> {
     /// define, or a chunk tree that does not describe an address space.
     ///
     /// Under [`ReadPolicy::Strict`] a copy of the superblock that the device has room for and
-    /// that is missing, damaged, misplaced, or behind the chosen one is also a refusal.
+    /// that is missing, damaged, misplaced, behind the chosen one, or at its generation without
+    /// being a copy of it is also a refusal.
     /// Under [`ReadPolicy::Lenient`] every one of those is recorded in
     /// [`mirrors`](Self::mirrors) and the filesystem opens.
     pub fn open_with(mut src: R, options: OpenOptions) -> Result<Self, ReadError> {
         let base = options.base;
         let mut found = [Mirror::Absent; MIRRORS.len()];
         let mut candidates: [Option<SuperBlock>; MIRRORS.len()] = [None, None, None];
+        // Each candidate's bytes, so the copies that were not chosen can be held against the
+        // one that was.
+        let mut records: [Option<Vec<u8>>; MIRRORS.len()] = [None, None, None];
 
         for (index, &at) in MIRRORS.iter().enumerate() {
             // Through the shared addressing rather than by hand: `base` is a caller's and
@@ -244,6 +262,7 @@ impl<R: Read + Seek> Volume<R> {
                 generation: superblock.generation,
             };
             candidates[index] = Some(superblock);
+            records[index] = Some(bytes);
         }
 
         // The filesystem's own rule for which copy is live: the newest. Ties go to the
@@ -283,6 +302,20 @@ impl<R: Read + Seek> Volume<R> {
 
         check_readable(&superblock)?;
 
+        // A copy at the live generation is the live record but for its checksum and its own
+        // location, which is how every transaction writes them. One that differs anywhere
+        // else is not a copy of this filesystem's live state, however well its checksum
+        // covers it.
+        let live = records[chosen].take().expect("the chosen copy was read");
+        for (index, record) in records.iter().enumerate() {
+            if let (Some(record), Mirror::Present { generation }) = (record, found[index])
+                && generation == superblock.generation
+                && !same_record(record, &live)
+            {
+                found[index] = Mirror::Diverged { generation };
+            }
+        }
+
         // Now that the device's length is known, each location that is not a superblock can be
         // told apart: one the device has no room for was never written, and one it has room
         // for is missing.
@@ -305,6 +338,10 @@ impl<R: Read + Seek> Volume<R> {
                     Mirror::Damaged => "a copy of the superblock fails its checksum",
                     Mirror::Misplaced { .. } => {
                         "a copy of the superblock records another place as its own"
+                    }
+                    Mirror::Diverged { .. } => {
+                        "a copy of the superblock at the live generation is not a copy of the \
+                         live one"
                     }
                 };
                 return Err(ReadError::MirrorDisagreement {
@@ -334,6 +371,7 @@ impl<R: Read + Seek> Volume<R> {
             chunks,
             cache,
             read_through: BTreeMap::new(),
+            bootstrap_conflicts: Vec::new(),
         };
         volume.load_chunk_tree()?;
         Ok(volume)
@@ -471,13 +509,43 @@ impl<R: Read + Seek> Volume<R> {
     /// where one fails its checks, fails only where every copy does, and the filesystem's
     /// [`scan`](super::Reader::scan) names each block it read that way.
     pub fn read_block(&mut self, logical: u64) -> Result<TreeBlock, ReadError> {
-        if let Some(block) = self.cache.get(logical) {
+        self.fetch(logical, None)
+    }
+
+    /// The tree block at `logical`, as a tree reaches it: [`read_block`](Self::read_block)'s
+    /// checks, and one more — the block was written by transaction `generation`, which is
+    /// what the root item or the parent's pointer that led here records for it.
+    ///
+    /// A block at the right address, with a checksum that covers it, can still be the wrong
+    /// block: one from an earlier transaction, left at an address the filesystem has since
+    /// written again, verifies exactly as the right one does. The generation is what tells
+    /// them apart, so a copy at another one is a copy that failed its checks — a strict read
+    /// refuses it, and a lenient one reads through to the next copy as it would for a bad
+    /// checksum.
+    pub(super) fn read_tree_block(
+        &mut self,
+        logical: u64,
+        generation: u64,
+    ) -> Result<TreeBlock, ReadError> {
+        self.fetch(logical, Some(generation))
+    }
+
+    /// One tree block, checked, and checked to be from `generation` where one is expected.
+    ///
+    /// A block already held answers only where it is from the generation asked for: two
+    /// pointers to one address that expect different transactions are a filesystem that does
+    /// not describe itself consistently, and the copies are read again so the one asked for is
+    /// judged on its own bytes rather than on whichever pointer reached the address first.
+    fn fetch(&mut self, logical: u64, generation: Option<u64>) -> Result<TreeBlock, ReadError> {
+        if let Some(block) = self.cache.get(logical)
+            && generation.is_none_or(|expected| block.header.generation == expected)
+        {
             return Ok(block.clone());
         }
         let len = u64::from(self.superblock.nodesize);
         let mut first: Option<ReadError> = None;
         for (copy, physical) in self.chunks.copies_of(logical, len)?.into_iter().enumerate() {
-            match self.read_copy(logical, physical, len) {
+            match self.read_copy(logical, physical, len, generation) {
                 Ok(block) => {
                     if let Some(fault) = first {
                         self.read_through.insert(
@@ -493,9 +561,11 @@ impl<R: Read + Seek> Volume<R> {
                 }
                 // What a mirrored block group is for. Under a lenient read, a copy that fails
                 // its own checks is read past to the next, and the scan names the block.
-                Err(fault @ (ReadError::BadChecksum { .. } | ReadError::BadTreeBlock { .. }))
-                    if self.policy == ReadPolicy::Lenient =>
-                {
+                Err(
+                    fault @ (ReadError::BadChecksum { .. }
+                    | ReadError::BadTreeBlock { .. }
+                    | ReadError::WrongGeneration { .. }),
+                ) if self.policy == ReadPolicy::Lenient => {
                     first.get_or_insert(fault);
                 }
                 Err(fault) => return Err(first.unwrap_or(fault)),
@@ -504,8 +574,15 @@ impl<R: Read + Seek> Volume<R> {
         Err(first.expect("a chunk has at least one copy, and each failed"))
     }
 
-    /// One copy of the tree block at `logical`, read from `physical` and checked.
-    fn read_copy(&mut self, logical: u64, physical: u64, len: u64) -> Result<TreeBlock, ReadError> {
+    /// One copy of the tree block at `logical`, read from `physical` and checked — against
+    /// `generation` too, where one is expected.
+    fn read_copy(
+        &mut self,
+        logical: u64,
+        physical: u64,
+        len: u64,
+        generation: Option<u64>,
+    ) -> Result<TreeBlock, ReadError> {
         let offset =
             offset_of(self.base, physical, 1).ok_or(ReadError::UnmappedLogical { logical, len })?;
         let bytes = read_exact_at(&mut self.src, offset, len as usize)?;
@@ -535,6 +612,15 @@ impl<R: Read + Seek> Volume<R> {
                 fault: "the block is at a height the format does not define",
             });
         }
+        if let Some(expected) = generation
+            && header.generation != expected
+        {
+            return Err(ReadError::WrongGeneration {
+                logical,
+                generation: header.generation,
+                expected,
+            });
+        }
         Ok(TreeBlock {
             header,
             bytes: bytes.into(),
@@ -546,6 +632,14 @@ impl<R: Read + Seek> Volume<R> {
     /// refuses the block instead.
     pub(super) fn read_through(&self) -> &BTreeMap<u64, ReadThrough> {
         &self.read_through
+    }
+
+    /// The logical start of every chunk the chunk tree maps differently from the superblock's
+    /// bootstrap array, which a lenient read keeps the bootstrap's mapping of: that mapping is
+    /// the one that read the chunk tree, so it is the one known to reach it. A strict read
+    /// refuses the filesystem instead. At most as many as the bootstrap array has room for.
+    pub(super) fn bootstrap_conflicts(&self) -> &[u64] {
+        &self.bootstrap_conflicts
     }
 
     /// Fill `buf` from a logical address, through the chunk map.
@@ -615,13 +709,28 @@ impl<R: Read + Seek> Volume<R> {
         }
         for (key, chunk, record) in found {
             // The bootstrap array carries a copy of the system chunks the chunk tree also
-            // records, so meeting one again is the ordinary case rather than a conflict. An
-            // entry that repeats a mapping already held is skipped; one that *contradicts* it
-            // is the overlap `insert` refuses.
+            // records, so meeting one again is the ordinary case rather than a conflict. The
+            // repeated record is validated as every other record is, and then held against the
+            // copy already mapped: the same mapping is skipped, and a different one is two
+            // places for one address. A strict read refuses that; a lenient one keeps the
+            // bootstrap's mapping, which is the one that has just read the chunk tree, and
+            // the scan names the chunk. A record overlapping a mapping without starting where
+            // it does is the overlap `insert` refuses.
             if let Some(existing) = self.chunks.chunk_at(key.offset)
                 && existing.logical == key.offset
-                && existing.length == chunk.length
             {
+                let repeated = ChunkMap::mapped(&key, &chunk, &record, devid, device_bytes)?;
+                if repeated == *existing {
+                    continue;
+                }
+                if self.policy == ReadPolicy::Strict {
+                    return Err(ReadError::BadChunk {
+                        logical: key.offset,
+                        fault: "the chunk tree maps this chunk differently from the superblock's \
+                                bootstrap array",
+                    });
+                }
+                self.bootstrap_conflicts.push(key.offset);
                 continue;
             }
             self.chunks
@@ -788,6 +897,76 @@ impl TreeBlock {
         Ok(())
     }
 
+    /// The key of entry `index`, whichever of the two things the block holds: an item's key in
+    /// a leaf, a child pointer's in a node.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`item`](Self::item) or [`key_ptr`](Self::key_ptr) refuses.
+    pub fn key_at(&self, index: usize) -> Result<DiskKey, ReadError> {
+        if self.header.is_leaf() {
+            Ok(self.item(index)?.key)
+        } else {
+            Ok(self.key_ptr(index)?.key)
+        }
+    }
+
+    /// Hold the block's keys against each other and against the keys its parent records.
+    ///
+    /// Every key must be above the one before it, in a node as in a leaf: a search over a
+    /// block that is not sorted lands in the wrong place and misses what is there, rather
+    /// than failing. And a block below a parent sits where the parent's keys say it does —
+    /// its first key is `first`, the key the parent records for it, and its last is below
+    /// `below`, the key the parent records for the block after it, or the bound the parent
+    /// itself sits under. A node's keys are what a search steers by, and a checksum covers a
+    /// misrouting key as faithfully as a correct one: a key that does not match the block it
+    /// leads to sends a lookup past files the filesystem holds, while a walk of every block
+    /// in order meets each of them and sees nothing wrong.
+    ///
+    /// The root of a tree has no parent, and is held to no bound.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::BadTreeBlock`] naming which of the three does not hold, and whatever
+    /// [`key_at`](Self::key_at) refuses.
+    pub fn check_keys(
+        &self,
+        first: Option<DiskKey>,
+        below: Option<DiskKey>,
+    ) -> Result<(), ReadError> {
+        let logical = self.header.bytenr;
+        let count = self.count()?;
+        let mut previous: Option<DiskKey> = None;
+        for index in 0..count {
+            let key = self.key_at(index)?;
+            if previous.is_some_and(|last| key <= last) {
+                return Err(ReadError::BadTreeBlock {
+                    logical,
+                    fault: "a key is not above the one before it",
+                });
+            }
+            previous = Some(key);
+        }
+        if let Some(first) = first
+            && (count == 0 || self.key_at(0)? != first)
+        {
+            return Err(ReadError::BadTreeBlock {
+                logical,
+                fault: "the block's first key is not the key its parent records for it",
+            });
+        }
+        if let (Some(last), Some(below)) = (previous, below)
+            && last >= below
+        {
+            return Err(ReadError::BadTreeBlock {
+                logical,
+                fault: "the block holds a key at or above the key its parent records for the \
+                        block after it",
+            });
+        }
+        Ok(())
+    }
+
     /// The bytes of the item at `index`, bounded by the leaf that holds them.
     ///
     /// An item's data grows backward from the end of the block while the item array grows
@@ -849,6 +1028,17 @@ fn checksum_holds(object: &[u8], csum_type: ChecksumType) -> bool {
     };
     ondisk::stored_crc32c(object) == ondisk::checksum(object)
         && ondisk::padding_is_clear(object, digest_len)
+}
+
+/// Whether two superblock records are copies of one: the same bytes outside the checksum
+/// field and the location each records as its own, which are the two fields every copy a
+/// transaction writes has to itself.
+fn same_record(a: &[u8], b: &[u8]) -> bool {
+    let checksum = ondisk::CSUM_FIELD_LEN;
+    let location = SuperBlock::BYTENR_OFFSET..SuperBlock::BYTENR_OFFSET + 8;
+    a.len() == b.len()
+        && a[checksum..location.start] == b[checksum..location.start]
+        && a[location.end..] == b[location.end..]
 }
 
 /// Whether the filesystem this superblock describes is one this crate can read at all.
@@ -1053,6 +1243,25 @@ pub enum ReadError {
         logical: u64,
         /// How many bytes were wanted there.
         len: u64,
+    },
+    /// A tree block was written by another transaction than the one its root item or its
+    /// parent's pointer records for it.
+    ///
+    /// Its checksum, its address and its filesystem all verify, which is what makes this its
+    /// own refusal: a block from an earlier transaction, left at an address the filesystem has
+    /// since written again, is that shape exactly, and it is not the committed state.
+    #[error(
+        "the tree block at {logical} was written by transaction {generation}, and what points \
+         at it records transaction {expected}"
+    )]
+    #[non_exhaustive]
+    WrongGeneration {
+        /// The block's logical address.
+        logical: u64,
+        /// The transaction its header records.
+        generation: u64,
+        /// The transaction the pointer to it records.
+        expected: u64,
     },
     /// A tree block does not describe itself consistently.
     #[error("the tree block at {logical}: {fault}")]
@@ -1525,7 +1734,7 @@ mod tests {
 
     // ── Opening a forged filesystem: the copies of the superblock, and the policy over them ──
 
-    use crate::btrfs::forge::{CHUNK_LOGICAL, DEVICE_BYTES, Forge, ROOT_TREE_AT};
+    use crate::btrfs::forge::{CHUNK_LOGICAL, CHUNK_TREE_AT, DEVICE_BYTES, Forge, ROOT_TREE_AT};
 
     /// Two mebibytes past the second location, so a forged device holds two copies and not
     /// three. Sparse, so it costs the pages it writes rather than its length.
@@ -1601,7 +1810,7 @@ mod tests {
         /// say about it.
         type Damage = (&'static str, Box<dyn Fn(&mut Forge)>, Mirror);
 
-        let damage: [Damage; 3] = [
+        let damage: [Damage; 4] = [
             (
                 "a checksum that no longer covers it",
                 Box::new(|f: &mut Forge| {
@@ -1622,6 +1831,15 @@ mod tests {
                     f.copy_superblock(0, 1);
                 }),
                 Mirror::Misplaced { bytenr: MIRRORS[0] },
+            ),
+            (
+                "a copy at the live generation naming another filesystem",
+                Box::new(|f: &mut Forge| {
+                    f.amend_superblock(1, |sb| sb.fsid[0] ^= 1);
+                }),
+                Mirror::Diverged {
+                    generation: super::super::forge::GENERATION,
+                },
             ),
         ];
         for (what, apply, expected) in damage {
@@ -1747,6 +1965,44 @@ mod tests {
             chunk.copies[0], chunk.logical,
             "the mapping is not the identity"
         );
+    }
+
+    #[test]
+    fn a_chunk_tree_that_moves_a_bootstrap_chunk_is_refused_strictly_and_recorded_leniently() {
+        // The chunk tree repeats the bootstrap array's system chunk, and a repeated record is
+        // held to say the same thing. Here it places the chunk's one copy 64 KiB further into
+        // the device, which is a second answer for every address the chunk covers — the
+        // bootstrap's answer is the one that read the chunk tree at all.
+        let mut forge = Forge::new();
+        forge.amend(CHUNK_TREE_AT, |block| {
+            let item = ondisk::Item::read_from(&block[Header::SIZE..]).expect("the one item");
+            let stripe_offset = Header::SIZE + item.offset as usize + Chunk::SIZE + 8;
+            let moved = crate::bytes::get_u64(block, stripe_offset) + (64 << 10);
+            block[stripe_offset..stripe_offset + 8].copy_from_slice(&moved.to_le_bytes());
+        });
+        assert!(
+            matches!(
+                Volume::open(forge.source()).err(),
+                Some(ReadError::BadChunk { logical, .. }) if logical == CHUNK_LOGICAL
+            ),
+            "a strict open refuses two mappings of one chunk"
+        );
+        let lenient = Volume::open_with(
+            forge.source(),
+            OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("a lenient open keeps the bootstrap's mapping");
+        assert_eq!(lenient.bootstrap_conflicts(), [CHUNK_LOGICAL]);
+        assert_eq!(lenient.chunk_map().len(), 1);
+        assert_eq!(
+            lenient.chunk_map().chunks()[0].copies,
+            [super::super::forge::CHUNK_PHYSICAL]
+        );
+
+        // The control: the record the forge writes repeats the bootstrap's exactly, and is
+        // neither refused nor recorded.
+        let clean = Volume::open(Forge::new().source()).expect("the forged filesystem");
+        assert!(clean.bootstrap_conflicts().is_empty());
     }
 
     #[test]

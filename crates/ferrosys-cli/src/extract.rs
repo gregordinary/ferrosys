@@ -72,7 +72,7 @@ use ferrosys::{
 use ferrosys::Acl;
 
 use crate::args::{ExtractArgs, ExtractMode, Stream};
-use crate::dest::Destination;
+use crate::dest::{Destination, Reads};
 use crate::json::Object;
 use crate::{Error, emit, render};
 
@@ -334,7 +334,10 @@ where
             })
         }
         ExtractMode::ToTar(Stream::File(path)) => {
-            let mut dest = Destination::open(&path, args.atomic)?;
+            // The archive is written while the image is still being read, so an archive
+            // written in place over the image would truncate what is left to read.
+            let reads = Reads::file(&args.image)?;
+            let mut dest = Destination::open(&path, args.atomic, &reads)?;
             let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, dest.file());
             ArchiveSink::new(&mut out)
                 .synthesis(args.synthesis)

@@ -58,11 +58,11 @@ pub fn run(args: &FormatArgs, target: &ExFatTarget) -> Result<(), Error> {
     // destination's own I/O happens here, and the destination is not opened until it has
     // succeeded. The fidelity report is readable off the plan, so what a build will cost is a
     // number to read before it is paid.
-    let plan: FormatPlan = crate::format::planned(args, options(target))?;
+    let (plan, reads): (FormatPlan, _) = crate::format::planned(args, options(target))?;
     // Read before the write consumes nothing, so the dry run and the real one report the same
     // number.
     let free = plan.free_clusters();
-    let (layout, written) = crate::format::realize(args, &plan)?;
+    let (layout, written) = crate::format::realize(args, &plan, &reads)?;
     report(args, target, &layout, free, plan.fidelity(), written)
 }
 

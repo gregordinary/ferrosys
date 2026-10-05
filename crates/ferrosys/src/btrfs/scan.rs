@@ -203,6 +203,11 @@ pub(super) fn mirror_anomaly(state: Mirror, live: u64) -> Option<(Severity, &'st
             "a copy of the superblock records another place as its own, which is what an image \
              carved out of a disk at the wrong offset looks like",
         )),
+        Mirror::Diverged { .. } => Some((
+            Severity::Integrity,
+            "a copy of the superblock at the live generation differs from the live one outside \
+             its checksum and its own location, so it is not a copy of it",
+        )),
     }
 }
 
@@ -326,6 +331,7 @@ mod tests {
             Mirror::Absent,
             Mirror::Damaged,
             Mirror::Misplaced { bytenr: 0 },
+            Mirror::Diverged { generation: 8 },
         ] {
             assert!(mirror_anomaly(state, 8).is_some(), "{state:?}");
         }

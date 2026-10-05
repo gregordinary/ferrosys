@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, Timespec, Timestamps, Uid};
 
 use crate::fidelity::{Direction, FidelityReport, Synthesis};
-use crate::host::{HostError, io_at};
+use crate::host::{HostError, fd_path, io_at};
 use crate::path::{canonical_parts, is_hostile_component};
 use crate::source::Metadata;
 use crate::time::Timestamp;
@@ -1033,20 +1033,6 @@ fn check_name(name: &[u8], path: &[u8]) -> Result<(), HostError> {
 /// Whether a path is `/lost+found` or something inside it.
 fn is_lost_found(path: &[u8]) -> bool {
     path == LOST_FOUND || path.starts_with(b"/lost+found/")
-}
-
-/// The path that names `name` inside the directory `dir` refers to, without resolving the
-/// directory again.
-///
-/// `/proc/self/fd/<n>` is the kernel's own name for an open handle: resolving it yields the
-/// file that handle refers to, whatever the path it was opened by has since become. Joining a
-/// single component onto it therefore reaches exactly what an `*at` call on `dir` would, which
-/// is what a call that has no `*at` form needs.
-fn fd_path(dir: &OwnedFd, name: &[u8]) -> PathBuf {
-    use std::os::fd::AsRawFd;
-    let mut path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
-    path.push(display(name));
-    path
 }
 
 /// An image path or name as an [`OsStr`](std::ffi::OsStr): the bytes themselves, since a path

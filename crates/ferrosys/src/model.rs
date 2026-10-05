@@ -78,6 +78,21 @@ fn validate_mode(path: &[u8], mode: u16) -> Result<(), ModelError> {
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelError {
+    /// A file declared by its length alone, whose bytes the source does not hold.
+    ///
+    /// This family's writer reads every file's bytes itself as it places them, so a file with
+    /// none to read is refused when the plan is made rather than part of the way through
+    /// writing the image.
+    #[error(
+        "{}: its contents are declared by length alone, and this writer reads a file's bytes \
+         itself",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    ContentsNotHeld {
+        /// The file's path.
+        path: Vec<u8>,
+    },
     /// A path resolved to the root where a name was required — a hard link cannot
     /// target the root directory.
     #[error("path is empty or names the root, where a name is required")]
@@ -964,6 +979,11 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
                 );
             }
             EntryKind::File(content) => {
+                if matches!(content, FileContent::Declared { .. }) {
+                    return Err(ModelError::ContentsNotHeld {
+                        path: n.entry.path.clone(),
+                    });
+                }
                 // The length is known without reading, so a file the feature set cannot
                 // describe is refused here — naming its path — whether its bytes are in
                 // memory or still on the host.

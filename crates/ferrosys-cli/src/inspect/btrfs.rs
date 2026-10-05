@@ -142,6 +142,7 @@ impl Described {
                 Mirror::Absent => "absent",
                 Mirror::Damaged => "damaged",
                 Mirror::Misplaced { .. } => "misplaced",
+                Mirror::Diverged { .. } => "diverged",
                 // A state a newer library reports and this tool has no word for. Saying so is
                 // honest; picking the nearest word would not be.
                 _ => "unrecognized",

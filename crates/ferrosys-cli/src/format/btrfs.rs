@@ -61,8 +61,8 @@ pub fn run(args: &FormatArgs, target: &BtrfsTarget) -> Result<(), Error> {
     // As in the other three families: everything a format can fail at that is not the
     // destination's own I/O happens here, and the destination is not opened until it has
     // succeeded.
-    let plan: FormatPlan = crate::format::planned(args, options(args, target))?;
-    let (layout, written) = crate::format::realize(args, &plan)?;
+    let (plan, reads): (FormatPlan, _) = crate::format::planned(args, options(args, target))?;
+    let (layout, written) = crate::format::realize(args, &plan, &reads)?;
     report(args, target, &layout, plan.fidelity(), written)
 }
 

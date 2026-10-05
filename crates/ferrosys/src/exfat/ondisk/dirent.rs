@@ -274,6 +274,11 @@ impl VolumeLabelEntry {
     }
 }
 
+/// Bit 0 of [`AllocationBitmapEntry::bitmap_flags`]: clear for the first allocation bitmap,
+/// set for the second, which only a volume with two allocation tables has. The other seven
+/// bits are reserved.
+pub const BITMAP_IDENTIFIER: u8 = 0x01;
+
 /// The allocation bitmap's describing entry: where the bitmap the volume allocates through
 /// lives, and how long it is.
 ///
@@ -283,8 +288,9 @@ impl VolumeLabelEntry {
 /// ([`EntryType::is_end_of_directory`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AllocationBitmapEntry {
-    /// Byte 1: which allocation table this bitmap describes. Zero on every volume with one
-    /// table, which is every volume outside the transaction-safe variant.
+    /// Byte 1: which allocation table this bitmap describes, in [`BITMAP_IDENTIFIER`]. Zero
+    /// on every volume with one table, which is every volume outside the transaction-safe
+    /// variant.
     pub bitmap_flags: u8,
     /// Bytes 20..24: the bitmap's first cluster.
     pub first_cluster: u32,

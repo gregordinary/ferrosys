@@ -63,7 +63,7 @@ use ferrosys::exfat::ondisk::{
     upcase_checksum as crate_upcase_checksum,
 };
 use ferrosys::exfat::{
-    ClusterSize, FormatOptions, PlanRequest, VolumeLabel, format_to, plan_layout,
+    ClusterSize, FormatOptions, FormatPlan, PlanRequest, VolumeLabel, format_to, plan_layout,
 };
 use ferrosys::{FsTree, Metadata, Source, Timestamp, TreeBuilder};
 use util::{available, fsck_exfat_clean, tool};
@@ -2052,21 +2052,40 @@ fn ferrosys_format_from(
     serial: u32,
     source: impl Source,
 ) -> tempfile::NamedTempFile {
+    let image = blank(volume.bytes);
+    ferrosys_format_into(volume, baseline, serial, source, image.path());
+    image
+}
+
+/// The options this crate formats a row with, carrying the baseline's boot code.
+fn ferrosys_options(volume: &Volume, baseline: &Path, serial: u32) -> FormatOptions {
     let mut boot_code = [0u8; BOOT_CODE_LEN];
     boot_code.copy_from_slice(&read_at(baseline, 120, BOOT_CODE_LEN));
-
-    let image = blank(volume.bytes);
-    let options = FormatOptions::new(serial)
+    FormatOptions::new(serial)
         .label(VolumeLabel::new(LABEL).expect("the fixture label fits"))
         .boot_code(boot_code)
-        .plan(volume.request);
+        .plan(volume.request)
+}
+
+/// The same, written over whatever `image` already holds rather than into a fresh file.
+fn ferrosys_format_into(
+    volume: &Volume,
+    baseline: &Path,
+    serial: u32,
+    source: impl Source,
+    image: &Path,
+) {
     let file = std::fs::OpenOptions::new()
         .write(true)
-        .open(image.path())
+        .open(image)
         .expect("open the image for writing");
-    format_to(file, source, volume.bytes, options)
-        .unwrap_or_else(|e| panic!("this crate could not build {}: {e}", volume.what));
-    image
+    format_to(
+        file,
+        source,
+        volume.bytes,
+        ferrosys_options(volume, baseline, serial),
+    )
+    .unwrap_or_else(|e| panic!("this crate could not build {}: {e}", volume.what));
 }
 
 #[test]
@@ -3913,5 +3932,217 @@ fn a_name_hash_no_name_produces_on_a_foreign_volume_is_refused() {
             fsck_exfat_clean(image.path()).is_err(),
             "the checker still calls a volume with a name hash no name produces clean"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the destination held
+//
+// A format writes every byte a reader or a prober could consult, so what the destination held
+// before it does not matter. These gates hand it destinations that held something, and hold
+// the result to the baseline's bytes and to the checker.
+
+/// Set every bit of `range` in `image`, a mebibyte at a time.
+fn fill(image: &Path, range: Range<u64>, byte: impl Fn(u64) -> u8) {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(image)
+        .expect("open the image for writing");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek the image");
+    let mut at = range.start;
+    while at < range.end {
+        let n = (range.end - at).min(MIB);
+        let chunk: Vec<u8> = (at..at + n).map(&byte).collect();
+        file.write_all(&chunk).expect("write the image");
+        at += n;
+    }
+}
+
+/// A sparse file the size of `volume` with every bit set wherever either formatter writes:
+/// the front of the volume through its root directory and a mebibyte past it, and the
+/// volume's last two mebibytes.
+///
+/// What lies between is a hole both formatters leave alone, which is the free middle of an
+/// empty heap. Setting it as well would cost the matrix's largest row eight gigabytes of writes
+/// and show nothing either side does not already show.
+fn dirtied(volume: &Volume) -> tempfile::NamedTempFile {
+    let image = blank(volume.bytes);
+    let g = &volume.geometry;
+    let cluster = g.bytes_per_sector * g.sectors_per_cluster;
+    let front =
+        (u64::from(g.heap_offset) * g.bytes_per_sector + u64::from(g.root_cluster) * cluster + MIB)
+            .min(volume.bytes);
+    let back = volume.bytes.saturating_sub(2 * MIB).max(front);
+    fill(image.path(), 0..front, |_| 0xFF);
+    fill(image.path(), back..volume.bytes, |_| 0xFF);
+    image
+}
+
+#[test]
+fn over_a_dirty_destination_this_crate_writes_what_the_baseline_does_and_zeros_past_it() {
+    if !available("mkfs.exfat") || !available("tune.exfat") {
+        return;
+    }
+    // Over every bit set, the baseline writes its regions and leaves the rest as it found it:
+    // the allocation table past its head, the gap before the table past the first 64 KiB, the
+    // gap after it, and the end of the volume. This crate writes every byte the baseline
+    // writes, identically, and zeros everywhere it writes beyond that — so wherever the two
+    // differ, the baseline left a set bit and this crate wrote a zero.
+    for volume in VOLUMES {
+        let theirs = dirtied(volume);
+        mkfs(theirs.path(), volume.args)
+            .unwrap_or_else(|e| panic!("the baseline could not build {}: {e}", volume.what));
+        set_serial(theirs.path(), PINNED_SERIAL);
+        let ours = dirtied(volume);
+        ferrosys_format_into(
+            volume,
+            theirs.path(),
+            PINNED_SERIAL,
+            TreeBuilder::new(),
+            ours.path(),
+        );
+
+        let g = &volume.geometry;
+        let fat_at = u64::from(g.fat_offset) * g.bytes_per_sector;
+        let mut before_the_table = 0u64;
+        for range in differing_ranges(theirs.path(), ours.path()) {
+            let len = (range.end - range.start) as usize;
+            let (left, right) = (
+                read_at(theirs.path(), range.start, len),
+                read_at(ours.path(), range.start, len),
+            );
+            if let Some(i) = (0..len).find(|&i| left[i] != 0xFF || right[i] != 0) {
+                panic!(
+                    "{}: at {:#x} the baseline holds {:#04x} and this crate {:#04x}; only a set \
+                     bit the baseline left beside a zero this crate wrote may differ",
+                    volume.what,
+                    range.start + i as u64,
+                    left[i],
+                    right[i]
+                );
+            }
+            if range.start < fat_at {
+                before_the_table += range.end.min(fat_at) - range.start;
+            }
+        }
+        // Read off the pinned baseline rather than reasoned to: it leaves the gap before the
+        // table as it found it, which is where another format's signature sits. A baseline
+        // that starts clearing it moves this number to zero, and that is a re-baselining to
+        // read beside the version bump.
+        assert!(
+            before_the_table > 0,
+            "{}: the baseline wrote the whole gap before the allocation table",
+            volume.what
+        );
+    }
+}
+
+/// The checker's verdict on `image`, held to the words a clean volume earns: a zero exit, the
+/// word clean, and no complaint along the way. The exit status alone is not enough — the
+/// checker reports an entry it would delete and still calls the volume clean.
+fn checker_says_clean(image: &Path) -> Result<(), String> {
+    let said = fsck_exfat_clean(image)?;
+    if said.contains(": clean.") && !said.contains("ERROR") && !said.contains("corrupted") {
+        Ok(())
+    } else {
+        Err(said)
+    }
+}
+
+#[test]
+fn a_populated_volume_over_any_destination_is_one_the_checker_accepts_and_reads_the_same() {
+    if !available("mkfs.exfat") || !available("tune.exfat") || !available("fsck.exfat") {
+        return;
+    }
+    let volume = VOLUMES
+        .iter()
+        .find(|v| v.args == ["-c", "4K"])
+        .expect("the four-kilobyte row");
+    let (baseline, _) = formatted(volume);
+    let fresh = ferrosys_format_from(volume, baseline.path(), PINNED_SERIAL, tree_source());
+    checker_says_clean(fresh.path()).expect("a fresh destination is clean");
+
+    // What a piece covers is the volume; what none covers is never read. So the bytes every
+    // piece covers are the fresh destination's, whatever was underneath.
+    let plan = FormatPlan::new(
+        tree_source(),
+        volume.bytes,
+        ferrosys_options(volume, baseline.path(), PINNED_SERIAL),
+    )
+    .expect("plan");
+    let mut covered: Vec<Range<u64>> = Vec::new();
+    for stage in plan.stages() {
+        for piece in stage.pieces() {
+            let piece = piece.expect("every piece builds");
+            covered.push(piece.offset()..piece.offset() + piece.len());
+        }
+    }
+
+    // An earlier volume of this family holding more than the one written over it: its entries
+    // past the new end of a directory would come back as live files if they were left.
+    let earlier = {
+        let image = blank(volume.bytes);
+        let mut tree = tree_source();
+        let time = Timestamp::from_secs(TREE_TIME);
+        for i in 0..60 {
+            let name = format!("/AN-EARLIER-FILE-WITH-A-LONG-NAME-{i:03}.TXT");
+            tree = tree.file(
+                name.into_bytes(),
+                vec![b'o'; 5000],
+                Metadata::new(0o644, time),
+            );
+        }
+        ferrosys_format_into(volume, baseline.path(), 0x0BAD_F00D, tree, image.path());
+        image
+    };
+    let mut destinations: Vec<(&str, tempfile::NamedTempFile)> =
+        vec![("an earlier volume", earlier)];
+    let every_bit = blank(volume.bytes);
+    fill(every_bit.path(), 0..volume.bytes, |_| 0xFF);
+    destinations.push(("every bit set", every_bit));
+    let noise = blank(volume.bytes);
+    fill(noise.path(), 0..volume.bytes, |at| {
+        (at.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8
+    });
+    destinations.push(("noise", noise));
+    // A filesystem of another family, whose superblock sits inside the gap before the
+    // allocation table where no exFAT driver looks and every prober does.
+    #[cfg(feature = "btrfs")]
+    {
+        use ferrosys::btrfs::{
+            FormatOptions as BtrfsOptions, PlanRequest as BtrfsRequest, Profile,
+        };
+        let image = blank(volume.bytes);
+        let request = BtrfsRequest::new(0).metadata_profile(Profile::Single);
+        let options = BtrfsOptions::new([0x5A; 16], Timestamp::from_secs(TREE_TIME)).plan(request);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(image.path())
+            .expect("open the image for writing");
+        ferrosys::btrfs::format_to(file, TreeBuilder::new(), volume.bytes, options)
+            .expect("a btrfs filesystem to write over");
+        assert_eq!(&read_at(image.path(), 0x10040, 8), b"_BHRfS_M");
+        destinations.push(("a btrfs filesystem", image));
+    }
+
+    for (what, image) in &destinations {
+        ferrosys_format_into(
+            volume,
+            baseline.path(),
+            PINNED_SERIAL,
+            tree_source(),
+            image.path(),
+        );
+        checker_says_clean(image.path()).unwrap_or_else(|said| {
+            panic!("over {what}, the checker did not call the volume clean:\n{said}")
+        });
+        for range in &covered {
+            let len = (range.end - range.start) as usize;
+            assert!(
+                read_at(image.path(), range.start, len) == read_at(fresh.path(), range.start, len),
+                "over {what}, a byte in {range:?} differs from a fresh destination's"
+            );
+        }
     }
 }

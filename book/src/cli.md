@@ -79,8 +79,8 @@ is empty but for `/lost+found`. Giving both is a usage error, since nothing here
 the rules for a merge.
 
 **`--from-tar FILE`** reads an uncompressed tar archive. A named file is left on disk, and
-each member is read as its file is placed. Peak memory is therefore the largest single
-member, not the archive. `--from-tar -` reads the standard input, which cannot be sought
+each member is read as its file is placed, a mebibyte at a time. Peak memory therefore does
+not grow with the archive. `--from-tar -` reads the standard input, which cannot be sought
 back over and so is held whole. That is the one case where a large archive needs the
 memory to match, and the one that carries a size cap. A stream past four gibibytes is
 refused, and naming the archive as a file is both the way past it and the cheaper route.
@@ -94,7 +94,8 @@ $ gunzip -c rootfs.tar.gz | ferrosys format ... --from-tar - rootfs.img
 **`--from-dir DIR`** walks a directory tree on this machine. `DIR` itself becomes the
 filesystem root. Modes, ownership, all three times, symlinks, hard links, device, FIFO and
 socket nodes, and extended attributes with their POSIX ACLs all come across. Each file is
-read as it is placed, so peak memory is the largest single file.
+read as it is placed, a mebibyte at a time, so a file costs one mebibyte of memory however
+large it is.
 
 The walk records Linux inode metadata and Linux extended attributes, so this is the one
 option carried out on Linux alone. A binary built elsewhere refuses it by name and exits
@@ -180,6 +181,18 @@ file carried do not survive the rename. Without `--atomic` the image is written 
 
 The two do not combine. `--dry-run` opens no destination, so there is nothing left for
 `--atomic` to decide, and a flag that decides nothing reads as one that worked.
+
+### A destination is never a file the run reads
+
+An archive named by path is read a member at a time, as each file is placed. So is a walked
+tree. Both reads happen after the destination is opened. A destination written in place that
+is one of those files is truncated before it is read. The image would then carry zeros, or
+its own bytes, where the source's belong.
+
+So the tool refuses such a destination and leaves it as it was. It judges by the file rather
+than by the name. The archive itself is refused, and so is a hard or symbolic link to it, or
+a file already inside the walked tree. `--atomic` writes a new file and renames it into place
+once everything has been read, so it carries out the same command.
 
 ### Geometry the command line names, and geometry it does not
 
@@ -967,6 +980,9 @@ fails therefore leaves whatever was at that path untouched.
 
 `--atomic` applies to `--to-tar FILE`, the only mode with a destination to rename into.
 Asking for it anywhere else is refused rather than accepted and ignored.
+
+The image is read while the archive is written. So an archive written in place over the
+image is refused, by any name, as `format` refuses a destination it reads.
 
 ```console
 $ ferrosys extract rootfs.img --to-tar rootfs.tar --atomic

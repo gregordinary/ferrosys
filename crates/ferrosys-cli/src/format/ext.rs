@@ -31,7 +31,7 @@ pub fn run(args: &FormatArgs, target: &ExtTarget) -> Result<(), Error> {
     // the archive is read and parsed, the geometry is planned, and the inode model is built
     // and checked against it. The destination is not opened until this has succeeded, so a
     // failing run cannot destroy the image already at that path.
-    let plan: FormatPlan = crate::format::planned(args, options(args, target))?;
+    let (plan, reads): (FormatPlan, _) = crate::format::planned(args, options(args, target))?;
 
     // A dry run reports the geometry the plan realizes and stops. The layout is the same
     // value the write would use, so what it reports is exact rather than an estimate — and
@@ -40,7 +40,7 @@ pub fn run(args: &FormatArgs, target: &ExtTarget) -> Result<(), Error> {
         return report(args, target, plan.layout(), None);
     }
 
-    let mut dest = crate::format::open_destination(&args.out, args.atomic)?;
+    let mut dest = crate::format::open_destination(&args.out, args.atomic, &reads)?;
     let layout = plan.write_to(dest.file())?;
     // The filesystem's own account of what it has left, read back from what was just
     // written rather than estimated from the plan: the free counts depend on what the

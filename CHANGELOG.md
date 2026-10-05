@@ -7,12 +7,14 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [0.6.0] - 2026-10-04
+## [0.6.0] - 2026-10-05
 
 The ext reader reads what a used filesystem holds. It replays a journal left needing
 recovery, looks a name up through its directory's hash index, and reads a filesystem whose
 descriptors a kernel split into meta-groups as it grew it. Every family reports a filesystem
-left mounted, in one sentence. A default build carries all four families.
+left mounted, in one sentence. A default build carries all four families. Every writer
+places a file a mebibyte at a time, and an exFAT format writes over whatever its destination
+held, in ordered stages a caller doing its own I/O can apply.
 
 A breaking release, and these are the changes a caller can see:
 
@@ -26,6 +28,10 @@ A breaking release, and these are the changes a caller can see:
   and a FAT volume whose table records that state is cosmetic rather than a conformance
   finding.
 - A FAT or exFAT lookup no longer answers to `Limits::max_walk_entries`.
+- A strict read refuses more ext, exFAT and btrfs filesystems whose fields break what the
+  format fixes, and an ext superblock whose inode total disagrees with its groups is refused
+  under either policy. `exfat::VolumeLabel::new` refuses the characters a file name may not
+  hold.
 
 To migrate: a build that wants ext alone, as the 0.5 default was, names it, with
 `default-features = false, features = ["ext"]`. A `Metadata` is built with `Metadata::new`
@@ -115,6 +121,37 @@ pattern on `ChecksumSeedPointless` drops its field.
   `ci/provenance.sh` fails on a routine, a source path, or an internal macro of another
   implementation of these formats. The structure names the formats' own documentation uses
   pass, each recorded with the page that names it.
+- **`HostError::Replaced`**, for a name in a walked tree that holds something else by the
+  time the walk opens it.
+- **A `Vec<SourceEntry>` is a `Source`.** A caller that takes another source's entries to
+  look at them, or to change some, hands the list on to a format as it stands.
+- **`btrfs::ReadError::WrongGeneration`**, for a tree block written by another transaction
+  than the root item or the parent's pointer that leads to it records.
+- **`btrfs::Mirror::Diverged`**, for a copy of the superblock at the live generation that
+  differs from the live copy outside its checksum and its own location.
+- **`btrfs::TreeBlock::key_at` and `btrfs::TreeBlock::check_keys`**: an entry's key in either
+  kind of block, and the ordering and placement rule every block a tree reaches is held to.
+- **Five `exfat::ReadError` variants for fields the format fixes.**
+  `NoFatChainWithoutAllocation` names a stream that addresses no cluster and declares its
+  clusters contiguous. `SecondBitmap` names an allocation bitmap entry calling itself the
+  second bitmap on a volume with one allocation table, and `BitmapReservedFlags` the
+  reserved bits of that entry. `UpcaseMandatoryMapping` names an up-case table folding one
+  of the first 128 characters otherwise than the format fixes, and
+  `LabelForbiddenCharacter` a volume label carrying a character a name may not hold.
+- **`exfat::LabelError::ForbiddenCharacter`**, **`exfat::ondisk::BITMAP_IDENTIFIER`**, and
+  **`exfat::ondisk::UpcaseTable::mandatory_deviation`**, which names the first of the 128
+  fixed mappings a table breaks.
+- **`FileContent::read_at` and `FileRange::read_at`**: a file's contents read from an
+  offset into a buffer the caller sizes, so a large file is copied without being held.
+- **`exfat::FormatPlan::stages`**, a format handed back as five ordered stages of pieces for
+  a caller that writes the destination itself: bytes, zeros, a range of a host file, or a
+  file declared by its length alone. Every piece starts on a sector boundary, no two pieces
+  of one stage share a sector, and a byte no piece covers is never read. `exfat::Stage`,
+  `exfat::StageKind`, `exfat::Piece` and `exfat::Pieces` are its types.
+- **`FileContent::Declared`**, a file declared by its length and a key the caller chose,
+  whose bytes the caller supplies. exFAT's stages place one, and
+  `exfat::FormatError::ContentsNotHeld` refuses a plan holding one in `write_to`. The ext,
+  FAT and btrfs plans refuse one with `ModelError::ContentsNotHeld`, naming the path.
 
 ### Changed
 
@@ -177,6 +214,20 @@ pattern on `ChecksumSeedPointless` drops its field.
 - **`ext::IdentityError::ChecksumSeedPointless` carries no field, and is raised only for a
   filesystem without `metadata_csum`.** Asking for the checksum seed on a filesystem that
   records one already sets nothing new, and the rewrite goes ahead.
+- **Every family places a file named by range a mebibyte at a time.** A writer read a
+  file's whole contents before placing them, so a format from an archive or a walked tree
+  held the largest file in it in memory, gigabytes for a disk image. A file costs one
+  mebibyte while it is placed, whatever its size.
+- **An exFAT format writes every byte a reader or a prober consults, so what the destination
+  held does not matter.** A directory's clusters past its last entry, and the allocation
+  bitmap past its last set bit, were left to the destination. Over an earlier volume, that
+  brought the earlier volume's entries back as live files sharing clusters with the new
+  ones, and left stale bits marking free clusters in use. Every byte before the cluster heap
+  is zeroed, which clears another format's signature from the gap before the allocation
+  table, and so are the free clusters in the volume's last mebibyte. The zeros go down
+  first, invalidating any earlier boot regions, and the main boot sector last, so once the
+  zeros are down an interruption leaves the whole volume or nothing a driver mounts.
+  `write_to` flushes its sink between the stages.
 
 ### Fixed
 
@@ -199,6 +250,99 @@ pattern on `ChecksumSeedPointless` drops its field.
   uninterrupted one, whichever of the writes reached the image.
 - **`ferrosys identity` reported success before its writes were on the disk.** It
   synchronizes the image before it reports.
+- **A walked tree's file could be read from outside the tree.** `DirectorySource` named
+  each file by its host path, and the format opened that path when it placed the file,
+  refusing a symbolic link at the last name alone. A directory above the file replaced
+  with a link between the walk and the format put the file at the link's destination into
+  the image. The walk lists every directory through a handle opened beneath its parent's
+  and reads each name through a handle to the name itself, following no link below the
+  root. A file's bytes are read from the tree root's handle one name at a time, following
+  no link, and only from the file the walk recorded: a file replaced under its name after
+  the walk is an error rather than either file's bytes. One descriptor, the root's, is held
+  from the walk to the format. The extended attributes of a symbolic link, a device node, a
+  FIFO, a socket, or a file the process cannot open are read through
+  `/proc/self/fd/<n>/<name>`, as `DirectorySink` writes them.
+- **Ranges sharing one descriptor could read each other's bytes.** `FileRange::read`
+  moved the shared file's cursor and then read from it, and a duplicated handle moves the
+  same cursor, so two ranges of one archive read at once on two threads could each return
+  the other's bytes, without an error. Every read names its own offset and moves no cursor.
+- **`ferrosys format` could write its image over the files it was reading.** An archive
+  named by path and a walked tree are read a file at a time as each file is placed, after
+  the destination is opened and truncated. A destination that was the archive itself, a
+  link to it, or a file already inside the tree was emptied before it was read, and the
+  image carried zeros or its own bytes in place of the source's, with the command exiting
+  zero. A destination written in place that is a file the run reads is refused before it
+  changes, with exit code 8, and the file is judged by device and inode rather than by
+  name. `--atomic` writes a new file and renames it into place after everything is read,
+  so it carries the same command out. `ferrosys extract --to-tar` refuses an archive
+  written in place over the image it reads, the same way.
+- **A btrfs tree block from another transaction was read as the committed one.** A root
+  item and a parent's pointer each record the transaction that wrote the block they lead
+  to, and the reader held neither against the block, so a block at the right address with
+  a valid checksum and another transaction's header was read and scanned clean. A strict
+  read refuses it. A lenient read takes a mirrored block's next copy, as it does for a copy
+  whose checksum fails, and the scan names the block.
+- **A btrfs node key that did not lead where it said scanned clean and hid files from a
+  lookup.** A search steered by a node's keys, and nothing held those keys to the blocks
+  they lead to. A walk of every block in order met every item and found nothing wrong,
+  while a lookup through a misplaced key missed files the filesystem holds. Every block a
+  tree reaches has its keys held against each other, a node's as well as a leaf's, and
+  against its parent's: its first key is the parent's key for it, and its last is below
+  the parent's key for the block after it.
+- **The btrfs chunk tree's record of a chunk the bootstrap array also maps was skipped by
+  its start and length alone.** A record placing the chunk's copies elsewhere was neither
+  validated nor compared. It is validated as every chunk record is, and held to describe
+  the bootstrap's mapping: a strict read refuses one that does not, and a lenient read keeps
+  the bootstrap's mapping, which is the one that read the chunk tree, and the scan names the
+  chunk.
+- **A btrfs superblock copy at the live generation was taken for a copy of the live one by
+  its generation alone.** A copy naming another filesystem, with its checksum recomputed,
+  opened strictly and scanned clean. Every copy a transaction writes is the live record but
+  for its checksum and its own location, and a copy at the live generation is held to that;
+  one that differs anywhere else is `Mirror::Diverged`, refused by a strict read and named
+  by a lenient scan.
+- **An ext directory whose records did not frame scanned clean.** A listing refuses a
+  directory at a record whose length does not fit it, and the scan stepped past the same
+  record without a word, as it did past a directory block it could not read. On a
+  filesystem without checksums nothing else reads a directory's records, so the verdict was
+  clean for a directory the same reader could not list. The scan names the first such
+  record in each directory, and a directory block it cannot read wherever no checksum pass
+  reads the block already.
+- **An ext superblock whose inode total disagreed with its groups opened.** The total is
+  the per-group count times the group count, and reaches the root's inode. A total of zero
+  hid every inode and scanned clean; a smaller one hid the inodes past it, and a larger
+  one named inodes no group holds. A superblock whose total is anything else is refused at
+  open, under the lenient policy as under the strict one, as the family's own library
+  refuses it.
+- **A FAT lookup could not resolve a name's 8.3 alias.** A listing shows the short name
+  beside the long one, and a lookup matched the long name alone, so a file listed with the
+  alias `LONGFILE.TXT` was not found under it, nor was a directory under its own. A lookup
+  matches either name, exactly and then case-folded, an exact match ahead of a folded one
+  and a long name ahead of an alias.
+- **An exFAT empty file's stream flags were not judged.** `AllocationPossible` is required
+  on every stream extension and `NoFatChain` describes an allocation, and the reader held a
+  stream to them only where it addressed clusters. An empty stream with no flags, or with
+  `NoFatChain` set, opened strictly and scanned clean. Both are judged on every stream, as
+  the writer sets them.
+- **An exFAT allocation bitmap entry naming the second bitmap read as the volume's one.**
+  The identifier picks one of two bitmaps, and a volume with one allocation table has one.
+  An entry naming the second, or setting the bits above the identifier, opened strictly and
+  scanned clean; each is now its own deviation.
+- **An exFAT up-case table that folded ASCII otherwise than the format fixes opened
+  strictly.** A volume may fold every character but the first 128 its own way, and those
+  128 fold `a` through `z` to `A` through `Z` and every other one to itself. A table with a
+  checksum that held was taken whatever it said of them. A strict open refuses a table that
+  breaks one, naming it. A lenient one folds through the volume's own table, as it does for
+  any table, and the scan reports it.
+- **The exFAT writer wrote a volume label a name could not be.** A label reserves the
+  characters a file name does, and `VolumeLabel::new` refused only `U+0000`, so `A/B` made a
+  volume whose label the format forbids. `VolumeLabel::new` refuses the control codes and
+  the nine reserved characters, and the reader reports one in a label it reads.
+- **An exFAT open held every duplicate resident entry it met.** A root directory filled
+  with copies of the allocation bitmap's entry made an open hold one deviation per copy,
+  whatever `Limits::max_findings` said, and a scan cloned all of them before applying its
+  cap. What an open holds is bounded by `max_findings`, with reaching the bound recorded and
+  carried into the scan's report, and a strict open stops at the first duplicate.
 
 ## [0.5.2] - 2026-10-04
 

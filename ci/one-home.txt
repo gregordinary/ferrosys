@@ -61,6 +61,11 @@ rule|crates/ferrosys/src/io.rs|all|io::io_fault, written by io::io_error!|\(err\
 # missing, and the volume that reaches the threshold is a quarter of a terabyte long.
 rule|crates/ferrosys/src/btrfs/ondisk/superblock.rs|all|ondisk::holds_mirror|SUPER_INFO_SIZE as u64 <=|checked_add\(SUPER_INFO_SIZE
 
+# A writer places a file's contents a window at a time, so what a file costs in memory while
+# it is placed is one window and not its length. A whole read of a file's contents in a
+# writer is the spelling that brings the length back.
+rule|crates/ferrosys/src/source.rs|code|FileContent::for_each_window, or FileContent::read_at for a writer that steps its own window|content(s\[[^]]*\])?\.read\(\)
+
 # --- paths and names ----------------------------------------------------------------
 
 # Which components a path has is one rule. A second splitter does not fail; it keys two
@@ -122,3 +127,4 @@ skip|crates/ferrosys/src/identity.rs:SeekFrom::Start|the write half of a rewrite
 skip|crates/ferrosys/src/host/sink.rs:split(|&b| b == b'/')|open_dir must REFUSE a `.` component where a normalization DROPS one: check_name is the gate deciding what may become a name in the destination, and a component silently dropped is a component never checked
 skip|crates/ferrosys/src/json.rs:\\u{|a test asserting what the escaper writes, which has to name the escaped form literally to compare against it
 skip|crates/ferrosys/src/flags.rs:fn from_name|a flag word's own vocabulary rather than a named choice's: this reads the name of one *flag within* a word, any number of which are set at once, where named_choice! reads the name of one variant of a closed set, exactly one of which holds. It is generated once by named_flags! for every word in the crate, which is the same discipline one level over
+skip|crates/ferrosys/src/btrfs/materialize.rs:contents[*content].read()|an inline extent holds a file shorter than one sector, so the whole read is bounded by the sector

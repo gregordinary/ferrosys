@@ -101,6 +101,17 @@ impl<W: Write + Seek> ByteSink<W> {
         Ok(())
     }
 
+    /// Pass everything taken so far on to the destination, through its own `flush`.
+    ///
+    /// What that makes durable is the destination's to say: a file's `flush` hands nothing to
+    /// the medium, and a destination that must survive a power cut between two writes is one
+    /// whose `flush` does. The exFAT writer flushes between the stages of a format, which is
+    /// what lets such a destination keep their order.
+    #[cfg(feature = "exfat")]
+    pub(crate) fn flush(&mut self) -> Result<()> {
+        self.sink.flush()
+    }
+
     /// Make the destination as long as the filesystem, for the case where its final blocks
     /// hold nothing and so were never written.
     ///
@@ -113,8 +124,9 @@ impl<W: Write + Seek> ByteSink<W> {
             return Ok(());
         }
         if self.written_end < size {
-            // The last byte was never written, so it is already zero; writing a zero there
-            // only grows the destination.
+            // The last byte was never written, so a zero there overwrites nothing this run
+            // wrote and only grows the destination. A fresh destination holds a zero there
+            // already.
             self.write_at(size - 1, &[0])?;
         }
         Ok(())

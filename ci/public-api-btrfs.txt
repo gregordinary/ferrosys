@@ -50,6 +50,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::GeometryError::VolumeTooSmall
 #[non_exhaustive] pub ferrosys::btrfs::LabelError::NulByte
 #[non_exhaustive] pub ferrosys::btrfs::LabelError::TooLong
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::ContentsNotHeld
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::Duplicate
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume
@@ -105,6 +106,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedFeatures
 #[non_exhaustive] pub ferrosys::btrfs::ReadError::UnsupportedProfile
 #[non_exhaustive] pub ferrosys::btrfs::ReadError::WalkTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::ReadError::WrongGeneration
 #[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::BadMagic
 #[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::TooShort
 #[non_exhaustive] pub struct ferrosys::Attributes
@@ -1147,6 +1149,9 @@ pub ferrosys::Family::Btrfs
 pub ferrosys::FidelityRecord::direction: Direction
 pub ferrosys::FidelityRecord::path: Vec<u8>
 pub ferrosys::FidelityRecord::property: Property
+pub ferrosys::FileContent::Declared
+pub ferrosys::FileContent::Declared::key: u64
+pub ferrosys::FileContent::Declared::len: u64
 pub ferrosys::FileContent::Owned(Vec<u8>)
 pub ferrosys::FileContent::Range(FileRange)
 pub ferrosys::Filesystem::Btrfs
@@ -1302,12 +1307,15 @@ pub ferrosys::btrfs::MappedChunk::length: u64
 pub ferrosys::btrfs::MappedChunk::logical: u64
 pub ferrosys::btrfs::Mirror::Absent
 pub ferrosys::btrfs::Mirror::Damaged
+pub ferrosys::btrfs::Mirror::Diverged
+pub ferrosys::btrfs::Mirror::Diverged::generation: u64
 pub ferrosys::btrfs::Mirror::Misplaced
 pub ferrosys::btrfs::Mirror::Misplaced::bytenr: u64
 pub ferrosys::btrfs::Mirror::OutsideDevice
 pub ferrosys::btrfs::Mirror::Present
 pub ferrosys::btrfs::Mirror::Present::generation: u64
 pub ferrosys::btrfs::Mirror::Truncated
+pub ferrosys::btrfs::ModelError::ContentsNotHeld::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::Duplicate::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume::path: Vec<u8>
@@ -1434,6 +1442,9 @@ pub ferrosys::btrfs::ReadError::UnsupportedFeatures::names: String
 pub ferrosys::btrfs::ReadError::UnsupportedProfile::flags: u64
 pub ferrosys::btrfs::ReadError::UnsupportedProfile::logical: u64
 pub ferrosys::btrfs::ReadError::WalkTooLarge::limit: usize
+pub ferrosys::btrfs::ReadError::WrongGeneration::expected: u64
+pub ferrosys::btrfs::ReadError::WrongGeneration::generation: u64
+pub ferrosys::btrfs::ReadError::WrongGeneration::logical: u64
 pub ferrosys::btrfs::ReadPolicy::Lenient
 pub ferrosys::btrfs::ReadPolicy::Strict
 pub ferrosys::btrfs::Reservation::metadata_blocks: u64
@@ -1694,10 +1705,12 @@ pub fn ferrosys::FidelityReport::to_table(&self) -> String
 pub fn ferrosys::FileContent::is_empty(&self) -> bool
 pub fn ferrosys::FileContent::len(&self) -> u64
 pub fn ferrosys::FileContent::read(&self) -> std::io::Result<Cow<'_, [u8]>>
+pub fn ferrosys::FileContent::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::FileRange::at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
 pub fn ferrosys::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
 pub fn ferrosys::FileRange::path(&self) -> &Path
 pub fn ferrosys::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::FileRange::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::FindingReport::findings(&self) -> &[Finding]
 pub fn ferrosys::FindingReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
 pub fn ferrosys::FindingReport::is_clean(&self) -> bool
@@ -1816,11 +1829,13 @@ pub fn ferrosys::btrfs::Tree::for_each_item<F>(&mut self, visit: F) -> Result<()
 pub fn ferrosys::btrfs::Tree::for_each_item_from<F>(&mut self, from: DiskKey, visit: F) -> Result<(), ReadError> where F: FnMut(&DiskKey, &[u8]) -> bool
 pub fn ferrosys::btrfs::Tree::root(&self) -> TreeRoot
 pub fn ferrosys::btrfs::TreeBlock::bytes(&self) -> &[u8]
+pub fn ferrosys::btrfs::TreeBlock::check_keys(&self, first: Option<DiskKey>, below: Option<DiskKey>) -> Result<(), ReadError>
 pub fn ferrosys::btrfs::TreeBlock::check_leaf_packing(&self) -> Result<(), ReadError>
 pub fn ferrosys::btrfs::TreeBlock::count(&self) -> Result<usize, ReadError>
 pub fn ferrosys::btrfs::TreeBlock::header(&self) -> &Header
 pub fn ferrosys::btrfs::TreeBlock::item(&self, index: usize) -> Result<ondisk::Item, ReadError>
 pub fn ferrosys::btrfs::TreeBlock::item_data(&self, index: usize) -> Result<&[u8], ReadError>
+pub fn ferrosys::btrfs::TreeBlock::key_at(&self, index: usize) -> Result<DiskKey, ReadError>
 pub fn ferrosys::btrfs::TreeBlock::key_ptr(&self, index: usize) -> Result<ondisk::KeyPtr, ReadError>
 pub fn ferrosys::btrfs::Volume::chunk_map(&self) -> &ChunkMap
 pub fn ferrosys::btrfs::Volume::chunk_tree(&self) -> TreeRoot

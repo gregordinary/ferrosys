@@ -41,6 +41,7 @@
 #[non_exhaustive] pub ferrosys::HostError::OutOfOrder
 #[non_exhaustive] pub ferrosys::HostError::Read
 #[non_exhaustive] pub ferrosys::HostError::RepeatedDirectory
+#[non_exhaustive] pub ferrosys::HostError::Replaced
 #[non_exhaustive] pub ferrosys::HostError::ShortRead
 #[non_exhaustive] pub ferrosys::HostError::TooManyDeferredDirectories
 #[non_exhaustive] pub ferrosys::HostError::Unprivileged
@@ -75,6 +76,7 @@
 #[non_exhaustive] pub ferrosys::fat::GeometryError::VolumeTooLarge
 #[non_exhaustive] pub ferrosys::fat::LabelError::InvalidByte
 #[non_exhaustive] pub ferrosys::fat::LabelError::TooLong
+#[non_exhaustive] pub ferrosys::fat::ModelError::ContentsNotHeld
 #[non_exhaustive] pub ferrosys::fat::ModelError::Duplicate
 #[non_exhaustive] pub ferrosys::fat::ModelError::FileTooLarge
 #[non_exhaustive] pub ferrosys::fat::ModelError::HardlinkCycle
@@ -822,6 +824,9 @@ pub ferrosys::Family::Fat
 pub ferrosys::FidelityRecord::direction: Direction
 pub ferrosys::FidelityRecord::path: Vec<u8>
 pub ferrosys::FidelityRecord::property: Property
+pub ferrosys::FileContent::Declared
+pub ferrosys::FileContent::Declared::key: u64
+pub ferrosys::FileContent::Declared::len: u64
 pub ferrosys::FileContent::Owned(Vec<u8>)
 pub ferrosys::FileContent::Range(FileRange)
 pub ferrosys::Filesystem::Fat(crate::fat::FatType)
@@ -843,6 +848,7 @@ pub ferrosys::HostError::OutOfOrder::path: Vec<u8>
 pub ferrosys::HostError::Read::source: crate::tree::TreeError
 pub ferrosys::HostError::RepeatedDirectory::first: std::path::PathBuf
 pub ferrosys::HostError::RepeatedDirectory::path: std::path::PathBuf
+pub ferrosys::HostError::Replaced::path: std::path::PathBuf
 pub ferrosys::HostError::ShortRead::got: u64
 pub ferrosys::HostError::ShortRead::path: Vec<u8>
 pub ferrosys::HostError::ShortRead::size: u64
@@ -1024,6 +1030,7 @@ pub ferrosys::fat::LabelError::TooLong::limit: usize
 pub ferrosys::fat::Location::cluster: Option<u32>
 pub ferrosys::fat::Location::entry: Option<u32>
 pub ferrosys::fat::Location::sector: Option<u32>
+pub ferrosys::fat::ModelError::ContentsNotHeld::path: Vec<u8>
 pub ferrosys::fat::ModelError::Duplicate::path: Vec<u8>
 pub ferrosys::fat::ModelError::FileTooLarge::bytes: u64
 pub ferrosys::fat::ModelError::FileTooLarge::limit: u64
@@ -1232,10 +1239,12 @@ pub fn ferrosys::FidelityReport::to_table(&self) -> String
 pub fn ferrosys::FileContent::is_empty(&self) -> bool
 pub fn ferrosys::FileContent::len(&self) -> u64
 pub fn ferrosys::FileContent::read(&self) -> std::io::Result<Cow<'_, [u8]>>
+pub fn ferrosys::FileContent::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::FileRange::at_path(path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
 pub fn ferrosys::FileRange::new(file: Arc<File>, path: impl Into<PathBuf>, offset: u64, len: u64) -> Self
 pub fn ferrosys::FileRange::path(&self) -> &Path
 pub fn ferrosys::FileRange::read(&self) -> std::io::Result<Vec<u8>>
+pub fn ferrosys::FileRange::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::FindingReport::findings(&self) -> &[Finding]
 pub fn ferrosys::FindingReport::has_fatal(&self, policy: crate::ReadPolicy) -> bool
 pub fn ferrosys::FindingReport::is_clean(&self) -> bool

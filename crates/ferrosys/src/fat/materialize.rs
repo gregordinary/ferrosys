@@ -862,11 +862,11 @@ pub fn format(
 /// - **The model.** Every entry's name, times, and cluster run, held until the last byte is
 ///   written. It grows with the number of entries, not with their size — a chain is a first
 ///   cluster and a count, because a fresh volume has nothing to allocate around.
-/// - **A file's contents, while it is placed.** A
+/// - **One window of a file's contents, while it is placed.** A
 ///   [`FileContent::Owned`](crate::FileContent::Owned) entry holds its bytes from the moment
 ///   the source is built, so a list of them costs the sum of every file. A
-///   [`FileContent::Range`](crate::FileContent::Range) is read at placement and dropped
-///   after, so a list of them costs the largest single file.
+///   [`FileContent::Range`](crate::FileContent::Range) is read at placement a mebibyte at a
+///   time, so a list of them costs one mebibyte however large the files are.
 /// - **One directory's entries, while it is written**, and one batch of the file allocation
 ///   table. Neither grows with the volume.
 ///
@@ -1164,23 +1164,24 @@ fn write_tree<W: Write + Seek>(
             if run.is_empty() {
                 continue;
             }
-            // Read when the file is placed rather than when the source was built, so a tree
-            // of ranges costs the largest single file rather than the sum of them.
-            let bytes = model.contents[content].read()?;
             // The length the entry records was taken from this content when the model was
-            // built, and a read hands back exactly what it declared or fails — so the two
-            // agree. Checked in every build: the slice below would panic on contents shorter
-            // than the entry claims, and would silently write a truncated file on contents
-            // longer than it, which is the direction nothing downstream can notice.
+            // built, and the content hands back exactly what it declares or fails — so the
+            // two agree. Checked in every build: a content longer than its entry would run on
+            // into the clusters placed after it, which is the direction nothing downstream
+            // can notice.
+            let content = &model.contents[content];
             assert_eq!(
-                bytes.len() as u64,
+                content.len(),
                 u64::from(size),
                 "a file's contents are not the length its entry records"
             );
             let start = layout
                 .cluster_start_sector(run.first)
                 .expect("a planned file cluster is one the volume has");
-            sink.write_at(at_sector(layout, start), &bytes[..size as usize])?;
+            let at = at_sector(layout, start);
+            // Read when the file is placed rather than when the source was built, and a
+            // window at a time, so a file costs one window of memory however large it is.
+            content.for_each_window(|offset, bytes| sink.write_at(at + offset, bytes))?;
         }
     }
     Ok(())

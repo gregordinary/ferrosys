@@ -94,6 +94,21 @@ impl core::fmt::Display for TimeField {
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelError {
+    /// A file declared by its length alone, whose bytes the source does not hold.
+    ///
+    /// This family's writer reads every file's bytes itself as it places them, so a file with
+    /// none to read is refused when the plan is made rather than part of the way through
+    /// writing the image.
+    #[error(
+        "{}: its contents are declared by length alone, and this writer reads a file's bytes \
+         itself",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    ContentsNotHeld {
+        /// The file's path.
+        path: Vec<u8>,
+    },
     /// A name the format cannot represent. Every one of these is a refusal rather than a
     /// recorded loss: a name is what a file is found by, so substituting one would hand back
     /// a tree whose entries are not the entries that were asked for.
@@ -552,6 +567,11 @@ impl<'a> Builder<'a> {
                 Ok(match &entry.kind {
                     EntryKind::Directory => Class::Dir,
                     EntryKind::File(content) => {
+                        if matches!(content, FileContent::Declared { .. }) {
+                            return Err(ModelError::ContentsNotHeld {
+                                path: entry.path.clone(),
+                            });
+                        }
                         let size = file_size(content.len(), &entry.path)?;
                         let content = next_content;
                         next_content += 1;

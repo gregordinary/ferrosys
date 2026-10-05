@@ -1736,6 +1736,30 @@ impl<R: Read + Seek> Reader<R> {
                 value: sb.blocks_count,
             }));
         }
+        // The total inode count is the per-group count times the group count, exactly: every
+        // group carries the same inode table, and the total is what bounds every inode number
+        // the reader resolves and every inode a scan examines. A total below that product
+        // hides the inodes past it — at zero, every one, the root included, so a scan
+        // examines nothing and reports a clean filesystem, the zero-work shape the guards
+        // above refuse. A total above it names inodes no group holds. The family's own
+        // library refuses a superblock whose total is anything but the product, observed
+        // with the pinned `e2fsck` one inode either side of it, so this is refused here too.
+        // The product is taken in 64 bits, so a geometry whose product passes the field's
+        // 32-bit range is refused rather than wrapped onto a small total that matches.
+        let groups = (sb.blocks_count - u64::from(sb.first_data_block))
+            .div_ceil(u64::from(sb.blocks_per_group));
+        // And a total that agrees with its groups still has to reach the root directory, which
+        // is inode 2: one inode in one group is a consistent geometry with no root, where every
+        // walk begins at an inode the filesystem does not have.
+        if u64::from(sb.inodes_count) != u64::from(sb.inodes_per_group) * groups
+            || sb.inodes_count < ROOT_INO
+        {
+            return Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "superblock",
+                field: "s_inodes_count",
+                value: u64::from(sb.inodes_count),
+            }));
+        }
         Ok((sb, feature, block_size))
     }
 
@@ -3093,7 +3117,7 @@ impl<R: Read + Seek> Reader<R> {
                         // whose inode the filesystem does not have, is a structural fault
                         // whether or not the image carries checksums, so both are checked
                         // outside the `has_csum` block below.
-                        self.scan_dirents(n, &inode, &mut anomalies);
+                        self.scan_dirents(n, &inode, has_csum, &mut anomalies);
                         // Whether the index leads to every name the directory holds, which
                         // is what a lookup through it relies on.
                         if is_dir(&inode) {
@@ -3261,13 +3285,16 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// Flag directory `ino` for the faults its entry records carry: a name a real ext4
-    /// filesystem could not hold, and a reference to an inode the filesystem does not
-    /// have. A non-directory has no entries.
+    /// filesystem could not hold, a reference to an inode the filesystem does not have, and
+    /// a record that does not frame — or a block that cannot be read at all, which is the
+    /// same failure one step earlier. A non-directory has no entries.
     ///
-    /// Both are structural, and both are checked on every image rather than only a
-    /// checksummed one — the records are exactly as they were written, so no checksum
-    /// disagrees with them, and an image crafted to carry either recomputes its checksums
-    /// over it.
+    /// All three are structural, and all three are checked on every image rather than only
+    /// a checksummed one — the records are exactly as they were written, so no checksum
+    /// disagrees with them, and an image crafted to carry one recomputes its checksums over
+    /// it. A block that cannot be read is the exception: where the image carries checksums,
+    /// the checksum pass reads every directory block and names it there, so `has_csum` is
+    /// what keeps it from being named twice.
     ///
     /// A hostile name carries a path separator or a NUL (see [`is_hostile_entry`]) and is
     /// impossible on a kernel-checked filesystem. A reference past `s_inodes_count` names
@@ -3280,13 +3307,20 @@ impl<R: Read + Seek> Reader<R> {
     /// is strict: it abandons a whole directory at its first bad record, and a directory
     /// carrying either fault is exactly the one likely to carry a malformed record too —
     /// so reading through it would skip the check on the directories that most need it. A
-    /// record this cannot parse ends that *block*, and the walk goes on to the next.
+    /// record this cannot parse is reported where [`read_dir`](Self::read_dir) would refuse
+    /// it, and ends that *block*; the walk goes on to the next.
     ///
     /// Each physical block is read once, and each kind of fault is reported once for the
     /// whole directory, so a crafted map cannot make one inode's finding into thousands.
     /// The walk carries on past a fault it has reported, since the records after it may
-    /// hold the other kind, and stops once both have been found.
-    fn scan_dirents(&mut self, ino: u32, inode: &Inode, out: &mut Findings<Anomaly>) {
+    /// hold another kind, and stops once all three have been found.
+    fn scan_dirents(
+        &mut self,
+        ino: u32,
+        inode: &Inode,
+        has_csum: bool,
+        out: &mut Findings<Anomaly>,
+    ) {
         if !is_dir(inode) {
             return;
         }
@@ -3296,19 +3330,39 @@ impl<R: Read + Seek> Reader<R> {
             return;
         };
         let mut read = HashSet::new();
-        let (mut bad_name, mut bad_reference) = (false, false);
+        let (mut bad_name, mut bad_reference, mut bad_framing) = (false, false, false);
         for phys in blocks {
             if phys == 0 || !read.insert(phys) {
                 continue;
             }
-            let Ok(block) = self.block(phys) else {
-                continue;
+            // A block a listing cannot read is a directory a listing cannot list. Where the
+            // image carries checksums, the checksum pass reads every directory block and has
+            // named this one already; where it does not, nothing else reads it.
+            let block = match self.block(phys) {
+                Ok(block) => block,
+                Err(e) => {
+                    if !bad_framing && !has_csum {
+                        out.push(anomaly_in_mapping(&e, ino, Category::Directory));
+                        bad_framing = true;
+                    }
+                    continue;
+                }
             };
             let mut off = 0;
             while off < block.len() {
-                let Ok((entry, rec_len)) = DirEntry::read_from(&block[off..], self.block_size)
-                else {
-                    break; // this block is malformed from here on; the next one may not be
+                // A record that does not frame is where a listing refuses the directory, so
+                // the scan names it there, with or without checksums: a checksum says the
+                // bytes are the ones written, not that they describe records. The rest of
+                // this block is unframed from here on; the next block may not be.
+                let (entry, rec_len) = match DirEntry::read_from(&block[off..], self.block_size) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        if !bad_framing {
+                            out.push(anomaly_at_inode(&ReadError::Parse(e), ino));
+                            bad_framing = true;
+                        }
+                        break;
+                    }
                 };
                 // The same guard `read_dir` carries, for the same reason: `read_from`
                 // returns nothing shorter than an eight-byte header, and a scan that could
@@ -3330,7 +3384,7 @@ impl<R: Read + Seek> Reader<R> {
                         out.push(anomaly_at_inode(&e, ino));
                         bad_reference = true;
                     }
-                    if bad_name && bad_reference {
+                    if bad_name && bad_reference && bad_framing {
                         return;
                     }
                 }
@@ -5919,10 +5973,20 @@ mod tests {
         let image = format(TreeBuilder::new(), 64 * MIB, opts_no_csum())
             .unwrap()
             .into_bytes();
-        // Offsets into the primary superblock at byte 1024: `s_blocks_count_lo` at 0x04,
-        // `s_first_data_block` at 0x14.
+        // The total inode count is the third way to the same verdict: at zero it hides
+        // every inode, the root among them, so the inode loop runs and examines nothing. It
+        // is held to the per-group count times the group count, which is what the family's
+        // own library holds it to, so one inode either side of that is refused as well.
+        let total = SuperBlock::read_from(&image[1024..2048])
+            .expect("the superblock")
+            .inodes_count;
+        // Offsets into the primary superblock at byte 1024: `s_inodes_count` at 0x00,
+        // `s_blocks_count_lo` at 0x04, `s_first_data_block` at 0x14.
         for (field, offset, value) in [
-            ("s_blocks_count", 0x04usize, 0u32),
+            ("s_inodes_count", 0x00usize, 0u32),
+            ("s_inodes_count", 0x00, total - 1),
+            ("s_inodes_count", 0x00, total + 1),
+            ("s_blocks_count", 0x04, 0),
             ("s_first_data_block", 0x14, 0xffff_ffff),
         ] {
             let mut mangled = image.clone();
@@ -5935,12 +5999,34 @@ mod tests {
             assert!(
                 matches!(
                     &refused,
-                    Err(ReadError::Parse(ParseError::InvalidField { field: f, .. }))
-                        if *f == field
+                    Err(ReadError::Parse(ParseError::InvalidField { field: f, value: v, .. }))
+                        if *f == field && *v == u64::from(value)
                 ),
-                "{field}: {refused:?}"
+                "{field} = {value}: {refused:?}"
             );
         }
+
+        // A total that agrees with its groups and stops short of the root: one inode in one
+        // group. The 64 MiB image is one group of 4 KiB blocks.
+        let mut rootless = image.clone();
+        crate::ondisk::put_u32(&mut rootless[1024..], 0x28, 1);
+        crate::ondisk::put_u32(&mut rootless[1024..], 0x00, 1);
+        let refused = Reader::open_with(
+            std::io::Cursor::new(&rootless),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .map(|_| ());
+        assert!(
+            matches!(
+                &refused,
+                Err(ReadError::Parse(ParseError::InvalidField {
+                    field: "s_inodes_count",
+                    value: 1,
+                    ..
+                }))
+            ),
+            "a geometry with no root inode: {refused:?}"
+        );
 
         // The subtraction's other zero: at a one-kibibyte block the canonical first data
         // block is one, so a block count of one passes a zero check and a first-data-block
@@ -6311,6 +6397,48 @@ mod tests {
             found.detail.contains(&missing.to_string()),
             "the finding names the inode the entry pointed at: {found:?}"
         );
+    }
+
+    #[test]
+    fn a_directory_record_that_does_not_frame_is_a_finding_and_not_only_a_refused_listing() {
+        // A listing refuses a directory at its first record that does not frame, and the
+        // scan names the same record — on an image without checksums, where nothing else
+        // reads a directory's records, as much as on one with them. A checksum says the
+        // bytes are the ones written, not that they describe records.
+        let mut ext2 = opts();
+        ext2.feature = FeatureSet::EXT2;
+        let mut bytes = format(TreeBuilder::new(), 16 * MIB, ext2)
+            .unwrap()
+            .into_bytes();
+        let block = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            assert!(r.scan().is_clean(), "the image is clean before the edit");
+            let root = r.inode(ROOT_INO).unwrap();
+            r.data_blocks(&root).unwrap()[0]
+        };
+        // The first record's `rec_len`, two bytes at offset 4 of the root's first block.
+        let at = usize::try_from(block).unwrap() * 4096 + 4;
+        bytes[at..at + 2].copy_from_slice(&0u16.to_le_bytes());
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let root = r.inode(ROOT_INO).unwrap();
+        assert!(matches!(
+            r.read_dir(&root),
+            Err(ReadError::Parse(ParseError::InvalidField {
+                structure: "DirEntry",
+                field: "rec_len",
+                value: 0,
+            }))
+        ));
+        let report = r.scan();
+        assert!(!report.is_clean(), "the scan is not clean");
+        let found = report
+            .anomalies()
+            .iter()
+            .find(|a| a.category == Category::Directory && a.location.inode == Some(ROOT_INO))
+            .unwrap_or_else(|| panic!("the scan names the root directory: {report:?}"));
+        assert_eq!(found.severity, Severity::Structural);
+        assert!(found.detail.contains("rec_len"), "{found:?}");
     }
 
     #[test]
@@ -7380,33 +7508,62 @@ mod tests {
 
     #[test]
     fn a_scan_is_bounded_by_the_bytes_that_exist_not_the_claimed_block_count() {
-        // A superblock claiming `2^64 - 1` blocks implies more block groups than a
-        // `u32` holds. Every group past the ones the source physically covers has no
-        // bitmap block to read, so each would record one "unreadable bitmap" anomaly —
-        // billions of them, an allocation driven by a count a bit-flip can set rather
-        // than by the bytes that exist. Both of the scan's group loops are capped at
-        // the groups the source can hold, so the work and the report stay proportional
-        // to the image.
+        // A superblock claiming far more blocks than the source holds implies groups the
+        // source does not reach. Every one of them has no bitmap block to read, so each
+        // would record one "unreadable bitmap" anomaly — hundreds of thousands of them, an
+        // allocation driven by a count a few bit-flips can set rather than by the bytes
+        // that exist. Both of the scan's group loops are capped at the groups the source
+        // can hold, so the work and the report stay proportional to the image.
         let bytes = format(TreeBuilder::new(), 64 * MIB, opts())
             .unwrap()
             .into_bytes();
-        let mut corrupt = bytes.clone();
+        let sb = SuperBlock::read_from(&bytes[1024..2048]).expect("the superblock");
+
+        // A count past what any inode total can describe is refused before a scan is
+        // asked for: `2^64 - 1` blocks is more groups than a 32-bit inode total covers.
         // s_blocks_count_lo is at superblock offset 0x04 and _hi at 0x150.
-        crate::ondisk::put_u32(&mut corrupt[1024 + 0x04..], 0, 0xffff_ffff);
-        crate::ondisk::put_u32(&mut corrupt[1024 + 0x150..], 0, 0xffff_ffff);
+        let mut refused = bytes.clone();
+        crate::ondisk::put_u32(&mut refused[1024 + 0x04..], 0, 0xffff_ffff);
+        crate::ondisk::put_u32(&mut refused[1024 + 0x150..], 0, 0xffff_ffff);
+        assert!(matches!(
+            Reader::open_with(
+                std::io::Cursor::new(&refused),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .err(),
+            Some(ReadError::Parse(ParseError::InvalidField {
+                field: "s_inodes_count",
+                ..
+            }))
+        ));
+
+        // The largest count a consistent inode total describes, with that total beside it:
+        // the most groups whose inodes a 32-bit total still counts.
+        let groups = u64::from(u32::MAX / sb.inodes_per_group);
+        let blocks = groups * u64::from(sb.blocks_per_group);
+        let mut corrupt = bytes.clone();
+        crate::ondisk::put_u32(&mut corrupt[1024 + 0x04..], 0, blocks as u32);
+        crate::ondisk::put_u32(&mut corrupt[1024 + 0x150..], 0, (blocks >> 32) as u32);
+        crate::ondisk::put_u32(
+            &mut corrupt[1024..],
+            0,
+            (groups * u64::from(sb.inodes_per_group)) as u32,
+        );
         let mut r = Reader::open_with(
             std::io::Cursor::new(&corrupt),
             &OpenOptions::new().policy(ReadPolicy::Lenient),
         )
         .unwrap();
         let report = r.scan();
-        // The image spans two groups' worth of descriptors at most, so the report is a
-        // handful of anomalies. The bound is loose on purpose: what it rules out is a
-        // report whose length tracks the claimed group count.
+        // The groups the scan reaches are the ones whose structures the source's own blocks
+        // can hold, so the report is a few hundred checksum findings over those — where the
+        // claimed count would be several for each of half a million groups, cut off at the
+        // findings limit. The bound is loose on purpose: what it rules out is a report whose
+        // length tracks the claimed group count.
         assert!(
-            report.anomalies().len() < 64,
-            "the scan reported {} anomalies for a 64 MiB image — it is walking the \
-             claimed group count, not the source",
+            report.anomalies().len() < 1024 && !report.is_truncated(),
+            "the scan reported {} anomalies for a 64 MiB image claiming {groups} groups — it \
+             is walking the claimed group count, not the source",
             report.anomalies().len()
         );
         // A regression surfaces as this test never returning rather than as a failed
@@ -7857,17 +8014,32 @@ mod tests {
         let report = r.scan();
 
         // The blocks it names hold no directory tail, so each is one finding — and there
-        // are as many findings as there are blocks, not as many as there are offsets.
-        let per_block = report
+        // are as many findings as there are blocks, not as many as there are offsets. Their
+        // records do not frame either, which a listing refuses at the first of them, and
+        // that is one finding for the whole directory rather than one per block.
+        let directory: Vec<_> = report
             .anomalies()
             .iter()
             .filter(|a| a.category == Category::Directory && a.location.inode == Some(3))
+            .collect();
+        let per_block = directory
+            .iter()
+            .filter(|a| a.location.block.is_some())
             .count();
         assert_eq!(
             per_block,
             LEN as usize,
             "one finding per block named, not per logical offset ({} offsets name {LEN} blocks)",
             RUNS as usize * LEN as usize
+        );
+        assert_eq!(
+            directory.len() - per_block,
+            1,
+            "and one for the directory's framing: {:?}",
+            directory
+                .iter()
+                .filter(|a| a.location.block.is_none())
+                .collect::<Vec<_>>()
         );
         assert!(!report.is_truncated(), "this image is fully scanned");
     }

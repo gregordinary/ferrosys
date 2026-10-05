@@ -110,6 +110,16 @@ pub enum Error {
          so every other byte of the destination must already read as zero"
     )]
     NotARegularFile(String),
+    /// The destination, written in place, is a file the run reads.
+    ///
+    /// Writing it would truncate what is still to be read, and the artifact would hold
+    /// zeros or its own bytes where the source's belong, with every step succeeding.
+    #[error(
+        "{0}: is a file this run reads, and writing it in place would destroy it before it \
+         is read — name another destination, or pass --atomic to replace it once the run \
+         has read it"
+    )]
+    DestinationIsSource(String),
     /// No compiled-in family recognized the image, so there is nothing to classify it as.
     #[error("{path}: {source}")]
     NotDetected {
@@ -370,6 +380,7 @@ impl Error {
             Error::NoDirectorySource | Error::NoDirectorySink => exit::OPERATIONAL,
             Error::Io { .. }
             | Error::NotARegularFile(_)
+            | Error::DestinationIsSource(_)
             | Error::NotDetected { .. }
             | Error::NotExt { .. }
             | Error::IdentityNotExt { .. }
@@ -646,8 +657,8 @@ required:
 
 contents (at most one):
   --from-tar FILE|-    populate the filesystem from a tar archive. A named FILE is left on
-                       disk and each member read as its file is placed, so peak memory is
-                       the largest single member; `-` reads the standard input, which
+                       disk and each member read as its file is placed, so memory holds a
+                       mebibyte of it at a time; `-` reads the standard input, which
                        cannot be sought back over and so is held whole. The archive must
                        be uncompressed — decompress it into `-` with `gunzip -c f.tar.gz |
                        ferrosys format ... --from-tar -`
@@ -657,10 +668,10 @@ contents (at most one):
                        and FIFO nodes, sockets, and extended attributes with their POSIX
                        ACLs; symlinks are recorded, never followed. A FAT volume has a field
                        for almost none of it, and --accept-loss is what says which of them
-                       may go. Each file is read as it is placed, so
-                       peak memory is the largest single file. Walking a tree records Linux
-                       inode metadata and Linux extended attributes, so this option is
-                       carried out on Linux alone; --from-tar reads an archive anywhere
+                       may go. Each file is read as it is placed, a mebibyte at a time.
+                       Walking a tree records Linux inode metadata and Linux extended
+                       attributes, so this option is carried out on Linux alone;
+                       --from-tar reads an archive anywhere
   --owner UID:GID      own every entry of a --from-dir tree by this user and group,
                        whatever the host files say. A build that does not run as root
                        usually wants --owner 0:0: without it the image is owned by the

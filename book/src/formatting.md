@@ -76,8 +76,8 @@ the archive's PAX timestamps, `SCHILY.xattr.*` attributes, and `SCHILY.acl.*` AC
 It has two constructors, and they differ only in where a regular file's *contents*
 live. `ArchiveSource::from_reader` takes any stream and reads every body into memory.
 `ArchiveSource::from_path` opens the archive itself, records where each body lies, and
-reads it only when that file is placed. A format then needs the largest single member
-rather than the sum of them all. Both write byte-identical images.
+reads it only when that file is placed, a mebibyte at a time. A format then needs one
+mebibyte rather than the sum of every member. Both write byte-identical images.
 
 The handles keep the archive open, so it must not be modified in place until the format
 finishes. Replacing it by writing a new file and renaming it over the old one is safe,
@@ -118,7 +118,7 @@ it. The same tree therefore walks to the same entry list, whatever order the hos
 its directories in.
 
 Each file's bytes are read as that file is placed, and no descriptor is held in between. A
-tree can hold any number of files, and the peak memory is the largest single one.
+tree can hold any number of files, and each is read a mebibyte at a time.
 
 The times on those entries are the host's, and two of the three move under the host's feet.
 A walk reads every directory and every symlink to learn what it holds, and a host that
@@ -527,16 +527,17 @@ Three things are held while the bytes stream out, and none of them is the image:
 
 - **The entry list**, and the inode model built from it, for the whole run. This grows
   with the number of entries, not with their size.
-- **A file's contents, while it is placed**. How long that is depends on the source. An
-  entry holding `FileContent::Owned` bytes holds them from the moment the source was built,
-  so a list of them costs the sum of every file. A `FileContent::Range` is read at
-  placement and dropped after, so a list of them costs the largest single file.
-  `ArchiveSource::from_path` is what makes that difference for a tar source.
+- **One window of a file's contents, while it is placed**. How long a file's bytes are held
+  depends on the source. An entry holding `FileContent::Owned` bytes holds them from the
+  moment the source was built, so a list of them costs the sum of every file. A
+  `FileContent::Range` is read at placement a mebibyte at a time, so a list of them costs
+  one mebibyte however large the files are. `ArchiveSource::from_path` is what makes that
+  difference for a tar source.
 - **The allocator's used-block bitmap**, for the whole run, at one bit per filesystem
   block: `total_blocks / 8` bytes, 128 MiB for a 4 TiB image at a 4 KiB block.
 
-So peak memory grows with the entry count, the largest file, and the block count. It never
-grows with the image's size in bytes.
+So peak memory grows with the entry count and the block count. It never grows with the
+image's size in bytes.
 
 ## Formatting a FAT volume
 
@@ -1386,10 +1387,10 @@ same place.
 them all. A volume far larger than memory is therefore created into a file that stays
 sparse.
 
-Only the sectors the filesystem occupies are written, and nothing is read back from the
-destination. Every byte the destination holds that the format does not write must therefore
-already read as zero. A freshly created file, or one truncated to zero length, satisfies
-that.
+Nothing is read back from the destination, and what it held before does not matter. A
+format writes every byte a reader or a prober could consult, so a reused card comes out the
+same as a fresh file. The free clusters of the heap are left alone, but for those in the
+volume's last mebibyte, so a file destination stays sparse.
 
 ```rust
 # extern crate ferrosys;
@@ -1570,6 +1571,76 @@ named inside the same source, so resolving it reads nothing this crate was not a
 given. What that costs is the file's size again, which is why `FormatPlan` exists. The
 report is readable before the destination is touched, so a caller finds out what a build
 will cost rather than discovering it.
+
+### Writing over what was there before
+
+A destination that held something is formatted the same as a fresh one. Two regions decide
+that. A directory's clusters past its last entry are written as zeros, which end the
+directory. The allocation bitmap is written whole, so a stale set bit cannot hold a cluster.
+
+Some bytes no driver reads are written as well, because a prober reads them. Everything
+before the cluster heap is zeroed, including the gap where another format keeps its
+signature. So are the free clusters in the volume's last mebibyte, where some formats keep
+labels.
+
+The write goes down in five stages, in order. The first zeroes everything before the heap
+and the end of the volume, which invalidates both boot regions of whatever was there. The
+second writes the volume's contents. The backup boot region follows, then the main boot
+region, and the main boot sector goes last. Once the first stage is down, an interruption
+leaves the whole volume or nothing a driver mounts. One during the first stage leaves what
+was there, partly zeroed.
+
+### Doing the I/O yourself
+
+`FormatPlan::stages` hands the same write back as pieces, for a caller that writes the
+destination itself. A piece is bytes the plan holds, a run of zeros, a range of a host file,
+or a file declared by its length alone. Apply the stages in order, and make each durable
+before the next. Within a stage the pieces never share a sector, and they go down in any
+order.
+
+Every piece starts on a sector boundary. A byte no piece covers lies in a free cluster, or
+past the recorded length of the stream that owns it, so nothing reads it. A caller writing
+whole sectors can therefore pad a piece's last sector with anything.
+
+`FileContent::Declared` is how a file enters a plan without its bytes. The plan places it
+from its length, and its piece names it by the key the caller chose. A large image can then
+stream from a slow or asynchronous source, decompressing on the way.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::exfat::{FormatOptions, FormatPlan, Piece};
+use ferrosys::{FileContent, Metadata, Timestamp, TreeBuilder};
+
+let meta = Metadata::new(0o644, Timestamp::from_secs(1_426_325_212));
+let image = FileContent::Declared { len: 300 << 20, key: 7 };
+let source = TreeBuilder::new()
+    .file(b"/eflasher.conf".to_vec(), b"autostart=yes\n", meta)
+    .file(b"/os.img".to_vec(), image, meta);
+let plan = FormatPlan::new(source, 1 << 30, FormatOptions::new(0x1234_abcd))?;
+
+let mut placed = None;
+for stage in plan.stages() {
+    for piece in stage.pieces() {
+        match piece? {
+            // The declared file: stream its bytes to this offset, from wherever they are.
+            Piece::Declared { offset, len, key, .. } => placed = Some((key, offset, len)),
+            // Bytes, zeros, and host ranges go down as they are.
+            _ => {}
+        }
+    }
+    // Flush here, so this stage is durable before the next begins.
+}
+
+let (key, offset, len) = placed.expect("the image has a place");
+assert_eq!((key, len), (7, 300 << 20));
+assert_eq!(offset % u64::from(plan.layout().bytes_per_cluster), 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`FormatPlan::write_to` is these stages applied to a seekable sink. It refuses a plan holding
+a declared file, before touching the sink, since it has no bytes to put there. Every other
+family's writer reads a file's bytes itself, so each refuses a declared file when the plan is
+made.
 
 ### The up-case table
 

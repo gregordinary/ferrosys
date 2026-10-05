@@ -117,6 +117,40 @@ impl ChunkMap {
         devid: u64,
         device_bytes: u64,
     ) -> Result<(), ReadError> {
+        let mapped = Self::mapped(key, chunk, record, devid, device_bytes)?;
+        let (logical, length) = (mapped.logical, mapped.length);
+        let at = self.chunks.partition_point(|c| c.logical < logical);
+        let overlaps_before = at
+            .checked_sub(1)
+            .is_some_and(|prev| self.chunks[prev].logical_end() > logical);
+        let overlaps_after = self
+            .chunks
+            .get(at)
+            .is_some_and(|next| next.logical < logical + length);
+        if overlaps_before || overlaps_after {
+            return Err(ReadError::ChunkOverlap { logical });
+        }
+        self.chunks.insert(at, mapped);
+        Ok(())
+    }
+
+    /// The mapping one chunk item describes, validated as [`insert`](Self::insert) validates
+    /// one, without adding it to anything.
+    ///
+    /// What a reader holds a repeated record against: a chunk the map already carries, met
+    /// again, is judged on its own bytes first and then on whether it says the same thing.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal [`insert`](Self::insert) makes except the overlap, which is a question
+    /// about a map rather than about one chunk.
+    pub(super) fn mapped(
+        key: &DiskKey,
+        chunk: &Chunk,
+        record: &[u8],
+        devid: u64,
+        device_bytes: u64,
+    ) -> Result<MappedChunk, ReadError> {
         if key.kind != ItemType::CHUNK_ITEM || key.objectid != objectid::FIRST_CHUNK_TREE {
             return Err(ReadError::BadChunk {
                 logical: key.offset,
@@ -178,28 +212,12 @@ impl ChunkMap {
                 fault: "no copy of a chunk is on the device this image holds",
             });
         }
-
-        let at = self.chunks.partition_point(|c| c.logical < logical);
-        let overlaps_before = at
-            .checked_sub(1)
-            .is_some_and(|prev| self.chunks[prev].logical_end() > logical);
-        let overlaps_after = self
-            .chunks
-            .get(at)
-            .is_some_and(|next| next.logical < logical + chunk.length);
-        if overlaps_before || overlaps_after {
-            return Err(ReadError::ChunkOverlap { logical });
-        }
-        self.chunks.insert(
-            at,
-            MappedChunk {
-                logical,
-                length: chunk.length,
-                flags: chunk.ty,
-                copies,
-            },
-        );
-        Ok(())
+        Ok(MappedChunk {
+            logical,
+            length: chunk.length,
+            flags: chunk.ty,
+            copies,
+        })
     }
 
     /// Load the chunks the superblock's bootstrap array carries.

@@ -421,6 +421,26 @@ impl UpcaseTable {
         name.iter().map(|unit| self.fold_unit(*unit)).collect()
     }
 
+    /// The first of the 128 characters whose mapping the format fixes that this table maps to
+    /// something else, and what it maps it to — or `None` where all 128 fold as the format
+    /// says: `a` through `z` to `A` through `Z`, and every other one to itself.
+    ///
+    /// A volume may fold every character past these its own way, so this is the whole of what
+    /// a table's mappings can be held to. A table too short to state one of them leaves it
+    /// folding to itself, which for `a` through `z` is a deviation this names too.
+    #[must_use]
+    pub fn mandatory_deviation(&self) -> Option<(u16, u16)> {
+        (0u16..128).find_map(|character| {
+            let required = if (u16::from(b'a')..=u16::from(b'z')).contains(&character) {
+                character - 0x20
+            } else {
+                character
+            };
+            let maps_to = self.fold_unit(character);
+            (maps_to != required).then_some((character, maps_to))
+        })
+    }
+
     /// How many units the table folds to something other than themselves.
     ///
     /// A volume whose table folds nothing is one whose lookups are case-*sensitive*, which is

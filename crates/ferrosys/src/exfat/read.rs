@@ -66,7 +66,7 @@ use crate::bytes::{get_u16, get_u32};
 use crate::fidelity::Synthesis;
 use crate::finding::{Family, Finding, Findings, Severity};
 use crate::io::{offset_of, read_exact_at};
-use crate::path::is_hostile_component;
+use crate::path::{is_hostile_component, is_reserved_name_char};
 use crate::policy::{Limits, MAX_PATH, OpenOptions, ReadPolicy};
 use crate::time::Timestamp;
 use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
@@ -74,15 +74,15 @@ use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
 use super::geometry::{ExfatLayout, FIRST_CLUSTER, layout_from_boot};
 use super::model::MAX_DIRECTORY_BYTES;
 use super::ondisk::{
-    AllocationBitmapEntry, BAD_CLUSTER, BOOT_REGION_SECTORS, CHECKSUM_SECTOR, DIR_ENTRY_SIZE,
-    EXTENDED_BOOT_FIRST_SECTOR, EXTENDED_BOOT_SECTORS, EXTENDED_BOOT_SIGNATURE, EntryType,
-    FAT_ENTRY_MEDIA, FAT_ENTRY_RESERVED, FILE_SYSTEM_MINOR_REVISION, FileAttributes, FileEntry,
-    FileNameEntry, MAIN_BOOT_REGION_SECTOR, MAX_LABEL_UNITS, MainBootSector, NAME_UNITS_PER_ENTRY,
-    PERCENT_IN_USE_MAX, PERCENT_IN_USE_UNKNOWN, ParseError, SECONDARY_ALLOCATION_POSSIBLE,
-    StreamExtensionEntry, UpcaseTable, UpcaseTableEntry, VOLUME_FLAG_MEDIA_FAILURE,
-    VOLUME_FLAG_VOLUME_DIRTY, VolumeLabelEntry, boot_checksum, checksum_sector_value,
-    entry_set_checksum, extended_boot_signature, name_hash, percent_in_use, unpack_timestamp,
-    upcase_checksum, utc_offset_minutes,
+    AllocationBitmapEntry, BAD_CLUSTER, BITMAP_IDENTIFIER, BOOT_REGION_SECTORS, CHECKSUM_SECTOR,
+    DIR_ENTRY_SIZE, EXTENDED_BOOT_FIRST_SECTOR, EXTENDED_BOOT_SECTORS, EXTENDED_BOOT_SIGNATURE,
+    EntryType, FAT_ENTRY_MEDIA, FAT_ENTRY_RESERVED, FILE_SYSTEM_MINOR_REVISION, FileAttributes,
+    FileEntry, FileNameEntry, MAIN_BOOT_REGION_SECTOR, MAX_LABEL_UNITS, MainBootSector,
+    NAME_UNITS_PER_ENTRY, PERCENT_IN_USE_MAX, PERCENT_IN_USE_UNKNOWN, ParseError,
+    SECONDARY_ALLOCATION_POSSIBLE, StreamExtensionEntry, UpcaseTable, UpcaseTableEntry,
+    VOLUME_FLAG_MEDIA_FAILURE, VOLUME_FLAG_VOLUME_DIRTY, VolumeLabelEntry, boot_checksum,
+    checksum_sector_value, entry_set_checksum, extended_boot_signature, name_hash, percent_in_use,
+    unpack_timestamp, upcase_checksum, utc_offset_minutes,
 };
 
 /// The most bytes of an up-case table this reader loads.
@@ -672,6 +672,47 @@ pub enum ReadError {
     /// handing back a name that is not one.
     #[error("the volume label carries a NUL, which is what the field's padding is")]
     LabelNulUnit,
+    /// The volume label carries a character a name may not hold.
+    ///
+    /// A label reserves the characters a file name does: the control codes and the nine a
+    /// path or a pattern gives a meaning to.
+    #[error("the volume label carries {ch:?}, which a label may not hold")]
+    #[non_exhaustive]
+    LabelForbiddenCharacter {
+        /// The first such character.
+        ch: char,
+    },
+    /// The allocation bitmap's entry names itself the second bitmap, on a volume with one
+    /// allocation table and so one bitmap.
+    #[error(
+        "the allocation bitmap's entry names itself the second bitmap, and the volume has one \
+         allocation table"
+    )]
+    SecondBitmap,
+    /// The allocation bitmap's entry sets flag bits the format reserves.
+    #[error("the allocation bitmap's entry sets reserved flag bits {bits:#04x}")]
+    #[non_exhaustive]
+    BitmapReservedFlags {
+        /// The reserved bits that are set.
+        bits: u8,
+    },
+    /// The up-case table maps one of the 128 characters whose mapping the format fixes to
+    /// something else.
+    ///
+    /// A volume may fold every other character its own way. These 128 fold as the format
+    /// says — `a` through `z` to `A` through `Z`, and every other one to itself — on every
+    /// exFAT volume, which is what makes an ASCII name compare alike everywhere.
+    #[error(
+        "the up-case table maps U+{character:04X} to U+{maps_to:04X}, and the format fixes that \
+         mapping"
+    )]
+    #[non_exhaustive]
+    UpcaseMandatoryMapping {
+        /// The character.
+        character: u16,
+        /// What the table maps it to.
+        maps_to: u16,
+    },
     /// A directory holds entries after the one that marks its end, which no reader will reach.
     #[error("directory entry {index} follows the end marker and no reader reaches it")]
     #[non_exhaustive]
@@ -783,14 +824,26 @@ pub enum ReadError {
         /// The reserved bits that are set.
         bits: u16,
     },
-    /// A stream extension records an allocation and does not declare one possible.
+    /// A stream extension does not declare an allocation possible.
     ///
     /// The format requires the flag on every stream extension, whether or not the stream
-    /// currently addresses a cluster — so a clear one is a secondary entry saying it addresses
-    /// nothing, beside a first cluster and a length saying it does.
-    #[error("the stream at entry {index} records an allocation and does not declare one possible")]
+    /// currently addresses a cluster — so a clear one is a secondary entry saying it can
+    /// address nothing, which no stream extension is.
+    #[error("the stream at entry {index} does not declare an allocation possible")]
     #[non_exhaustive]
     AllocationNotPossible {
+        /// The set's first entry index within its directory.
+        index: u32,
+    },
+    /// A stream extension that addresses no cluster declares its clusters contiguous.
+    ///
+    /// `NoFatChain` says the allocation table holds no chain for a stream's clusters, which
+    /// describes an allocation; a stream with none has nothing for it to describe.
+    #[error(
+        "the stream at entry {index} addresses no cluster and declares its clusters contiguous"
+    )]
+    #[non_exhaustive]
+    NoFatChainWithoutAllocation {
         /// The set's first entry index within its directory.
         index: u32,
     },
@@ -1032,6 +1085,20 @@ impl ReadError {
                 Category::UpcaseTable,
                 Location::default(),
             ),
+            // The table reads and folds; what it folds ASCII to is not what the format says,
+            // which is a field outside the range the format states for it.
+            ReadError::UpcaseMandatoryMapping { .. } => (
+                Severity::Conformance,
+                Category::UpcaseTable,
+                Location::default(),
+            ),
+            // The bitmap reads and is the volume's only one; the entry describing it says
+            // something the boot sector contradicts, or sets bits nothing defines.
+            ReadError::SecondBitmap | ReadError::BitmapReservedFlags { .. } => (
+                Severity::Conformance,
+                Category::AllocationBitmap,
+                Location::default(),
+            ),
             ReadError::UpcaseTooLong { .. } => (
                 Severity::Structural,
                 Category::UpcaseTable,
@@ -1074,6 +1141,7 @@ impl ReadError {
             | ReadError::DirectoryLengthNotClusters { index, .. }
             | ReadError::ReservedAttributes { index, .. }
             | ReadError::AllocationNotPossible { index }
+            | ReadError::NoFatChainWithoutAllocation { index }
             // The clusters are there and the entry does not claim them, so the volume reads
             // back whole and the space is spent — a conformance fault rather than a structural
             // one, which is the call FAT makes for the same shape.
@@ -1090,7 +1158,9 @@ impl ReadError {
             ),
             // Both are the root directory's label entry, which is found once at open and has
             // no index a later report could carry.
-            ReadError::LabelTooLong { .. } | ReadError::LabelNulUnit => (
+            ReadError::LabelTooLong { .. }
+            | ReadError::LabelNulUnit
+            | ReadError::LabelForbiddenCharacter { .. } => (
                 Severity::Conformance,
                 Category::Directory,
                 Location::default(),
@@ -1351,7 +1421,11 @@ pub struct Reader<R> {
     root_bytes: u64,
     /// The deviations found while opening, kept so a scan reports them without re-deriving the
     /// geometry and a lenient caller can see them without one.
-    open_anomalies: Vec<Anomaly>,
+    ///
+    /// Bounded by [`Limits::max_findings`], as a scan's report is, with reaching the bound
+    /// recorded: a root directory is the volume's to fill, and how many deviations it holds is
+    /// its claim rather than this reader's budget.
+    open_anomalies: Findings<Anomaly>,
     /// A one-sector window on the allocation table.
     ///
     /// Following a chain reads one entry at a time and the entries of a chain are usually near
@@ -1508,14 +1582,16 @@ impl<R: Read + Seek> Reader<R> {
             },
             label: None,
             root_bytes: 0,
-            open_anomalies: Vec::new(),
+            open_anomalies: Findings::new(options.limits.max_findings),
             fat_window: None,
             bitmap_window: None,
             bitmap_at: None,
             chain_cursor: None,
         };
 
-        let mut deviations = Vec::new();
+        // Bounded as a scan's report is, so what an open holds of the deviations it meets is
+        // the caller's limit and not the volume's to choose.
+        let mut deviations = Findings::new(options.limits.max_findings);
         reader.check_boot_regions(&mut deviations)?;
         reader.check_revision(&mut deviations);
         reader.check_volume_state(&mut deviations);
@@ -1525,12 +1601,16 @@ impl<R: Read + Seek> Reader<R> {
         // The policy is applied once, after everything an open reads has been read, so a
         // strict open reports the first deviation in the order the volume is laid out rather
         // than in the order this happens to check.
+        let (deviations, truncated) = deviations.into_parts();
         for err in deviations {
             let anomaly = err.anomaly();
             if options.policy.is_fatal(anomaly.severity) {
                 return Err(err);
             }
             reader.open_anomalies.push(anomaly);
+        }
+        if truncated {
+            reader.open_anomalies.is_full();
         }
         Ok(reader)
     }
@@ -1619,7 +1699,7 @@ impl<R: Read + Seek> Reader<R> {
     /// The main region is preferred whatever the backup says. A reader that fell back to the
     /// backup would open a volume under a geometry no driver uses, and every driver reads
     /// sector 0.
-    fn check_boot_regions(&mut self, out: &mut Vec<ReadError>) -> Result<(), ReadError> {
+    fn check_boot_regions(&mut self, out: &mut Findings<ReadError>) -> Result<(), ReadError> {
         for region in [MAIN_BOOT_REGION_SECTOR, BOOT_REGION_SECTORS] {
             // The eleven sectors the checksum covers, then the sector holding it.
             let covered = self.read_sectors(region, CHECKSUM_SECTOR)?;
@@ -1669,7 +1749,12 @@ impl<R: Read + Seek> Reader<R> {
     /// One report per region rather than one per sector: eight sectors that were zeroed
     /// together are one fact about the region, and a scan that spent eight findings on it
     /// would have that much less room for the rest of the volume.
-    fn check_extended_boot_sectors(&self, region: u64, covered: &[u8], out: &mut Vec<ReadError>) {
+    fn check_extended_boot_sectors(
+        &self,
+        region: u64,
+        covered: &[u8],
+        out: &mut Findings<ReadError>,
+    ) {
         let bytes_per_sector = self.layout.bytes_per_sector as usize;
         for n in 0..EXTENDED_BOOT_SECTORS {
             let at = (EXTENDED_BOOT_FIRST_SECTOR + n) as usize * bytes_per_sector;
@@ -1771,7 +1856,7 @@ impl<R: Read + Seek> Reader<R> {
     /// to the volume, so the message says what each means rather than which field held it: a
     /// caller told "the volume was not cleanly unmounted" knows what to do, and one told that
     /// a flag word is `0x0002` does not.
-    fn check_volume_state(&self, out: &mut Vec<ReadError>) {
+    fn check_volume_state(&self, out: &mut Findings<ReadError>) {
         if self.volume_dirty() {
             out.push(ReadError::VolumeDirty);
         }
@@ -1786,7 +1871,7 @@ impl<R: Read + Seek> Reader<R> {
     /// judged, so the classifier and the reader answer together. The minor half is the weaker
     /// case the format asks an implementation to honour: every structure is the one this
     /// reader knows, and something in the volume may mean more than it appears to.
-    fn check_revision(&self, out: &mut Vec<ReadError>) {
+    fn check_revision(&self, out: &mut Findings<ReadError>) {
         let minor = self.boot.minor_revision();
         if minor != FILE_SYSTEM_MINOR_REVISION {
             out.push(ReadError::UnknownMinorRevision { minor });
@@ -1829,7 +1914,7 @@ impl<R: Read + Seek> Reader<R> {
     /// table's, and the volume label's. The first two are what a driver must have before it can
     /// allocate anything or compare any name, which is why a volume missing either is refused
     /// rather than reported as an empty tree.
-    fn load_residents(&mut self, out: &mut Vec<ReadError>) -> Result<(), ReadError> {
+    fn load_residents(&mut self, out: &mut Findings<ReadError>) -> Result<(), ReadError> {
         let root = self.root();
         let mut bitmap: Option<AllocationBitmapEntry> = None;
         let mut upcase: Option<UpcaseTableEntry> = None;
@@ -1840,8 +1925,23 @@ impl<R: Read + Seek> Reader<R> {
         // that bit alone finds the residents without assembling a single name.
         //
         // The first of each kind is what a driver takes, so it is what this takes; a second
-        // is storage nothing reads, and is reported rather than stepped over in silence.
-        let mut duplicates: Vec<ReadError> = Vec::new();
+        // is storage nothing reads, and is reported rather than stepped over in silence. The
+        // reports go straight into `out`, whose bound is the caller's: a root directory can
+        // hold a duplicate in nearly every slot it has.
+        //
+        // A duplicate is a deviation a strict open refuses, and the open would refuse on it
+        // whatever followed, so a strict open stops at the first one rather than reading the
+        // rest of the directory for a verdict already reached. A lenient open reads on, since
+        // the residents it needs may sit after any number of them.
+        let stops = self.policy.is_fatal(
+            ReadError::DuplicateRootEntry {
+                index: 0,
+                entry_type: "",
+            }
+            .anomaly()
+            .severity,
+        );
+        let mut refused = false;
         self.for_each_slot::<ReadError>(&root, |_, slot| {
             let entry_type = slot.entry_type();
             if entry_type.is_end_of_directory() {
@@ -1850,30 +1950,45 @@ impl<R: Read + Seek> Reader<R> {
             if !entry_type.in_use() || entry_type.is_secondary() {
                 return Ok(ControlFlow::Continue(()));
             }
-            let mut second = |named: &'static str| {
-                duplicates.push(ReadError::DuplicateRootEntry {
+            let named = match entry_type {
+                EntryType::ALLOCATION_BITMAP => match bitmap {
+                    None => {
+                        bitmap = Some(AllocationBitmapEntry::read_from(&slot.bytes)?);
+                        None
+                    }
+                    Some(_) => Some("allocation bitmap"),
+                },
+                EntryType::UPCASE_TABLE => match upcase {
+                    None => {
+                        upcase = Some(UpcaseTableEntry::read_from(&slot.bytes)?);
+                        None
+                    }
+                    Some(_) => Some("up-case table"),
+                },
+                EntryType::VOLUME_LABEL => match label {
+                    None => {
+                        label = Some(VolumeLabelEntry::read_from(&slot.bytes)?);
+                        None
+                    }
+                    Some(_) => Some("volume label"),
+                },
+                _ => None,
+            };
+            if let Some(named) = named {
+                out.push(ReadError::DuplicateRootEntry {
                     index: slot.index,
                     entry_type: named,
                 });
-            };
-            match entry_type {
-                EntryType::ALLOCATION_BITMAP => match bitmap {
-                    None => bitmap = Some(AllocationBitmapEntry::read_from(&slot.bytes)?),
-                    Some(_) => second("allocation bitmap"),
-                },
-                EntryType::UPCASE_TABLE => match upcase {
-                    None => upcase = Some(UpcaseTableEntry::read_from(&slot.bytes)?),
-                    Some(_) => second("up-case table"),
-                },
-                EntryType::VOLUME_LABEL => match label {
-                    None => label = Some(VolumeLabelEntry::read_from(&slot.bytes)?),
-                    Some(_) => second("volume label"),
-                },
-                _ => {}
+                if stops {
+                    refused = true;
+                    return Ok(ControlFlow::Break(()));
+                }
             }
             Ok(ControlFlow::Continue(()))
         })?;
-        out.append(&mut duplicates);
+        if refused {
+            return Ok(());
+        }
 
         let bitmap = bitmap.ok_or(ReadError::MissingResident {
             resident: "allocation bitmap",
@@ -1881,6 +1996,18 @@ impl<R: Read + Seek> Reader<R> {
         let upcase = upcase.ok_or(ReadError::MissingResident {
             resident: "up-case table",
         })?;
+
+        // The identifier says which of two bitmaps an entry is, and a volume has two only
+        // where it has two allocation tables. This reader reads the one-table volume alone,
+        // whose one bitmap is the first, so an entry naming itself the second contradicts the
+        // boot sector's table count. The seven bits above it are reserved, a separate remark.
+        if bitmap.bitmap_flags & BITMAP_IDENTIFIER != 0 {
+            out.push(ReadError::SecondBitmap);
+        }
+        let reserved = bitmap.bitmap_flags & !BITMAP_IDENTIFIER;
+        if reserved != 0 {
+            out.push(ReadError::BitmapReservedFlags { bits: reserved });
+        }
 
         // A bitmap is one bit per cluster. A shorter one addresses fewer clusters than the
         // volume has, and a longer one is a length that is not this bitmap's.
@@ -1910,15 +2037,16 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// Two fields are judged rather than taken. `CharacterCount` runs 0 to 11, and a larger
     /// one names units the field does not have — so it is reported and the field is read to
-    /// its end, which is the only thing there is to read. And a label carrying `U+0000` is one
+    /// its end, which is the only thing there is to read. A label carrying `U+0000` is one
     /// every implementation that reads the field as terminated rather than counted would read
-    /// differently, so it is reported and answered `None`: this crate's writer refuses to
-    /// produce one, and the two ends of that rule now match.
+    /// differently, so it is reported and answered `None`. A label carrying a character a name
+    /// may not hold is reported and handed back. This crate's writer refuses to produce
+    /// either, so the two ends of each rule match.
     ///
     /// An over-long count on an unnamed volume is what makes the second check earn its place.
     /// The field of an unnamed volume is eleven zero units, so clamping alone would turn "no
     /// name" into a name of eleven NULs.
-    fn label_of(&self, entry: &VolumeLabelEntry, out: &mut Vec<ReadError>) -> Option<Vec<u8>> {
+    fn label_of(&self, entry: &VolumeLabelEntry, out: &mut Findings<ReadError>) -> Option<Vec<u8>> {
         let mut count = usize::from(entry.character_count);
         if count > MAX_LABEL_UNITS {
             out.push(ReadError::LabelTooLong {
@@ -1935,6 +2063,14 @@ impl<R: Read + Seek> Reader<R> {
             out.push(ReadError::LabelNulUnit);
             return None;
         }
+        // A label reserves the characters a name does. One holding them is the volume's
+        // own statement of its name, so it is handed back, and the character is reported.
+        if let Some(ch) = char::decode_utf16(units.iter().copied())
+            .filter_map(Result::ok)
+            .find(|ch| is_reserved_name_char(*ch))
+        {
+            out.push(ReadError::LabelForbiddenCharacter { ch });
+        }
         Some(decode_utf16(units).0)
     }
 
@@ -1949,7 +2085,7 @@ impl<R: Read + Seek> Reader<R> {
     fn load_upcase(
         &mut self,
         entry: &UpcaseTableEntry,
-        out: &mut Vec<ReadError>,
+        out: &mut Findings<ReadError>,
     ) -> Result<UpcaseTable, ReadError> {
         if entry.data_length > MAX_UPCASE_BYTES {
             out.push(ReadError::UpcaseTooLong {
@@ -1971,7 +2107,16 @@ impl<R: Read + Seek> Reader<R> {
         let units: Vec<u16> = (0..bytes.len() / 2)
             .map(|n| get_u16(&bytes, n * 2))
             .collect();
-        Ok(UpcaseTable::new(&units))
+        let table = UpcaseTable::new(&units);
+        // A volume may carry its own folding for every character but the first 128, whose
+        // mappings the format fixes. A checksum that holds says the table is the one recorded,
+        // not that it folds ASCII as every exFAT does, so the mappings are held to that as
+        // well — and the table is kept as the volume's own either way, which is the folding a
+        // lenient read of this volume answers with.
+        if let Some((character, maps_to)) = table.mandatory_deviation() {
+            out.push(ReadError::UpcaseMandatoryMapping { character, maps_to });
+        }
+        Ok(table)
     }
 
     // -- byte-level access --------------------------------------------------------------
@@ -2694,7 +2839,8 @@ impl<R: Read + Seek> Reader<R> {
         // length with no cluster reads as a file whose bytes cannot be reached, and a cluster
         // with no length reads as an ordinary empty file whose allocation a scan meets much
         // later, as clusters in use and reached by nothing.
-        let storage = if stream.first_cluster == 0 || stream.data_length == 0 {
+        let unallocated = stream.first_cluster == 0 || stream.data_length == 0;
+        let storage = if unallocated {
             if stream.first_cluster == 0 && stream.data_length != 0 {
                 deviations.record(
                     at,
@@ -2721,18 +2867,23 @@ impl<R: Read + Seek> Reader<R> {
             }
             Storage::None
         } else {
-            // The format requires the flag on every stream extension, whether or not the
-            // stream currently addresses a cluster — so a clear one beside an allocation is
-            // the entry contradicting itself.
-            if stream.flags & SECONDARY_ALLOCATION_POSSIBLE == 0 {
-                deviations.record(at, ReadError::AllocationNotPossible { index })?;
-            }
             if stream.no_fat_chain() {
                 Storage::Contiguous(stream.first_cluster)
             } else {
                 Storage::Chain(stream.first_cluster)
             }
         };
+        // The flags are judged whatever the stream holds, once what it addresses has been. The
+        // writer's `stream_flags` rule, read from the other side: `AllocationPossible` is
+        // required on every stream extension, empty or not, and `NoFatChain` describes an
+        // allocation — it says the table holds no chain for these clusters — so set on a
+        // stream with none it describes nothing.
+        if stream.flags & SECONDARY_ALLOCATION_POSSIBLE == 0 {
+            deviations.record(at, ReadError::AllocationNotPossible { index })?;
+        }
+        if unallocated && stream.no_fat_chain() {
+            deviations.record(at, ReadError::NoFatChainWithoutAllocation { index })?;
+        }
 
         let declared = self.bound_length(stream.data_length, is_dir, index, deviations)?;
 
@@ -3096,9 +3247,7 @@ impl<R: Read + Seek> Reader<R> {
     #[must_use]
     pub fn scan(&mut self) -> ScanReport {
         let mut findings = Findings::new(self.limits.max_findings);
-        for anomaly in self.open_anomalies.clone() {
-            findings.push(anomaly);
-        }
+        findings.extend_from(&self.open_anomalies);
         self.scan_table_head(&mut findings);
         let reached = self.scan_tree(&mut findings);
         if let Some(reached) = reached {
@@ -4088,6 +4237,166 @@ mod tests {
     }
 
     #[test]
+    fn a_label_carrying_a_character_a_name_may_not_hold_is_named_and_handed_back() {
+        // A label reserves the characters a file name does. The writer refuses one, so this is
+        // a volume someone else wrote: a strict read refuses it, and a lenient one reads the
+        // label as the volume states it and reports the character.
+        let label = crate::exfat::VolumeLabel::new("AXB").expect("a label");
+        let mut bytes = format(
+            TreeBuilder::new(),
+            VOLUME,
+            FormatOptions::new(0x1234_5678).label(label),
+        )
+        .expect("format")
+        .into_bytes();
+        let root = cluster_at(&bytes, reader(&bytes).layout().first_cluster_of_root);
+        assert_eq!(bytes[root], EntryType::VOLUME_LABEL.0, "the first slot");
+        // The label's units begin at byte 2 of the entry, two bytes each; the second is `X`.
+        bytes[root + 4..root + 6].copy_from_slice(&u16::from(b'/').to_le_bytes());
+
+        assert!(matches!(
+            open_err(&bytes, ReadPolicy::Strict),
+            ReadError::LabelForbiddenCharacter { ch: '/' }
+        ));
+        let mut r = lenient(&bytes);
+        assert_eq!(r.volume_label(), Some(&b"A/B"[..]));
+        assert!(
+            r.scan()
+                .anomalies()
+                .iter()
+                .any(|a| a.detail.contains("'/'") && a.severity == Severity::Conformance)
+        );
+    }
+
+    #[test]
+    fn a_bitmap_entry_contradicting_a_one_table_volume_is_named() {
+        // The identifier says which of two bitmaps an entry is, and a volume with one
+        // allocation table has one bitmap: the first. The bits above it are reserved. The
+        // entry carries no checksum, so the change is the whole of the case.
+        let bytes = image_of(TreeBuilder::new());
+        let root_cluster = reader(&bytes).layout().first_cluster_of_root;
+        let root = cluster_at(&bytes, root_cluster);
+        let slots = reader(&bytes).layout().bytes_per_cluster as usize / DIR_ENTRY_SIZE;
+        let entry = (0..slots)
+            .map(|n| root + n * DIR_ENTRY_SIZE)
+            .find(|at| bytes[*at] == EntryType::ALLOCATION_BITMAP.0)
+            .expect("the bitmap's entry");
+        assert_eq!(bytes[entry + 1], 0, "the writer names the first bitmap");
+        for (flags, what) in [(0x01u8, "the second bitmap"), (0x80, "a reserved bit")] {
+            let mut bytes = bytes.clone();
+            bytes[entry + 1] = flags;
+            let err = open_err(&bytes, ReadPolicy::Strict);
+            assert!(
+                match flags {
+                    0x01 => matches!(err, ReadError::SecondBitmap),
+                    _ => matches!(err, ReadError::BitmapReservedFlags { bits: 0x80 }),
+                },
+                "{what}: {err}"
+            );
+            let report = lenient(&bytes).scan();
+            assert!(
+                report
+                    .anomalies()
+                    .iter()
+                    .any(|a| a.category == Category::AllocationBitmap
+                        && a.severity == Severity::Conformance),
+                "{what}: {:?}",
+                report.anomalies()
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_streams_flags_are_held_to_the_format_as_an_allocated_ones_are() {
+        // The writer's `stream_flags` rule from the reading side: every stream extension
+        // declares an allocation possible, and only one that addresses clusters declares them
+        // contiguous. An empty file's stream addresses none, so neither half was judged there.
+        use super::super::ondisk::SECONDARY_NO_FAT_CHAIN;
+
+        let bytes = image_of(TreeBuilder::new().file(b"/E.BIN".to_vec(), b"", meta(0o644)));
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let set = set_at(&bytes, root, "E.BIN");
+        let stream = stream_at(set);
+        assert_eq!(
+            bytes[stream + 1],
+            SECONDARY_ALLOCATION_POSSIBLE,
+            "the writer's shape for an empty stream"
+        );
+        for flags in [0, SECONDARY_ALLOCATION_POSSIBLE | SECONDARY_NO_FAT_CHAIN] {
+            let mut bytes = bytes.clone();
+            bytes[stream + 1] = flags;
+            refresh_set_checksum(&mut bytes, set);
+            let err = root_entries(&bytes).expect_err("a strict read refuses it");
+            assert!(
+                if flags == 0 {
+                    matches!(err, ReadError::AllocationNotPossible { .. })
+                } else {
+                    matches!(err, ReadError::NoFatChainWithoutAllocation { .. })
+                },
+                "flags {flags:#04x}: {err}"
+            );
+            assert_eq!(err.anomaly().severity, Severity::Conformance);
+            assert!(
+                !lenient(&bytes).scan().is_clean(),
+                "flags {flags:#04x}: a scan names it"
+            );
+        }
+    }
+
+    #[test]
+    fn what_an_open_holds_of_a_root_full_of_duplicates_is_the_callers_bound() {
+        // Every free slot of the root carries another copy of the bitmap's entry. Each is a
+        // deviation, and how many there are is the volume's to choose: a root as large as the
+        // heap allows holds hundreds of thousands. A lenient open reads past them all to the
+        // residents it needs, and keeps of them what the caller's bound allows, saying so.
+        let mut bytes = image_of(TreeBuilder::new());
+        let root = cluster_at(&bytes, reader(&bytes).layout().first_cluster_of_root);
+        let slots = reader(&bytes).layout().bytes_per_cluster as usize / DIR_ENTRY_SIZE;
+        let bitmap = (0..slots)
+            .map(|n| root + n * DIR_ENTRY_SIZE)
+            .find(|at| bytes[*at] == EntryType::ALLOCATION_BITMAP.0)
+            .expect("the bitmap's entry");
+        let entry = bytes[bitmap..bitmap + DIR_ENTRY_SIZE].to_vec();
+        let mut copies = 0;
+        for at in (0..slots).map(|n| root + n * DIR_ENTRY_SIZE) {
+            if bytes[at] == 0 {
+                bytes[at..at + DIR_ENTRY_SIZE].copy_from_slice(&entry);
+                copies += 1;
+            }
+        }
+        assert!(copies > 100, "the root is full of copies: {copies}");
+
+        let bounded = OpenOptions::new()
+            .policy(ReadPolicy::Lenient)
+            .limits(Limits::new().max_findings(1));
+        let mut r = match Reader::open_with(Cursor::new(&bytes[..]), &bounded) {
+            Ok(r) => r,
+            Err(e) => panic!("a lenient open reads past them: {e}"),
+        };
+        assert_eq!(
+            r.open_anomalies.held(),
+            (1, true),
+            "the open holds what the bound allows, and says it held no more"
+        );
+        let report = r.scan();
+        assert!(report.anomalies().len() <= 1);
+        assert!(
+            report.is_truncated(),
+            "the scan's report carries the truncation"
+        );
+
+        // A strict open refuses at the first, without reading on for a verdict already
+        // reached.
+        assert!(matches!(
+            open_err(&bytes, ReadPolicy::Strict),
+            ReadError::DuplicateRootEntry {
+                entry_type: "allocation bitmap",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_second_entry_of_a_kind_the_root_owns_one_of_is_named() {
         // A reader takes the first of each and steps over the rest, so a second is storage
         // nothing reads and a second answer to a question with one. The misplaced case — one
@@ -4203,14 +4512,109 @@ mod tests {
     fn the_folding_is_the_volumes_own_and_not_this_crates_copy_of_one() {
         // The claim a reader can only make by reading the table: fold through a volume that
         // carries a *different* mapping and the lookup follows that mapping instead. Here the
-        // volume's table folds nothing, so its lookups are case-sensitive — conformant, and
-        // not what any ordinary volume does.
+        // volume's table folds the 128 characters the format fixes and nothing else, so `Ä`
+        // and `ä` are two names on it — conformant, and not what any ordinary volume does.
+        let mut bytes =
+            image_of(TreeBuilder::new().file("/ÄX".as_bytes().to_vec(), b"x", meta(0o644)));
+        install_upcase_table(&mut bytes, &ascii_only_upcase_table());
+
+        let mut r = reader(&bytes);
+        assert_eq!(
+            r.upcase().folded_units(),
+            26,
+            "the volume folds a to z and nothing else"
+        );
+        assert!(r.lookup("/ÄX".as_bytes()).is_ok());
+        assert!(
+            r.lookup(b"/\xc3\x84x").is_ok(),
+            "ASCII folds as the format fixes it"
+        );
+        assert!(
+            matches!(r.lookup("/äx".as_bytes()), Err(ReadError::NotFound { .. })),
+            "a volume that does not fold Ä resolves it case-sensitively",
+        );
+        // And the same image read through the mapping every implementation writes would have
+        // found it, which is what makes this a measurement rather than a tautology.
+        assert_eq!(
+            UpcaseTable::recommended().fold(&"äx".encode_utf16().collect::<Vec<_>>()),
+            UpcaseTable::recommended().fold(&"ÄX".encode_utf16().collect::<Vec<_>>()),
+        );
+    }
+
+    #[test]
+    fn a_table_that_folds_ascii_otherwise_than_the_format_fixes_is_refused_strictly() {
+        // A volume may fold every character but the first 128 its own way. Those 128 are fixed,
+        // and a checksum that holds says only that the table is the one recorded. A table that
+        // folds nothing — case-sensitive lookups, ASCII included — is one a strict read refuses
+        // by naming the first mapping it breaks. A lenient read keeps the volume's own folding,
+        // which is the answer a reader of that volume gets, and the scan says what is wrong.
         let mut bytes = image_of(TreeBuilder::new().file(b"/README".to_vec(), b"x", meta(0o644)));
-        // Every offset this case needs, taken before a byte of the volume is changed: past
-        // this point the volume's table is not the one its entry advertises, so opening a
-        // reader over it is exactly what must not be done to find one's way around it.
+        install_upcase_table(&mut bytes, &[super::super::ondisk::UPCASE_IDENTITY_RUN, 0]);
+        assert!(matches!(
+            open_err(&bytes, ReadPolicy::Strict),
+            ReadError::UpcaseMandatoryMapping {
+                character: 0x61,
+                maps_to: 0x61
+            }
+        ));
+        let mut r = lenient(&bytes);
+        assert_eq!(r.upcase().folded_units(), 0, "the volume's own table, kept");
+        assert!(matches!(
+            r.lookup(b"/readme"),
+            Err(ReadError::NotFound { .. })
+        ));
+        let report = r.scan();
+        assert!(
+            report
+                .anomalies()
+                .iter()
+                .any(|a| a.category == Category::UpcaseTable && a.severity == Severity::Conformance),
+            "{:?}",
+            report.anomalies()
+        );
+
+        // A table changing one mapping among the 128 is the same refusal, naming it. Here `a`
+        // maps to `B`.
+        let mut table: Vec<u16> = ascii_only_upcase_table();
+        table[0x61] = 0x42;
+        let mut bytes = image_of(TreeBuilder::new().file(b"/README".to_vec(), b"x", meta(0o644)));
+        install_upcase_table(&mut bytes, &table);
+        assert!(matches!(
+            open_err(&bytes, ReadPolicy::Strict),
+            ReadError::UpcaseMandatoryMapping {
+                character: 0x61,
+                maps_to: 0x42
+            }
+        ));
+    }
+
+    /// An up-case table folding the 128 characters the format fixes as it fixes them, and
+    /// every character past them to itself.
+    fn ascii_only_upcase_table() -> Vec<u16> {
+        let mut units: Vec<u16> = (0u16..128)
+            .map(|c| {
+                if (0x61..=0x7a).contains(&c) {
+                    c - 0x20
+                } else {
+                    c
+                }
+            })
+            .collect();
+        units.extend([
+            super::super::ondisk::UPCASE_IDENTITY_RUN,
+            (0x1_0000u32 - 128) as u16,
+        ]);
+        units
+    }
+
+    /// Replace the volume's up-case table with `units`, and its describing entry with what is
+    /// now there, so a read objects to the folding rather than to the checksum.
+    fn install_upcase_table(bytes: &mut [u8], units: &[u16]) {
+        // Every offset taken before a byte of the volume is changed: past this point the
+        // volume's table is not the one its entry advertises, so opening a reader over it is
+        // exactly what must not be done to find one's way around it.
         let (table_at, table_bytes, entry_at) = {
-            let r = reader(&bytes);
+            let r = reader(bytes);
             let layout = r.layout();
             let table_at = layout
                 .cluster_start_byte(layout.upcase_cluster)
@@ -4224,34 +4628,17 @@ mod tests {
                 .expect("the up-case table's entry");
             (table_at, layout.upcase_bytes as usize, entry_at)
         };
-
-        // An identity table: one run marker and a count covering the whole plane, which is
-        // four bytes and folds nothing.
-        let identity = [super::super::ondisk::UPCASE_IDENTITY_RUN, 0u16];
-        let mut table = vec![0u8; 4];
-        write_upcase_table(&identity, &mut table).expect("write the table");
+        let mut table = vec![0u8; units.len() * 2];
+        write_upcase_table(units, &mut table).expect("write the table");
+        assert!(
+            table.len() <= table_bytes,
+            "the table fits where the old one was"
+        );
         bytes[table_at..table_at + table_bytes].fill(0);
         bytes[table_at..table_at + table.len()].copy_from_slice(&table);
-
-        // The describing entry has to say what is now there, or the checksum is what the read
-        // objects to rather than the folding.
-        let checksum = upcase_checksum(&bytes[table_at..table_at + table.len()]);
+        let checksum = upcase_checksum(&table);
         bytes[entry_at + 4..entry_at + 8].copy_from_slice(&checksum.to_le_bytes());
         bytes[entry_at + 24..entry_at + 32].copy_from_slice(&(table.len() as u64).to_le_bytes());
-
-        let mut r = reader(&bytes);
-        assert_eq!(r.upcase().folded_units(), 0, "the volume folds nothing");
-        assert!(r.lookup(b"/README").is_ok());
-        assert!(
-            matches!(r.lookup(b"/readme"), Err(ReadError::NotFound { .. })),
-            "a volume folding nothing resolves names case-sensitively",
-        );
-        // And the same image read through the mapping every implementation writes would have
-        // found it, which is what makes this a measurement rather than a tautology.
-        assert_eq!(
-            UpcaseTable::recommended().fold(&"readme".encode_utf16().collect::<Vec<_>>()),
-            UpcaseTable::recommended().fold(&"README".encode_utf16().collect::<Vec<_>>()),
-        );
     }
 
     // -- the two run shapes -------------------------------------------------------------
@@ -5724,6 +6111,13 @@ mod tests {
                 limit: MAX_LABEL_UNITS,
             },
             ReadError::LabelNulUnit,
+            ReadError::LabelForbiddenCharacter { ch: '/' },
+            ReadError::SecondBitmap,
+            ReadError::BitmapReservedFlags { bits: 0x80 },
+            ReadError::UpcaseMandatoryMapping {
+                character: 0x61,
+                maps_to: 0x61,
+            },
             ReadError::EntriesAfterEnd { index: 0 },
             ReadError::DirectoryWithoutAllocation { index: 0 },
             ReadError::StreamWithoutAllocation {
@@ -5753,6 +6147,7 @@ mod tests {
                 bits: 0xF008,
             },
             ReadError::AllocationNotPossible { index: 0 },
+            ReadError::NoFatChainWithoutAllocation { index: 0 },
             ReadError::MalformedTimestamp {
                 index: 0,
                 field: "creation time",

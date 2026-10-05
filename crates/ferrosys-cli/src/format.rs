@@ -3,9 +3,10 @@
 //! The bytes stream out through the library's `FormatPlan`, which writes only the blocks
 //! the filesystem uses, so a file destination stays sparse and an image far larger than
 //! memory can be written. A `--from-tar` archive named by path is opened and left on
-//! disk, each member read only as its file is placed, so the memory a run needs is the
-//! largest single member rather than the whole archive; a `--from-dir` tree is walked for
-//! its metadata alone and each file read as it is placed, which is the same bound. An
+//! disk, each member read only as its file is placed and then a window at a time, so the
+//! memory a run needs is one window rather than the whole archive; a `--from-dir` tree is
+//! walked for its metadata alone and each file read as it is placed, which is the same
+//! bound. An
 //! archive arriving on the standard input has nothing to seek back to and is read whole, so
 //! that one path carries a size cap: a stream with no end must not become memory with no
 //! bound.
@@ -55,7 +56,7 @@ use ferrosys::{ArchiveSource, Slack, Source, TreeBuilder};
 
 use crate::Error;
 use crate::args::{Contents, FormatArgs, Size, Stream, Target};
-use crate::dest::Destination;
+use crate::dest::{Destination, Reads};
 
 /// Write the filesystem the arguments describe.
 pub fn run(args: FormatArgs) -> Result<(), Error> {
@@ -140,38 +141,74 @@ pub(crate) trait Written: Plan {
 ///
 /// The second half of the answer says which of the two happened, because a report has to: a
 /// receipt claiming an image was written when none was is worse than one that says nothing.
-pub(crate) fn realize<P: Written>(args: &FormatArgs, plan: &P) -> Result<(P::Layout, bool), Error> {
+pub(crate) fn realize<P: Written>(
+    args: &FormatArgs,
+    plan: &P,
+    reads: &Reads,
+) -> Result<(P::Layout, bool), Error> {
     if args.dry_run {
         return Ok((plan.planned_layout(), false));
     }
-    let mut dest = open_destination(&args.out, args.atomic)?;
+    let mut dest = open_destination(&args.out, args.atomic, reads)?;
     let layout = plan.write_to(dest.file())?;
     dest.commit()?;
     Ok((layout, true))
 }
 
-/// Plan the format the arguments describe, without opening the destination.
+/// Plan the format the arguments describe, without opening the destination, and name the
+/// host files the write will read.
 ///
 /// The source is consumed by value and each kind is a distinct type, so the plan is built
 /// once per kind rather than behind a trait object the library would have to accept — which
 /// is what makes this a four-arm match rather than one call.
 ///
 /// An archive named by path is opened by the library, which keeps every file's bytes on disk
-/// until the file is placed: peak memory is the largest single member rather than the whole
-/// archive. A stream on the standard input has no such option — there is nothing to seek back
-/// to — so it is read whole, under [`MAX_STDIN_ARCHIVE`]. A walked tree names each file rather
-/// than reading it, so peak memory there is the largest single file too.
-pub(crate) fn planned<P: Plan>(args: &FormatArgs, options: P::Options) -> Result<P, Error> {
+/// until the file is placed, and then reads it a window at a time: peak memory is one window
+/// rather than the whole archive. A stream on the standard input has no such option — there is
+/// nothing to seek back to — so it is read whole, under [`MAX_STDIN_ARCHIVE`]. A walked tree
+/// names each file rather than reading it, so peak memory there is one window too.
+///
+/// The files read as they are placed are what the destination must not be, so those two
+/// kinds come back with them named; a source held in memory reads nothing more.
+pub(crate) fn planned<P: Plan>(
+    args: &FormatArgs,
+    options: P::Options,
+) -> Result<(P, Reads), Error> {
     match &args.contents {
-        None => at_size(TreeBuilder::new(), args, options),
-        Some(Contents::Tar(Stream::Std)) => {
-            at_size(ArchiveSource::from_reader(bounded_stdin())?, args, options)
-        }
+        None => Ok((
+            at_size(TreeBuilder::new(), args, options)?,
+            Reads::default(),
+        )),
+        Some(Contents::Tar(Stream::Std)) => Ok((
+            at_size(ArchiveSource::from_reader(bounded_stdin())?, args, options)?,
+            Reads::default(),
+        )),
         Some(Contents::Tar(Stream::File(path))) => {
-            at_size(ArchiveSource::from_path(path)?, args, options)
+            read_as_placed(ArchiveSource::from_path(path)?, args, options)
         }
         Some(Contents::Dir(path)) => from_dir(path, args, options),
     }
+}
+
+/// Plan a source whose files are read from the host as they are placed, and name them.
+///
+/// A destination written in place that is one of them is refused here, before the planning,
+/// so a mistyped command costs nothing; the destination's own open asks again from the handle
+/// it truncates. Under `--atomic`, or in a dry run, nothing is truncated, and nothing is asked.
+fn read_as_placed<P: Plan>(
+    source: impl Source,
+    args: &FormatArgs,
+    options: P::Options,
+) -> Result<(P, Reads), Error> {
+    let entries = source.into_entries();
+    let reads = if args.atomic || args.dry_run {
+        Reads::default()
+    } else {
+        let reads = Reads::of(&entries);
+        reads.refuse(&args.out)?;
+        reads
+    };
+    Ok((at_size(entries, args, options)?, reads))
 }
 
 /// Plan one source at whichever size the arguments asked for.
@@ -197,12 +234,16 @@ fn at_size<P: Plan>(
 /// The ownership override is applied to the walk, since it is what records the host's ids in
 /// the first place.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn from_dir<P: Plan>(path: &Path, args: &FormatArgs, options: P::Options) -> Result<P, Error> {
+fn from_dir<P: Plan>(
+    path: &Path,
+    args: &FormatArgs,
+    options: P::Options,
+) -> Result<(P, Reads), Error> {
     let mut source = DirectorySource::from_path(path)?;
     if let Some((uid, gid)) = args.owner {
         source = source.owner(uid, gid);
     }
-    at_size(source, args, options)
+    read_as_placed(source, args, options)
 }
 
 /// The same, on a platform the library builds no directory source for: a named failure
@@ -211,7 +252,11 @@ fn from_dir<P: Plan>(path: &Path, args: &FormatArgs, options: P::Options) -> Res
 /// The refusal is the whole of what `--from-dir` does here, and it happens before the
 /// destination is opened, like every other planning failure.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn from_dir<P: Plan>(_path: &Path, _args: &FormatArgs, _options: P::Options) -> Result<P, Error> {
+fn from_dir<P: Plan>(
+    _path: &Path,
+    _args: &FormatArgs,
+    _options: P::Options,
+) -> Result<(P, Reads), Error> {
     Err(Error::NoDirectorySource)
 }
 
@@ -249,7 +294,7 @@ pub(crate) fn fidelity_table(fidelity: &ferrosys::FidelityReport) -> String {
 /// The most an archive arriving on the standard input may be.
 ///
 /// An archive named by path is opened by the library and each member read as its file is
-/// placed, so peak memory is the largest single member. A stream has nothing to seek back to
+/// placed, a window at a time, so peak memory is one window. A stream has nothing to seek back to
 /// and is read whole — which is inherent, and is why the cap is here rather than a defect to
 /// fix. Without one, a service or CI step piping an untrusted or accidentally-huge tar into
 /// the command has no way to bound what it costs.
@@ -307,14 +352,14 @@ pub(crate) fn bounded_stdin() -> impl Read {
 ///
 /// Shared rather than per-family: the reasoning is about the destination, and every family
 /// writes only what its filesystem occupies.
-fn open_destination(out: &Path, atomic: bool) -> Result<Destination, Error> {
+fn open_destination(out: &Path, atomic: bool, reads: &Reads) -> Result<Destination, Error> {
     let not_regular = || Error::NotARegularFile(out.display().to_string());
     match std::fs::metadata(out) {
         Ok(meta) if !meta.file_type().is_file() => return Err(not_regular()),
         // A path that does not exist yet is about to be a regular file.
         Ok(_) | Err(_) => {}
     }
-    let mut dest = Destination::open(out, atomic)?;
+    let mut dest = Destination::open(out, atomic, reads)?;
     let meta = dest
         .file()
         .metadata()

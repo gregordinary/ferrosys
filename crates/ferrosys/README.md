@@ -173,8 +173,8 @@ assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
 - **Streaming a write**. `format_to` writes an image to any seekable destination,
   touching only the blocks the filesystem uses. A file therefore stays sparse, and a
   filesystem larger than memory is possible. `format` collects the same bytes in memory.
-  A source can return a file's contents as a handle rather than a buffer. Peak memory is
-  then the largest single file, not the sum of them all.
+  A source can return a file's contents as a handle rather than a buffer. A handle is
+  read a mebibyte at a time, so peak memory does not grow with the files.
 - **Streaming a read**. `read_into` reads a range of a file, and `read_data_to` streams
   one to a writer a window at a time. `walk_with` walks the tree lazily, handing each
   entry to a callback that can read as it goes. Pulling a multi-gigabyte file out of an

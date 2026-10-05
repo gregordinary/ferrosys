@@ -55,11 +55,11 @@ pub fn run(args: &FormatArgs, target: &FatTarget) -> Result<(), Error> {
     // family adds a second reason to want the plan as a value — the fidelity report is
     // readable before the write, so what a build will cost is a number to read rather than
     // a surprise to discover.
-    let plan: FormatPlan = crate::format::planned(args, options(args, target))?;
+    let (plan, reads): (FormatPlan, _) = crate::format::planned(args, options(args, target))?;
     // Read before the write consumes nothing, so the dry run and the real one report the
     // same number.
     let free = plan.free_clusters();
-    let (layout, written) = crate::format::realize(args, &plan)?;
+    let (layout, written) = crate::format::realize(args, &plan, &reads)?;
     report(args, target, &layout, free, plan.fidelity(), written)
 }
 
