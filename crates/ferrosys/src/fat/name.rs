@@ -58,6 +58,32 @@ const MAX_TAIL: u32 = 999_999;
 /// underscore in the short name.
 const SHORT_NAME_ALSO_FORBIDDEN: &[u8] = b"+,.;=[]";
 
+/// Whether an eleven-byte short-name field may not hold `byte`, wherever in the field it sits.
+///
+/// The field reserves every control code and the nine characters a long name reserves, and
+/// `+ , . ; = [ ]` besides (documented, FAT specification 1.03). It reserves 0x7F as well,
+/// which the pinned `fsck.fat` refuses in a short name (observed). The writer substitutes an
+/// underscore for each, and the reader reports each; two positions add rules of their own,
+/// which [`is_reserved_short_byte_at`] applies.
+pub(crate) fn is_reserved_short_byte(byte: u8) -> bool {
+    byte == 0x7F
+        || SHORT_NAME_ALSO_FORBIDDEN.contains(&byte)
+        || is_reserved_name_char(char::from(byte))
+}
+
+/// Whether the byte at `position` of a short-name field is one the format reserves there.
+///
+/// [`is_reserved_short_byte`], less 0x05 in the first byte, where it stands for a leading
+/// 0xE5, and with a space in the first byte, where the name would begin with its own padding
+/// (documented).
+pub(crate) fn is_reserved_short_byte_at(byte: u8, position: usize) -> bool {
+    match (position, byte) {
+        (0, NAME_LEADING_E5) => false,
+        (0, b' ') => true,
+        _ => is_reserved_short_byte(byte),
+    }
+}
+
 /// The character an unrepresentable one becomes in a short name.
 const SUBSTITUTE: u8 = b'_';
 
@@ -270,7 +296,9 @@ fn long_name_units(name: &[u8]) -> Result<Vec<u16>, NameError> {
         return Err(NameError::Empty);
     }
     for ch in text.chars() {
-        if is_reserved_name_char(ch) {
+        // U+FFFF is the unit the format pads a long name with, so a name holding one cannot
+        // be told from a shorter name and its padding.
+        if is_reserved_name_char(ch) || u32::from(ch) == u32::from(LFN_PADDING) {
             return Err(NameError::ForbiddenCharacter { ch });
         }
     }
@@ -337,7 +365,7 @@ fn shorten(part: &str, limit: usize) -> Vec<u8> {
             SUBSTITUTE
         } else {
             let byte = (ch as u8).to_ascii_uppercase();
-            if SHORT_NAME_ALSO_FORBIDDEN.contains(&byte) {
+            if is_reserved_short_byte(byte) {
                 SUBSTITUTE
             } else {
                 byte
@@ -418,6 +446,51 @@ mod tests {
             .expect("a name the format holds")
             .long
             .is_some()
+    }
+
+    #[test]
+    fn a_character_a_short_name_reserves_becomes_an_underscore_there() {
+        // Each is legal in a long name and reserved in a short one, 0x7F among them: the
+        // pinned checker refuses it in a short name, and a long name keeps it.
+        for (name, short) in [
+            ("a+b.txt", "A_B     TXT"),
+            ("a[b].txt", "A_B_    TXT"),
+            ("a\u{7f}b.txt", "A_B     TXT"),
+        ] {
+            assert_eq!(short_of(name), short, "{name:?}");
+            assert!(
+                needs_lfn(name),
+                "{name:?} keeps its own spelling in the long name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_name_holding_the_unit_the_format_pads_with_is_refused() {
+        // A name holding U+FFFF could not be told from a shorter name and its padding, so a
+        // read would hand back the shorter one.
+        assert!(matches!(
+            long_name_units("a\u{ffff}b".as_bytes()),
+            Err(NameError::ForbiddenCharacter { ch: '\u{ffff}' })
+        ));
+    }
+
+    #[test]
+    fn the_reserved_short_name_bytes_are_the_documented_set_and_0x7f() {
+        let reserved: Vec<u8> = (0u8..=0x7f)
+            .filter(|&b| is_reserved_short_byte(b))
+            .collect();
+        let mut want: Vec<u8> = (0..0x20).collect();
+        want.extend_from_slice(b"\"*+,./:;<=>?[\\]|\x7f");
+        want.sort_unstable();
+        assert_eq!(reserved, want);
+        // Above ASCII is a code page's, which the field does not record.
+        assert!(!(0x80..=0xff).any(is_reserved_short_byte));
+        // The first byte's two rules.
+        assert!(!is_reserved_short_byte_at(NAME_LEADING_E5, 0));
+        assert!(is_reserved_short_byte_at(NAME_LEADING_E5, 1));
+        assert!(is_reserved_short_byte_at(b' ', 0));
+        assert!(!is_reserved_short_byte_at(b' ', 7), "padding");
     }
 
     #[test]

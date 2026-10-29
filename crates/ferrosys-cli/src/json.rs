@@ -17,7 +17,7 @@
 /// including the library's own findings report (`ferrosys::FINDINGS_SCHEMA_VERSION`), so a
 /// consumer reads one field wherever it looks. The tool's version says what wrote a
 /// document; this says what the document *is*, and the two move independently.
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// The library's JSON writer, which is what builds every document here. It escapes every
 /// string it is given through the library's own escaper, so a name out of an image reaches a
@@ -52,8 +52,8 @@ mod tests {
         // schema field wherever it looks, and a document that did not end in a newline would
         // run into whatever followed it on a stream.
         let out = document(|o| o.bool("written", true));
-        assert_eq!(out, "{\"schema\":2,\"written\":true}\n");
+        assert_eq!(out, "{\"schema\":3,\"written\":true}\n");
         // Empty but for the envelope is still a document.
-        assert_eq!(document(|_| {}), "{\"schema\":2}\n");
+        assert_eq!(document(|_| {}), "{\"schema\":3}\n");
     }
 }

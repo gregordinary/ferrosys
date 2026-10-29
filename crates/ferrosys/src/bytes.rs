@@ -54,9 +54,16 @@ pub(crate) fn get_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
+/// Read one little-endian 24-bit word at `off`: an LZBITMAP block's lengths and offsets.
+#[inline]
+#[cfg(all(feature = "lzbitmap", any(feature = "btrfs", feature = "apfs")))]
+pub(crate) fn get_u24(buf: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], 0])
+}
+
 /// Read one little-endian `u64` at `off`.
 #[inline]
-#[cfg(any(feature = "exfat", feature = "btrfs"))]
+#[cfg(any(feature = "exfat", feature = "btrfs", feature = "apfs"))]
 pub(crate) fn get_u64(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes([
         buf[off],
@@ -72,7 +79,7 @@ pub(crate) fn get_u64(buf: &[u8], off: usize) -> u64 {
 
 /// Read one big-endian `u32` at `off`.
 #[inline]
-#[cfg(feature = "ext")]
+#[cfg(any(feature = "ext", feature = "apfs"))]
 pub(crate) fn get_u32_be(buf: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
@@ -86,7 +93,13 @@ pub(crate) fn get_u64_be(buf: &[u8], off: usize) -> u64 {
 
 /// Read a fixed-size byte array at `off`.
 #[inline]
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn get_arr<const N: usize>(buf: &[u8], off: usize) -> [u8; N] {
     let mut out = [0u8; N];
     out.copy_from_slice(&buf[off..off + N]);
@@ -102,42 +115,66 @@ pub(crate) fn put_u8(buf: &mut [u8], off: usize, v: u8) {
 
 /// Write one little-endian `u16` at `off`.
 #[inline]
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn put_u16(buf: &mut [u8], off: usize, v: u16) {
     buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Write one little-endian `u32` at `off`.
 #[inline]
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn put_u32(buf: &mut [u8], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Write one little-endian `u64` at `off`.
 #[inline]
-#[cfg(any(feature = "exfat", feature = "btrfs"))]
+#[cfg(any(feature = "exfat", feature = "btrfs", feature = "apfs"))]
 pub(crate) fn put_u64(buf: &mut [u8], off: usize, v: u64) {
     buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Write one big-endian `u32` at `off`.
 #[inline]
-#[cfg(feature = "ext")]
+#[cfg(any(feature = "ext", all(feature = "apfs", test)))]
 pub(crate) fn put_u32_be(buf: &mut [u8], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
 }
 
 /// Write a byte slice at `off`.
 #[inline]
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn put_arr(buf: &mut [u8], off: usize, v: &[u8]) {
     buf[off..off + v.len()].copy_from_slice(v);
 }
 
 #[cfg(all(
     test,
-    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")
+    any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    )
 ))]
 mod tests {
     use super::*;
@@ -145,14 +182,23 @@ mod tests {
     #[test]
     fn scalar_round_trips() {
         let mut buf = [0u8; 16];
-        put_u8(&mut buf, 0, 0x12);
         put_u16(&mut buf, 1, 0x3456);
         put_u32(&mut buf, 3, 0x789a_bcde);
-        assert_eq!(get_u8(&buf, 0), 0x12);
         assert_eq!(get_u16(&buf, 1), 0x3456);
         assert_eq!(get_u32(&buf, 3), 0x789a_bcde);
         // Little-endian on disk regardless of host.
         assert_eq!(&buf[3..7], &[0xde, 0xbc, 0x9a, 0x78]);
+    }
+
+    // The single-byte pair is compiled where a family serializes a lone byte through it, which
+    // the APFS layer does not: it reads a byte by indexing the slice it has bounded.
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+    #[test]
+    fn a_byte_round_trips() {
+        let mut buf = [0u8; 2];
+        put_u8(&mut buf, 1, 0x12);
+        assert_eq!(get_u8(&buf, 1), 0x12);
+        assert_eq!(buf, [0, 0x12]);
     }
 
     #[test]
@@ -163,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(feature = "exfat", feature = "btrfs"))]
+    #[cfg(any(feature = "exfat", feature = "btrfs", feature = "apfs"))]
     fn the_sixty_four_bit_pair_round_trips_and_writes_the_low_byte_first() {
         // exFAT's volume length and partition offset, and every address and length btrfs
         // records, are single 64-bit fields rather than pairs of 32-bit halves, so the width

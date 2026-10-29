@@ -89,6 +89,12 @@ impl Reads {
         )
     }
 
+    /// These files and `other`'s.
+    pub fn and(mut self, other: Self) -> Self {
+        self.0.extend(other.0);
+        self
+    }
+
     /// Refuse `out` if it is already one of these files.
     ///
     /// This is the early answer, given before anything is planned so a mistyped command

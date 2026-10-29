@@ -57,8 +57,12 @@ allow = [
     # The Rust standard library's own exception, carried by the direct-syscall crates the
     # directory source is built on.
     "Apache-2.0 WITH LLVM-exception",
+    # The Unicode Character Database's tables in this workspace's own crates, and
     # `unicode-ident`, reached through every proc-macro in the graph.
     "Unicode-3.0",
+    # The LZVN and LZFSE decoders in this workspace's own crates, derived from Apple's lzfse
+    # project.
+    "BSD-3-Clause",
 ]
 
 # Packages marked `publish = false` carry no license field, because an unpublished package

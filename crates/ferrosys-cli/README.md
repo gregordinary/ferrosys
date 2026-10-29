@@ -1,14 +1,16 @@
 # ferrosys-cli
 
 The `ferrosys` command line: create a filesystem, report on one, and read one back. One
-binary carries four families:
+binary carries five families:
 
 - ext2, ext3, and ext4
 - FAT12, FAT16, and FAT32
 - exFAT
 - btrfs
+- APFS
 
-It creates and reads all four, subvolumes included. It runs in userspace as a single
+It creates, reports on and reads all five: btrfs subvolumes, and APFS volumes and their
+snapshots, included. It runs in userspace as a single
 self-contained binary, in safe Rust, over
 [`ferrosys`](https://crates.io/crates/ferrosys). It builds on Rust 1.88 or newer.
 
@@ -30,9 +32,15 @@ ferrosys format --type exfat --volume-serial 1234abcd --size 4G card.img
 ferrosys format --type btrfs --size 2G --fsid "$(uuidgen)" --time 1700000000 \
     --subvol "$(uuidgen)":/@root --default-subvol /@root --from-dir staged/ root.img
 ferrosys extract root.img --cat /@root/etc/hostname
+ferrosys format --type apfs --size auto --slack 8M --time 1700000000 \
+    --container-uuid "$(uuidgen)" --volume "case-sensitive:$(uuidgen)":ramdisk \
+    --owner 0:0 --from-dir staged/ ramdisk.img
 
 ferrosys inspect fedora-root.img
 ferrosys extract fedora-root.img --cat /etc/os-release
+
+ferrosys inspect disk.img
+ferrosys extract disk.img --volume Data --to-tar - | tar -tv
 ```
 
 ## The five subcommands
@@ -40,15 +48,16 @@ ferrosys extract fedora-root.img --cat /etc/os-release
 ### `format`
 
 `format` writes a filesystem of the type `--type` names: `ext2`, `ext3`, `ext4`, `fat12`,
-`fat16`, `fat32`, `exfat`, or `btrfs`. The default is `ext4`. The source is a tar archive
-(`--from-tar`), a directory tree on this machine (`--from-dir`, with `--owner UID:GID` to
-override the host's ownership), or empty. You name the size, or for the ext and FAT
-families you give `--size auto`, which finds it from the contents.
+`fat16`, `fat32`, `exfat`, `btrfs`, or `apfs`. The default is `ext4`. The source is a tar
+archive (`--from-tar`), a directory tree on this machine (`--from-dir`, with
+`--owner UID:GID` to override the host's ownership), or empty. You name the size, or for the
+ext, FAT and APFS families you give `--size auto`, which finds it from the contents.
 
 The size, the timestamps, and the family's own identity are inputs. The identity option is
-`--uuid` for ext, `--volume-id` for a FAT volume, `--volume-serial` for an exFAT one, and
-`--fsid` for a btrfs. The tool reads only what you give it, so the same inputs write the
-same image every time.
+`--uuid` for ext, `--volume-id` for FAT, `--volume-serial` for exFAT, `--fsid` for btrfs,
+and `--container-uuid` for APFS. Each APFS volume is one
+`--volume` naming its identifier and its name. The tool reads only what you give it, so the
+same inputs write the same image every time.
 
 Each family's geometry has its own options. ferrosys refuses an option that belongs to
 another family, and names it. `--dry-run` reports the geometry without opening the
@@ -72,8 +81,11 @@ anomaly:
 | FAT | Both allocation tables and every chain |
 | exFAT | The allocation bitmap, the up-case table, and every entry set |
 | btrfs | The chunk map, every tree, and every metadata block's checksum |
+| APFS | One volume's file-system tree, every node's checksum, and the counts the volume keeps |
 
-A btrfs report also lists the subvolumes and which of them is the default. `--fail-on`
+A btrfs report also lists the subvolumes and which of them is the default. An APFS report
+lists every volume of the container, its role, and whether it is read. It also lists the
+snapshots of the volume the scan read, which is the one `--volume` names. `--fail-on`
 sets the severity at which the run fails.
 
 ### `extract`
@@ -87,7 +99,8 @@ sets the severity at which the run fails.
 - A listing
 
 A btrfs is read the same way, subvolumes included. A path crosses a subvolume boundary the
-way it crosses a directory.
+way it crosses a directory. An APFS container is read one volume at a time. `--volume`
+names it, by name or slot, and `--snapshot` names one of its snapshots.
 
 ### `detect`
 
@@ -126,3 +139,7 @@ every subcommand and option.
 <!-- prose-lint: off -- Rule 23 exempts legal boilerplate. -->
 
 Licensed under either of Apache License, Version 2.0 or the MIT license, at your option.
+The Unicode character tables APFS names are held to are data from the Unicode Character
+Database, distributed under the Unicode License v3. The LZVN and LZFSE decoders are derived
+from Apple's lzfse project, distributed under the BSD-3-Clause license, and the LZBITMAP
+decoder reads the layout libzbitmap decodes; both notices are in `THIRD-PARTY-NOTICES`.

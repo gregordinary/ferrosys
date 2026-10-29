@@ -17,12 +17,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::image_source::ImageFile;
 use crate::path::canonical_key;
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
 
 /// A regular file's contents: bytes in memory, a range of a file on the host read at the
-/// moment it is placed, or a length alone, whose bytes a caller writing the image supplies.
+/// moment it is placed, a file in an image this crate reads, read the same way, or a length
+/// alone, whose bytes a caller writing the image supplies.
 ///
 /// The first two coexist in one entry list, deliberately. A source that maps an on-host archive
 /// yields handles; a caller that computes an entry's bytes — rewriting one file of a tree
@@ -45,6 +47,9 @@ pub enum FileContent {
     Owned(Vec<u8>),
     /// A range of a file on the host, read when the content is placed.
     Range(FileRange),
+    /// A file in an image this crate reads, read from the image when the content is placed:
+    /// what an [`ImageSource`](crate::ImageSource) gives a regular file.
+    Image(ImageFile),
     /// A file declared by its length alone. The source holds none of its bytes: a caller
     /// that writes the image itself puts them where the plan places the file, and knows the
     /// file by `key`, which it chose.
@@ -65,7 +70,13 @@ pub enum FileContent {
 /// A whole number of blocks and sectors in every family, since each of those is a power of
 /// two no larger than this, so a window boundary is never inside a block a writer has to
 /// fill whole.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) const CONTENT_WINDOW: usize = 1 << 20;
 
 impl FileContent {
@@ -75,6 +86,7 @@ impl FileContent {
         match self {
             Self::Owned(bytes) => bytes.len() as u64,
             Self::Range(range) => range.len(),
+            Self::Image(file) => file.len(),
             Self::Declared { len, .. } => *len,
         }
     }
@@ -87,9 +99,10 @@ impl FileContent {
     /// # Errors
     ///
     /// [`std::io::ErrorKind::InvalidInput`] if `at` plus the buffer's length runs past the
-    /// end of the file, and otherwise what [`FileRange::read_at`] reports for a range. An
-    /// owned entry fails only on the bound. A declared one is
-    /// [`std::io::ErrorKind::Unsupported`], since it has no bytes to read.
+    /// end of the file, and otherwise what [`FileRange::read_at`] reports for a range and
+    /// [`ImageFile::read_at`] for a file in an image. An owned
+    /// entry fails only on the bound. A declared one is [`std::io::ErrorKind::Unsupported`],
+    /// since it has no bytes to read.
     pub fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
         match self {
             Self::Owned(bytes) => {
@@ -104,6 +117,7 @@ impl FileContent {
                 Ok(())
             }
             Self::Range(range) => range.read_at(at, buf),
+            Self::Image(file) => file.read_at(at, buf),
             Self::Declared { key, .. } => Err(not_held(*key)),
         }
     }
@@ -115,10 +129,11 @@ impl FileContent {
     /// it. Owned bytes are lent in place; a range is read into one buffer that every window
     /// reuses. An empty file calls `each` not at all.
     ///
-    /// The ext and FAT writers call this. The exFAT writer holds a range's piece rather than
-    /// the content, and reaches [`FileRange::for_each_window`]; the btrfs writer steps its
-    /// extents by the window itself, through [`read_at`](Self::read_at).
-    #[cfg(any(feature = "ext", feature = "fat"))]
+    /// The ext, FAT and APFS writers call this, and the exFAT writer for a file in an image;
+    /// for a range it holds the range's piece and reaches [`FileRange::for_each_window`]. The
+    /// btrfs writer steps its extents by the window itself, through
+    /// [`read_at`](Self::read_at).
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "apfs"))]
     pub(crate) fn for_each_window<E: From<std::io::Error>>(
         &self,
         mut each: impl FnMut(u64, &[u8]) -> Result<(), E>,
@@ -131,6 +146,7 @@ impl FileContent {
                 Ok(())
             }
             Self::Range(range) => range.for_each_window(each),
+            Self::Image(file) => windows(file.len(), |at, buf| file.read_at(at, buf), each),
             Self::Declared { len: 0, .. } => Ok(()),
             Self::Declared { key, .. } => Err(not_held(*key).into()),
         }
@@ -146,9 +162,9 @@ impl FileContent {
     ///
     /// Bytes already held are borrowed, not copied: reading an [`Owned`](Self::Owned)
     /// entry costs nothing, so a caller that reads every entry in turn never holds two
-    /// copies of one file. Only a [`Range`](Self::Range) allocates, and only for as long
-    /// as the caller keeps what it returned — the whole range at once, which
-    /// [`read_at`](Self::read_at) is the bounded alternative to.
+    /// copies of one file. Only a [`Range`](Self::Range) and an [`Image`](Self::Image)
+    /// allocate, and only for as long as the caller keeps what it returned — the whole file
+    /// at once, which [`read_at`](Self::read_at) is the bounded alternative to.
     ///
     /// # Errors
     ///
@@ -159,6 +175,19 @@ impl FileContent {
         match self {
             Self::Owned(bytes) => Ok(Cow::Borrowed(bytes)),
             Self::Range(range) => Ok(Cow::Owned(range.read()?)),
+            Self::Image(file) => {
+                let mut bytes = vec![
+                    0u8;
+                    usize::try_from(file.len()).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::OutOfMemory,
+                            "a file in an image is larger than this machine addresses",
+                        )
+                    })?
+                ];
+                file.read_at(0, &mut bytes)?;
+                Ok(Cow::Owned(bytes))
+            }
             Self::Declared { key, .. } => Err(not_held(*key)),
         }
     }
@@ -173,6 +202,12 @@ impl From<Vec<u8>> for FileContent {
 impl From<FileRange> for FileContent {
     fn from(range: FileRange) -> Self {
         Self::Range(range)
+    }
+}
+
+impl From<ImageFile> for FileContent {
+    fn from(file: ImageFile) -> Self {
+        Self::Image(file)
     }
 }
 
@@ -419,22 +454,34 @@ impl FileRange {
     ///
     /// Every window but the last is [`CONTENT_WINDOW`] bytes. An empty range calls `each`
     /// not at all.
-    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat"))]
+    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "apfs"))]
     pub(crate) fn for_each_window<E: From<std::io::Error>>(
         &self,
-        mut each: impl FnMut(u64, &[u8]) -> Result<(), E>,
+        each: impl FnMut(u64, &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        // Bounded by the window, so neither conversion can lose a value.
-        let mut buffer = vec![0u8; self.len.min(CONTENT_WINDOW as u64) as usize];
-        let mut at = 0u64;
-        while at < self.len {
-            let n = (self.len - at).min(CONTENT_WINDOW as u64) as usize;
-            self.read_at(at, &mut buffer[..n])?;
-            each(at, &buffer[..n])?;
-            at += n as u64;
-        }
-        Ok(())
+        windows(self.len, |at, buf| self.read_at(at, buf), each)
     }
+}
+
+/// Hand `len` bytes that `read` fills to `each` in order, a window at a time, through one
+/// buffer every window reuses: each window's offset, and its bytes. Every window but the last
+/// is [`CONTENT_WINDOW`] bytes.
+#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "apfs"))]
+fn windows<E: From<std::io::Error>>(
+    len: u64,
+    mut read: impl FnMut(u64, &mut [u8]) -> std::io::Result<()>,
+    mut each: impl FnMut(u64, &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    // Bounded by the window, so neither conversion can lose a value.
+    let mut buffer = vec![0u8; len.min(CONTENT_WINDOW as u64) as usize];
+    let mut at = 0u64;
+    while at < len {
+        let n = (len - at).min(CONTENT_WINDOW as u64) as usize;
+        read(at, &mut buffer[..n])?;
+        each(at, &buffer[..n])?;
+        at += n as u64;
+    }
+    Ok(())
 }
 
 /// The error for a read of a file declared by its length alone, under `key`, which holds no
@@ -621,8 +668,12 @@ impl std::fmt::Debug for FileRange {
 /// The `mode` is the permission and set-user/group/sticky bits only; the file-type
 /// bits come from the entry's [`EntryKind`]. Access, change, and modification times
 /// are carried independently, matching what ext4 stores and what an archive can
-/// supply. A creation time is not part of the vocabulary: a family whose format records
-/// one records the modification time there.
+/// supply. A birth time is carried where the source states one: a tree read from an image
+/// whose format records one states it, and a host directory, an archive and a built tree
+/// state none. Every family's format has a field for one, and writes the modification time
+/// there where none is stated; APFS writes the format's instant instead where the modification
+/// time is before 1970 or after that instant, since macOS refuses to read an inode created
+/// before 1970.
 ///
 /// Built with [`new`](Self::new) and the builders beside it, or by assigning a public
 /// field of a value one of them returned. The type is `#[non_exhaustive]`, so a field it
@@ -641,15 +692,19 @@ pub struct Metadata {
     pub atime: Timestamp,
     /// Change (status) time (`ctime`).
     pub ctime: Timestamp,
-    /// Modification time (`mtime`); also the source of the derived creation time.
+    /// Modification time (`mtime`).
     pub mtime: Timestamp,
+    /// Birth time (`btime`): when the entry was created, where the source states it. A
+    /// format writes the modification time in its place where it is [`None`], as the type's
+    /// documentation says.
+    pub btime: Option<Timestamp>,
 }
 
 /// The file-type bits of a mode (`S_IFMT`), which [`Metadata::mode`] must not carry: the
 /// entry's [`EntryKind`] supplies them. Every model that writes POSIX modes refuses a
 /// `mode` with any of these set, so a raw `st_mode` passed through whole is a typed error
 /// rather than an inode carrying two file types.
-#[cfg(any(feature = "ext", feature = "btrfs"))]
+#[cfg(any(feature = "ext", feature = "btrfs", feature = "apfs"))]
 pub(crate) const MODE_TYPE_MASK: u16 = 0o170000;
 
 impl Metadata {
@@ -665,6 +720,7 @@ impl Metadata {
             atime: mtime,
             ctime: mtime,
             mtime,
+            btime: None,
         }
     }
 
@@ -683,6 +739,13 @@ impl Metadata {
         self.atime = atime;
         self.ctime = ctime;
         self.mtime = mtime;
+        self
+    }
+
+    /// Set the birth time, for a source that states one.
+    #[must_use]
+    pub fn with_birth_time(mut self, btime: Timestamp) -> Self {
+        self.btime = Some(btime);
         self
     }
 }
@@ -746,6 +809,84 @@ pub struct SourceEntry {
     /// Extended attributes attached to this entry, each a fully-qualified name and
     /// its value in the boundary form [`Xattr`] describes. Empty for an entry with none.
     pub xattrs: Vec<Xattr>,
+    /// What a Darwin filesystem records of the entry beyond the rest: its BSD flags, and a
+    /// compressed file's content as stored. [`None`] for an entry from anywhere else.
+    pub darwin: Option<Darwin>,
+}
+
+/// What a Darwin filesystem records of an entry that no other family's vocabulary holds.
+///
+/// APFS keeps it, as HFS+ does. Every other family writes the entry's decoded content as it
+/// always has, and reports BSD flags it cannot hold as a loss, refusing them unless the caller
+/// accepts it; a caller accepts it for one entry by clearing [`SourceEntry::darwin`].
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
+pub struct Darwin {
+    /// The BSD flags `chflags` sets: `UF_HIDDEN`, `UF_NODUMP`, `UF_IMMUTABLE` and the rest.
+    /// [`Darwin::COMPRESSED`] among them says the file's content is held compressed, which a
+    /// [`compressed`](Self::compressed) form gives. A writer keeping the form takes the flag
+    /// from it, set where a form is given and cleared where none is, whatever this field holds.
+    pub bsd_flags: u32,
+    /// A compressed file's content as the filesystem stores it, where the entry is one.
+    ///
+    /// A writer keeping the form writes it as the file's content and does not read the
+    /// entry's own content, which it holds only to be as long as the form's header says. A
+    /// caller changing an entry's content clears the form, or gives the form of the new
+    /// content: a form left beside content of the same length is what is written.
+    pub compressed: Option<CompressedFile>,
+}
+
+impl Darwin {
+    /// `UF_COMPRESSED`: the flag a compressed file carries, and a storage detail rather than a
+    /// property of the file. Its content is the same bytes compressed or not, so a family
+    /// writing the content decoded loses nothing of it.
+    pub const COMPRESSED: u32 = 0x20;
+
+    /// A part holding `bsd_flags` and no compressed form.
+    #[must_use]
+    pub const fn new(bsd_flags: u32) -> Self {
+        Self {
+            bsd_flags,
+            compressed: None,
+        }
+    }
+
+    /// This part with `form` as the file's compressed content, and the flag that says so.
+    #[must_use]
+    pub fn compressed(mut self, form: CompressedFile) -> Self {
+        self.bsd_flags |= Self::COMPRESSED;
+        self.compressed = Some(form);
+        self
+    }
+
+    /// The flags the entry states of itself: every one but [`COMPRESSED`](Self::COMPRESSED),
+    /// which follows from the form its content is stored in. A Darwin filesystem keeps them;
+    /// a family that holds no BSD flags loses them.
+    #[must_use]
+    pub const fn stated_flags(&self) -> u32 {
+        self.bsd_flags & !Self::COMPRESSED
+    }
+}
+
+/// A compressed file's content as a Darwin filesystem stores it: its compression header, the
+/// `com.apple.decmpfs` attribute, and its resource fork, `com.apple.ResourceFork`, where the
+/// compressed content is held there.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub struct CompressedFile {
+    /// The compression header, which names the method and the decoded length and, for small
+    /// content, holds it.
+    pub header: Vec<u8>,
+    /// The resource fork holding the compressed content, where the header does not.
+    pub fork: Option<Vec<u8>>,
+}
+
+impl CompressedFile {
+    /// A compressed form of `header` and, where the content is held there, `fork`.
+    #[must_use]
+    pub const fn new(header: Vec<u8>, fork: Option<Vec<u8>>) -> Self {
+        Self { header, fork }
+    }
 }
 
 impl SourceEntry {
@@ -757,6 +898,7 @@ impl SourceEntry {
             kind,
             meta,
             xattrs: Vec::new(),
+            darwin: None,
         }
     }
 
@@ -764,6 +906,13 @@ impl SourceEntry {
     #[must_use]
     pub fn with_xattrs(mut self, xattrs: Vec<Xattr>) -> Self {
         self.xattrs = xattrs;
+        self
+    }
+
+    /// Set what a Darwin filesystem records of the entry, replacing any it carries.
+    #[must_use]
+    pub fn with_darwin(mut self, darwin: Darwin) -> Self {
+        self.darwin = Some(darwin);
         self
     }
 }
@@ -976,11 +1125,19 @@ impl Source for TreeBuilder {
 /// it would have no directory to live in, so they are dropped along with it. A file at
 /// `/etc` removes `/etc/hostname` from an earlier layer.
 ///
-/// # What it does not do
+/// # Removing a path
 ///
-/// There is no deletion marker. A layer states what is present, so a path an earlier layer
-/// placed can be replaced but not removed, and the entry list is always the union of the
-/// layers' paths.
+/// A layer states what is present, so it replaces a path and leaves every other in place.
+/// Taking a path out is [`remove`](Self::remove), a step of its own over what the layers so
+/// far compose: the path goes, with everything beneath it, and a later layer may place it
+/// again. A path nothing composed holds is refused, so a misspelled removal is an error
+/// rather than a step that did nothing.
+///
+/// A name is what goes, and a file with another name keeps it. Where a hard link elsewhere
+/// names a file that a removal, or a layer replacing a directory, takes away, the first of
+/// the file's remaining names in path order holds the file whole — its content, metadata,
+/// extended attributes and [`Darwin`] part — and every other remaining name links to that
+/// one.
 ///
 /// Nothing is validated here. A layer may name a path the model refuses — one holding a
 /// `..` element, say — and the refusal comes from the model when the composed list is read,
@@ -1032,30 +1189,145 @@ impl LayeredSource {
         for entry in source.into_entries() {
             let key = canonical_key(&entry.path);
             // Something that is not a directory cannot hold the entries an earlier layer
-            // put beneath this path, so they go with it. The keys are canonical and
-            // ordered, so a subtree is the contiguous range beginning `key/` — and for the
-            // root, whose key is empty, that is every other entry.
+            // put beneath this path, so they go with it.
             if !matches!(entry.kind, EntryKind::Directory) {
-                let mut prefix = key.clone();
-                if !prefix.is_empty() {
-                    prefix.push(b'/');
-                }
-                let doomed: Vec<Vec<u8>> = self
-                    .entries
-                    .range(prefix.clone()..)
-                    .take_while(|(k, _)| k.starts_with(&prefix))
-                    // The path itself is inside its own range when it is the root, whose
-                    // prefix is empty. It is being replaced, not dropped.
-                    .filter(|(k, _)| **k != key)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for k in doomed {
-                    self.entries.remove(&k);
-                }
+                let beneath = self.beneath(&key);
+                self.drop_names(&beneath);
             }
             self.entries.insert(key, entry);
         }
         self
+    }
+
+    /// Remove `path` and everything beneath it from what the layers so far compose.
+    ///
+    /// Paths are compared as the model compares them, so `//etc//ssl` removes `/etc/ssl`. A
+    /// file that has a name outside what is removed keeps that name, as the type's
+    /// documentation describes.
+    ///
+    /// ```
+    /// use ferrosys::{LayeredSource, Metadata, Source, Timestamp, TreeBuilder};
+    ///
+    /// let time = Timestamp::from_secs(1_700_000_000);
+    /// let base = TreeBuilder::new()
+    ///     .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+    ///     .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), Metadata::new(0o644, time))
+    ///     .file(b"/etc/issue".to_vec(), b"welcome\n".to_vec(), Metadata::new(0o644, time));
+    ///
+    /// let entries = LayeredSource::new().layer(base).remove("/etc/issue")?.into_entries();
+    /// assert_eq!(entries.len(), 2);
+    /// assert!(LayeredSource::new().remove("/etc").is_err(), "nothing holds /etc");
+    /// # Ok::<(), ferrosys::RemovalError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`RemovalError::NotHeld`] when nothing composed is at `path` or beneath it, and
+    /// [`RemovalError::Root`] when `path` names the root directory.
+    pub fn remove(mut self, path: impl AsRef<[u8]>) -> Result<Self, RemovalError> {
+        let path = path.as_ref();
+        let key = canonical_key(path);
+        if key.is_empty() {
+            return Err(RemovalError::Root);
+        }
+        let mut doomed = self.beneath(&key);
+        if self.entries.contains_key(&key) {
+            doomed.push(key);
+        }
+        if doomed.is_empty() {
+            return Err(RemovalError::NotHeld {
+                path: path.to_vec(),
+            });
+        }
+        self.drop_names(&doomed);
+        Ok(self)
+    }
+
+    /// The keys strictly beneath `key`. The keys are canonical and ordered, so a subtree is
+    /// the contiguous range beginning `key/` — and for the root, whose key is empty, that is
+    /// every other key.
+    fn beneath(&self, key: &[u8]) -> Vec<Vec<u8>> {
+        let mut prefix = key.to_vec();
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        self.entries
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(&prefix))
+            // The root's own key is inside its range, its prefix being empty.
+            .filter(|(k, _)| k.as_slice() != key)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Take the names `doomed` out, keeping each file they name that has a name outside them.
+    ///
+    /// A hard link is another name for the file at the end of its chain. Where that file's
+    /// own name goes, the first surviving link to it in path order takes its entry whole and
+    /// the other surviving links name that one; where only a link in the chain goes, the
+    /// links past it name the file directly. A link whose chain ends at nothing, at a
+    /// directory, or back on itself is left as written, for the model to refuse naming it.
+    fn drop_names(&mut self, doomed: &[Vec<u8>]) {
+        if doomed.is_empty() {
+            return;
+        }
+        let doomed: std::collections::BTreeSet<&[u8]> = doomed.iter().map(Vec::as_slice).collect();
+        // Each file a surviving link reaches through a doomed name, with those links in path
+        // order.
+        let mut reached: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+        for (key, entry) in &self.entries {
+            let EntryKind::HardLink { target } = &entry.kind else {
+                continue;
+            };
+            if doomed.contains(key.as_slice()) {
+                continue;
+            }
+            let through = std::cell::Cell::new(false);
+            let end = follow_hard_link(target, self.entries.len(), |at| {
+                if doomed.contains(at) {
+                    through.set(true);
+                }
+                match self.entries.get(at).map(|e| &e.kind) {
+                    None => LinkStep::Missing,
+                    Some(EntryKind::Directory) => LinkStep::Directory,
+                    Some(EntryKind::HardLink { target }) => LinkStep::Link(canonical_key(target)),
+                    Some(_) => LinkStep::File(at.to_vec()),
+                }
+            });
+            if let LinkEnd::File(file) = end
+                && through.get()
+            {
+                reached.entry(file).or_default().push(key.clone());
+            }
+        }
+        for (file, links) in reached {
+            let target = if doomed.contains(file.as_slice()) {
+                let held = self.entries[&file].clone();
+                let holder = self
+                    .entries
+                    .get_mut(&links[0])
+                    .expect("a surviving link is composed");
+                holder.kind = held.kind;
+                holder.meta = held.meta;
+                holder.xattrs = held.xattrs;
+                holder.darwin = held.darwin;
+                holder.path.clone()
+            } else {
+                self.entries[&file].path.clone()
+            };
+            for link in &links {
+                let entry = self
+                    .entries
+                    .get_mut(link)
+                    .expect("a surviving link is composed");
+                if let EntryKind::HardLink { target: named } = &mut entry.kind {
+                    named.clone_from(&target);
+                }
+            }
+        }
+        for key in doomed {
+            self.entries.remove(key);
+        }
     }
 
     /// The number of distinct paths the layers hold between them.
@@ -1080,8 +1352,30 @@ impl Source for LayeredSource {
     }
 }
 
+/// A removal [`LayeredSource::remove`] refused.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RemovalError {
+    /// Nothing the layers compose is at the path or beneath it: a misspelled path, or one an
+    /// earlier step already took out.
+    #[error("nothing is at {} or beneath it to remove", crate::escape::printable(.path))]
+    #[non_exhaustive]
+    NotHeld {
+        /// The path, as the caller wrote it.
+        path: Vec<u8>,
+    },
+    /// The path names the root directory, which every filesystem holds.
+    #[error("the root directory is part of every filesystem and is not removed")]
+    Root,
+}
+
 /// A fault a path has whatever format is being asked to hold it.
-#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) enum PathFault {
     /// A component was `..`, which a source may not use — a path is where an entry goes, not a
     /// traversal to be resolved.
@@ -1095,7 +1389,12 @@ pub(crate) enum PathFault {
 
 /// A classification that stopped: at a fault in a path, or at whatever the family decided about
 /// what the entry holds.
-#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) enum ClassifyError<E> {
     /// A fault in a path, with the path as the caller wrote it — so a message names that rather
     /// than the canonical form used to compare it.
@@ -1115,7 +1414,12 @@ pub(crate) enum ClassifyError<E> {
 ///
 /// The pass exists because a hard link may name a target that sorts after it: nothing can be
 /// placed until every path is known.
-#[cfg(any(feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn classify_paths<C, E>(
     entries: &[SourceEntry],
     mut class_of: impl FnMut(&SourceEntry, &[&[u8]]) -> Result<C, E>,
@@ -1156,14 +1460,14 @@ pub(crate) fn classify_paths<C, E>(
 ///
 /// The file arm carries whatever the caller needs of the file it found, so a walk that ends at
 /// one hands it back rather than leaving the caller to look the path up a second time.
-#[cfg(any(feature = "fat", feature = "exfat"))]
 pub(crate) enum LinkStep<T> {
     /// A regular file: the chain ends here, with what the caller keeps of it.
     File(T),
     /// A directory, which no filesystem lets a hard link name.
     Directory,
     /// Something the target format cannot hold, so there is nothing left to be a second name
-    /// for.
+    /// for. A format that holds every kind of entry, as APFS does, never answers this.
+    #[cfg_attr(not(any(feature = "fat", feature = "exfat")), allow(dead_code))]
     Unrepresentable,
     /// Another hard link, naming this canonical key.
     Link(Vec<u8>),
@@ -1172,7 +1476,6 @@ pub(crate) enum LinkStep<T> {
 }
 
 /// Where a chain of hard links ends.
-#[cfg(any(feature = "fat", feature = "exfat"))]
 pub(crate) enum LinkEnd<T> {
     /// A file, with what the caller keeps of it.
     File(T),
@@ -1193,14 +1496,14 @@ pub(crate) enum LinkEnd<T> {
 /// which is what bounds it: every step consumes one declared path, so a walk longer than that
 /// has come back to somewhere it has been.
 ///
-/// One walk rather than one per family. What a family does with each outcome is its own — the
-/// refusals are that family's error taxonomy, and what it keeps of a file is its own value —
-/// but *which* outcomes there are, and the bound that makes a cycle terminate rather than hang,
-/// are properties of a source and not of any format.
+/// One walk for every family and for [`LayeredSource`], which follows a link to the file a
+/// removed name leaves. What a caller does with each outcome is its own — the refusals are a
+/// family's error taxonomy, and what it keeps of a file is its own value — but *which*
+/// outcomes there are, and the bound that makes a cycle terminate rather than hang, are
+/// properties of a source and not of any format.
 ///
 /// Nothing here reads a file or resolves a path outside the source: `target` names something
 /// the same source declared, which is why a hard link can be written as a second copy at all.
-#[cfg(any(feature = "fat", feature = "exfat"))]
 pub(crate) fn follow_hard_link<T>(
     target: &[u8],
     declared: usize,
@@ -1393,6 +1696,164 @@ mod tests {
             0o700,
             "the later root's mode, and the tree beneath it kept"
         );
+    }
+
+    #[test]
+    fn a_removal_takes_the_path_and_everything_beneath_it() {
+        let base = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta())
+            .directory(b"/etc/ssl".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/ssl/cert".to_vec(), b"pem\n".to_vec(), meta())
+            // Siblings whose names share the removed path's bytes but not its subtree.
+            .file(b"/etc/ssl-old".to_vec(), b"kept\n".to_vec(), meta())
+            .file(b"/etcetera".to_vec(), b"kept\n".to_vec(), meta());
+
+        let composed = LayeredSource::new()
+            .layer(base)
+            .remove(b"//etc//ssl/.")
+            .expect("held");
+        assert_eq!(
+            paths(composed.clone()),
+            ["/etc", "/etc/hostname", "/etc/ssl-old", "/etcetera"],
+            "a spelling of the path the model takes as it"
+        );
+        assert_eq!(paths(composed.remove("/etc").expect("held")), ["/etcetera"]);
+    }
+
+    #[test]
+    fn a_removal_of_nothing_is_refused_naming_the_path_written() {
+        let base = TreeBuilder::new().file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta());
+        let composed = LayeredSource::new().layer(base);
+        assert_eq!(
+            composed.clone().remove("/etc/hostnmae").err(),
+            Some(RemovalError::NotHeld {
+                path: b"/etc/hostnmae".to_vec()
+            })
+        );
+        // Once removed, a path is not there to remove again.
+        let once = composed.clone().remove("/etc/hostname").expect("held");
+        assert!(matches!(
+            once.remove("/etc/hostname"),
+            Err(RemovalError::NotHeld { .. })
+        ));
+        // An undeclared directory holding a declared entry is held: its subtree goes.
+        assert!(composed.clone().remove("/etc").expect("held").is_empty());
+        for root in ["/", "", "//.", "."] {
+            assert_eq!(
+                composed.clone().remove(root).err(),
+                Some(RemovalError::Root),
+                "{root:?}"
+            );
+        }
+        let message = LayeredSource::new()
+            .remove(b"/a\x1b[2J")
+            .expect_err("nothing")
+            .to_string();
+        assert!(
+            !message.contains('\x1b'),
+            "the path is escaped: {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_later_layer_places_a_removed_path_again() {
+        let base = TreeBuilder::new().file(b"/motd".to_vec(), b"base\n".to_vec(), meta());
+        let over = TreeBuilder::new().file(b"/motd".to_vec(), b"over\n".to_vec(), meta());
+        let entries = LayeredSource::new()
+            .layer(base)
+            .remove("/motd")
+            .expect("held")
+            .layer(over)
+            .into_entries();
+        assert_eq!(contents_at(&entries, b"/motd"), b"over\n");
+    }
+
+    /// The kind of the entry at `path`, which must be present.
+    fn kind_at<'a>(entries: &'a [SourceEntry], path: &[u8]) -> &'a EntryKind {
+        &entries
+            .iter()
+            .find(|e| e.path == path)
+            .unwrap_or_else(|| panic!("{} is present", String::from_utf8_lossy(path)))
+            .kind
+    }
+
+    #[test]
+    fn a_file_whose_name_is_removed_keeps_its_other_names() {
+        let held = meta().owned_by(501, 20);
+        let base = TreeBuilder::new()
+            .file(b"/a".to_vec(), b"x".to_vec(), held)
+            .xattr(b"user.k".to_vec(), b"v".to_vec())
+            .hardlink(b"/c".to_vec(), b"/a".to_vec(), meta())
+            .hardlink(b"/b".to_vec(), b"/a".to_vec(), meta())
+            .into_entries();
+        let mut base = base;
+        base[0].darwin = Some(Darwin::new(0x8000));
+
+        let entries = LayeredSource::new()
+            .layer(base)
+            .remove("/a")
+            .expect("held")
+            .into_entries();
+        // The first remaining name in path order holds the file whole, the other names it.
+        let b = entries.iter().find(|e| e.path == b"/b").expect("kept");
+        assert_eq!(contents_at(&entries, b"/b"), b"x");
+        assert_eq!(b.meta, held);
+        assert_eq!(b.xattrs.len(), 1);
+        assert_eq!(b.darwin, Some(Darwin::new(0x8000)));
+        assert_eq!(
+            kind_at(&entries, b"/c"),
+            &EntryKind::HardLink {
+                target: b"/b".to_vec()
+            }
+        );
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn a_link_past_a_removed_link_names_the_file() {
+        let base = TreeBuilder::new()
+            .file(b"/a".to_vec(), b"x".to_vec(), meta())
+            .hardlink(b"/b".to_vec(), b"/a".to_vec(), meta())
+            .hardlink(b"/c".to_vec(), b"//b".to_vec(), meta())
+            // A link whose chain reaches nothing is left as written, for the model to refuse.
+            .hardlink(b"/d".to_vec(), b"/nowhere".to_vec(), meta());
+        let entries = LayeredSource::new()
+            .layer(base)
+            .remove("/b")
+            .expect("held")
+            .into_entries();
+        assert_eq!(
+            kind_at(&entries, b"/c"),
+            &EntryKind::HardLink {
+                target: b"/a".to_vec()
+            }
+        );
+        assert_eq!(
+            kind_at(&entries, b"/d"),
+            &EntryKind::HardLink {
+                target: b"/nowhere".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_beneath_a_replaced_directory_keeps_its_name_outside_it() {
+        let base = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, meta().mtime))
+            .file(b"/etc/hostname".to_vec(), b"base\n".to_vec(), meta())
+            .hardlink(b"/hostname".to_vec(), b"/etc/hostname".to_vec(), meta());
+        let removed = LayeredSource::new()
+            .layer(base.clone())
+            .remove("/etc")
+            .expect("held")
+            .into_entries();
+        assert_eq!(contents_at(&removed, b"/hostname"), b"base\n");
+
+        let over = TreeBuilder::new().file(b"/etc".to_vec(), b"a file\n".to_vec(), meta());
+        let replaced = LayeredSource::new().layer(base).layer(over).into_entries();
+        assert_eq!(contents_at(&replaced, b"/hostname"), b"base\n");
+        assert_eq!(contents_at(&replaced, b"/etc"), b"a file\n");
     }
 
     #[test]

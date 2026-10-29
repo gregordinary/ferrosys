@@ -98,6 +98,7 @@ pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
     feature = "fat",
     feature = "exfat",
     feature = "btrfs",
+    feature = "apfs",
     all(feature = "dir", any(target_os = "linux", target_os = "android"))
 ))]
 pub(crate) fn is_hostile_entry(name: &[u8]) -> bool {
@@ -116,6 +117,7 @@ pub(crate) fn is_hostile_entry(name: &[u8]) -> bool {
     feature = "fat",
     feature = "exfat",
     feature = "btrfs",
+    feature = "apfs",
     all(feature = "dir", any(target_os = "linux", target_os = "android"))
 ))]
 pub(crate) fn is_hostile_component(name: &[u8]) -> bool {
@@ -134,6 +136,7 @@ pub(crate) fn is_hostile_component(name: &[u8]) -> bool {
     feature = "fat",
     feature = "exfat",
     feature = "btrfs",
+    feature = "apfs",
     all(feature = "dir", any(target_os = "linux", target_os = "android"))
 ))]
 pub(crate) fn is_dot_entry(name: &[u8]) -> bool {
@@ -193,6 +196,7 @@ mod tests {
         feature = "fat",
         feature = "exfat",
         feature = "btrfs",
+        feature = "apfs",
         all(feature = "dir", any(target_os = "linux", target_os = "android"))
     ))]
     #[test]
@@ -211,6 +215,7 @@ mod tests {
         feature = "fat",
         feature = "exfat",
         feature = "btrfs",
+        feature = "apfs",
         all(feature = "dir", any(target_os = "linux", target_os = "android"))
     ))]
     #[test]

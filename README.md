@@ -1,22 +1,24 @@
 # ferrosys
 
 ferrosys is pure-Rust filesystem tooling. It builds and reads filesystem images in
-userspace, over ordinary byte streams, in safe Rust. It has four filesystem families:
+userspace, over ordinary byte streams, in safe Rust. It has five filesystem families:
 
 - ext2, ext3, and ext4
 - FAT12, FAT16, and FAT32
 - exFAT
 - btrfs
+- APFS
 
-Each family is a Cargo feature. The default build carries all four, and a build that turns
+Each family is a Cargo feature. The default build carries all five, and a build that turns
 the default off takes only the families you name.
 
 This Cargo workspace has two crates:
 
-- [`ferrosys`](crates/ferrosys) is the library. It has a reader and a writer per family,
-  each behind a feature of its own, with byte-reproducible on-disk geometry.
+- [`ferrosys`](crates/ferrosys) is the library. It has a reader per family, each behind a
+  feature of its own, and a writer for each. The writers' on-disk geometry is
+  byte-reproducible.
 - [`ferrosys-cli`](crates/ferrosys-cli) is the `ferrosys` binary. It puts the library on
-  the command line and carries all four families.
+  the command line and carries all five families.
 
 Both crates build on Rust 1.88 or newer.
 
@@ -41,6 +43,14 @@ Each family is a separate on-disk format with a reader and a writer of its own:
   tree maps that space onto the device, and every metadata block carries its own
   checksum. ferrosys reads a btrfs volume in full, and writes one whole from a source
   tree with its subvolumes.
+- **APFS.** A container of volumes under a checkpoint, each volume a tree of records found
+  through an object map, and every object carrying its own checksum. ferrosys reads a
+  container's volumes and their snapshots, and refuses an encrypted or a sealed volume by name.
+  It reads a file macOS compressed with zlib, LZVN, LZFSE or LZBITMAP, or stored whole behind
+  its compression header. It writes a container whose first volume holds a source tree, with
+  each entry's BSD flags and a compressed file in its stored form. With nothing in it, the
+  container is block for block what `newfs_apfs` formats in a file, with the identifiers and
+  the time as inputs.
 
 ### Resize-safe ext geometry
 
@@ -130,6 +140,14 @@ ferrosys format --type btrfs --size 2G --fsid "$(uuidgen)" --time 1700000000 \
 ferrosys extract root.img --cat /@root/etc/hostname
 ```
 
+Read one volume of an APFS container, as it is and as one of its snapshots keeps it:
+
+```sh
+ferrosys inspect disk.img
+ferrosys extract disk.img --volume Data --to-tar - | tar -tv
+ferrosys extract disk.img --volume Data --snapshot before-upgrade --cat /notes.txt
+```
+
 | Command | What it does |
 |---|---|
 | `format` | Writes a filesystem of the type `--type` names, from a tar archive, a directory tree, or empty. |
@@ -177,6 +195,15 @@ Licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+The Unicode character tables APFS names are held to are data from the Unicode Character
+Database, distributed under the Unicode License v3 ([LICENSE-UNICODE](LICENSE-UNICODE)). The
+LZVN and LZFSE decoders are derived from Apple's lzfse project, distributed under the
+BSD-3-Clause license, and the LZBITMAP decoder reads the layout libzbitmap decodes; both
+notices are in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The library's `apfs` feature
+compiles the Unicode tables, and its `lzvn` and `lzfse` features compile the decoders derived
+from Apple's code; all three are in the default set. A build of the library's other features
+compiles code under MIT OR Apache-2.0 alone.
 
 ### Contribution
 

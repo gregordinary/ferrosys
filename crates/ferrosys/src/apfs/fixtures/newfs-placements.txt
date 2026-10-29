@@ -1,0 +1,6996 @@
+# Where newfs_apfs placed every object of an empty container, read back from the containers
+# it formatted on macOS 14, 15, 26 and 27, on Apple silicon and on Intel: plain files, attached
+# disks, hdiutil create with no source, every block size, 1 MiB to 16 TiB. Each size on either
+# side of a rule's edge is here in full; newfs-digests.txt holds every other size measured.
+#
+# One record per distinct listing. Its first line is
+#
+#   @ <how> <containers> <releases...>
+#
+# where <how> is `file` (newfs_apfs on a plain file, or hdiutil create), `device` (newfs_apfs on
+# an attached disk), or `container-only` (newfs_apfs -C, which commits the first transaction
+# alone), joined with `+` where containers formatted more than one way gave one listing. The
+# lines after it, to the next record, are the listing the planner's gate renders from a plan.
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 256 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 304 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 362 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 430 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 512 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 608 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 724 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 768 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 861 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 1024 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 1217 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 1448 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 1722 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 2048 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 2435 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 2896 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 3444 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 4096 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 4352 4096
+descriptor 1 8
+data 9 52
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 4870 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 5792 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 6888 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 8192 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 8448 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 9741 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 11585 4096
+descriptor 1 8
+data 9 124
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 133 16
+pool 149 6
+queue-limits 1 3
+max-volumes 1
+ephemeral-min 3
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 155 156
+ address-blocks -
+ info-blocks 149+1
+ bitmaps 0:150
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 163 164
+ volume 0 157 158 159 160 161 162
+ address-blocks -
+ info-blocks 151+1
+ bitmaps 0:152
+ pool-bitmap-slots 1+1
+ freed-pool 2:149+2
+ freed-main 2:155+2
+@ file 4 14 15 26 27
+blocks 13777 4096
+descriptor 1 8
+data 9 160
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 169 16
+pool 185 6
+queue-limits 1 4
+max-volumes 1
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 191 192
+ address-blocks -
+ info-blocks 185+1
+ bitmaps 0:186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 199 200
+ volume 0 193 194 195 196 197 198
+ address-blocks -
+ info-blocks 187+1
+ bitmaps 0:188
+ pool-bitmap-slots 1+1
+ freed-pool 2:185+2
+ freed-main 2:191+2
+@ file 6 14 15 15-intel 26 26-intel 27
+blocks 16374 4096
+descriptor 1 8
+data 9 160
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 169 16
+pool 185 6
+queue-limits 1 4
+max-volumes 1
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 191 192
+ address-blocks -
+ info-blocks 185+1
+ bitmaps 0:186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 199 200
+ volume 0 193 194 195 196 197 198
+ address-blocks -
+ info-blocks 187+1
+ bitmaps 0:188
+ pool-bitmap-slots 1+1
+ freed-pool 2:185+2
+ freed-main 2:191+2
+@ file+device 104 14 15 15-intel 26 26-intel 27
+blocks 16384 4096
+descriptor 1 8
+data 9 160
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 169 16
+pool 185 6
+queue-limits 1 4
+max-volumes 1
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 191 192
+ address-blocks -
+ info-blocks 185+1
+ bitmaps 0:186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 199 200
+ volume 0 193 194 195 196 197 198
+ address-blocks -
+ info-blocks 187+1
+ bitmaps 0:188
+ pool-bitmap-slots 1+1
+ freed-pool 2:185+2
+ freed-main 2:191+2
+@ container-only 4 14 15 26 27
+blocks 16384 4096
+descriptor 1 8
+data 9 160
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 169 16
+pool 185 6
+queue-limits 1 4
+max-volumes 1
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 191 192
+ address-blocks -
+ info-blocks 185+1
+ bitmaps 0:186
+ pool-bitmap-slots 0+1
+@ file 4 14 15 26 27
+blocks 8192 8192
+descriptor 1 8
+data 9 52
+chunks 65536 254 1019 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 4096 16384
+descriptor 1 8
+data 9 52
+chunks 131072 510 2043 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 1024 65536
+descriptor 1 8
+data 9 52
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 19483 4096
+descriptor 1 8
+data 9 196
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 205 16
+pool 221 6
+queue-limits 1 5
+max-volumes 1
+ephemeral-min 5
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 227 228
+ address-blocks -
+ info-blocks 221+1
+ bitmaps 0:222
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 235 236
+ volume 0 229 230 231 232 233 234
+ address-blocks -
+ info-blocks 223+1
+ bitmaps 0:224
+ pool-bitmap-slots 1+1
+ freed-pool 2:221+2
+ freed-main 2:227+2
+@ file 4 14 15 26 27
+blocks 23170 4096
+descriptor 1 8
+data 9 232
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 241 16
+pool 257 6
+queue-limits 1 6
+max-volumes 1
+ephemeral-min 6
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 263 264
+ address-blocks -
+ info-blocks 257+1
+ bitmaps 0:258
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 271 272
+ volume 0 265 266 267 268 269 270
+ address-blocks -
+ info-blocks 259+1
+ bitmaps 0:260
+ pool-bitmap-slots 1+1
+ freed-pool 2:257+2
+ freed-main 2:263+2
+@ file 4 14 15 26 27
+blocks 25600 4096
+descriptor 1 8
+data 9 232
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 241 16
+pool 257 6
+queue-limits 1 6
+max-volumes 1
+ephemeral-min 6
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 263 264
+ address-blocks -
+ info-blocks 257+1
+ bitmaps 0:258
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 271 272
+ volume 0 265 266 267 268 269 270
+ address-blocks -
+ info-blocks 259+1
+ bitmaps 0:260
+ pool-bitmap-slots 1+1
+ freed-pool 2:257+2
+ freed-main 2:263+2
+@ file 4 14 15 26 27
+blocks 25601 4096
+descriptor 1 8
+data 9 232
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 241 16
+pool 257 6
+queue-limits 1 6
+max-volumes 1
+ephemeral-min 6
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 263 264
+ address-blocks -
+ info-blocks 257+1
+ bitmaps 0:258
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 271 272
+ volume 0 265 266 267 268 269 270
+ address-blocks -
+ info-blocks 259+1
+ bitmaps 0:260
+ pool-bitmap-slots 1+1
+ freed-pool 2:257+2
+ freed-main 2:263+2
+@ file 4 14 15 26 27
+blocks 27554 4096
+descriptor 1 8
+data 9 268
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 277 16
+pool 293 6
+queue-limits 1 7
+max-volumes 1
+ephemeral-min 7
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 299 300
+ address-blocks -
+ info-blocks 293+1
+ bitmaps 0:294
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 307 308
+ volume 0 301 302 303 304 305 306
+ address-blocks -
+ info-blocks 295+1
+ bitmaps 0:296
+ pool-bitmap-slots 1+1
+ freed-pool 2:293+2
+ freed-main 2:299+2
+@ file 4 14 15 26 27
+blocks 32512 4096
+descriptor 1 8
+data 9 304
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 313 16
+pool 329 6
+queue-limits 1 8
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 335 336
+ address-blocks -
+ info-blocks 329+1
+ bitmaps 0:330
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 343 344
+ volume 0 337 338 339 340 341 342
+ address-blocks -
+ info-blocks 331+1
+ bitmaps 0:332
+ pool-bitmap-slots 1+1
+ freed-pool 2:329+2
+ freed-main 2:335+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 32768 4096
+descriptor 1 8
+data 9 304
+chunks 32768 126 507 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 313 16
+pool 329 6
+queue-limits 1 8
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 335 336
+ address-blocks -
+ info-blocks 329+1
+ bitmaps 0:330
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 343 344
+ volume 0 337 338 339 340 341 342
+ address-blocks -
+ info-blocks 331+1
+ bitmaps 0:332
+ pool-bitmap-slots 1+1
+ freed-pool 2:329+2
+ freed-main 2:335+2
+@ file 4 14 15 26 27
+blocks 33024 4096
+descriptor 1 8
+data 9 304
+chunks 32768 126 507 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 313 16
+pool 329 9
+queue-limits 1 8
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 338 339
+ address-blocks -
+ info-blocks 329+1
+ bitmaps 0:330
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 346 347
+ volume 0 340 341 342 343 344 345
+ address-blocks -
+ info-blocks 331+1
+ bitmaps 0:332
+ pool-bitmap-slots 1+1
+ freed-pool 2:329+2
+ freed-main 2:338+2
+@ file 4 14 15 26 27
+blocks 38967 4096
+descriptor 1 8
+data 9 308
+chunks 32768 126 507 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 317 16
+pool 333 9
+queue-limits 1 9
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 342 343
+ address-blocks -
+ info-blocks 333+1
+ bitmaps 0:334
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 350 351
+ volume 0 344 345 346 347 348 349
+ address-blocks -
+ info-blocks 335+1
+ bitmaps 0:336
+ pool-bitmap-slots 1+1
+ freed-pool 2:333+2
+ freed-main 2:342+2
+@ file 4 14 15 26 27
+blocks 46340 4096
+descriptor 1 8
+data 9 316
+chunks 32768 126 507 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 325 16
+pool 341 9
+queue-limits 1 11
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 350 351
+ address-blocks -
+ info-blocks 341+1
+ bitmaps 0:342
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 358 359
+ volume 0 352 353 354 355 356 357
+ address-blocks -
+ info-blocks 343+1
+ bitmaps 0:344
+ pool-bitmap-slots 1+1
+ freed-pool 2:341+2
+ freed-main 2:350+2
+@ file 4 14 15 26 27
+blocks 55108 4096
+descriptor 1 8
+data 9 324
+chunks 32768 126 507 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 333 16
+pool 349 9
+queue-limits 1 13
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 358 359
+ address-blocks -
+ info-blocks 349+1
+ bitmaps 0:350
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 366 367
+ volume 0 360 361 362 363 364 365
+ address-blocks -
+ info-blocks 351+1
+ bitmaps 0:352
+ pool-bitmap-slots 1+1
+ freed-pool 2:349+2
+ freed-main 2:358+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 65536 4096
+descriptor 1 8
+data 9 332
+chunks 32768 126 507 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 341 16
+pool 357 9
+queue-limits 1 15
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 366 367
+ address-blocks -
+ info-blocks 357+1
+ bitmaps 0:358
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 374 375
+ volume 0 368 369 370 371 372 373
+ address-blocks -
+ info-blocks 359+1
+ bitmaps 0:360
+ pool-bitmap-slots 1+1
+ freed-pool 2:357+2
+ freed-main 2:366+2
+@ file 4 14 15 26 27
+blocks 32768 8192
+descriptor 1 8
+data 9 160
+chunks 65536 254 1019 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 169 16
+pool 185 6
+queue-limits 1 4
+max-volumes 1
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 191 192
+ address-blocks -
+ info-blocks 185+1
+ bitmaps 0:186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 199 200
+ volume 0 193 194 195 196 197 198
+ address-blocks -
+ info-blocks 187+1
+ bitmaps 0:188
+ pool-bitmap-slots 1+1
+ freed-pool 2:185+2
+ freed-main 2:191+2
+@ file 4 14 15 26 27
+blocks 16384 16384
+descriptor 1 8
+data 9 52
+chunks 131072 510 2043 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 4096 65536
+descriptor 1 8
+data 9 52
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 61 16
+pool 77 6
+queue-limits 1 1
+max-volumes 1
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 83 84
+ address-blocks -
+ info-blocks 77+1
+ bitmaps 0:78
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 91 92
+ volume 0 85 86 87 88 89 90
+ address-blocks -
+ info-blocks 79+1
+ bitmaps 0:80
+ pool-bitmap-slots 1+1
+ freed-pool 2:77+2
+ freed-main 2:83+2
+@ file 4 14 15 26 27
+blocks 77935 4096
+descriptor 1 8
+data 9 344
+chunks 32768 126 507 3 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 353 16
+pool 369 12
+queue-limits 1 18
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 381 382
+ address-blocks -
+ info-blocks 369+1
+ bitmaps 0:370
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 389 390
+ volume 0 383 384 385 386 387 388
+ address-blocks -
+ info-blocks 371+1
+ bitmaps 0:372
+ pool-bitmap-slots 1+1
+ freed-pool 2:369+2
+ freed-main 2:381+2
+@ file 4 14 15 26 27
+blocks 92681 4096
+descriptor 1 8
+data 9 356
+chunks 32768 126 507 3 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 365 16
+pool 381 12
+queue-limits 1 21
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 393 394
+ address-blocks -
+ info-blocks 381+1
+ bitmaps 0:382
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 401 402
+ volume 0 395 396 397 398 399 400
+ address-blocks -
+ info-blocks 383+1
+ bitmaps 0:384
+ pool-bitmap-slots 1+1
+ freed-pool 2:381+2
+ freed-main 2:393+2
+@ file 4 14 15 26 27
+blocks 110217 4096
+descriptor 1 8
+data 9 372
+chunks 32768 126 507 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 381 16
+pool 397 15
+queue-limits 1 25
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 412 413
+ address-blocks -
+ info-blocks 397+1
+ bitmaps 0:398
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 420 421
+ volume 0 414 415 416 417 418 419
+ address-blocks -
+ info-blocks 399+1
+ bitmaps 0:400
+ pool-bitmap-slots 1+1
+ freed-pool 2:397+2
+ freed-main 2:412+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 131072 4096
+descriptor 1 8
+data 9 388
+chunks 32768 126 507 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 397 16
+pool 413 15
+queue-limits 1 29
+max-volumes 1
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 428 429
+ address-blocks -
+ info-blocks 413+1
+ bitmaps 0:414
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 436 437
+ volume 0 430 431 432 433 434 435
+ address-blocks -
+ info-blocks 415+1
+ bitmaps 0:416
+ pool-bitmap-slots 1+1
+ freed-pool 2:413+2
+ freed-main 2:428+2
+@ file 4 14 15 26 27
+blocks 131328 4096
+descriptor 1 12
+data 13 644
+chunks 32768 126 507 5 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 657 16
+pool 673 18
+queue-limits 1 29
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 691 692
+ address-blocks -
+ info-blocks 673+1
+ bitmaps 0:674
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 699 700
+ volume 0 693 694 695 696 697 698
+ address-blocks -
+ info-blocks 675+1
+ bitmaps 0:676
+ pool-bitmap-slots 1+1
+ freed-pool 2:673+2
+ freed-main 2:691+2
+@ file 4 14 15 26 27
+blocks 155871 4096
+descriptor 1 12
+data 13 668
+chunks 32768 126 507 5 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 681 16
+pool 697 18
+queue-limits 1 35
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 715 716
+ address-blocks -
+ info-blocks 697+1
+ bitmaps 0:698
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 723 724
+ volume 0 717 718 719 720 721 722
+ address-blocks -
+ info-blocks 699+1
+ bitmaps 0:700
+ pool-bitmap-slots 1+1
+ freed-pool 2:697+2
+ freed-main 2:715+2
+@ file 4 14 15 26 27
+blocks 185363 4096
+descriptor 1 12
+data 13 692
+chunks 32768 126 507 6 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 705 16
+pool 721 21
+queue-limits 1 41
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 742 743
+ address-blocks -
+ info-blocks 721+1
+ bitmaps 0:722
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 750 751
+ volume 0 744 745 746 747 748 749
+ address-blocks -
+ info-blocks 723+1
+ bitmaps 0:724
+ pool-bitmap-slots 1+1
+ freed-pool 2:721+2
+ freed-main 2:742+2
+@ file 4 14 15 26 27
+blocks 220435 4096
+descriptor 1 12
+data 13 724
+chunks 32768 126 507 7 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 737 16
+pool 753 24
+queue-limits 1 49
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 777 778
+ address-blocks -
+ info-blocks 753+1
+ bitmaps 0:754
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 785 786
+ volume 0 779 780 781 782 783 784
+ address-blocks -
+ info-blocks 755+1
+ bitmaps 0:756
+ pool-bitmap-slots 1+1
+ freed-pool 2:753+2
+ freed-main 2:777+2
+@ file 8 14 15 26 27
+blocks 256000 4096
+descriptor 1 12
+data 13 756
+chunks 32768 126 507 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 769 16
+pool 785 27
+queue-limits 1 57
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 812 813
+ address-blocks -
+ info-blocks 785+1
+ bitmaps 0:786
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 820 821
+ volume 0 814 815 816 817 818 819
+ address-blocks -
+ info-blocks 787+1
+ bitmaps 0:788
+ pool-bitmap-slots 1+1
+ freed-pool 2:785+2
+ freed-main 2:812+2
+@ file 4 14 15 26 27
+blocks 262143 4096
+descriptor 1 12
+data 13 760
+chunks 32768 126 507 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 773 16
+pool 789 27
+queue-limits 1 58
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 816 817
+ address-blocks -
+ info-blocks 789+1
+ bitmaps 0:790
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 824 825
+ volume 0 818 819 820 821 822 823
+ address-blocks -
+ info-blocks 791+1
+ bitmaps 0:792
+ pool-bitmap-slots 1+1
+ freed-pool 2:789+2
+ freed-main 2:816+2
+@ file+device 18 14 15 15-intel 26 26-intel 27
+blocks 262144 4096
+descriptor 1 16
+data 17 992
+chunks 32768 126 507 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1009 16
+pool 1025 27
+queue-limits 1 116
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 17
+ reaper 18
+ object-map 1052 1053
+ address-blocks -
+ info-blocks 1025+1
+ bitmaps 0:1026
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 19
+ reaper 20
+ queues 21 22
+ object-map 1060 1061
+ volume 0 1054 1055 1056 1057 1058 1059
+ address-blocks -
+ info-blocks 1027+1
+ bitmaps 0:1028
+ pool-bitmap-slots 1+1
+ freed-pool 2:1025+2
+ freed-main 2:1052+2
+@ file+device 14 14 15 15-intel 26 26-intel 27
+blocks 131072 8192
+descriptor 1 8
+data 9 588
+chunks 65536 254 1019 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 597 16
+pool 613 9
+queue-limits 1 15
+max-volumes 2
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 622 623
+ address-blocks -
+ info-blocks 613+1
+ bitmaps 0:614
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 630 631
+ volume 0 624 625 626 627 628 629
+ address-blocks -
+ info-blocks 615+1
+ bitmaps 0:616
+ pool-bitmap-slots 1+1
+ freed-pool 2:613+2
+ freed-main 2:622+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 65536 16384
+descriptor 1 8
+data 9 288
+chunks 131072 510 2043 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 297 16
+pool 313 6
+queue-limits 1 4
+max-volumes 2
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 319 320
+ address-blocks -
+ info-blocks 313+1
+ bitmaps 0:314
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 327 328
+ volume 0 321 322 323 324 325 326
+ address-blocks -
+ info-blocks 315+1
+ bitmaps 0:316
+ pool-bitmap-slots 1+1
+ freed-pool 2:313+2
+ freed-main 2:319+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 16384 65536
+descriptor 1 8
+data 9 84
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 93 16
+pool 109 6
+queue-limits 1 1
+max-volumes 2
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 115 116
+ address-blocks -
+ info-blocks 109+1
+ bitmaps 0:110
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 123 124
+ volume 0 117 118 119 120 121 122
+ address-blocks -
+ info-blocks 111+1
+ bitmaps 0:112
+ pool-bitmap-slots 1+1
+ freed-pool 2:109+2
+ freed-main 2:115+2
+@ file 4 14 15 26 27
+blocks 311743 4096
+descriptor 1 20
+data 21 1336
+chunks 32768 126 507 10 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1357 16
+pool 1373 33
+queue-limits 1 138
+max-volumes 3
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1406 1407
+ address-blocks -
+ info-blocks 1373+1
+ bitmaps 0:1374
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1414 1415
+ volume 0 1408 1409 1410 1411 1412 1413
+ address-blocks -
+ info-blocks 1375+1
+ bitmaps 0:1376
+ pool-bitmap-slots 1+1
+ freed-pool 2:1373+2
+ freed-main 2:1406+2
+@ file 4 14 15 26 27
+blocks 370727 4096
+descriptor 1 20
+data 21 1440
+chunks 32768 126 507 12 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1461 16
+pool 1477 39
+queue-limits 1 164
+max-volumes 3
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1516 1517
+ address-blocks -
+ info-blocks 1477+1
+ bitmaps 0:1478
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1524 1525
+ volume 0 1518 1519 1520 1521 1522 1523
+ address-blocks -
+ info-blocks 1479+1
+ bitmaps 0:1480
+ pool-bitmap-slots 1+1
+ freed-pool 2:1477+2
+ freed-main 2:1516+2
+@ file 4 14 15 26 27
+blocks 440871 4096
+descriptor 1 24
+data 25 1820
+chunks 32768 126 507 14 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1845 16
+pool 1861 45
+queue-limits 1 195
+max-volumes 4
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 25
+ reaper 26
+ object-map 1906 1907
+ address-blocks -
+ info-blocks 1861+1
+ bitmaps 0:1862
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 27
+ reaper 28
+ queues 29 30
+ object-map 1914 1915
+ volume 0 1908 1909 1910 1911 1912 1913
+ address-blocks -
+ info-blocks 1863+1
+ bitmaps 0:1864
+ pool-bitmap-slots 1+1
+ freed-pool 2:1861+2
+ freed-main 2:1906+2
+@ file 4 14 15 26 27
+blocks 262143 8192
+descriptor 1 12
+data 13 1156
+chunks 65536 254 1019 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1169 16
+pool 1185 15
+queue-limits 1 29
+max-volumes 4
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 1200 1201
+ address-blocks -
+ info-blocks 1185+1
+ bitmaps 0:1186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 1208 1209
+ volume 0 1202 1203 1204 1205 1206 1207
+ address-blocks -
+ info-blocks 1187+1
+ bitmaps 0:1188
+ pool-bitmap-slots 1+1
+ freed-pool 2:1185+2
+ freed-main 2:1200+2
+@ file+device 10 14 15 15-intel 26 26-intel 27
+blocks 524288 4096
+descriptor 1 24
+data 25 1964
+chunks 32768 126 507 16 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1989 16
+pool 2005 51
+queue-limits 1 231
+max-volumes 4
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 25
+ reaper 26
+ object-map 2056 2057
+ address-blocks -
+ info-blocks 2005+1
+ bitmaps 0:2006
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 27
+ reaper 28
+ queues 29 30
+ object-map 2064 2065
+ volume 0 2058 2059 2060 2061 2062 2063
+ address-blocks -
+ info-blocks 2007+1
+ bitmaps 0:2008
+ pool-bitmap-slots 1+1
+ freed-pool 2:2005+2
+ freed-main 2:2056+2
+@ file 8 14 15 26 27
+blocks 262144 8192
+descriptor 1 12
+data 13 1268
+chunks 65536 254 1019 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 1281 16
+pool 1297 15
+queue-limits 1 57
+max-volumes 4
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 1312 1313
+ address-blocks -
+ info-blocks 1297+1
+ bitmaps 0:1298
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 1320 1321
+ volume 0 1314 1315 1316 1317 1318 1319
+ address-blocks -
+ info-blocks 1299+1
+ bitmaps 0:1300
+ pool-bitmap-slots 1+1
+ freed-pool 2:1297+2
+ freed-main 2:1312+2
+@ file 4 14 15 26 27
+blocks 623487 4096
+descriptor 1 28
+data 29 2396
+chunks 32768 126 507 20 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 2425 16
+pool 2441 63
+queue-limits 1 275
+max-volumes 5
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 29
+ reaper 30
+ object-map 2504 2505
+ address-blocks -
+ info-blocks 2441+1
+ bitmaps 0:2442
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 31
+ reaper 32
+ queues 33 34
+ object-map 2512 2513
+ volume 0 2506 2507 2508 2509 2510 2511
+ address-blocks -
+ info-blocks 2443+1
+ bitmaps 0:2444
+ pool-bitmap-slots 1+1
+ freed-pool 2:2441+2
+ freed-main 2:2504+2
+@ file 4 14 15 26 27
+blocks 741455 4096
+descriptor 1 36
+data 37 2860
+chunks 32768 126 507 23 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 2897 16
+pool 2913 72
+queue-limits 1 327
+max-volumes 6
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 2985 2986
+ address-blocks -
+ info-blocks 2913+1
+ bitmaps 0:2914
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 2993 2994
+ volume 0 2987 2988 2989 2990 2991 2992
+ address-blocks -
+ info-blocks 2915+1
+ bitmaps 0:2916
+ pool-bitmap-slots 1+1
+ freed-pool 2:2913+2
+ freed-main 2:2985+2
+@ file 4 14 15 26 27
+blocks 786435 4096
+descriptor 1 36
+data 37 3196
+chunks 32768 126 507 25 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 3233 16
+pool 3249 78
+queue-limits 1 347
+max-volumes 7
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 3327 3328
+ address-blocks -
+ info-blocks 3249+1
+ bitmaps 0:3250
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 3335 3336
+ volume 0 3329 3330 3331 3332 3333 3334
+ address-blocks -
+ info-blocks 3251+1
+ bitmaps 0:3252
+ pool-bitmap-slots 1+1
+ freed-pool 2:3249+2
+ freed-main 2:3327+2
+@ file 8 14 15 26 27
+blocks 881743 4096
+descriptor 1 40
+data 41 3364
+chunks 32768 126 507 27 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 3405 16
+pool 3421 84
+queue-limits 1 389
+max-volumes 7
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 41
+ reaper 42
+ object-map 3505 3506
+ address-blocks -
+ info-blocks 3421+1
+ bitmaps 0:3422
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 43
+ reaper 44
+ queues 45 46
+ object-map 3513 3514
+ volume 0 3507 3508 3509 3510 3511 3512
+ address-blocks -
+ info-blocks 3423+1
+ bitmaps 0:3424
+ pool-bitmap-slots 1+1
+ freed-pool 2:3421+2
+ freed-main 2:3505+2
+@ file 4 14 15 26 27
+blocks 262143 16384
+descriptor 1 12
+data 13 2124
+chunks 131072 510 2043 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 2137 16
+pool 2153 9
+queue-limits 1 15
+max-volumes 8
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 2162 2163
+ address-blocks -
+ info-blocks 2153+1
+ bitmaps 0:2154
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 2170 2171
+ volume 0 2164 2165 2166 2167 2168 2169
+ address-blocks -
+ info-blocks 2155+1
+ bitmaps 0:2156
+ pool-bitmap-slots 1+1
+ freed-pool 2:2153+2
+ freed-main 2:2162+2
+@ file 4 14 15 26 27
+blocks 1048575 4096
+descriptor 1 44
+data 45 3912
+chunks 32768 126 507 32 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 3957 16
+pool 3973 99
+queue-limits 1 462
+max-volumes 8
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 45
+ reaper 46
+ object-map 4072 4073
+ address-blocks -
+ info-blocks 3973+1
+ bitmaps 0:3974
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 47
+ reaper 48
+ queues 49 50
+ object-map 4080 4081
+ volume 0 4074 4075 4076 4077 4078 4079
+ address-blocks -
+ info-blocks 3975+1
+ bitmaps 0:3976
+ pool-bitmap-slots 1+1
+ freed-pool 2:3973+2
+ freed-main 2:4072+2
+@ file+device 14 14 15 15-intel 26 26-intel 27
+blocks 1048576 4096
+descriptor 1 48
+data 49 4112
+chunks 32768 126 507 32 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4161 16
+pool 4177 99
+queue-limits 1 512
+max-volumes 8
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 49
+ reaper 50
+ object-map 4276 4277
+ address-blocks -
+ info-blocks 4177+1
+ bitmaps 0:4178
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 51
+ reaper 52
+ queues 53 54
+ object-map 4284 4285
+ volume 0 4278 4279 4280 4281 4282 4283
+ address-blocks -
+ info-blocks 4179+1
+ bitmaps 0:4180
+ pool-bitmap-slots 1+1
+ freed-pool 2:4177+2
+ freed-main 2:4276+2
+@ file 8 14 15 26 27
+blocks 524288 8192
+descriptor 1 20
+data 21 2520
+chunks 65536 254 1019 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 2541 16
+pool 2557 27
+queue-limits 1 114
+max-volumes 8
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 2584 2585
+ address-blocks -
+ info-blocks 2557+1
+ bitmaps 0:2558
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 2592 2593
+ volume 0 2586 2587 2588 2589 2590 2591
+ address-blocks -
+ info-blocks 2559+1
+ bitmaps 0:2560
+ pool-bitmap-slots 1+1
+ freed-pool 2:2557+2
+ freed-main 2:2584+2
+@ file 12 14 15 26 27
+blocks 262144 16384
+descriptor 1 12
+data 13 2180
+chunks 131072 510 2043 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 2193 16
+pool 2209 9
+queue-limits 1 29
+max-volumes 8
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 2218 2219
+ address-blocks -
+ info-blocks 2209+1
+ bitmaps 0:2210
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 2226 2227
+ volume 0 2220 2221 2222 2223 2224 2225
+ address-blocks -
+ info-blocks 2211+1
+ bitmaps 0:2212
+ pool-bitmap-slots 1+1
+ freed-pool 2:2209+2
+ freed-main 2:2218+2
+@ file 4 14 15 26 27
+blocks 65536 65536
+descriptor 1 8
+data 9 276
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 285 16
+pool 301 6
+queue-limits 1 1
+max-volumes 8
+ephemeral-min 1
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 307 308
+ address-blocks -
+ info-blocks 301+1
+ bitmaps 0:302
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 315 316
+ volume 0 309 310 311 312 313 314
+ address-blocks -
+ info-blocks 303+1
+ bitmaps 0:304
+ pool-bitmap-slots 1+1
+ freed-pool 2:301+2
+ freed-main 2:307+2
+@ file 4 14 15 26 27
+blocks 1246974 4096
+descriptor 1 52
+data 53 4624
+chunks 32768 126 507 39 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4677 16
+pool 4693 120
+queue-limits 1 512
+max-volumes 10
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 53
+ reaper 54
+ object-map 4813 4814
+ address-blocks -
+ info-blocks 4693+1
+ bitmaps 0:4694
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 55
+ reaper 56
+ queues 57 58
+ object-map 4821 4822
+ volume 0 4815 4816 4817 4818 4819 4820
+ address-blocks -
+ info-blocks 4695+1
+ bitmaps 0:4696
+ pool-bitmap-slots 1+1
+ freed-pool 2:4693+2
+ freed-main 2:4813+2
+@ file 4 14 15 26 27
+blocks 1311743 4096
+descriptor 1 56
+data 57 4880
+chunks 32768 126 507 41 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4937 16
+pool 4953 126
+queue-limits 1 512
+max-volumes 11
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 57
+ reaper 58
+ object-map 5079 5080
+ address-blocks -
+ info-blocks 4953+1
+ bitmaps 0:4954
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 59
+ reaper 60
+ queues 61 62
+ object-map 5087 5088
+ volume 0 5081 5082 5083 5084 5085 5086
+ address-blocks -
+ info-blocks 4955+1
+ bitmaps 0:4956
+ pool-bitmap-slots 1+1
+ freed-pool 2:4953+2
+ freed-main 2:5079+2
+@ file 8 14 15 26 27
+blocks 1482910 4096
+descriptor 1 56
+data 57 5136
+chunks 32768 126 507 46 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5193 16
+pool 5209 141
+queue-limits 1 512
+max-volumes 12
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 57
+ reaper 58
+ object-map 5350 5351
+ address-blocks -
+ info-blocks 5209+1
+ bitmaps 0:5210
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 59
+ reaper 60
+ queues 61 62
+ object-map 5358 5359
+ volume 0 5352 5353 5354 5355 5356 5357
+ address-blocks -
+ info-blocks 5211+1
+ bitmaps 0:5212
+ pool-bitmap-slots 1+1
+ freed-pool 2:5209+2
+ freed-main 2:5350+2
+@ file 4 14 15 26 27
+blocks 1572863 4096
+descriptor 1 56
+data 57 5136
+chunks 32768 126 507 48 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5193 16
+pool 5209 147
+queue-limits 1 512
+max-volumes 12
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 57
+ reaper 58
+ object-map 5356 5357
+ address-blocks -
+ info-blocks 5209+1
+ bitmaps 0:5210
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 59
+ reaper 60
+ queues 61 62
+ object-map 5364 5365
+ volume 0 5358 5359 5360 5361 5362 5363
+ address-blocks -
+ info-blocks 5211+1
+ bitmaps 0:5212
+ pool-bitmap-slots 1+1
+ freed-pool 2:5209+2
+ freed-main 2:5356+2
+@ file 4 14 15 26 27
+blocks 1572864 4096
+descriptor 1 56
+data 57 5136
+chunks 32768 126 507 48 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5193 16
+pool 5209 147
+queue-limits 1 512
+max-volumes 12
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 57
+ reaper 58
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 5209+1
+ bitmaps 0:5210,3:5211
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 59
+ reaper 60
+ queues 61 62
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 5212+1
+ bitmaps 0:5210,2:5214,3:5213
+ pool-bitmap-slots 1+1
+ freed-pool 2:5209+1,2:5211+1
+ freed-main 2:122880+2
+@ file 8 14 15 26 27
+blocks 1763487 4096
+descriptor 1 60
+data 61 5648
+chunks 32768 126 507 54 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5709 16
+pool 5725 165
+queue-limits 1 512
+max-volumes 14
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 61
+ reaper 62
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 5725+1
+ bitmaps 0:5726,3:5727
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 63
+ reaper 64
+ queues 65 66
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 5728+1
+ bitmaps 0:5726,2:5730,3:5729
+ pool-bitmap-slots 1+1
+ freed-pool 2:5725+1,2:5727+1
+ freed-main 2:122880+2
+@ file 4 14 15 26 27
+blocks 262143 32768
+descriptor 1 12
+data 13 4144
+chunks 262144 1022 4091 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4157 16
+pool 4173 6
+queue-limits 1 8
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 4179 4180
+ address-blocks -
+ info-blocks 4173+1
+ bitmaps 0:4174
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 4187 4188
+ volume 0 4181 4182 4183 4184 4185 4186
+ address-blocks -
+ info-blocks 4175+1
+ bitmaps 0:4176
+ pool-bitmap-slots 1+1
+ freed-pool 2:4173+2
+ freed-main 2:4179+2
+@ file 4 14 15 26 27
+blocks 1048575 8192
+descriptor 1 32
+data 33 5024
+chunks 65536 254 1019 16 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5057 16
+pool 5073 51
+queue-limits 1 228
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 33
+ reaper 34
+ object-map 5124 5125
+ address-blocks -
+ info-blocks 5073+1
+ bitmaps 0:5074
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 35
+ reaper 36
+ queues 37 38
+ object-map 5132 5133
+ volume 0 5126 5127 5128 5129 5130 5131
+ address-blocks -
+ info-blocks 5075+1
+ bitmaps 0:5076
+ pool-bitmap-slots 1+1
+ freed-pool 2:5073+2
+ freed-main 2:5124+2
+@ file 4 14 15 26 27
+blocks 2097152 4096
+descriptor 1 68
+data 69 6160
+chunks 32768 126 507 64 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 6229 16
+pool 6245 195
+queue-limits 1 512
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 69
+ reaper 70
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 6245+1
+ bitmaps 0:6246,3:6247
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 71
+ reaper 72
+ queues 73 74
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 6248+1
+ bitmaps 0:6246,2:6250,3:6249
+ pool-bitmap-slots 1+1
+ freed-pool 2:6245+1,2:6247+1
+ freed-main 2:122880+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 2097152 4096
+descriptor 1 68
+data 69 6160
+chunks 32768 126 507 64 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 6229 16
+pool 6245 195
+queue-limits 1 512
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 69
+ reaper 70
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 6245+1
+ bitmaps 0:6246,3:6247
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 71
+ reaper 72
+ queues 73 74
+ object-map 65542 65543
+ volume 0 65536 65537 65538 65539 65540 65541
+ address-blocks -
+ info-blocks 6248+1
+ bitmaps 0:6246,2:6249,3:6247
+ pool-bitmap-slots 1+1
+ freed-pool 2:6245+1
+ freed-main 2:122880+2
+@ file 8 14 15 26 27
+blocks 1048576 8192
+descriptor 1 32
+data 33 5136
+chunks 65536 254 1019 16 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 5169 16
+pool 5185 51
+queue-limits 1 256
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 33
+ reaper 34
+ object-map 5236 5237
+ address-blocks -
+ info-blocks 5185+1
+ bitmaps 0:5186
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 35
+ reaper 36
+ queues 37 38
+ object-map 5244 5245
+ volume 0 5238 5239 5240 5241 5242 5243
+ address-blocks -
+ info-blocks 5187+1
+ bitmaps 0:5188
+ pool-bitmap-slots 1+1
+ freed-pool 2:5185+2
+ freed-main 2:5236+2
+@ file 8 14 15 26 27
+blocks 262144 32768
+descriptor 1 12
+data 13 4172
+chunks 262144 1022 4091 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4185 16
+pool 4201 6
+queue-limits 1 15
+max-volumes 16
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 4207 4208
+ address-blocks -
+ info-blocks 4201+1
+ bitmaps 0:4202
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 4215 4216
+ volume 0 4209 4210 4211 4212 4213 4214
+ address-blocks -
+ info-blocks 4203+1
+ bitmaps 0:4204
+ pool-bitmap-slots 1+1
+ freed-pool 2:4201+2
+ freed-main 2:4207+2
+@ file 4 14 15 26 27
+blocks 2493948 4096
+descriptor 1 76
+data 77 7184
+chunks 32768 126 507 77 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 7261 16
+pool 7277 234
+queue-limits 1 512
+max-volumes 20
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 77
+ reaper 78
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 7277+1
+ bitmaps 0:7278,3:7279
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 79
+ reaper 80
+ queues 81 82
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 7280+1
+ bitmaps 0:7278,2:7282,3:7281
+ pool-bitmap-slots 1+1
+ freed-pool 2:7277+1,2:7279+1
+ freed-main 2:122880+2
+@ file 4 14 15 26 27
+blocks 2965820 4096
+descriptor 1 84
+data 85 7952
+chunks 32768 126 507 91 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 8037 16
+pool 8053 276
+queue-limits 1 512
+max-volumes 23
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 85
+ reaper 86
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 8053+1
+ bitmaps 0:8054,3:8055
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 87
+ reaper 88
+ queues 89 90
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 8056+1
+ bitmaps 0:8054,2:8058,3:8057
+ pool-bitmap-slots 1+1
+ freed-pool 2:8053+1,2:8055+1
+ freed-main 2:122880+2
+@ file 4 14 15 26 27
+blocks 1572863 8192
+descriptor 1 40
+data 41 7184
+chunks 65536 254 1019 24 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 7225 16
+pool 7241 75
+queue-limits 1 256
+max-volumes 24
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 41
+ reaper 42
+ object-map 7316 7317
+ address-blocks -
+ info-blocks 7241+1
+ bitmaps 0:7242
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 43
+ reaper 44
+ queues 45 46
+ object-map 7324 7325
+ volume 0 7318 7319 7320 7321 7322 7323
+ address-blocks -
+ info-blocks 7243+1
+ bitmaps 0:7244
+ pool-bitmap-slots 1+1
+ freed-pool 2:7241+2
+ freed-main 2:7316+2
+@ file 4 14 15 26 27
+blocks 1572864 8192
+descriptor 1 40
+data 41 7184
+chunks 65536 254 1019 24 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 7225 16
+pool 7241 75
+queue-limits 1 256
+max-volumes 24
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 41
+ reaper 42
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 7241+1
+ bitmaps 0:7242,1:7243
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 43
+ reaper 44
+ queues 45 46
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 7244+1
+ bitmaps 0:7242,1:7245
+ pool-bitmap-slots 1+1
+ freed-pool 2:7241+1,2:7243+1
+ freed-main 2:122880+2
+@ file 4 14 15 26 27
+blocks 3526975 4096
+descriptor 1 96
+data 97 8976
+chunks 32768 126 507 108 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 9073 16
+pool 9089 327
+queue-limits 1 512
+max-volumes 27
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 97
+ reaper 98
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 9089+1
+ bitmaps 0:9090,3:9091
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 99
+ reaper 100
+ queues 101 102
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 9092+1
+ bitmaps 0:9090,2:9094,3:9093
+ pool-bitmap-slots 1+1
+ freed-pool 2:9089+1,2:9091+1
+ freed-main 2:122880+2
+@ file 4 14 15 26 27
+blocks 262143 65536
+descriptor 1 8
+data 9 4128
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 4137 16
+pool 4153 6
+queue-limits 1 4
+max-volumes 32
+ephemeral-min 4
+tx 1
+ descriptor 1 2
+ manager 9
+ reaper 10
+ object-map 4159 4160
+ address-blocks -
+ info-blocks 4153+1
+ bitmaps 0:4154
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 11
+ reaper 12
+ queues 13 14
+ object-map 4167 4168
+ volume 0 4161 4162 4163 4164 4165 4166
+ address-blocks -
+ info-blocks 4155+1
+ bitmaps 0:4156
+ pool-bitmap-slots 1+1
+ freed-pool 2:4153+2
+ freed-main 2:4159+2
+@ file 4 14 15 26 27
+blocks 1048575 16384
+descriptor 1 28
+data 29 8660
+chunks 131072 510 2043 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 8689 16
+pool 8705 27
+queue-limits 1 113
+max-volumes 32
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 29
+ reaper 30
+ object-map 8732 8733
+ address-blocks -
+ info-blocks 8705+1
+ bitmaps 0:8706
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 31
+ reaper 32
+ queues 33 34
+ object-map 8740 8741
+ volume 0 8734 8735 8736 8737 8738 8739
+ address-blocks -
+ info-blocks 8707+1
+ bitmaps 0:8708
+ pool-bitmap-slots 1+1
+ freed-pool 2:8705+2
+ freed-main 2:8732+2
+@ file 4 14 15 26 27
+blocks 4194304 4096
+descriptor 1 108
+data 109 10256
+chunks 32768 126 507 128 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 10365 16
+pool 10381 390
+queue-limits 1 512
+max-volumes 32
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 109
+ reaper 110
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 10381+2
+ bitmaps 0:10383,3:10384
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 111
+ reaper 112
+ queues 113 114
+ object-map 122884 122885
+ volume 0 122882 122883 65536 65537 65538 65539
+ address-blocks -
+ info-blocks 10385+1,10382+1
+ bitmaps 0:10383,2:10387,3:10386
+ pool-bitmap-slots 1+1
+ freed-pool 2:10381+1,2:10384+1
+ freed-main 2:122880+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 4194304 4096
+descriptor 1 108
+data 109 10256
+chunks 32768 126 507 128 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 10365 16
+pool 10381 390
+queue-limits 1 512
+max-volumes 32
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 109
+ reaper 110
+ object-map 122880 122881
+ address-blocks -
+ info-blocks 10381+2
+ bitmaps 0:10383,3:10384
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 111
+ reaper 112
+ queues 113 114
+ object-map 65542 65543
+ volume 0 65536 65537 65538 65539 65540 65541
+ address-blocks -
+ info-blocks 10385+1,10382+1
+ bitmaps 0:10383,2:10386,3:10384
+ pool-bitmap-slots 1+1
+ freed-pool 2:10381+1
+ freed-main 2:122880+2
+@ file 8 14 15 26 27
+blocks 1048576 16384
+descriptor 1 28
+data 29 8720
+chunks 131072 510 2043 8 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 8749 16
+pool 8765 27
+queue-limits 1 128
+max-volumes 32
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 29
+ reaper 30
+ object-map 8792 8793
+ address-blocks -
+ info-blocks 8765+1
+ bitmaps 0:8766
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 31
+ reaper 32
+ queues 33 34
+ object-map 8800 8801
+ volume 0 8794 8795 8796 8797 8798 8799
+ address-blocks -
+ info-blocks 8767+1
+ bitmaps 0:8768
+ pool-bitmap-slots 1+1
+ freed-pool 2:8765+2
+ freed-main 2:8792+2
+@ file 8 14 15 26 27
+blocks 262144 65536
+descriptor 1 12
+data 13 8240
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 8253 16
+pool 8269 6
+queue-limits 1 8
+max-volumes 32
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 8275 8276
+ address-blocks -
+ info-blocks 8269+1
+ bitmaps 0:8270
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 8283 8284
+ volume 0 8277 8278 8279 8280 8281 8282
+ address-blocks -
+ info-blocks 8271+1
+ bitmaps 0:8272
+ pool-bitmap-slots 1+1
+ freed-pool 2:8269+2
+ freed-main 2:8275+2
+@ file 4 14 15 26 27
+blocks 298768 65536
+descriptor 1 12
+data 13 9520
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 9533 16
+pool 9549 6
+queue-limits 1 8
+max-volumes 37
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 9555 9556
+ address-blocks -
+ info-blocks 9549+1
+ bitmaps 0:9550
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 9563 9564
+ volume 0 9557 9558 9559 9560 9561 9562
+ address-blocks -
+ info-blocks 9551+1
+ bitmaps 0:9552
+ pool-bitmap-slots 1+1
+ freed-pool 2:9549+2
+ freed-main 2:9555+2
+@ file 4 14 15 26 27
+blocks 298896 65536
+descriptor 1 12
+data 13 9520
+chunks 524288 2046 8187 1 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 9533 16
+pool 9549 6
+queue-limits 1 8
+max-volumes 37
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 13
+ reaper 14
+ object-map 9555 9556
+ address-blocks -
+ info-blocks 9549+1
+ bitmaps 0:9550
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 15
+ reaper 16
+ queues 17 18
+ object-map 9563 9564
+ volume 0 9557 9558 9559 9560 9561 9562
+ address-blocks -
+ info-blocks 9551+1
+ bitmaps 0:9552
+ pool-bitmap-slots 1+1
+ freed-pool 2:9549+2
+ freed-main 2:9555+2
+@ file 4 14 15 26 27
+blocks 4987896 4096
+descriptor 1 124
+data 125 12048
+chunks 32768 126 507 153 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 12173 16
+pool 12189 465
+queue-limits 1 512
+max-volumes 39
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 125
+ reaper 126
+ object-map 146130 146131
+ address-blocks -
+ info-blocks 12189+2
+ bitmaps 0:12191,4:12192
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 127
+ reaper 128
+ queues 129 130
+ object-map 146134 146135
+ volume 0 146132 146133 77935 77936 77937 77938
+ address-blocks -
+ info-blocks 12193+1,12190+1
+ bitmaps 0:12191,2:12195,4:12194
+ pool-bitmap-slots 1+1
+ freed-pool 2:12189+1,2:12192+1
+ freed-main 2:146130+2
+@ file 4 14 15 26 27
+blocks 5931641 4096
+descriptor 1 144
+data 145 13840
+chunks 32768 126 507 182 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 13985 16
+pool 14001 552
+queue-limits 1 512
+max-volumes 46
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 145
+ reaper 146
+ object-map 173778 173779
+ address-blocks -
+ info-blocks 14001+2
+ bitmaps 0:14003,5:14004
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 147
+ reaper 148
+ queues 149 150
+ object-map 173782 173783
+ volume 0 173780 173781 92681 92682 92683 92684
+ address-blocks -
+ info-blocks 14005+1,14002+1
+ bitmaps 0:14003,2:14007,5:14006
+ pool-bitmap-slots 1+1
+ freed-pool 2:14001+1,2:14004+1
+ freed-main 2:173778+2
+@ file 4 14 15 26 27
+blocks 1572863 16384
+descriptor 1 36
+data 37 12816
+chunks 131072 510 2043 12 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 12853 16
+pool 12869 39
+queue-limits 1 128
+max-volumes 48
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 12908 12909
+ address-blocks -
+ info-blocks 12869+1
+ bitmaps 0:12870
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 12916 12917
+ volume 0 12910 12911 12912 12913 12914 12915
+ address-blocks -
+ info-blocks 12871+1
+ bitmaps 0:12872
+ pool-bitmap-slots 1+1
+ freed-pool 2:12869+2
+ freed-main 2:12908+2
+@ file 4 14 15 26 27
+blocks 1572864 16384
+descriptor 1 36
+data 37 12816
+chunks 131072 510 2043 12 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 12853 16
+pool 12869 39
+queue-limits 1 128
+max-volumes 48
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 188416 188417
+ address-blocks -
+ info-blocks 12869+1
+ bitmaps 0:12870,1:12871
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 188420 188421
+ volume 0 188418 188419 98304 98305 98306 98307
+ address-blocks -
+ info-blocks 12872+1
+ bitmaps 0:12874,1:12873
+ pool-bitmap-slots 1+1
+ freed-pool 2:12869+3
+ freed-main 2:188416+2
+@ file 4 14 15 26 27
+blocks 7053950 4096
+descriptor 1 164
+data 165 15888
+chunks 32768 126 507 216 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 16053 16
+pool 16069 654
+queue-limits 1 512
+max-volumes 54
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 165
+ reaper 166
+ object-map 206658 206659
+ address-blocks -
+ info-blocks 16069+2
+ bitmaps 0:16071,6:16072
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 167
+ reaper 168
+ queues 169 170
+ object-map 206662 206663
+ volume 0 206660 206661 110217 110218 110219 110220
+ address-blocks -
+ info-blocks 16073+1,16070+1
+ bitmaps 0:16071,3:16075,6:16074
+ pool-bitmap-slots 1+1
+ freed-pool 2:16069+1,2:16072+1
+ freed-main 2:206658+2
+@ file 4 14 15 26 27
+blocks 1048575 32768
+descriptor 1 28
+data 29 16628
+chunks 262144 1022 4091 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 16657 16
+pool 16673 15
+queue-limits 1 57
+max-volumes 64
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 29
+ reaper 30
+ object-map 16688 16689
+ address-blocks -
+ info-blocks 16673+1
+ bitmaps 0:16674
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 31
+ reaper 32
+ queues 33 34
+ object-map 16696 16697
+ volume 0 16690 16691 16692 16693 16694 16695
+ address-blocks -
+ info-blocks 16675+1
+ bitmaps 0:16676
+ pool-bitmap-slots 1+1
+ freed-pool 2:16673+2
+ freed-main 2:16688+2
+@ file 4 14 15 26 27
+blocks 8388608 4096
+descriptor 1 188
+data 189 18448
+chunks 32768 126 507 256 3 0
+manager 1 2568 2592 2520 2528 2536
+pool-bitmaps 1 18637 16
+pool 18653 777
+queue-limits 1 512
+max-volumes 64
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 189
+ reaper 190
+ object-map 245760 245761
+ address-blocks -
+ info-blocks 18653+3
+ bitmaps 0:18656,7:18657
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 191
+ reaper 192
+ queues 193 194
+ object-map 245764 245765
+ volume 0 245762 245763 131072 131073 131074 131075
+ address-blocks -
+ info-blocks 18658+1,18654+2
+ bitmaps 0:18656,4:18660,7:18659
+ pool-bitmap-slots 1+1
+ freed-pool 2:18653+1,2:18657+1
+ freed-main 2:245760+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 8388608 4096
+descriptor 1 188
+data 189 18448
+chunks 32768 126 507 256 3 0
+manager 1 2568 2592 2520 2528 2536
+pool-bitmaps 1 18637 16
+pool 18653 777
+queue-limits 1 512
+max-volumes 64
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 189
+ reaper 190
+ object-map 245760 245761
+ address-blocks -
+ info-blocks 18653+3
+ bitmaps 0:18656,7:18657
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 191
+ reaper 192
+ queues 193 194
+ object-map 131078 131079
+ volume 0 131072 131073 131074 131075 131076 131077
+ address-blocks -
+ info-blocks 18658+1,18654+2
+ bitmaps 0:18656,4:18659,7:18657
+ pool-bitmap-slots 1+1
+ freed-pool 2:18653+1
+ freed-main 2:245760+2
+@ file 8 14 15 26 27
+blocks 1048576 32768
+descriptor 1 28
+data 29 16656
+chunks 262144 1022 4091 4 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 16685 16
+pool 16701 15
+queue-limits 1 64
+max-volumes 64
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 29
+ reaper 30
+ object-map 16716 16717
+ address-blocks -
+ info-blocks 16701+1
+ bitmaps 0:16702
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 31
+ reaper 32
+ queues 33 34
+ object-map 16724 16725
+ volume 0 16718 16719 16720 16721 16722 16723
+ address-blocks -
+ info-blocks 16703+1
+ bitmaps 0:16704
+ pool-bitmap-slots 1+1
+ freed-pool 2:16701+2
+ freed-main 2:16716+2
+@ file 4 14 15 26 27
+blocks 597520 65536
+descriptor 1 16
+data 17 18768
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 18785 16
+pool 18801 9
+queue-limits 1 16
+max-volumes 73
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 17
+ reaper 18
+ object-map 18810 18811
+ address-blocks -
+ info-blocks 18801+1
+ bitmaps 0:18802
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 19
+ reaper 20
+ queues 21 22
+ object-map 18818 18819
+ volume 0 18812 18813 18814 18815 18816 18817
+ address-blocks -
+ info-blocks 18803+1
+ bitmaps 0:18804
+ pool-bitmap-slots 1+1
+ freed-pool 2:18801+2
+ freed-main 2:18810+2
+@ file 4 14 15 26 27
+blocks 597776 65536
+descriptor 1 16
+data 17 18768
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 18785 16
+pool 18801 9
+queue-limits 1 16
+max-volumes 73
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 17
+ reaper 18
+ object-map 18810 18811
+ address-blocks -
+ info-blocks 18801+1
+ bitmaps 0:18802
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 19
+ reaper 20
+ queues 21 22
+ object-map 18818 18819
+ volume 0 18812 18813 18814 18815 18816 18817
+ address-blocks -
+ info-blocks 18803+1
+ bitmaps 0:18804
+ pool-bitmap-slots 1+1
+ freed-pool 2:18801+2
+ freed-main 2:18810+2
+@ file 4 14 15 26 27
+blocks 9975792 4096
+descriptor 1 220
+data 221 21776
+chunks 32768 126 507 305 3 0
+manager 1 2568 2592 2520 2528 2536
+pool-bitmaps 1 21997 16
+pool 22013 924
+queue-limits 1 512
+max-volumes 77
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 221
+ reaper 222
+ object-map 292260 292261
+ address-blocks -
+ info-blocks 22013+3
+ bitmaps 0:22016,8:22017
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 223
+ reaper 224
+ queues 225 226
+ object-map 292264 292265
+ volume 0 292262 292263 155871 155872 155873 155874
+ address-blocks -
+ info-blocks 22018+1,22014+2
+ bitmaps 0:22016,4:22020,8:22019
+ pool-bitmap-slots 1+1
+ freed-pool 2:22013+1,2:22017+1
+ freed-main 2:292260+2
+@ file 4 14 15 26 27
+blocks 11863283 4096
+descriptor 1 256
+data 257 25360
+chunks 32768 126 507 363 3 0
+manager 1 2568 2592 2520 2528 2536
+pool-bitmaps 1 25617 16
+pool 25633 1098
+queue-limits 1 512
+max-volumes 91
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 257
+ reaper 258
+ object-map 347557 347558
+ address-blocks -
+ info-blocks 25633+3
+ bitmaps 0:25636,10:25637
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 259
+ reaper 260
+ queues 261 262
+ object-map 347561 347562
+ volume 0 347559 347560 185363 185364 185365 185366
+ address-blocks -
+ info-blocks 25638+1,25634+2
+ bitmaps 0:25636,5:25640,10:25639
+ pool-bitmap-slots 1+1
+ freed-pool 2:25633+1,2:25637+1
+ freed-main 2:347557+2
+@ file 4 14 15 26 27
+blocks 1572863 32768
+descriptor 1 36
+data 37 24848
+chunks 262144 1022 4091 6 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 24885 16
+pool 24901 21
+queue-limits 1 64
+max-volumes 96
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 24922 24923
+ address-blocks -
+ info-blocks 24901+1
+ bitmaps 0:24902
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 24930 24931
+ volume 0 24924 24925 24926 24927 24928 24929
+ address-blocks -
+ info-blocks 24903+1
+ bitmaps 0:24904
+ pool-bitmap-slots 1+1
+ freed-pool 2:24901+2
+ freed-main 2:24922+2
+@ file 4 14 15 26 27
+blocks 1572864 32768
+descriptor 1 36
+data 37 24848
+chunks 262144 1022 4091 6 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 24885 16
+pool 24901 21
+queue-limits 1 64
+max-volumes 96
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 37
+ reaper 38
+ object-map 389120 389121
+ address-blocks -
+ info-blocks 24901+1
+ bitmaps 0:24902,1:24903
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 39
+ reaper 40
+ queues 41 42
+ object-map 389124 389125
+ volume 0 389122 389123 196608 196609 196610 196611
+ address-blocks -
+ info-blocks 24904+1
+ bitmaps 0:24906,1:24905
+ pool-bitmap-slots 1+1
+ freed-pool 2:24901+3
+ freed-main 2:389120+2
+@ file 4 14 15 26 27
+blocks 14107900 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 431 4 0
+manager 1 2568 2600 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 1305
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 413317 413318
+ address-blocks -
+ info-blocks 27969+4
+ bitmaps 0:27973,12:27974
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 413321 413322
+ volume 0 413319 413320 220435 220436 220437 220438
+ address-blocks -
+ info-blocks 27975+1,27970+3
+ bitmaps 0:27973,6:27977,12:27976
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27974+1
+ freed-main 2:413317+2
+@ file 4 14 15 26 27
+blocks 896272 65536
+descriptor 1 20
+data 21 25712
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25733 16
+pool 25749 9
+queue-limits 1 24
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 25758 25759
+ address-blocks -
+ info-blocks 25749+1
+ bitmaps 0:25750
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 25766 25767
+ volume 0 25760 25761 25762 25763 25764 25765
+ address-blocks -
+ info-blocks 25751+1
+ bitmaps 0:25752
+ pool-bitmap-slots 1+1
+ freed-pool 2:25749+2
+ freed-main 2:25758+2
+@ file 4 14 15 26 27
+blocks 896656 65536
+descriptor 1 20
+data 21 25712
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25733 16
+pool 25749 9
+queue-limits 1 24
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 25758 25759
+ address-blocks -
+ info-blocks 25749+1
+ bitmaps 0:25750
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 25766 25767
+ volume 0 25760 25761 25762 25763 25764 25765
+ address-blocks -
+ info-blocks 25751+1
+ bitmaps 0:25752
+ pool-bitmap-slots 1+1
+ freed-pool 2:25749+2
+ freed-main 2:25758+2
+@ file 4 14 15 26 27
+blocks 1048575 65536
+descriptor 1 20
+data 21 25732
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25753 16
+pool 25769 9
+queue-limits 1 29
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 25778 25779
+ address-blocks -
+ info-blocks 25769+1
+ bitmaps 0:25770
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 25786 25787
+ volume 0 25780 25781 25782 25783 25784 25785
+ address-blocks -
+ info-blocks 25771+1
+ bitmaps 0:25772
+ pool-bitmap-slots 1+1
+ freed-pool 2:25769+2
+ freed-main 2:25778+2
+@ file 4 14 15 26 27
+blocks 16777216 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 512 5 0
+manager 1 2568 2608 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 1551
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 491520 491521
+ address-blocks -
+ info-blocks 27969+5
+ bitmaps 0:27974,15:27975
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 491524 491525
+ volume 0 491522 491523 262144 262145 262146 262147
+ address-blocks -
+ info-blocks 27976+1,27970+4
+ bitmaps 0:27974,8:27978,15:27977
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27975+1
+ freed-main 2:491520+2
+@ device 10 14 15 15-intel 26 26-intel 27
+blocks 16777216 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 512 5 0
+manager 1 2568 2608 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 1551
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 491520 491521
+ address-blocks -
+ info-blocks 27969+5
+ bitmaps 0:27974,15:27975
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 262150 262151
+ volume 0 262144 262145 262146 262147 262148 262149
+ address-blocks -
+ info-blocks 27976+1,27970+4
+ bitmaps 0:27974,8:27977,15:27975
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1
+ freed-main 2:491520+2
+@ file 4 14 15 26 27
+blocks 8388608 8192
+descriptor 1 136
+data 137 26640
+chunks 65536 254 1019 128 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 26777 16
+pool 26793 387
+queue-limits 1 256
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 137
+ reaper 138
+ object-map 507904 507905
+ address-blocks -
+ info-blocks 26793+1
+ bitmaps 0:26794,7:26795
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 139
+ reaper 140
+ queues 141 142
+ object-map 507908 507909
+ volume 0 507906 507907 262144 262145 262146 262147
+ address-blocks -
+ info-blocks 26796+1
+ bitmaps 0:26794,4:26798,7:26797
+ pool-bitmap-slots 1+1
+ freed-pool 2:26793+1,2:26795+1
+ freed-main 2:507904+2
+@ file 8 14 15 26 27
+blocks 4194304 16384
+descriptor 1 72
+data 73 26128
+chunks 131072 510 2043 32 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 26201 16
+pool 26217 99
+queue-limits 1 128
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 73
+ reaper 74
+ object-map 516096 516097
+ address-blocks -
+ info-blocks 26217+1
+ bitmaps 0:26218,3:26219
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 75
+ reaper 76
+ queues 77 78
+ object-map 516100 516101
+ volume 0 516098 516099 262144 262145 262146 262147
+ address-blocks -
+ info-blocks 26220+1
+ bitmaps 0:26218,2:26222,3:26221
+ pool-bitmap-slots 1+1
+ freed-pool 2:26217+1,2:26219+1
+ freed-main 2:516096+2
+@ file 12 14 15 26 27
+blocks 1048576 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 2 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 9
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 25790 25791
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 25798 25799
+ volume 0 25792 25793 25794 25795 25796 25797
+ address-blocks -
+ info-blocks 25783+1
+ bitmaps 0:25784
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+2
+ freed-main 2:25790+2
+@ file 4 14 15 26 27
+blocks 19951584 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 609 5 0
+manager 1 2568 2608 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 1842
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 570879 570880
+ address-blocks -
+ info-blocks 27969+5
+ bitmaps 0:27974,17:27975
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 570883 570884
+ volume 0 570881 570882 301823 301824 301825 301826
+ address-blocks -
+ info-blocks 27976+1,27970+4
+ bitmaps 0:27974,9:27978,17:27977
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27975+1
+ freed-main 2:570879+2
+@ file 4 14 15 26 27
+blocks 23726566 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 725 6 0
+manager 1 2568 2616 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 2193
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 665253 665254
+ address-blocks -
+ info-blocks 27969+6
+ bitmaps 0:27975,20:27976
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 665257 665258
+ volume 0 665255 665256 349010 349011 349012 349013
+ address-blocks -
+ info-blocks 27977+1,27970+5
+ bitmaps 0:27975,10:27979,20:27978
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27976+1
+ freed-main 2:665253+2
+@ file 4 14 15 26 27
+blocks 1572863 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 3 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 12
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 25793 25794
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 25801 25802
+ volume 0 25795 25796 25797 25798 25799 25800
+ address-blocks -
+ info-blocks 25783+1
+ bitmaps 0:25784
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+2
+ freed-main 2:25793+2
+@ file 4 14 15 26 27
+blocks 1572864 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 3 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 12
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 391168 391169
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 391172 391173
+ volume 0 391170 391171 196608 196609 196610 196611
+ address-blocks -
+ info-blocks 25783+1
+ bitmaps 0:25784
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+2
+ freed-main 2:391168+2
+@ file 4 14 15 26 27
+blocks 28215801 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 862 7 0
+manager 1 2568 2624 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 2607
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 777484 777485
+ address-blocks -
+ info-blocks 27969+7
+ bitmaps 0:27976,23:27977
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 777488 777489
+ volume 0 777486 777487 405126 405127 405128 405129
+ address-blocks -
+ info-blocks 27978+1,27970+6
+ bitmaps 0:27976,12:27980,23:27979
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27977+1
+ freed-main 2:777484+2
+@ file 4 14 15 26 27
+blocks 33554432 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 1024 9 0
+manager 1 2568 2640 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 3099
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 910950 910951
+ address-blocks -
+ info-blocks 27969+9
+ bitmaps 0:27978,27:27979
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 910954 910955
+ volume 0 910952 910953 471859 471860 471861 471862
+ address-blocks -
+ info-blocks 27980+1,27970+8
+ bitmaps 0:27978,14:27982,27:27981
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1,2:27979+1
+ freed-main 2:910950+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 33554432 4096
+descriptor 1 280
+data 281 27672
+chunks 32768 126 507 1024 9 0
+manager 1 2568 2640 2520 2528 2536
+pool-bitmaps 1 27953 16
+pool 27969 3099
+queue-limits 3 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 910950 910951
+ address-blocks -
+ info-blocks 27969+9
+ bitmaps 0:27978,27:27979
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 471865 471866
+ volume 0 471859 471860 471861 471862 471863 471864
+ address-blocks -
+ info-blocks 27980+1,27970+8
+ bitmaps 0:27978,14:27981,27:27979
+ pool-bitmap-slots 1+1
+ freed-pool 2:27969+1
+ freed-main 2:910950+2
+@ file 4 14 15 26 27
+blocks 39903169 4096
+descriptor 1 280
+data 281 27676
+chunks 32768 126 507 1218 10 0
+manager 1 2568 2648 2520 2528 2536
+pool-bitmaps 1 27957 16
+pool 27973 3684
+queue-limits 4 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 960549 960550
+ address-blocks -
+ info-blocks 27973+10
+ bitmaps 0:27983,29:27984
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 960553 960554
+ volume 0 960551 960552 496658 496659 496660 496661
+ address-blocks -
+ info-blocks 27985+1,27974+9
+ bitmaps 0:27983,15:27987,29:27986
+ pool-bitmap-slots 1+1
+ freed-pool 2:27973+1,2:27984+1
+ freed-main 2:960549+2
+@ file 4 14 15 26 27
+blocks 47453132 4096
+descriptor 1 280
+data 281 27676
+chunks 32768 126 507 1449 12 0
+manager 1 2568 2664 2520 2528 2536
+pool-bitmaps 1 27957 16
+pool 27973 4383
+queue-limits 4 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1019533 1019534
+ address-blocks -
+ info-blocks 27973+12
+ bitmaps 0:27985,31:27986
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1019537 1019538
+ volume 0 1019535 1019536 526150 526151 526152 526153
+ address-blocks -
+ info-blocks 27987+1,27974+11
+ bitmaps 0:27985,16:27989,31:27988
+ pool-bitmap-slots 1+1
+ freed-pool 2:27973+1,2:27986+1
+ freed-main 2:1019533+2
+@ file 4 14 15 26 27
+blocks 56431603 4096
+descriptor 1 280
+data 281 27680
+chunks 32768 126 507 1723 14 0
+manager 1 2568 2680 2520 2528 2536
+pool-bitmaps 1 27961 16
+pool 27977 5211
+queue-limits 5 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1089678 1089679
+ address-blocks -
+ info-blocks 27977+14
+ bitmaps 0:27991,1:27992,33:27993
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1089682 1089683
+ volume 0 1089680 1089681 561223 561224 561225 561226
+ address-blocks -
+ info-blocks 27994+1,27978+13
+ bitmaps 0:27991,1:27992,17:27996,33:27995
+ pool-bitmap-slots 1+1
+ freed-pool 2:27977+1,2:27993+1
+ freed-main 2:1089678+2
+@ file 4 14 15 26 27
+blocks 67108864 4096
+descriptor 1 280
+data 281 27684
+chunks 32768 126 507 2048 17 0
+manager 1 2568 2704 2520 2528 2536
+pool-bitmaps 1 27965 16
+pool 27981 6195
+queue-limits 6 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1173094 1173095
+ address-blocks -
+ info-blocks 27981+17
+ bitmaps 0:27998,1:27999,35:28000
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1173098 1173099
+ volume 0 1173096 1173097 602931 602932 602933 602934
+ address-blocks -
+ info-blocks 28001+1,27982+16
+ bitmaps 0:27998,1:27999,18:28003,35:28002
+ pool-bitmap-slots 1+1
+ freed-pool 2:27981+1,2:28000+1
+ freed-main 2:1173094+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 67108864 4096
+descriptor 1 280
+data 281 27684
+chunks 32768 126 507 2048 17 0
+manager 1 2568 2704 2520 2528 2536
+pool-bitmaps 1 27965 16
+pool 27981 6195
+queue-limits 6 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1173094 1173095
+ address-blocks -
+ info-blocks 27981+17
+ bitmaps 0:27998,1:27999,35:28000
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 602937 602938
+ volume 0 602931 602932 602933 602934 602935 602936
+ address-blocks -
+ info-blocks 28001+1,27982+16
+ bitmaps 0:27998,1:27999,18:28002,35:28000
+ pool-bitmap-slots 1+1
+ freed-pool 2:27981+1
+ freed-main 2:1173094+2
+@ file 4 14 15 26 27
+blocks 4456448 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 9 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 30
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1112064 1112065
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1112068 1112069
+ volume 0 1112066 1112067 557056 557057 557058 557059
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1112064+2
+@ file 4 14 15 26 27
+blocks 4456449 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 9 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 30
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1112064 1112065
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1112068 1112069
+ volume 0 1112066 1112067 557056 557057 557058 557059
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1112064+2
+@ file 4 14 15 26 27
+blocks 4980736 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 10 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 33
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1243136 1243137
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1243140 1243141
+ volume 0 1243138 1243139 622592 622593 622594 622595
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1243136+2
+@ file 4 14 15 26 27
+blocks 4980737 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 10 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 33
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1243136 1243137
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1243140 1243141
+ volume 0 1243138 1243139 622592 622593 622594 622595
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1243136+2
+@ file 4 14 15 26 27
+blocks 79806338 4096
+descriptor 1 280
+data 281 27688
+chunks 32768 126 507 2436 20 0
+manager 1 2568 2728 2520 2528 2536
+pool-bitmaps 1 27969 16
+pool 27985 7368
+queue-limits 7 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1252453 1252454
+ address-blocks -
+ info-blocks 27985+20
+ bitmaps 0:28005,1:28006,38:28007
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1252457 1252458
+ volume 0 1252455 1252456 642610 642611 642612 642613
+ address-blocks -
+ info-blocks 28008+1,27986+19
+ bitmaps 0:28005,1:28006,19:28010,38:28009
+ pool-bitmap-slots 1+1
+ freed-pool 2:27985+1,2:28007+1
+ freed-main 2:1252453+2
+@ file 4 14 15 26 27
+blocks 5242872 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 10 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 33
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1308670 1308671
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1308674 1308675
+ volume 0 1308672 1308673 655359 655360 655361 655362
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1308670+2
+@ file 4 14 15 26 27
+blocks 5242880 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 10 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 33
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1308671 1308672
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1308675 1308676
+ volume 0 1308673 1308674 655359 655360 655361 655362
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1308671+2
+@ file 4 14 15 26 27
+blocks 5242888 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 11 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 36
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 1308672 1308673
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,2:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 1308676 1308677
+ volume 0 1308674 1308675 655360 655361 655362 655363
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,1:25786,2:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:1308672+2
+@ file 4 14 15 26 27
+blocks 94906265 4096
+descriptor 1 280
+data 281 27692
+chunks 32768 126 507 2897 23 0
+manager 1 2568 2752 2520 2528 2536
+pool-bitmaps 1 27973 16
+pool 27989 8760
+queue-limits 8 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1346828 1346829
+ address-blocks -
+ info-blocks 27989+23
+ bitmaps 0:28012,1:28013,41:28014
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1346832 1346833
+ volume 0 1346830 1346831 689798 689799 689800 689801
+ address-blocks -
+ info-blocks 28015+1,27990+22
+ bitmaps 0:28012,1:28013,21:28017,41:28016
+ pool-bitmap-slots 1+1
+ freed-pool 2:27989+1,2:28014+1
+ freed-main 2:1346828+2
+@ file 4 14 15 26 27
+blocks 112863206 4096
+descriptor 1 280
+data 281 27700
+chunks 32768 126 507 3445 28 0
+manager 1 2568 2792 2520 2528 2536
+pool-bitmaps 1 27981 16
+pool 27997 10419
+queue-limits 10 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1459059 1459060
+ address-blocks -
+ info-blocks 27997+28
+ bitmaps 0:28025,1:28026,44:28027
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1459063 1459064
+ volume 0 1459061 1459062 745913 745914 745915 745916
+ address-blocks -
+ info-blocks 28028+1,27998+27
+ bitmaps 0:28025,1:28026,22:28030,44:28029
+ pool-bitmap-slots 1+1
+ freed-pool 2:27997+1,2:28027+1
+ freed-main 2:1459059+2
+@ file 4 14 15 26 27
+blocks 134217728 4096
+descriptor 1 280
+data 281 27704
+chunks 32768 126 507 4096 33 0
+manager 1 2568 2832 2520 2528 2536
+pool-bitmaps 1 27985 16
+pool 28001 12387
+queue-limits 11 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1592524 1592525
+ address-blocks -
+ info-blocks 28001+33
+ bitmaps 0:28034,1:28035,48:28036
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1592528 1592529
+ volume 0 1592526 1592527 812646 812647 812648 812649
+ address-blocks -
+ info-blocks 28037+1,28002+32
+ bitmaps 0:28034,1:28035,24:28039,48:28038
+ pool-bitmap-slots 1+1
+ freed-pool 2:28001+1,2:28036+1
+ freed-main 2:1592524+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 134217728 4096
+descriptor 1 280
+data 281 27704
+chunks 32768 126 507 4096 33 0
+manager 1 2568 2832 2520 2528 2536
+pool-bitmaps 1 27985 16
+pool 28001 12387
+queue-limits 11 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1592524 1592525
+ address-blocks -
+ info-blocks 28001+33
+ bitmaps 0:28034,1:28035,48:28036
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 812652 812653
+ volume 0 812646 812647 812648 812649 812650 812651
+ address-blocks -
+ info-blocks 28037+1,28002+32
+ bitmaps 0:28034,1:28035,24:28038,48:28036
+ pool-bitmap-slots 1+1
+ freed-pool 2:28001+1
+ freed-main 2:1592524+2
+@ file 4 14 15 26 27
+blocks 159612677 4096
+descriptor 1 280
+data 281 27712
+chunks 32768 126 507 4871 39 0
+manager 1 2568 2880 2520 2528 2536
+pool-bitmaps 1 27993 16
+pool 28009 14730
+queue-limits 13 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1751243 1751244
+ address-blocks -
+ info-blocks 28009+39
+ bitmaps 0:28048,1:28049,53:28050
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1751247 1751248
+ volume 0 1751245 1751246 892005 892006 892007 892008
+ address-blocks -
+ info-blocks 28051+1,28010+38
+ bitmaps 0:28048,1:28049,27:28053,53:28052
+ pool-bitmap-slots 1+1
+ freed-pool 2:28009+1,2:28050+1
+ freed-main 2:1751243+2
+@ file 4 14 15 26 27
+blocks 189812531 4096
+descriptor 1 280
+data 281 27724
+chunks 32768 126 507 5793 46 0
+manager 1 2568 2936 2520 2528 2536
+pool-bitmaps 1 28005 16
+pool 28021 17517
+queue-limits 16 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 1939992 1939993
+ address-blocks -
+ info-blocks 28021+46
+ bitmaps 0:28067,1:28068,59:28069
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1939996 1939997
+ volume 0 1939994 1939995 986380 986381 986382 986383
+ address-blocks -
+ info-blocks 28070+1,28022+45
+ bitmaps 0:28067,1:28068,30:28072,59:28071
+ pool-bitmap-slots 1+1
+ freed-pool 2:28021+1,2:28069+1
+ freed-main 2:1939992+2
+@ file 4 14 15 26 27
+blocks 225726412 4096
+descriptor 1 280
+data 281 27736
+chunks 32768 126 507 6889 55 0
+manager 1 2568 3008 2520 2528 2536
+pool-bitmaps 1 28017 16
+pool 28033 20832
+queue-limits 19 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 2164454 2164455
+ address-blocks -
+ info-blocks 28033+55
+ bitmaps 0:28088,1:28089,66:28090
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 2164458 2164459
+ volume 0 2164456 2164457 1098611 1098612 1098613 1098614
+ address-blocks -
+ info-blocks 28091+1,28034+54
+ bitmaps 0:28088,1:28089,33:28093,66:28092
+ pool-bitmap-slots 1+1
+ freed-pool 2:28033+1,2:28090+1
+ freed-main 2:2164454+2
+@ file 4 14 15 26 27
+blocks 268435456 4096
+descriptor 1 280
+data 281 27748
+chunks 32768 126 507 8192 66 0
+manager 1 2568 3096 2520 2528 2536
+pool-bitmaps 1 28029 16
+pool 28045 24774
+queue-limits 22 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 2431385 2431386
+ address-blocks -
+ info-blocks 28045+66
+ bitmaps 0:28111,1:28112,74:28113
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 2431389 2431390
+ volume 0 2431387 2431388 1232076 1232077 1232078 1232079
+ address-blocks -
+ info-blocks 28114+1,28046+65
+ bitmaps 0:28111,1:28112,37:28116,74:28115
+ pool-bitmap-slots 1+1
+ freed-pool 2:28045+1,2:28113+1
+ freed-main 2:2431385+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 268435456 4096
+descriptor 1 280
+data 281 27748
+chunks 32768 126 507 8192 66 0
+manager 1 2568 3096 2520 2528 2536
+pool-bitmaps 1 28029 16
+pool 28045 24774
+queue-limits 22 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 2431385 2431386
+ address-blocks -
+ info-blocks 28045+66
+ bitmaps 0:28111,1:28112,74:28113
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 1232082 1232083
+ volume 0 1232076 1232077 1232078 1232079 1232080 1232081
+ address-blocks -
+ info-blocks 28114+1,28046+65
+ bitmaps 0:28111,1:28112,37:28115,74:28113
+ pool-bitmap-slots 1+1
+ freed-pool 2:28045+1
+ freed-main 2:2431385+2
+@ file 8 14 15 26 27
+blocks 134217728 8192
+descriptor 1 136
+data 137 26648
+chunks 65536 254 1019 2048 9 0
+manager 1 2568 2640 2520 2528 2536
+pool-bitmaps 1 26785 16
+pool 26801 6171
+queue-limits 3 256
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 137
+ reaper 138
+ object-map 2447769 2447770
+ address-blocks -
+ info-blocks 26801+9
+ bitmaps 0:26810,37:26811
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 139
+ reaper 140
+ queues 141 142
+ object-map 2447773 2447774
+ volume 0 2447771 2447772 1232076 1232077 1232078 1232079
+ address-blocks -
+ info-blocks 26812+1,26802+8
+ bitmaps 0:26810,18:26814,37:26813
+ pool-bitmap-slots 1+1
+ freed-pool 2:26801+1,2:26811+1
+ freed-main 2:2447769+2
+@ file 8 14 15 26 27
+blocks 67108864 16384
+descriptor 1 72
+data 73 26128
+chunks 131072 510 2043 512 2 0
+manager 1 2568 2584 2520 2528 2536
+pool-bitmaps 1 26201 16
+pool 26217 1542
+queue-limits 1 128
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 73
+ reaper 74
+ object-map 2455961 2455962
+ address-blocks -
+ info-blocks 26217+2
+ bitmaps 0:26219,18:26220
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 75
+ reaper 76
+ queues 77 78
+ object-map 2455965 2455966
+ volume 0 2455963 2455964 1232076 1232077 1232078 1232079
+ address-blocks -
+ info-blocks 26221+1,26218+1
+ bitmaps 0:26219,9:26223,18:26222
+ pool-bitmap-slots 1+1
+ freed-pool 2:26217+1,2:26220+1
+ freed-main 2:2455961+2
+@ file 8 14 15 26 27
+blocks 16777216 65536
+descriptor 1 20
+data 21 25744
+chunks 524288 2046 8187 32 1 0
+manager 1 2568 2576 2520 2528 2536
+pool-bitmaps 1 25765 16
+pool 25781 99
+queue-limits 1 32
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 21
+ reaper 22
+ object-map 2462105 2462106
+ address-blocks -
+ info-blocks 25781+1
+ bitmaps 0:25782,4:25783
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 23
+ reaper 24
+ queues 25 26
+ object-map 2462109 2462110
+ volume 0 2462107 2462108 1232076 1232077 1232078 1232079
+ address-blocks -
+ info-blocks 25784+1
+ bitmaps 0:25782,2:25786,4:25785
+ pool-bitmap-slots 1+1
+ freed-pool 2:25781+1,2:25783+1
+ freed-main 2:2462105+2
+@ file 4 14 15 26 27
+blocks 319225354 4096
+descriptor 1 280
+data 281 27764
+chunks 32768 126 507 9742 78 0
+manager 1 2568 3192 2520 2528 2536
+pool-bitmaps 1 28045 16
+pool 28061 29460
+queue-limits 26 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 2748822 2748823
+ address-blocks -
+ info-blocks 28061+78
+ bitmaps 0:28139,1:28140,83:28141
+ pool-bitmap-slots 0+1
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 2748826 2748827
+ volume 0 2748824 2748825 1390795 1390796 1390797 1390798
+ address-blocks -
+ info-blocks 28142+1,28062+77
+ bitmaps 0:28139,1:28140,42:28144,83:28143
+ pool-bitmap-slots 1+1
+ freed-pool 2:28061+1,2:28141+1
+ freed-main 2:2748822+2
+@ file 4 14 15 26 27
+blocks 379625062 4096
+descriptor 1 280
+data 281 27784
+chunks 32768 126 507 11586 92 0
+manager 1 2608 3344 2520 2536 2544
+pool-bitmaps 2 28065 32
+pool 28097 35034
+queue-limits 31 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 3126320 3126321
+ address-blocks -
+ info-blocks 28097+92
+ bitmaps 0:28189,1:28190,95:28191
+ pool-bitmap-slots 0+2
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 3126324 3126325
+ volume 0 3126322 3126323 1579544 1579545 1579546 1579547
+ address-blocks -
+ info-blocks 28192+1,28098+91
+ bitmaps 0:28189,1:28190,48:28194,95:28193
+ pool-bitmap-slots 2+1,1+1
+ freed-pool 2:28097+1,2:28191+1
+ freed-main 2:3126320+2
+@ file 4 14 15 26 27
+blocks 451452825 4096
+descriptor 1 280
+data 281 27808
+chunks 32768 126 507 13778 110 0
+manager 1 2608 3488 2520 2536 2544
+pool-bitmaps 2 28089 32
+pool 28121 41664
+queue-limits 37 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 3575244 3575245
+ address-blocks -
+ info-blocks 28121+110
+ bitmaps 0:28231,1:28232,2:28233,109:28234
+ pool-bitmap-slots 0+2
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 3575248 3575249
+ volume 0 3575246 3575247 1804006 1804007 1804008 1804009
+ address-blocks -
+ info-blocks 28235+1,28122+109
+ bitmaps 0:28231,1:28232,2:28233,55:28237,109:28236
+ pool-bitmap-slots 2+1,1+1
+ freed-pool 2:28121+1,2:28234+1
+ freed-main 2:3575244+2
+@ file 4 14 15 26 27
+blocks 536870912 4096
+descriptor 1 280
+data 281 27836
+chunks 32768 126 507 16384 131 0
+manager 1 2608 3656 2520 2536 2544
+pool-bitmaps 2 28117 32
+pool 28149 49545
+queue-limits 44 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 4109107 4109108
+ address-blocks -
+ info-blocks 28149+131
+ bitmaps 0:28280,1:28281,2:28282,125:28283
+ pool-bitmap-slots 0+2
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 4109111 4109112
+ volume 0 4109109 4109110 2070937 2070938 2070939 2070940
+ address-blocks -
+ info-blocks 28284+1,28150+130
+ bitmaps 0:28280,1:28281,2:28282,63:28286,125:28285
+ pool-bitmap-slots 2+1,1+1
+ freed-pool 2:28149+1,2:28283+1
+ freed-main 2:4109107+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 536870912 4096
+descriptor 1 280
+data 281 27836
+chunks 32768 126 507 16384 131 0
+manager 1 2608 3656 2520 2536 2544
+pool-bitmaps 2 28117 32
+pool 28149 49545
+queue-limits 44 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 4109107 4109108
+ address-blocks -
+ info-blocks 28149+131
+ bitmaps 0:28280,1:28281,2:28282,125:28283
+ pool-bitmap-slots 0+2
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 2070943 2070944
+ volume 0 2070937 2070938 2070939 2070940 2070941 2070942
+ address-blocks -
+ info-blocks 28284+1,28150+130
+ bitmaps 0:28280,1:28281,2:28282,63:28285,125:28283
+ pool-bitmap-slots 2+1,1+1
+ freed-pool 2:28149+1
+ freed-main 2:4109107+2
+@ file 4 14 15 26 27
+blocks 638450708 4096
+descriptor 1 280
+data 281 27868
+chunks 32768 126 507 19484 155 0
+manager 1 2608 3848 2520 2536 2544
+pool-bitmaps 2 28149 32
+pool 28181 58917
+queue-limits 52 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 281
+ reaper 282
+ object-map 4743980 4743981
+ address-blocks -
+ info-blocks 28181+155
+ bitmaps 0:28336,1:28337,2:28338,144:28339
+ pool-bitmap-slots 0+2
+tx 2
+ descriptor 3 4
+ manager 283
+ reaper 284
+ queues 285 286
+ object-map 4743984 4743985
+ volume 0 4743982 4743983 2388374 2388375 2388376 2388377
+ address-blocks -
+ info-blocks 28342+1,28340+1,28183+153
+ bitmaps 0:28336,1:28337,2:28338,72:28343,144:28341
+ pool-bitmap-slots 2+1,1+1
+ freed-pool 2:28181+2,2:28339+1
+ freed-main 2:4743980+2
+@ file 4 14 15 26 27
+blocks 759250124 4096
+descriptor 1 284
+data 285 27916
+chunks 32768 126 507 23171 184 0
+manager 2 2648 4120 2520 2544 2552
+pool-bitmaps 3 28201 48
+pool 28249 70065
+queue-limits 62 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 5498977 5498978
+ address-blocks -
+ info-blocks 28249+184
+ bitmaps 0:28433,1:28434,2:28435,3:28436,167:28437
+ pool-bitmap-slots 0+3
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 5498981 5498982
+ volume 0 5498979 5498980 2765872 2765873 2765874 2765875
+ address-blocks -
+ info-blocks 28440+1,28438+1,28251+182
+ bitmaps 0:28433,1:28434,2:28435,3:28436,84:28441,167:28439
+ pool-bitmap-slots 3+1,1+2
+ freed-pool 2:28249+2,2:28437+1
+ freed-main 2:5498977+2
+@ file 4 14 15 26 27
+blocks 902905650 4096
+descriptor 1 284
+data 285 27964
+chunks 32768 126 507 27555 219 0
+manager 2 2648 4400 2520 2544 2552
+pool-bitmaps 3 28249 48
+pool 28297 83322
+queue-limits 74 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 6396824 6396825
+ address-blocks -
+ info-blocks 28297+219
+ bitmaps 0:28516,1:28517,2:28518,3:28519,195:28520
+ pool-bitmap-slots 0+3
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 6396828 6396829
+ volume 0 6396826 6396827 3214796 3214797 3214798 3214799
+ address-blocks -
+ info-blocks 28523+1,28521+1,28299+217
+ bitmaps 0:28516,1:28517,2:28518,3:28519,98:28524,195:28522
+ pool-bitmap-slots 3+1,1+2
+ freed-pool 2:28297+2,2:28520+1
+ freed-main 2:6396824+2
+@ file 4 14 15 26 27
+blocks 1073741824 4096
+descriptor 1 284
+data 285 28020
+chunks 32768 126 507 32768 261 0
+manager 2 2688 4776 2520 2552 2560
+pool-bitmaps 4 28305 64
+pool 28369 99087
+queue-limits 88 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 7464550 7464551
+ address-blocks -
+ info-blocks 28369+261
+ bitmaps 0:28630,1:28631,2:28632,3:28633,227:28634
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 7464554 7464555
+ volume 0 7464552 7464553 3748659 3748660 3748661 3748662
+ address-blocks -
+ info-blocks 28637+1,28635+1,28371+259
+ bitmaps 0:28630,1:28631,2:28632,3:28633,114:28638,227:28636
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28369+2,2:28634+1
+ freed-main 2:7464550+2
+@ device 10 14 15 15-intel 26 26-intel 27
+blocks 1073741824 4096
+descriptor 1 284
+data 285 28020
+chunks 32768 126 507 32768 261 0
+manager 2 2688 4776 2520 2552 2560
+pool-bitmaps 4 28305 64
+pool 28369 99087
+queue-limits 88 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 7464550 7464551
+ address-blocks -
+ info-blocks 28369+261
+ bitmaps 0:28630,1:28631,2:28632,3:28633,227:28634
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 3748665 3748666
+ volume 0 3748659 3748660 3748661 3748662 3748663 3748664
+ address-blocks -
+ info-blocks 28635+1,28370+260
+ bitmaps 0:28630,1:28631,2:28632,3:28633,114:28636,227:28634
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28369+1
+ freed-main 2:7464550+2
+@ file 4 14 15 26 27
+blocks 1107296256 4096
+descriptor 1 284
+data 285 28028
+chunks 32768 126 507 33792 269 0
+manager 2 2688 4840 2520 2552 2560
+pool-bitmaps 4 28313 64
+pool 28377 102183
+queue-limits 90 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 7674265 7674266
+ address-blocks -
+ info-blocks 28377+269
+ bitmaps 0:28646,1:28647,2:28648,3:28649,234:28650
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 7674269 7674270
+ volume 0 7674267 7674268 3853516 3853517 3853518 3853519
+ address-blocks -
+ info-blocks 28653+1,28651+1,28379+267
+ bitmaps 0:28646,1:28647,2:28648,3:28649,117:28654,234:28652
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28377+2,2:28650+1
+ freed-main 2:7674265+2
+@ file 4 14 15 26 27
+blocks 1140850688 4096
+descriptor 1 284
+data 285 28040
+chunks 32768 126 507 34816 277 0
+manager 2 2688 4904 2520 2552 2560
+pool-bitmaps 4 28325 64
+pool 28389 105279
+queue-limits 93 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 7883980 7883981
+ address-blocks -
+ info-blocks 28389+277
+ bitmaps 0:28666,1:28667,2:28668,3:28669,4:28670,240:28671
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 7883984 7883985
+ volume 0 7883982 7883983 3958374 3958375 3958376 3958377
+ address-blocks -
+ info-blocks 28674+1,28672+1,28391+275
+ bitmaps 0:28666,1:28667,2:28668,3:28669,4:28670,120:28675,240:28673
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28389+2,2:28671+1
+ freed-main 2:7883980+2
+@ file 4 14 15 26 27
+blocks 1174405120 4096
+descriptor 1 284
+data 285 28052
+chunks 32768 126 507 35840 285 0
+manager 2 2688 4968 2520 2552 2560
+pool-bitmaps 4 28337 64
+pool 28401 108375
+queue-limits 96 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8093695 8093696
+ address-blocks -
+ info-blocks 28401+285
+ bitmaps 0:28686,1:28687,2:28688,3:28689,4:28690,246:28691,247:28692
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8093699 8093700
+ volume 0 8093697 8093698 4063231 4063232 4063233 4063234
+ address-blocks -
+ info-blocks 28695+1,28693+1,28403+283
+ bitmaps 0:28686,1:28687,2:28688,3:28689,4:28690,123:28696,124:28697,246:28691,247:28694
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28401+2,2:28692+1
+ freed-main 2:8093695+2
+@ file 4 14 15 26 27
+blocks 1207959552 4096
+descriptor 1 284
+data 285 28064
+chunks 32768 126 507 36864 293 0
+manager 2 2688 5032 2520 2552 2560
+pool-bitmaps 4 28349 64
+pool 28413 111471
+queue-limits 99 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8303411 8303412
+ address-blocks -
+ info-blocks 28413+293
+ bitmaps 0:28706,1:28707,2:28708,3:28709,4:28710,253:28711
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8303415 8303416
+ volume 0 8303413 8303414 4168089 4168090 4168091 4168092
+ address-blocks -
+ info-blocks 28413+1,28714+1,28712+1,28416+290
+ bitmaps 0:28706,1:28707,2:28708,3:28709,4:28710,127:28715,253:28713
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28414+2,2:28711+1
+ freed-main 2:8303411+2
+@ file 4 14 15 26 27
+blocks 1241513984 4096
+descriptor 1 284
+data 285 28072
+chunks 32768 126 507 37888 301 0
+manager 2 2688 5096 2520 2552 2560
+pool-bitmaps 4 28357 64
+pool 28421 114567
+queue-limits 101 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8513126 8513127
+ address-blocks -
+ info-blocks 28421+301
+ bitmaps 0:28722,1:28723,2:28724,3:28725,4:28726,259:28727
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8513130 8513131
+ volume 0 8513128 8513129 4272947 4272948 4272949 4272950
+ address-blocks -
+ info-blocks 28421+1,28730+1,28728+1,28424+298
+ bitmaps 0:28722,1:28723,2:28724,3:28725,4:28726,130:28731,259:28729
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28422+2,2:28727+1
+ freed-main 2:8513126+2
+@ file 4 14 15 26 27
+blocks 1275068416 4096
+descriptor 1 284
+data 285 28084
+chunks 32768 126 507 38912 309 0
+manager 2 2688 5160 2520 2552 2560
+pool-bitmaps 4 28369 64
+pool 28433 117663
+queue-limits 104 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8722841 8722842
+ address-blocks -
+ info-blocks 28433+309
+ bitmaps 0:28742,1:28743,2:28744,3:28745,4:28746,266:28747
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8722845 8722846
+ volume 0 8722843 8722844 4377804 4377805 4377806 4377807
+ address-blocks -
+ info-blocks 28433+1,28750+1,28748+1,28436+306
+ bitmaps 0:28742,1:28743,2:28744,3:28745,4:28746,133:28751,266:28749
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28434+2,2:28747+1
+ freed-main 2:8722841+2
+@ file 4 14 15 26 27
+blocks 1276901416 4096
+descriptor 1 284
+data 285 28084
+chunks 32768 126 507 38968 310 0
+manager 2 2688 5168 2520 2552 2560
+pool-bitmaps 4 28369 64
+pool 28433 117834
+queue-limits 104 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8734297 8734298
+ address-blocks -
+ info-blocks 28433+310
+ bitmaps 0:28743,1:28744,2:28745,3:28746,4:28747,266:28748
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8734301 8734302
+ volume 0 8734299 8734300 4383532 4383533 4383534 4383535
+ address-blocks -
+ info-blocks 28433+1,28751+1,28749+1,28436+307
+ bitmaps 0:28743,1:28744,2:28745,3:28746,4:28747,133:28752,266:28750
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28434+2,2:28748+1
+ freed-main 2:8734297+2
+@ file 4 14 15 26 27
+blocks 1308622848 4096
+descriptor 1 284
+data 285 28096
+chunks 32768 126 507 39936 317 0
+manager 2 2688 5224 2520 2552 2560
+pool-bitmaps 4 28381 64
+pool 28445 120759
+queue-limits 107 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 8932556 8932557
+ address-blocks -
+ info-blocks 28445+317
+ bitmaps 0:28762,1:28763,2:28764,3:28765,4:28766,272:28767
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 8932560 8932561
+ volume 0 8932558 8932559 4482662 4482663 4482664 4482665
+ address-blocks -
+ info-blocks 28445+1,28770+1,28768+1,28448+314
+ bitmaps 0:28762,1:28763,2:28764,3:28765,4:28766,136:28771,272:28769
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28446+2,2:28767+1
+ freed-main 2:8932556+2
+@ file 4 14 15 26 27
+blocks 1342177280 4096
+descriptor 1 284
+data 285 28108
+chunks 32768 126 507 40960 326 0
+manager 2 2688 5296 2520 2552 2560
+pool-bitmaps 4 28393 64
+pool 28457 123858
+queue-limits 110 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 9142271 9142272
+ address-blocks -
+ info-blocks 28457+326
+ bitmaps 0:28783,1:28784,2:28785,3:28786,4:28787,278:28788,279:28789
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 9142275 9142276
+ volume 0 9142273 9142274 4587519 4587520 4587521 4587522
+ address-blocks -
+ info-blocks 28457+1,28792+1,28790+1,28460+323
+ bitmaps 0:28783,1:28784,2:28785,3:28786,4:28787,139:28793,140:28794,278:28788,279:28791
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28458+2,2:28789+1
+ freed-main 2:9142271+2
+@ file 4 14 15 26 27
+blocks 1375731712 4096
+descriptor 1 284
+data 285 28116
+chunks 32768 126 507 41984 334 0
+manager 2 2688 5360 2520 2552 2560
+pool-bitmaps 4 28401 64
+pool 28465 126954
+queue-limits 112 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 9351987 9351988
+ address-blocks -
+ info-blocks 28465+334
+ bitmaps 0:28799,1:28800,2:28801,3:28802,4:28803,285:28804
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 9351991 9351992
+ volume 0 9351989 9351990 4692377 4692378 4692379 4692380
+ address-blocks -
+ info-blocks 28465+1,28807+1,28805+1,28468+331
+ bitmaps 0:28799,1:28800,2:28801,3:28802,4:28803,143:28808,285:28806
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28466+2,2:28804+1
+ freed-main 2:9351987+2
+@ file 4 14 15 26 27
+blocks 1409286144 4096
+descriptor 1 284
+data 285 28128
+chunks 32768 126 507 43008 342 0
+manager 2 2688 5424 2520 2552 2560
+pool-bitmaps 4 28413 64
+pool 28477 130050
+queue-limits 115 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 9561702 9561703
+ address-blocks -
+ info-blocks 28477+342
+ bitmaps 0:28819,1:28820,2:28821,3:28822,4:28823,291:28824
+ pool-bitmap-slots 0+4
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 9561706 9561707
+ volume 0 9561704 9561705 4797235 4797236 4797237 4797238
+ address-blocks -
+ info-blocks 28477+1,28827+1,28825+1,28480+339
+ bitmaps 0:28819,1:28820,2:28821,3:28822,4:28823,146:28828,291:28826
+ pool-bitmap-slots 4+1,1+3
+ freed-pool 2:28478+2,2:28824+1
+ freed-main 2:9561702+2
+@ file 4 14 15 26 27
+blocks 1442840576 4096
+descriptor 1 284
+data 285 28140
+chunks 32768 126 507 44032 350 0
+manager 2 2736 5536 2520 2560 2576
+pool-bitmaps 5 28425 80
+pool 28505 133146
+queue-limits 118 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 9771417 9771418
+ address-blocks -
+ info-blocks 28505+350
+ bitmaps 0:28855,1:28856,2:28857,3:28858,4:28859,298:28860
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 9771421 9771422
+ volume 0 9771419 9771420 4902092 4902093 4902094 4902095
+ address-blocks -
+ info-blocks 28505+1,28863+1,28861+1,28508+347
+ bitmaps 0:28855,1:28856,2:28857,3:28858,4:28859,149:28864,298:28862
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28506+2,2:28860+1
+ freed-main 2:9771417+2
+@ file 4 14 15 26 27
+blocks 1476395008 4096
+descriptor 1 284
+data 285 28148
+chunks 32768 126 507 45056 358 0
+manager 2 2736 5600 2520 2560 2576
+pool-bitmaps 5 28433 80
+pool 28513 136242
+queue-limits 120 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 9981132 9981133
+ address-blocks -
+ info-blocks 28513+358
+ bitmaps 0:28871,1:28872,2:28873,3:28874,4:28875,5:28876,304:28877
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 9981136 9981137
+ volume 0 9981134 9981135 5006950 5006951 5006952 5006953
+ address-blocks -
+ info-blocks 28513+1,28880+1,28878+1,28516+355
+ bitmaps 0:28871,1:28872,2:28873,3:28874,4:28875,5:28876,152:28881,304:28879
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28514+2,2:28877+1
+ freed-main 2:9981132+2
+@ file 4 14 15 26 27
+blocks 1509949440 4096
+descriptor 1 284
+data 285 28160
+chunks 32768 126 507 46080 366 0
+manager 2 2736 5664 2520 2560 2576
+pool-bitmaps 5 28445 80
+pool 28525 139338
+queue-limits 123 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 10190847 10190848
+ address-blocks -
+ info-blocks 28525+366
+ bitmaps 0:28891,1:28892,2:28893,3:28894,4:28895,5:28896,310:28897,311:28898
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 10190851 10190852
+ volume 0 10190849 10190850 5111807 5111808 5111809 5111810
+ address-blocks -
+ info-blocks 28525+1,28901+1,28899+1,28528+363
+ bitmaps 0:28891,1:28892,2:28893,3:28894,4:28895,5:28896,155:28902,156:28903,310:28897,311:28900
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28526+2,2:28898+1
+ freed-main 2:10190847+2
+@ file 4 14 15 26 27
+blocks 1518500249 4096
+descriptor 1 284
+data 285 28164
+chunks 32768 126 507 46341 368 0
+manager 2 2736 5680 2520 2560 2576
+pool-bitmaps 5 28449 80
+pool 28529 140127
+queue-limits 124 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 10244290 10244291
+ address-blocks -
+ info-blocks 28529+368
+ bitmaps 0:28897,1:28898,2:28899,3:28900,4:28901,5:28902,312:28903
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 10244294 10244295
+ volume 0 10244292 10244293 5138529 5138530 5138531 5138532
+ address-blocks -
+ info-blocks 28529+1,28906+1,28904+1,28532+365
+ bitmaps 0:28897,1:28898,2:28899,3:28900,4:28901,5:28902,156:28907,312:28905
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28530+2,2:28903+1
+ freed-main 2:10244290+2
+@ file 4 14 15 26 27
+blocks 1543503872 4096
+descriptor 1 284
+data 285 28172
+chunks 32768 126 507 47104 374 0
+manager 2 2736 5728 2520 2560 2576
+pool-bitmaps 5 28457 80
+pool 28537 142434
+queue-limits 126 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 10400563 10400564
+ address-blocks -
+ info-blocks 28537+374
+ bitmaps 0:28911,1:28912,2:28913,3:28914,4:28915,5:28916,317:28917
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 10400567 10400568
+ volume 0 10400565 10400566 5216665 5216666 5216667 5216668
+ address-blocks -
+ info-blocks 28537+1,28920+1,28918+1,28540+371
+ bitmaps 0:28911,1:28912,2:28913,3:28914,4:28915,5:28916,159:28921,317:28919
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28538+2,2:28917+1
+ freed-main 2:10400563+2
+@ file 4 14 15 26 27
+blocks 1577058304 4096
+descriptor 1 284
+data 285 28184
+chunks 32768 126 507 48128 382 0
+manager 2 2736 5792 2520 2560 2576
+pool-bitmaps 5 28469 80
+pool 28549 145530
+queue-limits 129 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 10610278 10610279
+ address-blocks -
+ info-blocks 28549+382
+ bitmaps 0:28931,1:28932,2:28933,3:28934,4:28935,5:28936,323:28937
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 10610282 10610283
+ volume 0 10610280 10610281 5321523 5321524 5321525 5321526
+ address-blocks -
+ info-blocks 28549+1,28940+1,28938+1,28552+379
+ bitmaps 0:28931,1:28932,2:28933,3:28934,4:28935,5:28936,162:28941,323:28939
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28550+2,2:28937+1
+ freed-main 2:10610278+2
+@ file 4 14 15 26 27
+blocks 1610612736 4096
+descriptor 1 284
+data 285 28192
+chunks 32768 126 507 49152 391 0
+manager 2 2736 5864 2520 2560 2576
+pool-bitmaps 5 28477 80
+pool 28557 148629
+queue-limits 131 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 10819993 10819994
+ address-blocks -
+ info-blocks 28557+391
+ bitmaps 0:28948,1:28949,2:28950,3:28951,4:28952,5:28953,330:28954
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 10819997 10819998
+ volume 0 10819995 10819996 5426380 5426381 5426382 5426383
+ address-blocks -
+ info-blocks 28557+1,28957+1,28955+1,28560+388
+ bitmaps 0:28948,1:28949,2:28950,3:28951,4:28952,5:28953,165:28958,330:28956
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28558+2,2:28954+1
+ freed-main 2:10819993+2
+@ file 4 14 15 26 27
+blocks 1644167168 4096
+descriptor 1 284
+data 285 28204
+chunks 32768 126 507 50176 399 0
+manager 2 2736 5928 2520 2560 2576
+pool-bitmaps 5 28489 80
+pool 28569 151725
+queue-limits 134 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 11029708 11029709
+ address-blocks -
+ info-blocks 28569+399
+ bitmaps 0:28968,1:28969,2:28970,3:28971,4:28972,5:28973,336:28974
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 11029712 11029713
+ volume 0 11029710 11029711 5531238 5531239 5531240 5531241
+ address-blocks -
+ info-blocks 28569+1,28977+1,28975+1,28572+396
+ bitmaps 0:28968,1:28969,2:28970,3:28971,4:28972,5:28973,168:28978,336:28976
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28570+2,2:28974+1
+ freed-main 2:11029708+2
+@ file 4 14 15 26 27
+blocks 1677721600 4096
+descriptor 1 284
+data 285 28216
+chunks 32768 126 507 51200 407 0
+manager 2 2736 5992 2520 2560 2576
+pool-bitmaps 5 28501 80
+pool 28581 154821
+queue-limits 137 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 11239423 11239424
+ address-blocks -
+ info-blocks 28581+407
+ bitmaps 0:28988,1:28989,2:28990,3:28991,4:28992,5:28993,342:28994,343:28995
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 11239427 11239428
+ volume 0 11239425 11239426 5636095 5636096 5636097 5636098
+ address-blocks -
+ info-blocks 28581+1,28998+1,28996+1,28584+404
+ bitmaps 0:28988,1:28989,2:28990,3:28991,4:28992,5:28993,171:28999,172:29000,342:28994,343:28997
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28582+2,2:28995+1
+ freed-main 2:11239423+2
+@ file 4 14 15 26 27
+blocks 1711276032 4096
+descriptor 1 284
+data 285 28228
+chunks 32768 126 507 52224 415 0
+manager 2 2736 6056 2520 2560 2576
+pool-bitmaps 5 28513 80
+pool 28593 157917
+queue-limits 140 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 11449139 11449140
+ address-blocks -
+ info-blocks 28593+415
+ bitmaps 0:29008,1:29009,2:29010,3:29011,4:29012,5:29013,349:29014
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 11449143 11449144
+ volume 0 11449141 11449142 5740953 5740954 5740955 5740956
+ address-blocks -
+ info-blocks 28593+1,29017+1,29015+1,28596+412
+ bitmaps 0:29008,1:29009,2:29010,3:29011,4:29012,5:29013,175:29018,349:29016
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28594+2,2:29014+1
+ freed-main 2:11449139+2
+@ file 4 14 15 26 27
+blocks 1744830464 4096
+descriptor 1 284
+data 285 28236
+chunks 32768 126 507 53248 423 0
+manager 2 2736 6120 2520 2560 2576
+pool-bitmaps 5 28521 80
+pool 28601 161013
+queue-limits 142 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 11658854 11658855
+ address-blocks -
+ info-blocks 28601+423
+ bitmaps 0:29024,1:29025,2:29026,3:29027,4:29028,5:29029,355:29030
+ pool-bitmap-slots 0+5
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 11658858 11658859
+ volume 0 11658856 11658857 5845811 5845812 5845813 5845814
+ address-blocks -
+ info-blocks 28601+1,29033+1,29031+1,28604+420
+ bitmaps 0:29024,1:29025,2:29026,3:29027,4:29028,5:29029,178:29034,355:29032
+ pool-bitmap-slots 5+1,1+4
+ freed-pool 2:28602+2,2:29030+1
+ freed-main 2:11658854+2
+@ file 4 14 15 26 27
+blocks 1778384896 4096
+descriptor 1 284
+data 285 28248
+chunks 32768 126 507 54272 431 0
+manager 2 2776 6224 2520 2568 2584
+pool-bitmaps 6 28533 96
+pool 28629 164109
+queue-limits 145 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 11868569 11868570
+ address-blocks -
+ info-blocks 28629+431
+ bitmaps 0:29060,1:29061,2:29062,3:29063,4:29064,5:29065,362:29066
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 11868573 11868574
+ volume 0 11868571 11868572 5950668 5950669 5950670 5950671
+ address-blocks -
+ info-blocks 28629+1,29069+1,29067+1,28632+428
+ bitmaps 0:29060,1:29061,2:29062,3:29063,4:29064,5:29065,181:29070,362:29068
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28630+2,2:29066+1
+ freed-main 2:11868569+2
+@ file 4 14 15 26 27
+blocks 1805811301 4096
+descriptor 1 284
+data 285 28256
+chunks 32768 126 507 55109 438 0
+manager 2 2776 6280 2520 2568 2584
+pool-bitmaps 6 28541 96
+pool 28637 166641
+queue-limits 147 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 12039984 12039985
+ address-blocks -
+ info-blocks 28637+438
+ bitmaps 0:29075,1:29076,2:29077,3:29078,4:29079,5:29080,367:29081
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 12039988 12039989
+ volume 0 12039986 12039987 6036376 6036377 6036378 6036379
+ address-blocks -
+ info-blocks 28637+1,29084+1,29082+1,28640+435
+ bitmaps 0:29075,1:29076,2:29077,3:29078,4:29079,5:29080,184:29085,367:29083
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28638+2,2:29081+1
+ freed-main 2:12039984+2
+@ file 4 14 15 26 27
+blocks 1811939328 4096
+descriptor 1 284
+data 285 28260
+chunks 32768 126 507 55296 439 0
+manager 2 2776 6288 2520 2568 2584
+pool-bitmaps 6 28545 96
+pool 28641 167205
+queue-limits 148 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 12078284 12078285
+ address-blocks -
+ info-blocks 28641+439
+ bitmaps 0:29080,1:29081,2:29082,3:29083,4:29084,5:29085,368:29086
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 12078288 12078289
+ volume 0 12078286 12078287 6055526 6055527 6055528 6055529
+ address-blocks -
+ info-blocks 28641+1,29089+1,29087+1,28644+436
+ bitmaps 0:29080,1:29081,2:29082,3:29083,4:29084,5:29085,184:29090,368:29088
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28642+2,2:29086+1
+ freed-main 2:12078284+2
+@ file 4 14 15 26 27
+blocks 1845493760 4096
+descriptor 1 284
+data 285 28268
+chunks 32768 126 507 56320 447 0
+manager 2 2776 6352 2520 2568 2584
+pool-bitmaps 6 28553 96
+pool 28649 170301
+queue-limits 150 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 12287999 12288000
+ address-blocks -
+ info-blocks 28649+447
+ bitmaps 0:29096,1:29097,2:29098,3:29099,4:29100,5:29101,6:29102,374:29103,375:29104
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 12288003 12288004
+ volume 0 12288001 12288002 6160383 6160384 6160385 6160386
+ address-blocks -
+ info-blocks 28649+1,29107+1,29105+1,28652+444
+ bitmaps 0:29096,1:29097,2:29098,3:29099,4:29100,5:29101,6:29102,187:29108,188:29109,374:29103,375:29106
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28650+2,2:29104+1
+ freed-main 2:12287999+2
+@ file 4 14 15 26 27
+blocks 1879048192 4096
+descriptor 1 284
+data 285 28280
+chunks 32768 126 507 57344 456 0
+manager 2 2776 6424 2520 2568 2584
+pool-bitmaps 6 28565 96
+pool 28661 173400
+queue-limits 153 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 285
+ reaper 287
+ object-map 12497715 12497716
+ address-blocks -
+ info-blocks 28661+456
+ bitmaps 0:29117,1:29118,2:29119,3:29120,4:29121,5:29122,6:29123,381:29124
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 288
+ reaper 290
+ queues 291 292
+ object-map 12497719 12497720
+ volume 0 12497717 12497718 6265241 6265242 6265243 6265244
+ address-blocks -
+ info-blocks 28661+1,29127+1,28663+1,29125+1,28665+452
+ bitmaps 0:29117,1:29118,2:29119,3:29120,4:29121,5:29122,6:29123,191:29128,381:29126
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28662+1,2:28664+1,2:29124+1
+ freed-main 2:12497715+2
+@ file 4 14 15 26 27
+blocks 1912602624 4096
+descriptor 1 288
+data 289 28292
+chunks 32768 126 507 58368 464 0
+manager 2 2776 6488 2520 2568 2584
+pool-bitmaps 6 28581 96
+pool 28677 176496
+queue-limits 156 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 12707430 12707431
+ address-blocks -
+ info-blocks 28677+464
+ bitmaps 0:29141,1:29142,2:29143,3:29144,4:29145,5:29146,6:29147,387:29148
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 12707434 12707435
+ volume 0 12707432 12707433 6370099 6370100 6370101 6370102
+ address-blocks -
+ info-blocks 28677+1,29151+1,28679+1,29149+1,28681+460
+ bitmaps 0:29141,1:29142,2:29143,3:29144,4:29145,5:29146,6:29147,194:29152,387:29150
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28678+1,2:28680+1,2:29148+1
+ freed-main 2:12707430+2
+@ file 4 14 15 26 27
+blocks 1946157056 4096
+descriptor 1 288
+data 289 28304
+chunks 32768 126 507 59392 472 0
+manager 2 2776 6552 2520 2568 2584
+pool-bitmaps 6 28593 96
+pool 28689 179592
+queue-limits 159 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 12917145 12917146
+ address-blocks -
+ info-blocks 28689+472
+ bitmaps 0:29161,1:29162,2:29163,3:29164,4:29165,5:29166,6:29167,394:29168
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 12917149 12917150
+ volume 0 12917147 12917148 6474956 6474957 6474958 6474959
+ address-blocks -
+ info-blocks 28689+1,29171+1,28691+1,29169+1,28693+468
+ bitmaps 0:29161,1:29162,2:29163,3:29164,4:29165,5:29166,6:29167,197:29172,394:29170
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28690+1,2:28692+1,2:29168+1
+ freed-main 2:12917145+2
+@ file 4 14 15 26 27
+blocks 1979711488 4096
+descriptor 1 288
+data 289 28312
+chunks 32768 126 507 60416 480 0
+manager 2 2776 6616 2520 2568 2584
+pool-bitmaps 6 28601 96
+pool 28697 182688
+queue-limits 161 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 13126860 13126861
+ address-blocks -
+ info-blocks 28697+480
+ bitmaps 0:29177,1:29178,2:29179,3:29180,4:29181,5:29182,6:29183,400:29184
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 13126864 13126865
+ volume 0 13126862 13126863 6579814 6579815 6579816 6579817
+ address-blocks -
+ info-blocks 28697+1,29187+1,28699+1,29185+1,28701+476
+ bitmaps 0:29177,1:29178,2:29179,3:29180,4:29181,5:29182,6:29183,200:29188,400:29186
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28698+1,2:28700+1,2:29184+1
+ freed-main 2:13126860+2
+@ file 4 14 15 26 27
+blocks 2013265920 4096
+descriptor 1 288
+data 289 28324
+chunks 32768 126 507 61440 488 0
+manager 2 2776 6680 2520 2568 2584
+pool-bitmaps 6 28613 96
+pool 28709 185784
+queue-limits 164 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 13336575 13336576
+ address-blocks -
+ info-blocks 28709+488
+ bitmaps 0:29197,1:29198,2:29199,3:29200,4:29201,5:29202,6:29203,406:29204,407:29205
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 13336579 13336580
+ volume 0 13336577 13336578 6684671 6684672 6684673 6684674
+ address-blocks -
+ info-blocks 28709+1,29208+1,28711+1,29206+1,28713+484
+ bitmaps 0:29197,1:29198,2:29199,3:29200,4:29201,5:29202,6:29203,203:29209,204:29210,406:29204,407:29207
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28710+1,2:28712+1,2:29205+1
+ freed-main 2:13336575+2
+@ file 4 14 15 26 27
+blocks 2046820352 4096
+descriptor 1 288
+data 289 28336
+chunks 32768 126 507 62464 496 0
+manager 2 2776 6744 2520 2568 2584
+pool-bitmaps 6 28625 96
+pool 28721 188880
+queue-limits 167 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 13546291 13546292
+ address-blocks -
+ info-blocks 28721+496
+ bitmaps 0:29217,1:29218,2:29219,3:29220,4:29221,5:29222,6:29223,413:29224
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 13546295 13546296
+ volume 0 13546293 13546294 6789529 6789530 6789531 6789532
+ address-blocks -
+ info-blocks 28721+1,29227+1,28723+1,29225+1,28725+492
+ bitmaps 0:29217,1:29218,2:29219,3:29220,4:29221,5:29222,6:29223,207:29228,413:29226
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28722+1,2:28724+1,2:29224+1
+ freed-main 2:13546291+2
+@ file 4 14 15 26 27
+blocks 2080374784 4096
+descriptor 1 288
+data 289 28344
+chunks 32768 126 507 63488 504 0
+manager 2 2776 6808 2520 2568 2584
+pool-bitmaps 6 28633 96
+pool 28729 191976
+queue-limits 169 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 13756006 13756007
+ address-blocks -
+ info-blocks 28729+504
+ bitmaps 0:29233,1:29234,2:29235,3:29236,4:29237,5:29238,6:29239,419:29240
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 13756010 13756011
+ volume 0 13756008 13756009 6894387 6894388 6894389 6894390
+ address-blocks -
+ info-blocks 28729+1,29243+1,28731+1,29241+1,28733+500
+ bitmaps 0:29233,1:29234,2:29235,3:29236,4:29237,5:29238,6:29239,210:29244,419:29242
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28730+1,2:28732+1,2:29240+1
+ freed-main 2:13756006+2
+@ file 4 14 15 26 27
+blocks 2093285376 4096
+descriptor 1 288
+data 289 28352
+chunks 32768 126 507 63882 507 0
+manager 2 2776 6832 2520 2568 2584
+pool-bitmaps 6 28641 96
+pool 28737 193167
+queue-limits 171 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 291
+ object-map 13836697 13836698
+ address-blocks -
+ info-blocks 28737+507
+ bitmaps 0:29244,1:29245,2:29246,3:29247,4:29248,5:29249,6:29250,422:29251
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 292
+ reaper 294
+ queues 295 296
+ object-map 13836701 13836702
+ volume 0 13836699 13836700 6934732 6934733 6934734 6934735
+ address-blocks -
+ info-blocks 28737+1,29254+1,28739+1,29252+1,28741+503
+ bitmaps 0:29244,1:29245,2:29246,3:29247,4:29248,5:29249,6:29250,211:29255,422:29253
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28738+1,2:28740+1,2:29251+1
+ freed-main 2:13836697+2
+@ file 4 14 15 26 27
+blocks 2093285377 4096
+descriptor 1 288
+data 289 28344
+chunks 32768 126 507 63883 508 2
+manager 1 2776 2792 2520 2568 2584
+pool-bitmaps 6 28633 96
+pool 28729 193179
+queue-limits 171 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 13836697 13836698
+ address-blocks 28729+1,29237+1
+ info-blocks 28730+507,29238+1
+ bitmaps 0:29239,1:29240,2:29241,3:29242,4:29243,5:29244,6:29245,422:29246
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 13836701 13836702
+ volume 0 13836699 13836700 6934732 6934733 6934734 6934735
+ address-blocks 29247+1,29237+1
+ info-blocks 28730+1,29250+1,28732+1,29248+1,28734+503,29238+1
+ bitmaps 0:29239,1:29240,2:29241,3:29242,4:29243,5:29244,6:29245,211:29251,422:29249
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28729+1,2:28731+1,2:28733+1,2:29246+1
+ freed-main 2:13836697+2
+@ file 8 14 15 26 27
+blocks 2113929216 4096
+descriptor 1 288
+data 289 28348
+chunks 32768 126 507 64512 512 2
+manager 1 2776 2792 2520 2568 2584
+pool-bitmaps 6 28637 96
+pool 28733 195078
+queue-limits 172 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 13965721 13965722
+ address-blocks 28733+1,29241+1
+ info-blocks 28734+507,29242+5
+ bitmaps 0:29247,1:29248,2:29249,3:29250,4:29251,5:29252,6:29253,426:29254
+ pool-bitmap-slots 0+6
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 13965725 13965726
+ volume 0 13965723 13965724 6999244 6999245 6999246 6999247
+ address-blocks 29255+1,29241+1
+ info-blocks 28734+1,29258+1,28736+1,29256+1,28738+503,29242+5
+ bitmaps 0:29247,1:29248,2:29249,3:29250,4:29251,5:29252,6:29253,213:29259,426:29257
+ pool-bitmap-slots 6+1,1+5
+ freed-pool 2:28733+1,2:28735+1,2:28737+1,2:29254+1
+ freed-main 2:13965721+2
+@ file 4 14 15 26 27
+blocks 2147483648 4096
+descriptor 1 288
+data 289 28360
+chunks 32768 126 507 65536 521 2
+manager 1 2816 2832 2520 2576 2592
+pool-bitmaps 7 28649 112
+pool 28761 198177
+queue-limits 175 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 14175436 14175437
+ address-blocks 28761+1,29269+1
+ info-blocks 28762+507,29270+14
+ bitmaps 0:29284,1:29285,2:29286,3:29287,4:29288,5:29289,6:29290,432:29291
+ pool-bitmap-slots 0+7
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 14175440 14175441
+ volume 0 14175438 14175439 7104102 7104103 7104104 7104105
+ address-blocks 29292+1,29269+1
+ info-blocks 28762+1,29295+1,28764+1,29293+1,28766+503,29270+14
+ bitmaps 0:29284,1:29285,2:29286,3:29287,4:29288,5:29289,6:29290,216:29296,432:29294
+ pool-bitmap-slots 7+1,1+6
+ freed-pool 2:28761+1,2:28763+1,2:28765+1,2:29291+1
+ freed-main 2:14175436+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 2147483648 4096
+descriptor 1 288
+data 289 28360
+chunks 32768 126 507 65536 521 2
+manager 1 2816 2832 2520 2576 2592
+pool-bitmaps 7 28649 112
+pool 28761 198177
+queue-limits 175 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 14175436 14175437
+ address-blocks 28761+1,29269+1
+ info-blocks 28762+507,29270+14
+ bitmaps 0:29284,1:29285,2:29286,3:29287,4:29288,5:29289,6:29290,432:29291
+ pool-bitmap-slots 0+7
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 7104108 7104109
+ volume 0 7104102 7104103 7104104 7104105 7104106 7104107
+ address-blocks 29292+1,29269+1
+ info-blocks 28762+1,29293+1,28764+505,29270+14
+ bitmaps 0:29284,1:29285,2:29286,3:29287,4:29288,5:29289,6:29290,216:29294,432:29291
+ pool-bitmap-slots 7+1,1+6
+ freed-pool 2:28761+1,2:28763+1
+ freed-main 2:14175436+2
+@ file 4 14 15 26 27
+blocks 2553802833 4096
+descriptor 1 288
+data 289 28492
+chunks 32768 126 507 77936 619 2
+manager 1 2856 2872 2520 2584 2600
+pool-bitmaps 8 28781 128
+pool 28909 235671
+queue-limits 208 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 16714931 16714932
+ address-blocks 28909+1,29417+1
+ info-blocks 28910+507,29418+112
+ bitmaps 0:29530,1:29531,2:29532,3:29533,4:29534,5:29535,6:29536,7:29537,8:29538,510:29539
+ pool-bitmap-slots 0+8
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 16714935 16714936
+ volume 0 16714933 16714934 8373849 8373850 8373851 8373852
+ address-blocks 29540+1,29417+1
+ info-blocks 28910+2,29543+1,28913+1,29541+1,28915+502,29418+112
+ bitmaps 0:29530,1:29531,2:29532,3:29533,4:29534,5:29535,6:29536,7:29537,8:29538,255:29544,510:29542
+ pool-bitmap-slots 8+1,1+7
+ freed-pool 2:28909+1,2:28912+1,2:28914+1,2:29539+1
+ freed-main 2:16714931+2
+@ file 4 14 15 26 27
+blocks 3037000499 4096
+descriptor 1 288
+data 289 28648
+chunks 32768 126 507 92682 736 2
+manager 1 2904 2920 2520 2592 2616
+pool-bitmaps 9 28937 144
+pool 29081 280260
+queue-limits 247 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 289
+ reaper 290
+ object-map 19734917 19734918
+ address-blocks 29081+1,29589+1
+ info-blocks 29082+507,29590+229
+ bitmaps 0:29819,1:29820,2:29821,3:29822,4:29823,5:29824,6:29825,7:29826,8:29827,9:29828,602:29829
+ pool-bitmap-slots 0+9
+tx 2
+ descriptor 3 4
+ manager 291
+ reaper 292
+ queues 293 294
+ object-map 19734921 19734922
+ volume 0 19734919 19734920 9883842 9883843 9883844 9883845
+ address-blocks 29830+1,29589+1
+ info-blocks 29082+2,29833+1,29085+1,29831+1,29087+502,29590+229
+ bitmaps 0:29819,1:29820,2:29821,3:29822,4:29823,5:29824,6:29825,7:29826,8:29827,9:29828,301:29834,602:29832
+ pool-bitmap-slots 9+1,1+8
+ freed-pool 2:29081+1,2:29084+1,2:29086+1,2:29829+1
+ freed-main 2:19734917+2
+@ file 4 14 15 26 27
+blocks 3611622602 4096
+descriptor 1 292
+data 293 28836
+chunks 32768 126 507 110218 875 2
+manager 1 2984 3000 2520 2608 2632
+pool-bitmaps 11 29129 176
+pool 29305 333285
+queue-limits 294 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 293
+ reaper 294
+ object-map 23326305 23326306
+ address-blocks 29305+1,29813+1
+ info-blocks 29306+507,29814+368
+ bitmaps 0:30182,1:30183,2:30184,3:30185,4:30186,5:30187,6:30188,7:30189,8:30190,9:30191,10:30192,11:30193,711:30194
+ pool-bitmap-slots 0+11
+tx 2
+ descriptor 3 4
+ manager 295
+ reaper 296
+ queues 297 298
+ object-map 23326309 23326310
+ volume 0 23326307 23326308 11679536 11679537 11679538 11679539
+ address-blocks 30195+1,29813+1
+ info-blocks 29306+2,30198+1,29309+2,30196+1,29312+501,29814+368
+ bitmaps 0:30182,1:30183,2:30184,3:30185,4:30186,5:30187,6:30188,7:30189,8:30190,9:30191,10:30192,11:30193,356:30199,711:30197
+ pool-bitmap-slots 11+1,1+10
+ freed-pool 2:29305+1,2:29308+1,2:29311+1,2:30194+1
+ freed-main 2:23326305+2
+@ file 4 14 15 26 27
+blocks 4294967296 4096
+descriptor 1 292
+data 293 29056
+chunks 32768 126 507 131072 1041 3
+manager 1 3072 3096 2520 2624 2656
+pool-bitmaps 13 29349 208
+pool 29557 396348
+queue-limits 349 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 293
+ reaper 294
+ object-map 27597209 27597210
+ address-blocks 29557+1,30065+1,30573+1
+ info-blocks 29558+507,30066+507,30574+27
+ bitmaps 0:30601,1:30602,2:30603,3:30604,4:30605,5:30606,6:30607,7:30608,8:30609,9:30610,10:30611,11:30612,12:30613,842:30614
+ pool-bitmap-slots 0+13
+tx 2
+ descriptor 3 4
+ manager 295
+ reaper 296
+ queues 297 298
+ object-map 27597213 27597214
+ volume 0 27597211 27597212 13814988 13814989 13814990 13814991
+ address-blocks 30615+1,30065+1,30573+1
+ info-blocks 29558+3,30618+1,29562+2,30616+1,29565+500,30066+507,30574+27
+ bitmaps 0:30601,1:30602,2:30603,3:30604,4:30605,5:30606,6:30607,7:30608,8:30609,9:30610,10:30611,11:30612,12:30613,421:30619,842:30617
+ pool-bitmap-slots 13+1,1+12
+ freed-pool 2:29557+1,2:29561+1,2:29564+1,2:30614+1
+ freed-main 2:27597209+2
+@ device 6 14 15 15-intel 26 26-intel 27
+blocks 4294967296 4096
+descriptor 1 292
+data 293 29056
+chunks 32768 126 507 131072 1041 3
+manager 1 3072 3096 2520 2624 2656
+pool-bitmaps 13 29349 208
+pool 29557 396348
+queue-limits 349 512
+max-volumes 100
+ephemeral-min 8
+tx 1
+ descriptor 1 2
+ manager 293
+ reaper 294
+ object-map 27597209 27597210
+ address-blocks 29557+1,30065+1,30573+1
+ info-blocks 29558+507,30066+507,30574+27
+ bitmaps 0:30601,1:30602,2:30603,3:30604,4:30605,5:30606,6:30607,7:30608,8:30609,9:30610,10:30611,11:30612,12:30613,842:30614
+ pool-bitmap-slots 0+13
+tx 2
+ descriptor 3 4
+ manager 295
+ reaper 296
+ queues 297 298
+ object-map 13814994 13814995
+ volume 0 13814988 13814989 13814990 13814991 13814992 13814993
+ address-blocks 30615+1,30065+1,30573+1
+ info-blocks 29558+3,30616+1,29562+503,30066+507,30574+27
+ bitmaps 0:30601,1:30602,2:30603,3:30604,4:30605,5:30606,6:30607,7:30608,8:30609,9:30610,10:30611,11:30612,12:30613,421:30617,842:30614
+ pool-bitmap-slots 13+1,1+12
+ freed-pool 2:29557+1,2:29561+1
+ freed-main 2:27597209+2

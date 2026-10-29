@@ -2,16 +2,17 @@
 
 `ferrosys` builds and reads filesystem images entirely in userspace, over ordinary byte
 streams, in safe Rust (`#![forbid(unsafe_code)]`). It is self-contained, pure Rust, and
-runs anywhere Rust runs. It carries four families:
+runs anywhere Rust runs. It carries five families:
 
 - ext2, ext3, and ext4, behind the `ext` feature
 - FAT12, FAT16, and FAT32, behind the `fat` feature
 - exFAT, behind the `exfat` feature
 - btrfs, behind the `btrfs` feature
+- APFS, behind the `apfs` feature
 
-A default build carries all four. Three properties hold across all four. The output
-is byte-reproducible. The reader is held to a never-panic contract on any input. The whole
-layout is decided before a byte is written.
+A default build carries all five. Every reader is held to a never-panic contract on any
+input. The families it writes share two more properties: the output is byte-reproducible,
+and the whole layout is decided before a byte is written.
 
 ## What the crate is
 
@@ -118,6 +119,36 @@ five inputs to be so. btrfs has a field for every property a source states, so t
 one family here whose fidelity report is empty in both directions.
 [Reading a btrfs](./formatting.md#reading-a-btrfs) and
 [writing one](./formatting.md#writing-one) are the two halves.
+
+## APFS
+
+`ferrosys` reads APFS behind the `apfs` feature: the format of every Mac, of the disk images
+macOS makes, and of the drives a Mac formats.
+
+An APFS partition holds one container, a pool of blocks under a checkpoint, and the
+container lists its volumes. Each volume is a filesystem of its own, with its own tree of
+records found through its own object map. So a read is a read of one volume: the one in the
+container's first slot, or the one a caller names.
+
+Reading covers both layers. The container is the newest whole checkpoint, its object map,
+and every volume it lists, each with its role and the features it carries. A volume is read
+as files: paths, attributes embedded and in streams of their own, hard links, and sparse
+files. A file whose content macOS compressed with zlib, LZVN, LZFSE or LZBITMAP reads as
+its content. So does one stored whole behind its compression header. Every object's
+checksum is verified, and every object is held to the identifier, type, and transaction of
+the reference that reached it.
+
+A volume's snapshots are views of it. Each is listed with the transaction it keeps the
+volume at and the identifier it carries, and any one opens as the volume it keeps.
+
+An encrypted volume, a sealed one, a Fusion container, and a feature bit this crate does not
+read are each refused by name.
+
+`ferrosys` also writes a container, each volume holding a source tree of its own. Two of them
+can be joined as a System and Data volume group. Empty, one
+volume is block for block what `newfs_apfs` writes into a file on macOS 14, 15, 26 and 27. The identifiers and the
+one instant it records are inputs, and so is how each volume compares names. [Formatting an APFS container](./formatting.md#formatting-an-apfs-container) shows
+the call.
 
 ## This guide
 

@@ -67,6 +67,13 @@ impl Timestamp {
     /// One past the largest fraction that divides a second.
     pub const NANOS_PER_SEC: u32 = 1_000_000_000;
 
+    /// Whether the fraction is less than a second, as it is in every time a filesystem
+    /// records.
+    #[cfg(any(feature = "ext", feature = "btrfs", feature = "apfs"))]
+    pub(crate) const fn has_proper_fraction(self) -> bool {
+        self.nanos < Self::NANOS_PER_SEC
+    }
+
     /// An instant at `secs` seconds past the epoch, with no sub-second part.
     #[must_use]
     pub const fn from_secs(secs: i64) -> Self {

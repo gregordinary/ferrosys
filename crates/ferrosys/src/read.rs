@@ -49,7 +49,7 @@ use crate::feature::{FeatureSet, Incompat, LARGE_FILE_MIN_SIZE, Profile};
 use crate::fidelity::Synthesis;
 use crate::finding::{Family, Finding, Findings, Severity};
 use crate::geometry::carries_superblock;
-use crate::io::{offset_of, read_exact_at};
+use crate::io::{Bounded, offset_of, read_exact_at};
 use crate::model::ROOT_INO;
 use crate::ondisk::{
     BG_BLOCK_UNINIT, BG_INODE_UNINIT, DIR_TAIL_LEN, DX_CHECKSUM_OFFSET, DX_ENTRY_LEN,
@@ -391,6 +391,10 @@ pub enum Category {
     Journal,
     /// The orphan file, which records the inodes awaiting deletion.
     Orphan,
+    /// The source the filesystem is read from, rather than the filesystem: a read the
+    /// source failed for a reason other than ending. A scan holds these apart from its
+    /// findings, as [`source_failures`](crate::ScanReport::source_failures).
+    Source,
 }
 
 impl Category {
@@ -407,6 +411,7 @@ impl Category {
             Category::Xattr => "xattr",
             Category::Journal => "journal",
             Category::Orphan => "orphan",
+            Category::Source => "source",
         }
     }
 }
@@ -498,6 +503,10 @@ pub struct Anomaly {
 impl crate::Deviation for Anomaly {
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn is_source_failure(&self) -> bool {
+        self.category == Category::Source
     }
 
     /// The block size is the addressing unit an ext location is stated in.
@@ -706,6 +715,21 @@ pub enum ReadError {
         /// The offending index.
         index: u64,
     },
+    /// The filesystem records more blocks than its source holds from where it begins: an
+    /// image cut short, or a filesystem longer than the region it was opened in.
+    ///
+    /// A scan reports it, at [`Severity::Structural`]: the blocks past the source's end are
+    /// blocks the filesystem counts on and does not have. Opening does not refuse it, under
+    /// either policy, since every block the source does hold reads as it is; a read that
+    /// reaches past the end is [`OutOfRange`](Self::OutOfRange) there.
+    #[error("the filesystem records {blocks} blocks and its source holds {held}")]
+    #[non_exhaustive]
+    SourceTooShort {
+        /// The blocks the superblock records, `s_blocks_count`.
+        blocks: u64,
+        /// The whole blocks the source holds from where the filesystem begins.
+        held: u64,
+    },
     /// An inode number was zero or beyond the filesystem's inode count.
     #[error("inode {inode} does not exist")]
     #[non_exhaustive]
@@ -762,6 +786,20 @@ pub enum ReadError {
     #[non_exhaustive]
     IndexMisplacesName {
         /// The inode number the misplaced entry names.
+        inode: u32,
+    },
+    /// A directory entry names a directory the tree already reaches by another name, or one
+    /// of its own ancestors. An ext directory has one name and one parent, so the tree
+    /// contradicts itself. A walk never descends into such a directory twice; a strict read
+    /// refuses the tree for it, and a lenient one passes the repeat over. Like
+    /// [`HostileName`](Self::HostileName), it carries the inode rather than a name.
+    #[error(
+        "a directory entry names directory inode {inode}, which the tree reaches by another \
+         name as well"
+    )]
+    #[non_exhaustive]
+    RepeatedDirectory {
+        /// The directory inode named twice.
         inode: u32,
     },
     /// The journal inode or its jbd2 superblock was malformed.
@@ -1046,12 +1084,18 @@ impl ReadError {
     #[must_use]
     pub fn anomaly(&self) -> Anomaly {
         let (severity, category, location) = match self {
-            // The source itself failed: nothing could be parsed, so it is structural.
-            ReadError::Io { .. } => (
+            // The source ended: the image is shorter than what it describes, which is a fault
+            // in it, and nothing past that point could be parsed.
+            ReadError::Io {
+                kind: std::io::ErrorKind::UnexpectedEof,
+                ..
+            } => (
                 Severity::Structural,
                 Category::Superblock,
                 Location::default(),
             ),
+            // The source failed some other way, which says nothing about the image.
+            ReadError::Io { .. } => (Severity::Structural, Category::Source, Location::default()),
             // A parse failure is reported against the object that failed to parse. The
             // structure name each `ParseError` carries is what names it; defaulting to
             // the superblock would file a malformed inode under the one object the
@@ -1086,6 +1130,11 @@ impl ReadError {
                 };
                 (Severity::Structural, category, location)
             }
+            ReadError::SourceTooShort { .. } => (
+                Severity::Structural,
+                Category::Superblock,
+                Location::default(),
+            ),
             ReadError::NoSuchInode { inode: n } => (
                 Severity::Structural,
                 Category::Inode,
@@ -1116,6 +1165,16 @@ impl ReadError {
                 Severity::Structural,
                 Category::Directory,
                 Location::default(),
+            ),
+            // Two names for one directory: every record parses, and the records disagree
+            // about the tree they make.
+            ReadError::RepeatedDirectory { inode } => (
+                Severity::Integrity,
+                Category::Directory,
+                Location {
+                    inode: Some(*inode),
+                    ..Location::default()
+                },
             ),
             ReadError::BadJournal
             | ReadError::JournalUnsupported { .. }
@@ -1377,11 +1436,12 @@ pub struct WalkEntry {
 /// returns or how one fails: the source is read-only to a reader and is taken not to change
 /// under it.
 pub struct Reader<R> {
-    src: R,
+    /// The source, ending where the caller's region does.
+    src: Bounded<R>,
     base: u64,
-    /// The bytes the source holds from [`base`](Self::base) on, measured at open. Every
-    /// structural bound the reader applies is derived from it, so it is the filesystem's
-    /// share of the source rather than the whole of it.
+    /// The bytes the source holds from [`base`](Self::base) on, measured at open through the
+    /// region. Every structural bound the reader applies is derived from it, so it is the
+    /// filesystem's share of the source rather than the whole of it.
     source_len: u64,
     sb: SuperBlock,
     /// The superblock exactly as it sits on disk.
@@ -1499,6 +1559,13 @@ impl OpenOptions {
         self
     }
 
+    /// Hold the filesystem to the `len` bytes from its base on.
+    #[must_use]
+    pub const fn len(mut self, len: u64) -> Self {
+        self.common = self.common.len(len);
+        self
+    }
+
     /// Read under `policy`.
     #[must_use]
     pub const fn policy(mut self, policy: ReadPolicy) -> Self {
@@ -1513,7 +1580,7 @@ impl OpenOptions {
         self
     }
 
-    /// Take the three shared inputs from `common`, leaving this family's own alone.
+    /// Take the shared inputs from `common`, leaving this family's own alone.
     #[must_use]
     pub const fn common(mut self, common: crate::OpenOptions) -> Self {
         self.common = common;
@@ -1557,17 +1624,19 @@ impl<R: Read + Seek> Reader<R> {
     /// [`ReadError::JournalUnsupported`], [`ReadError::JournalMalformed`], or
     /// [`ReadError::JournalCopyChecksum`] if its journal cannot be replayed whole. A lenient
     /// open reads what recovery can apply, and a scan reports the rest.
-    pub fn open_with(mut src: R, options: &OpenOptions) -> Result<Self, ReadError> {
+    pub fn open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError> {
         let &OpenOptions {
             common:
                 crate::OpenOptions {
                     base,
+                    len,
                     policy,
                     limits,
                     ..
                 },
             csum_seed,
         } = options;
+        let mut src = Bounded::new(src, base, len);
         // The primary superblock is 1024 bytes into the filesystem. A `base` a caller
         // pushed near the top of the 64-bit range cannot overflow into a small seek: the
         // sum is checked, and an offset that leaves no room for a superblock is reported
@@ -1767,6 +1836,24 @@ impl<R: Read + Seek> Reader<R> {
     #[must_use]
     pub fn superblock(&self) -> &SuperBlock {
         &self.sb
+    }
+
+    /// An inode's ownership, permission bits and times, as the shared vocabulary carries
+    /// them: the twelve bits below the file type, and a birth time where the inode records
+    /// one. A creation time is in the extra area, which a 128-byte inode lacks and a foreign
+    /// tool may declare short of it, so the inode's own `i_extra_isize` decides.
+    #[must_use]
+    pub fn metadata(&self, inode: &Inode) -> Metadata {
+        let born = Inode::has_crtime(self.sb.inode_size, inode.extra_isize);
+        Metadata {
+            mode: inode.mode & 0o7777,
+            uid: inode.uid,
+            gid: inode.gid,
+            atime: inode.atime,
+            ctime: inode.ctime,
+            mtime: inode.mtime,
+            btime: born.then_some(inode.crtime),
+        }
     }
 
     /// The feature set the image advertises.
@@ -2931,6 +3018,19 @@ impl<R: Read + Seek> Reader<R> {
         let source_len = self.source_len();
         let block_size = self.block_size as u64;
         let max_blocks = source_len / block_size;
+        // And say so where the filesystem is longer than that. `e2fsck` 1.47.0 calls a block
+        // count past the device's end an inconsistency it cannot repair (observed: `-p` exits
+        // 4), and nothing else here reports it where the blocks past the end hold nothing a
+        // read reaches.
+        if self.sb.blocks_count > max_blocks {
+            anomalies.push(
+                ReadError::SourceTooShort {
+                    blocks: self.sb.blocks_count,
+                    held: max_blocks,
+                }
+                .anomaly(),
+            );
+        }
 
         // An `incompat` feature the reader does not follow taints the whole image: it may
         // change the layout of the structures walked below, so it is reported first. A
@@ -4877,8 +4977,10 @@ impl<R: Read + Seek> Reader<R> {
     /// # Errors
     ///
     /// [`ReadError::NotADirectory`] if the root inode is not a directory, [`ReadError`]
-    /// variants if any directory along the walk cannot be read, or
-    /// [`ReadError::WalkTooLarge`] if the tree holds more names than the bounds allow.
+    /// variants if any directory along the walk cannot be read,
+    /// [`ReadError::RepeatedDirectory`] under [`ReadPolicy::Strict`] if an entry names a
+    /// directory the tree already reaches, or [`ReadError::WalkTooLarge`] if the tree holds
+    /// more names than the bounds allow.
     pub fn walk(&mut self) -> Result<Vec<WalkEntry>, ReadError> {
         let mut out = Vec::new();
         self.walk_with::<ReadError>(|_, entry| {
@@ -5077,6 +5179,16 @@ impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
         self.walk_children(&entry.inode, &entry.path)
     }
 
+    fn repeated(&mut self, entry: &WalkEntry) -> Result<(), ReadError> {
+        let err = ReadError::RepeatedDirectory {
+            inode: entry.number,
+        };
+        if self.policy.is_fatal(err.anomaly().severity) {
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn too_large(limit: usize) -> ReadError {
         ReadError::WalkTooLarge { limit }
     }
@@ -5240,17 +5352,7 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         // the synthesis inputs go unused. A caller's values are not applied over what the
         // image holds: what is stored is what is reported.
         let xattrs = self.xattrs(node)?;
-        Ok(Attributes::read(
-            Metadata {
-                mode: node.mode & 0o7777,
-                uid: node.uid,
-                gid: node.gid,
-                atime: node.atime,
-                ctime: node.ctime,
-                mtime: node.mtime,
-            },
-            xattrs,
-        ))
+        Ok(Attributes::read(self.metadata(node), xattrs))
     }
 
     fn read_bytes(
@@ -5259,6 +5361,12 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, TreeError> {
+        // A directory and a slow symlink map blocks too, holding entries and a target rather
+        // than file contents, so the question asked of the node is its kind and not whether
+        // it maps anything.
+        if node.mode & 0o170000 != 0o100000 {
+            return Ok(0);
+        }
         Ok(Reader::read_into(self, node, offset, buf)?)
     }
 
@@ -6854,6 +6962,36 @@ mod tests {
     }
 
     #[test]
+    fn an_inode_without_the_creation_field_reads_as_no_birth_time() {
+        let born = Timestamp::from_secs(1_600_000_000);
+        let m = Metadata::new(0o644, Timestamp::from_secs(1_700_000_000));
+        let file = |meta| TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), meta);
+        let read = |inode_size: u16, meta| {
+            let mut o = opts();
+            o.feature.inode_size = inode_size;
+            let image = format(file(meta), 64 * MIB, o).unwrap();
+            let mut r = Reader::open(std::io::Cursor::new(image.into_bytes())).unwrap();
+            let (_, inode) = r.lookup(b"/f").unwrap();
+            let stated = FsTree::stat(&mut r, &inode, &Synthesis::default())
+                .unwrap()
+                .meta;
+            assert_eq!(stated, r.metadata(&inode), "the one projection");
+            (r, inode, stated.btime)
+        };
+        // A larger inode holds the stated birth time, and the modification time where none is.
+        assert_eq!(read(256, m.with_birth_time(born)).2, Some(born));
+        assert_eq!(read(256, m).2, Some(m.mtime));
+        // A 128-byte inode ends before the field, so a read finds none.
+        let (_, _, none) = read(128, m);
+        assert_eq!(none, None);
+        // Nor where an inode of a larger table declares an extra area short of it, as a
+        // foreign tool may.
+        let (r, mut inode, _) = read(256, m);
+        inode.extra_isize = 0;
+        assert_eq!(r.metadata(&inode).btime, None);
+    }
+
+    #[test]
     fn the_fixed_time_clamp_reaches_the_reserved_structural_inodes() {
         // The clamp forces every inode's four times, including the reserved structural
         // inodes the materializer builds rather than the model — resize (7), journal
@@ -7630,6 +7768,42 @@ mod tests {
     }
 
     #[test]
+    fn a_filesystem_longer_than_its_region_is_found_short_and_one_inside_it_is_not() {
+        // A 32 MiB filesystem a mebibyte into a disk, and a neighbour's bytes after it.
+        const BASE: u64 = MIB;
+        let image = format(TreeBuilder::new(), 32 * MIB, opts()).unwrap();
+        let len = image.as_bytes().len() as u64;
+        let mut disk = vec![0x9au8; BASE as usize];
+        disk.extend_from_slice(image.as_bytes());
+        disk.extend(vec![0xee; MIB as usize]);
+
+        let scan = |len: Option<u64>| {
+            let mut options = OpenOptions::new().base(BASE).policy(ReadPolicy::Lenient);
+            options.common.len = len;
+            let mut r = Reader::open_with(std::io::Cursor::new(&disk), &options).expect("open");
+            let blocks = r.superblock().blocks_count;
+            let block_size = u64::from(r.feature().block_size);
+            (r.scan(), blocks, block_size)
+        };
+        // In a partition of 16 MiB, the filesystem records blocks its source does not hold.
+        // Nothing the fresh filesystem refers to lies past the partition, so this one finding
+        // is the only thing that says so.
+        let (report, blocks, block_size) = scan(Some(16 * MIB));
+        let short = ReadError::SourceTooShort {
+            blocks,
+            held: 16 * MIB / block_size,
+        }
+        .anomaly();
+        assert_eq!(short.severity, Severity::Structural);
+        assert_eq!(report.anomalies(), [short]);
+        // The partition that holds it whole, and the disk with no partition named: clean.
+        for len in [Some(len), None] {
+            let (report, _, _) = scan(len);
+            assert!(report.is_clean(), "{len:?}: {:?}", report.anomalies());
+        }
+    }
+
+    #[test]
     fn opens_a_filesystem_at_an_arbitrary_offset() {
         // A filesystem embedded past a leading gap — a partition inside a whole-disk
         // image — reads back identically to a bare one.
@@ -7813,7 +7987,8 @@ mod tests {
         assert!(!report.is_truncated());
         assert_eq!(
             report.to_report().to_json(),
-            "{\"schema\":2,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[]}"
+            "{\"schema\":3,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[],\
+             \"source_failures\":[]}"
         );
     }
 
@@ -8396,6 +8571,69 @@ mod tests {
                 Err(ReadError::FileTooLarge { limit: 4096, .. })
             ),
             "a target longer than a path can be is refused before it is read"
+        );
+    }
+
+    #[test]
+    fn the_shared_frame_reads_bytes_only_from_a_regular_file() {
+        // A directory and a slow symlink both map data blocks, which hold entries and a
+        // target rather than file contents. The shared frame's contract is that a node which
+        // is not a regular file yields nothing, so a sink asking for bytes gets the same
+        // nothing whichever family it drains.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let m = |mode| Metadata::new(mode, time);
+        let src = TreeBuilder::new()
+            .directory(b"/d".to_vec(), m(0o755))
+            .file(b"/d/f".to_vec(), b"contents".to_vec(), m(0o644))
+            .symlink(b"/slow".to_vec(), vec![b'a'; 200], m(0o777))
+            .fifo(b"/pipe".to_vec(), m(0o644));
+        let bytes = format(src, 16 * MIB, opts()).unwrap().into_bytes();
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let mut buf = [0u8; 4096];
+        for path in [&b"/d"[..], b"/slow", b"/pipe"] {
+            let (_, inode) = r.lookup_no_follow(path).unwrap();
+            let filled = <Reader<_> as FsTree>::read_bytes(&mut r, &inode, 0, &mut buf).unwrap();
+            assert_eq!(
+                filled,
+                0,
+                "{} yields no bytes",
+                String::from_utf8_lossy(path)
+            );
+        }
+        let (_, file) = r.lookup_no_follow(b"/d/f").unwrap();
+        let filled = <Reader<_> as FsTree>::read_bytes(&mut r, &file, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..filled], b"contents");
+    }
+
+    #[cfg(feature = "tar")]
+    #[test]
+    fn a_file_the_image_cannot_read_stops_an_archive_as_the_images_failure() {
+        // A file's bytes reach the archive through a `Read`, whose only failure is an I/O
+        // error. The reader's own verdict has to survive that, or a damaged image written out
+        // as an archive reads as a destination that could not be written — which is what an
+        // extraction to a directory of the same image does not say.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new().file(
+            b"/f".to_vec(),
+            vec![7u8; 10_000],
+            Metadata::new(0o644, time),
+        );
+        let mut bytes = format(src, 16 * MIB, opts_no_csum()).unwrap().into_bytes();
+        let number = {
+            let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+            r.lookup_no_follow(b"/f").unwrap().0
+        };
+        // The magic of the extent header at the head of `i_block`.
+        let at = inode_offset(&bytes, number) + 40;
+        bytes[at] ^= 0xff;
+
+        let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        let err = crate::ArchiveSink::new(Vec::new())
+            .write_tree(&mut r)
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::ArchiveError::Read(TreeError::Malformed { .. })),
+            "{err:?}"
         );
     }
 
@@ -9428,12 +9666,12 @@ mod tests {
         // deliberate.
         assert_eq!(
             golden_report().to_report().to_json(),
-            "{\"schema\":2,\"clean\":false,\"count\":2,\"truncated\":false,\"findings\":[\
+            "{\"schema\":3,\"clean\":false,\"count\":2,\"truncated\":false,\"findings\":[\
              {\"severity\":\"integrity\",\"family\":\"ext\",\"category\":\"inode\",\
              \"offset\":163840,\"location\":{\"group\":3,\"inode\":12,\"block\":40},\
              \"detail\":\"checksum \\\"bad\\\"\"},\
              {\"severity\":\"cosmetic\",\"family\":\"ext\",\"category\":\"journal\",\
-             \"location\":{},\"detail\":\"note\"}]}"
+             \"location\":{},\"detail\":\"note\"}],\"source_failures\":[]}"
         );
         assert_eq!(
             golden_report().to_report().to_table(),
@@ -9447,10 +9685,62 @@ mod tests {
         let clean = ScanReport::default().to_report();
         assert_eq!(
             clean.to_json(),
-            "{\"schema\":2,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[]}"
+            "{\"schema\":3,\"clean\":true,\"count\":0,\"truncated\":false,\"findings\":[],\
+             \"source_failures\":[]}"
         );
         assert_eq!(clean.to_table(), "no findings\n");
-        assert_eq!(crate::finding::FINDINGS_SCHEMA_VERSION, 2);
+        assert_eq!(crate::finding::FINDINGS_SCHEMA_VERSION, 3);
+
+        // A read the source failed is held apart from the findings, in a record of the same
+        // shape, and counts towards no verdict while keeping the report from being clean.
+        let failed = ScanReport::new(
+            vec![
+                ReadError::Io {
+                    kind: std::io::ErrorKind::Other,
+                    message: "the medium failed".to_string(),
+                }
+                .anomaly(),
+                golden_report().anomalies()[1].clone(),
+            ],
+            false,
+            crate::FindingReport::MAX_FINDINGS,
+            4096,
+        );
+        assert_eq!(failed.anomalies().len(), 1);
+        assert_eq!(failed.source_failures().len(), 1);
+        assert_eq!(failed.worst_severity(), Some(Severity::Cosmetic));
+        assert!(!failed.is_clean());
+        let projected = failed.to_report();
+        assert_eq!(
+            projected.to_json(),
+            "{\"schema\":3,\"clean\":false,\"count\":1,\"truncated\":false,\"findings\":[\
+             {\"severity\":\"cosmetic\",\"family\":\"ext\",\"category\":\"journal\",\
+             \"location\":{},\"detail\":\"note\"}],\"source_failures\":[\
+             {\"severity\":\"structural\",\"family\":\"ext\",\"category\":\"source\",\
+             \"location\":{},\"detail\":\"i/o error: the medium failed\"}]}"
+        );
+        assert_eq!(
+            projected.to_table(),
+            "SEVERITY  CATEGORY  LOCATION  DETAIL\n\
+             cosmetic  journal   -         note\n\
+             \n\
+             source failure: i/o error: the medium failed\n"
+        );
+        assert!(projected.to_sarif(None).contains(
+            "{\"executionSuccessful\":false,\"toolExecutionNotifications\":[\
+             {\"level\":\"error\",\"message\":{\"text\":\"source failure: i/o error: the \
+             medium failed\"}}]}"
+        ));
+        // A short read is the image's, and stays a finding.
+        let short = ReadError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message: "failed to fill whole buffer".to_string(),
+        }
+        .anomaly();
+        assert_eq!(
+            (short.severity, short.category),
+            (Severity::Structural, Category::Superblock)
+        );
     }
 
     #[test]
@@ -9752,10 +10042,21 @@ mod tests {
             off += rec_len;
         }
 
-        // The walk terminates (an unbounded one would return the depth-cap error) and
-        // yields each directory once; /a/b now resolves to the root and is not
-        // descended again.
+        // A strict read refuses the tree: an ext directory has one name, and /a/b names the
+        // root, which the tree already reaches.
         let mut r = Reader::open(std::io::Cursor::new(&bytes)).unwrap();
+        assert!(matches!(
+            r.walk(),
+            Err(ReadError::RepeatedDirectory { inode: 2 })
+        ));
+
+        // A lenient one terminates (an unbounded walk would return the depth-cap error) and
+        // yields each directory once; /a/b resolves to the root and is not descended again.
+        let mut r = Reader::open_with(
+            std::io::Cursor::new(&bytes),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .unwrap();
         let tree = r.walk().unwrap();
         let paths: Vec<&[u8]> = tree.iter().map(|e| e.path.as_slice()).collect();
         assert!(paths.contains(&b"/a".as_slice()));

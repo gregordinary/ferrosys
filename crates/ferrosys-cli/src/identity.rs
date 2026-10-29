@@ -34,7 +34,9 @@ pub fn run(args: IdentityArgs) -> Result<(), Error> {
     // reader's refusal of foreign bytes would say. An image nothing recognizes gets the
     // verdict `detect` gives it; one that detects as ext and then does not read is a
     // damaged ext filesystem, and the rewrite's own errors say so precisely.
-    match ferrosys::detect_with(&mut file, &DetectOptions::new().base(args.offset)) {
+    let mut detect = DetectOptions::new().base(args.offset);
+    detect.len = args.length;
+    match ferrosys::detect_with(&mut file, &detect) {
         Ok(Filesystem::Ext(_)) => {}
         Ok(other) => {
             let (family, variant) = crate::detect::words(&other);
@@ -57,9 +59,11 @@ pub fn run(args: IdentityArgs) -> Result<(), Error> {
     change.set_checksum_seed = args.set_checksum_seed;
 
     let report =
-        rewrite_identity_at(&mut file, &change, args.offset).map_err(|source| Error::Identity {
-            path: args.image.display().to_string(),
-            source,
+        rewrite_identity_at(&mut file, &change, args.offset, args.length).map_err(|source| {
+            Error::Identity {
+                path: args.image.display().to_string(),
+                source,
+            }
         })?;
     // On the disk before success is reported, so a report is never of writes a power loss
     // could still take back. A run cut short before this is finished by running it again.

@@ -20,7 +20,13 @@
 // The bullet belongs to the builds that have the item: with no family compiled in there is
 // nothing an image could be opened as, so `open` and `FsReader` are not there to link.
 #![cfg_attr(
-    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"),
+    any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ),
     doc = " - [`open`](fn@open) detects and hands back the matching family's reader, as an \
 [`FsReader`] — an enum of concrete readers rather than a common interface, so a caller that \
 has matched its way to one has that family's whole surface."
@@ -101,12 +107,24 @@ whose bytes are compressed takes the decoder for its algorithm; verifying one ta
 checksums covering the bytes on the volume. The byte-exact on-disk structures are under \
 [`btrfs::ondisk`]."
 )]
+#![cfg_attr(
+    feature = "apfs",
+    doc = "\n The [`apfs`] module reads the APFS family, over the two layers the format has. A \
+[`Container`](apfs::Container) opens one over any `Read + Seek` source at its newest whole \
+checkpoint and lists the volumes it holds, and a [`Reader`](apfs::Reader) is one of those \
+volumes read as files, or one of its snapshots. Every object's checksum is verified and every \
+object is held to the reference that reached it; a compressed file reads through its compression \
+header, its content after the header or in its resource fork. [`format`](apfs::format) writes a \
+container as `newfs_apfs` writes one into a file, its first volume populated from a source. The \
+byte-exact on-disk structures are under [`apfs::ondisk`]."
+)]
 //!
 //! # Features
 //!
-//! A build takes the filesystem families it names. The default build carries all four —
-//! `ext`, `fat`, `exfat` and `btrfs` — and the three decoders, so it reads what a Linux
-//! kernel mounts, a compressed btrfs included. A build that turns off every family compiles
+//! A build takes the filesystem families it names. The default build carries all five —
+//! `ext`, `fat`, `exfat`, `btrfs` and `apfs` — and all six decoders, so it reads what a Linux
+//! kernel mounts, a compressed btrfs included, and a Mac's compressed files. A build that turns
+//! off every family compiles
 //! the root substrate and no family code at all, and [`detect`](fn@detect) then recognizes
 //! nothing. Granularity is per *family* rather than per format — `ext` is ext2, ext3, and
 //! ext4 together, and `fat` is FAT12, FAT16, and FAT32 together, since each set is one
@@ -117,10 +135,11 @@ checksums covering the bytes on the volume. The byte-exact on-disk structures ar
 //! build that pulls this crate with a family turns that family on for everyone in it —
 //! including the answers [`detect`](fn@detect) then gives.
 //!
-//! Each feature stands alone and none implies another — the two ends of a tree are the
-//! root's vocabulary, so a source feeds whichever family is being written and a sink drains
-//! whichever one was opened, and a decoder undoes an encoding whichever family stored a run
-//! of bytes in it. The seven the default build carries:
+//! Each feature stands alone but `lzfse`, which turns `lzvn` on, since an LZFSE stream carries
+//! LZVN blocks among its own. The two ends of a tree are the root's vocabulary, so a source
+//! feeds whichever family is being written and a sink drains whichever one was opened, and a
+//! decoder undoes an encoding whichever family stored a run of bytes in it. The eleven the
+//! default build carries:
 //!
 //! - **`ext`** adds the ext2/ext3/ext4 family. It has no dependencies of its own.
 //! - **`fat`** adds the FAT12/FAT16/FAT32 family. It has no dependencies of its own.
@@ -128,16 +147,25 @@ checksums covering the bytes on the volume. The byte-exact on-disk structures ar
 //!   its structures. It has no dependencies of its own.
 //! - **`btrfs`** adds the btrfs family, over a format built out of B-trees and a logical
 //!   address space. It has no dependencies of its own.
+//! - **`apfs`** adds the APFS family: a container of volumes under a checkpoint, each volume a
+//!   tree of records found through an object map, read, and written from a source tree. It has
+//!   no dependencies of its own.
 //! - **`zlib`**, **`lzo`** and **`zstd`** each add a decoder, so that a file whose extents
 //!   are stored in that encoding reads as the file rather than as a refusal naming the
-//!   algorithm. btrfs is the family here that stores runs that way, and a decoder reaches
-//!   bytes only through a family that stores some — a build naming its features names one
-//!   beside `btrfs`, as `--features btrfs,zstd`; alone it compiles its dependency and
-//!   decodes nothing, since no reachable read stores runs that way. `lzo` takes no
+//!   algorithm. btrfs stores extents in all three, and APFS keeps a compressed file's content
+//!   in `zlib` as well. A decoder reaches bytes only through a family that stores some, so a
+//!   build naming its features names one beside such a family, as `--features btrfs,zstd`;
+//!   alone it compiles its dependency and decodes nothing, since no reachable read stores runs
+//!   that way. `lzo` takes no
 //!   dependency, its decoder being in this crate; the other two depend on `miniz_oxide`
 //!   and `ruzstd`. None of them is needed to *verify* a filesystem: the checksums it
 //!   records cover the bytes it stored, so a compressed extent is checked without being
 //!   expanded.
+//! - **`lzvn`**, **`lzfse`** and **`lzbitmap`** add the decoders an APFS compressed file's
+//!   chunks are stored with beside `zlib`, so that such a file reads as its content rather than
+//!   as a refusal naming its compression type. None takes a dependency, their decoders being in
+//!   this crate, and `lzfse` turns `lzvn` on, since an LZFSE stream carries LZVN blocks among
+//!   its own. They are named beside `apfs`, as `--features apfs,zlib,lzfse,lzbitmap`.
 //!
 //! Three more are off by default, so the default build's dependencies are `thiserror` and
 //! the two decoders':
@@ -174,11 +202,11 @@ pub use crc32c::crc32c;
 
 // Undoing the encodings a filesystem stores a run of bytes in fewer of them. Here beside
 // `crc32c` and for the same reason: an encoding is a property of a run of bytes rather than
-// of the format around it, and the same three algorithms appear in more than one filesystem.
-// How a format frames them stays with the format. Compiled where a family that stores runs
-// this way is; the three decoders inside it are each a feature of their own, so a build with
-// that family and none of them still names the encoding it is declining.
-#[cfg(feature = "btrfs")]
+// of the format around it, and the same algorithms appear in more than one filesystem. How a
+// format frames them stays with the format. Compiled where a family that stores runs this way
+// is; the decoders inside it are each a feature of their own, so a build with that family and
+// none of them still names the encoding it is declining.
+#[cfg(any(feature = "btrfs", feature = "apfs"))]
 mod compress;
 
 // The little-endian byte accessors every family's on-disk layer serializes through. Two
@@ -191,7 +219,7 @@ mod bytes;
 // The blocks a reader returns to, held so the source is asked for each once. Which blocks
 // are worth holding is the family's; how many are held and which goes first is the same
 // answer for every reader that holds any.
-#[cfg(any(feature = "ext", feature = "btrfs"))]
+#[cfg(any(feature = "ext", feature = "btrfs", feature = "apfs"))]
 mod cache;
 
 // The byte boundary, in both directions. Deciding what a byte is, and finding the structure
@@ -222,13 +250,25 @@ pub mod json;
 // The depth-first walk every family's reader is driven by: one frontier, one cycle check,
 // one set of bounds, with each family supplying what sits on the frontier and how a name's
 // children are read. Compiled where a family is, since with none there is no tree to walk.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 mod walk;
 
 // The path resolution every family's reader answers a lookup with: one component loop, one
 // ascent on `..`, one hop budget for symbolic links, with each family supplying only how a
 // name is found in a directory. Compiled where a family is, for the same reason the walk is.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 mod resolve;
 
 // One shape for a newtype over a field of on-disk flag bits: the set operations every one of
@@ -279,7 +319,8 @@ pub use xattr::Xattr;
 // source vocabulary of its own.
 mod source;
 pub use source::{
-    EntryKind, FileContent, FileRange, LayeredSource, Metadata, Source, SourceEntry, TreeBuilder,
+    CompressedFile, Darwin, EntryKind, FileContent, FileRange, LayeredSource, Metadata,
+    RemovalError, Source, SourceEntry, TreeBuilder,
 };
 
 // What a scan found, and what renders it. A family keeps its own typed taxonomy and
@@ -294,7 +335,13 @@ pub use finding::{
 // Where a filesystem begins, how strictly it is read, and what one read may allocate — the
 // same three settings whatever family answers them.
 mod policy;
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub use policy::MAX_SYMLINK_HOPS;
 pub use policy::{Limits, OpenOptions, ReadPolicy};
 
@@ -303,9 +350,21 @@ pub use policy::{Limits, OpenOptions, ReadPolicy};
 // not got one yet has nothing for it to hold. A family whose reader lands is added to this
 // condition in the same change; until then it is named by `detect` and refused by `open`
 // through an error variant that exists for exactly as long as something can produce it.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 mod open;
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub use open::{FsReader, OpenError, open, open_with};
 
 // What a format could not hold and what a read had to invent, both directions in one
@@ -318,13 +377,17 @@ pub use fidelity::{AcceptedLoss, Direction, FidelityRecord, FidelityReport, Prop
 mod tree;
 pub use tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
 
+// A tree this crate reads, handed back to the write side as a source.
+mod image_source;
+pub use image_source::{ImageFile, ImageSource};
+
 // Room to leave when a filesystem is sized to its contents rather than told a size. What
 // every family's search shares is the input and the arithmetic over it; the search itself
 // is each family's, because a probe is that family's writer. Compiled where a family is:
 // with none there is nothing to size.
-#[cfg(any(feature = "ext", feature = "fat"))]
+#[cfg(any(feature = "ext", feature = "fat", feature = "apfs"))]
 mod sizing;
-#[cfg(any(feature = "ext", feature = "fat"))]
+#[cfg(any(feature = "ext", feature = "fat", feature = "apfs"))]
 pub use sizing::Slack;
 
 // A POSIX access control list, which is the value one extended attribute carries. Like
@@ -414,3 +477,12 @@ pub mod exfat;
 // without naming the family it belongs to.
 #[cfg(feature = "btrfs")]
 pub mod btrfs;
+
+// ── The APFS family: the `apfs` module, behind the `apfs` feature ──
+//
+// A container of volumes rather than one filesystem: a pool of blocks under a checkpoint and
+// an object map, listing up to a hundred volumes that each have a tree of their own. The
+// layers live under the module, so nothing about a checkpoint is reachable without naming
+// the family it belongs to.
+#[cfg(feature = "apfs")]
+pub mod apfs;

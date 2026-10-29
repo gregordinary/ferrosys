@@ -61,6 +61,13 @@ pub enum Filesystem {
     /// label detection could compute from it.
     #[cfg(feature = "btrfs")]
     Btrfs,
+    /// An APFS container.
+    ///
+    /// The variant carries nothing, because what varies between two containers — how many
+    /// volumes they hold, what each is called, which features each carries — is read out of
+    /// the container rather than a label detection could compute from its first block.
+    #[cfg(feature = "apfs")]
+    Apfs,
 }
 
 /// Where to look for a filesystem, and anything else detection needs to be told.
@@ -70,8 +77,8 @@ pub enum Filesystem {
 ///
 /// ```
 /// # use ferrosys::DetectOptions;
-/// // The filesystem in a partition that begins one mebibyte into a whole-disk image.
-/// let options = DetectOptions::new().base(1 << 20);
+/// // The filesystem in a 16 MiB partition that begins one mebibyte into a whole-disk image.
+/// let options = DetectOptions::new().base(1 << 20).len(16 << 20);
 /// # let _ = options;
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -85,19 +92,33 @@ pub struct DetectOptions {
     /// for the same reason: the question detection answers is "what is at this location",
     /// which a classifier fixed to the start of its source cannot be asked.
     pub base: u64,
+    /// How many bytes from [`base`](Self::base) on the region holds, or `None` for every byte
+    /// to the source's end — the same region
+    /// [`OpenOptions::len`](crate::OpenOptions::len) names to a reader.
+    ///
+    /// Detection reads through the region alone: the source ends at the region's end, so no
+    /// byte past it is read as the filesystem's.
+    pub len: Option<u64>,
 }
 
 impl DetectOptions {
     /// Detect at the start of the source.
     #[must_use]
     pub const fn new() -> Self {
-        Self { base: 0 }
+        Self { base: 0, len: None }
     }
 
     /// Detect a filesystem that begins `base` bytes into the source.
     #[must_use]
     pub const fn base(mut self, base: u64) -> Self {
         self.base = base;
+        self
+    }
+
+    /// Detect a filesystem within the `len` bytes from its [`base`](Self::base) on.
+    #[must_use]
+    pub const fn len(mut self, len: u64) -> Self {
+        self.len = Some(len);
         self
     }
 }
@@ -164,6 +185,17 @@ pub fn detect_with<R: Read + Seek>(
     #[allow(unused_mut)] mut src: R,
     options: &DetectOptions,
 ) -> Result<Filesystem, DetectError> {
+    // Every probe reads through the region, so a family measuring its source measures the
+    // region and none reads past it. Compiled where a family is: with none, nothing reads.
+    #[cfg(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ))]
+    let mut src = crate::io::Bounded::new(src, options.base, options.len);
+
     // Tier 1: every family whose images carry a distinctive multi-byte magic at a fixed
     // offset. Order within the tier does not matter and must not be relied on — two such
     // magics do not collide, so at most one claims any image.
@@ -192,6 +224,19 @@ pub fn detect_with<R: Read + Seek>(
     // answer rather than a signature that might be a coincidence.
     #[cfg(feature = "btrfs")]
     match crate::btrfs::claim(&mut src, options) {
+        Ok(Some(fs)) => return Ok(fs),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // APFS is in this tier on a four-byte magic at offset 32 of the first block, an offset a
+    // FAT boot sector keeps its 32-bit sector count at, so one FAT volume size spells it. The
+    // claim is the magic and either the checksum every APFS object carries over its block, or,
+    // where block zero's does not cover it, a whole checkpoint in the descriptor area block zero
+    // names, which is what a lenient open reads through. A sector count that happens to spell
+    // the magic makes neither hold.
+    #[cfg(feature = "apfs")]
+    match crate::apfs::claim(&mut src, options) {
         Ok(Some(fs)) => return Ok(fs),
         Ok(None) => {}
         Err(e) => return Err(e),
@@ -242,9 +287,10 @@ fn ext_claim<R: Read + Seek>(
     use crate::policy::ReadPolicy;
     use crate::read::{OpenOptions, ReadError, Reader};
 
-    let open = OpenOptions::new()
+    let mut open = OpenOptions::new()
         .base(options.base)
         .policy(ReadPolicy::Lenient);
+    open.common.len = options.len;
     match Reader::open_with(src, &open) {
         Ok(reader) => Ok(Some(Filesystem::Ext(reader.profile()))),
         Err(ReadError::Io {
@@ -267,9 +313,11 @@ mod agnostic_tests {
     use super::DetectOptions;
 
     #[test]
-    fn options_carry_the_offset_they_were_given() {
+    fn options_carry_the_region_they_were_given() {
         assert_eq!(DetectOptions::new().base, 0);
-        assert_eq!(DetectOptions::new().base(1 << 20).base, 1 << 20);
+        assert_eq!(DetectOptions::new().len, None);
+        let options = DetectOptions::new().base(1 << 20).len(16 << 20);
+        assert_eq!((options.base, options.len), (1 << 20, Some(16 << 20)));
         assert_eq!(DetectOptions::default(), DetectOptions::new());
     }
 
@@ -280,7 +328,13 @@ mod agnostic_tests {
     /// The condition is every family, not any one of them: a build carrying a single family
     /// does recognize images, so running this there would assert something the build does
     /// not promise and pass only because the fixtures happen not to be that family's.
-    #[cfg(not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")))]
+    #[cfg(not(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    )))]
     #[test]
     fn a_build_with_no_family_recognizes_nothing() {
         use super::{DetectError, detect, detect_with};
@@ -314,7 +368,13 @@ mod agnostic_tests {
 /// fix a rule that changed, and the second copy stops being read the day it is written.
 #[cfg(all(
     test,
-    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")
+    any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    )
 ))]
 mod every_family {
     use super::{DetectError, DetectOptions, Filesystem, detect, detect_with};
@@ -351,8 +411,7 @@ mod every_family {
         ));
         #[cfg(feature = "btrfs")]
         {
-            // The one family with no formatter to build a fixture with, so the fixture is a
-            // filesystem assembled byte by byte. It carries the magic, and the superblock
+            // A filesystem assembled byte by byte. It carries the magic, and the superblock
             // carrying it carries a checksum over itself — which is what the claim checks.
             use std::io::Read;
             let mut src = crate::btrfs::forge::Forge::new().source();
@@ -360,6 +419,10 @@ mod every_family {
             src.read_to_end(&mut bytes).expect("the forged device");
             out.push((Filesystem::Btrfs, bytes));
         }
+        #[cfg(feature = "apfs")]
+        // The forge's container, assembled byte by byte. Its first block carries the magic and a
+        // checksum over the block, which is what the claim checks.
+        out.push((Filesystem::Apfs, crate::apfs::forge::Forge::new().image()));
         assert!(
             !out.is_empty(),
             "this module is compiled only where a family is"
@@ -393,6 +456,39 @@ mod every_family {
             assert_eq!(
                 detect_with(Cursor::new(&disk), &DetectOptions::new().base(BASE)).expect("detect"),
                 want
+            );
+        }
+    }
+
+    #[test]
+    fn detection_reads_nothing_past_the_region_it_is_given() {
+        // The same filesystem a mebibyte into a disk, followed by the bytes of whatever comes
+        // next. A region holding it whole is detected as it; one ending a sector in holds no
+        // family's header whole, and nothing past its end is read to complete one.
+        const BASE: u64 = 1 << 20;
+        for (want, bytes) in images() {
+            let len = bytes.len() as u64;
+            let mut disk = vec![0u8; BASE as usize];
+            disk.extend_from_slice(&bytes);
+            disk.extend(vec![0xee; 1 << 20]);
+
+            assert_eq!(
+                detect_with(
+                    Cursor::new(&disk),
+                    &DetectOptions::new().base(BASE).len(len)
+                )
+                .expect("detect"),
+                want
+            );
+            assert!(
+                matches!(
+                    detect_with(
+                        Cursor::new(&disk),
+                        &DetectOptions::new().base(BASE).len(512)
+                    ),
+                    Err(DetectError::Unrecognized)
+                ),
+                "{want:?} was claimed from a region of one sector"
             );
         }
     }

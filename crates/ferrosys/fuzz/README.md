@@ -20,6 +20,8 @@ cargo +nightly fuzz run exfat_reader corpus/exfat_reader seeds/exfat_reader \
     -- -max_len=8388608 $limits
 cargo +nightly fuzz run btrfs_reader corpus/btrfs_reader seeds/btrfs_reader \
     -- -max_len=83886080 -malloc_limit_mb=2048 -rss_limit_mb=24576
+cargo +nightly fuzz run apfs_reader corpus/apfs_reader seeds/apfs_reader \
+    -- -max_len=1048576 $limits
 cargo +nightly fuzz run archive_parse corpus/archive_parse seeds/archive_parse
 ```
 
@@ -124,6 +126,29 @@ occupy once checked out.
   114 MiB, and the file ends at 80 MiB, past the last block the filesystem uses: every
   seed stays under the 100 MB a repository host accepts in one file, and the seed gate
   holds them to it.
+- `apfs-populated` — a 1 MiB APFS container of one volume holding one of each kind of node
+  the reader reads — a file over two blocks with an embedded and a stream attribute, a
+  directory, a symbolic link, one file under two names, a named pipe, a device node, a sparse
+  file — and a snapshot taken before the first file existed. Assembled byte by byte by the
+  crate's own test scaffolding, which makes shapes the writer does not: a snapshot of an
+  earlier state of the volume, and a hole in a file.
+- `apfs-split` — the same volume with its file-system tree split across leaves under an index
+  node, so every read descends through one. Every node carries a checksum, so a change the
+  fuzzer makes inside a node is refused at the checksum before its framing or its keys are
+  read; the descent's own checks are held by the crate's tests, over nodes resealed after
+  each change.
+- `apfs-compressed` — the same volume holding a file of every compression type and layout
+  the reader reads: zlib, LZVN, LZFSE, LZBITMAP and stored content after the header, in a
+  stream of the compression attribute's own, and each again in a resource fork, behind a
+  table of offsets or, for zlib, a classic resource fork. Every compressed form is in blocks
+  no checksum covers, so a change to one reaches its decoder rather than a checksum. Its tree
+  is split across leaves to hold them.
+
+The three APFS seeds, and the command line's APFS fixture, are what the crate's forge makes:
+`every_image_committed_beside_the_crate_is_the_one_the_forge_makes` holds each to it, and
+`every_image_the_forge_commits_reads_whole_and_scans_clean` reads every file of each, live and
+at its snapshot. `FERROSYS_BLESS_APFS_IMAGES=1 cargo test -p ferrosys --lib apfs::forge`
+writes them again after a change to the forge that means to move them.
 - `inspect-huge-group-count` — `ext4-min` claiming as many block groups as its 32-bit
   inode total can count, sixteen million of them, with `s_blocks_count` and
   `s_inodes_count` both agreeing with that many: the crafted superblock the
@@ -205,6 +230,14 @@ PY
 - `btrfs_reader` — the address space and the trees through `Volume`, then the filesystem
   view through `Reader`: a walk, a lookup and a read of every file it reaches, a
   verification of each file's data checksums, and a scan.
+- `apfs_reader` — the container through `Container`, then every volume it lists through
+  `Reader`, leniently and strictly at the start of the source: a walk, a lookup and a read of
+  every file it reaches at several offsets, a scan and its projections, and every snapshot the
+  volume lists, opened through that volume's reader and read the same way. File content is
+  read under a cap; attribute values, link targets and the scan are read again with none,
+  since the image bounds each of them. A second open at a nonzero base offset. The lenient
+  read is the one the command line falls back to, and the only one that reaches a container
+  whose block zero is damaged or whose newer checkpoints were passed over.
 - `archive_parse` — both tar entry points: `ArchiveSource::from_reader`, which reads
   every body, and `ArchiveSource::from_path`, which locates each body and leaves it on
   disk. The seeking one computes an offset from a declared size, and a PAX `size`

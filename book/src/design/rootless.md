@@ -13,8 +13,8 @@ one property is what makes it rootless and portable:
 The byte layer is the same code on every platform. It builds and reads images on Linux,
 macOS, Windows, and the BSDs alike, and it works the same where mounting is unavailable.
 That holds for every family. ferrosys writes and reads a FAT32 boot partition, an exFAT
-card image, and a btrfs volume with subvolumes. The host kernel needs no driver for any
-of them, exactly as with an ext4 rootfs.
+card image, a btrfs volume with subvolumes, and an APFS container.
+The host kernel needs no driver for any of them, exactly as with an ext4 rootfs.
 
 The one exception is the `dir` feature, and it is an exception by nature. Walking a host
 tree means reading that host's inode metadata and extended attributes, which a portable

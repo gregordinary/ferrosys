@@ -46,6 +46,7 @@ rule|crates/ferrosys/src/io.rs|all|io::read_exact_at, or io::ByteSink::write_at 
 # held in memory rather than on disk. Matching on `SeekFrom` is what an implementation of
 # the trait does; the rule is about a second way of *calling* it.
 skip|crates/ferrosys/src/btrfs/forge.rs:SeekFrom::Start|the sparse test device implements `Seek`, and this is the match arm every implementation of the trait has
+skip|crates/ferrosys/src/apfs/materialize.rs:SeekFrom::Start|the byte gate's sparse destination and the sparse source it reads a container back through each implement `Seek`, and these are the match arms every implementation of the trait has
 
 # A byte offset built from a number an image supplied is checked in one place. An unchecked
 # product or sum here is not a read that fails; it is a successful read of the wrong bytes.
@@ -82,6 +83,7 @@ rule|crates/ferrosys/src/path.rs|all|path::is_hostile_component|name == b"\.\." 
 # are the two halves of expanding a symbolic link, which is where a second resolver shows.
 rule|crates/ferrosys/src/resolve.rs|all|resolve::drive, supplying the family's half of resolve::Resolve|push_front\(
 rule|crates/ferrosys/src/resolve.rs|all|resolve::drive, supplying the family's half of resolve::Resolve|starts_with\(b"/"\)
+skip|crates/ferrosys/src/apfs/firmlink.rs:starts_with(b"/")|a firmlink list states the form of each field, an absolute directory and a relative target, and the check refuses a line of the wrong form; nothing is resolved, since the target is written into an attribute as given and the directory is matched to a source entry by its canonical key
 
 # --- on-disk fields -------------------------------------------------------------------
 
@@ -89,6 +91,15 @@ rule|crates/ferrosys/src/resolve.rs|all|resolve::drive, supplying the family's h
 # byte order once. This catches the indexed form specifically: `x.to_le_bytes()` fed to a
 # checksum is a value being hashed, not a field being placed, and is not this.
 rule|crates/ferrosys/src/bytes.rs|code|bytes::get_u32 / put_u32 and their siblings|(from_le_bytes\(\[[a-z_]+\[|copy_from_slice\(&[a-z_]+\.to_le_bytes)
+
+# --- decoding -------------------------------------------------------------------------
+
+# A copy from earlier in a decoder's output is one loop and one distance check: a byte at a
+# time, since it may reach into the run it produces, and never from before the output's start.
+rule|crates/ferrosys/src/compress.rs|code|compress::copy_back|\bout\[[a-z_]+ - [a-z_]+\]
+# LZBITMAP mixes literals into a copy bit by bit under a mask, and its distance is held to a
+# rule of its own, so its loop is not the copy every other decoder shares.
+skip|crates/ferrosys/src/compress/lzbitmap.rs:out[at - distance]|a step takes each byte from its literals or from the output by a mask bit, and its distance is held to its own step
 
 # --- time -----------------------------------------------------------------------------
 
@@ -105,6 +116,19 @@ rule|crates/ferrosys/src/time.rs|code|time::DosTimestamp::encode / ::decode|(yea
 # in step. Scope `code`, because a test asserting an extracted mode names the bits it expects
 # and reading them back through the constant the extraction used would be tautological.
 rule|crates/ferrosys/src/fidelity.rs|code|fidelity::WRITE_BITS|0o222
+
+# A time a filesystem records divides its second into less than one, and whether a time does
+# is asked once. ext, btrfs and APFS each refuse one that does not, the format's own instant
+# among them, and a fourth family's check is the place a `<=` would slip in. Scope `code`, as
+# a test states the outcome it expects without asking the rule it tests.
+rule|crates/ferrosys/src/time.rs|code|Timestamp::has_proper_fraction|nanos (<|>=) (Timestamp|Self)::NANOS_PER_SEC
+
+# --- extended attributes --------------------------------------------------------------
+
+# An inode holds one value under each attribute name, and every family with attributes refuses
+# a source naming one twice through the one check. The spelling caught is the comparison of
+# each attribute with the ones before it.
+rule|crates/ferrosys/src/xattr.rs|all|xattr::repeated_name|\[\.\.[a-z]+\]\.iter\(\)\.any\(\|[a-z]+\| [a-z]+\.name ==
 
 # --- rendering ------------------------------------------------------------------------
 

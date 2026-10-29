@@ -43,7 +43,7 @@ use crate::bytes::{get_u16, get_u32, get_u32_be, put_arr, put_u32, put_u32_be};
 use crate::crc32c::crc32c;
 use crate::feature::Incompat;
 use crate::geometry::carries_superblock;
-use crate::io::{offset_of, read_exact_at};
+use crate::io::{Bounded, offset_of, read_exact_at};
 use crate::journal;
 use crate::ondisk::{SuperBlock, superblock_checksum};
 use crate::read::{INCOMPAT_RECOVER, OpenOptions, ReadError, Reader};
@@ -126,16 +126,18 @@ pub enum IdentityError {
     )]
     ChecksumSeedPointless,
     /// The image ends before a group the superblock's geometry claims exists, so a backup
-    /// this rewrite must patch is not in the file at all.
+    /// this rewrite must patch is not in the image at all.
     ///
-    /// The group count follows from `s_blocks_count` and `s_blocks_per_group`, neither of
-    /// which opening the filesystem validates against the image it came from. A superblock
-    /// claiming far more groups than the file holds — from a bit-flip, or written that way
-    /// on purpose — is refused here rather than driving the rewrite through offsets that are
-    /// not there.
+    /// The image ends at the end of the region the rewrite was given, where it was given one,
+    /// and at the end of the file otherwise. The group count follows from `s_blocks_count`
+    /// and `s_blocks_per_group`, neither of which opening the filesystem validates against
+    /// the image it came from. A superblock claiming more groups than the image holds — from
+    /// a bit-flip, from a filesystem longer than its partition, or written that way on
+    /// purpose — is refused here rather than driving the rewrite through offsets that are
+    /// not the filesystem's.
     #[error(
         "group {group}'s backup superblock lies past the end of a {blocks}-block image: \
-         the superblock describes a larger filesystem than this file holds"
+         the superblock describes a larger filesystem than the image holds"
     )]
     #[non_exhaustive]
     BackupPastEnd {
@@ -282,13 +284,18 @@ pub fn rewrite_identity<F: Read + Write + Seek>(
     image: &mut F,
     change: &IdentityChange,
 ) -> Result<IdentityReport, IdentityError> {
-    rewrite_identity_at(image, change, 0)
+    rewrite_identity_at(image, change, 0, None)
 }
 
 /// [`rewrite_identity`], for a filesystem `base` bytes into `image` — a partition inside a
-/// whole-disk image, or a region a carver located. The same offset every reader takes
-/// through [`OpenOptions::base`](crate::OpenOptions::base), reaching the one verb that
-/// writes.
+/// whole-disk image, or a region a carver located — and held to the `len` bytes from there
+/// on, or to the end of `image` where `len` is `None`. The same region every reader takes
+/// through [`OpenOptions::base`](crate::OpenOptions::base) and
+/// [`OpenOptions::len`](crate::OpenOptions::len), reaching the one verb that writes.
+///
+/// A group that begins past the region's end is [`IdentityError::BackupPastEnd`], as one
+/// past the end of `image` is, and no byte is written. A filesystem is never patched in
+/// the partition after its own.
 ///
 /// # Errors
 ///
@@ -297,12 +304,16 @@ pub fn rewrite_identity_at<F: Read + Write + Seek>(
     image: &mut F,
     change: &IdentityChange,
     base: u64,
+    len: Option<u64>,
 ) -> Result<IdentityReport, IdentityError> {
+    // Every read and write goes through the region, so the measure of the image below and
+    // each copy written back stop at its end.
+    let mut image = Bounded::new(image, base, len);
     // Everything that can refuse happens here, over a reader borrowing the handle. Only
     // once the whole set of copies is read and patched does a byte go back. The plan's
     // offsets are the filesystem's own, so the base is applied at each I/O and nowhere
     // else.
-    let plan = plan_rewrite(image, change, base)?;
+    let plan = plan_rewrite(&mut image, change, base)?;
     for (offset, bytes) in &plan.writes {
         image.seek(SeekFrom::Start(base + *offset))?;
         image.write_all(bytes)?;
@@ -688,6 +699,46 @@ mod tests {
         assert!(report.superblocks >= 1);
         let reader = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
         assert_eq!(reader.superblock().uuid, [0x5a; 16]);
+    }
+
+    #[test]
+    fn a_filesystem_longer_than_its_region_is_refused_and_what_follows_is_untouched() {
+        // A 32 MiB filesystem a mebibyte into a disk, in a partition of 16 MiB. Its groups
+        // begin every 8 MiB, so group 2 begins past the partition, in the bytes of whatever
+        // follows it on the disk.
+        const BASE: usize = MIB as usize;
+        let fs = multi_group_image(options(Profile::Ext2));
+        let mut disk = vec![0u8; BASE];
+        disk.extend_from_slice(&fs);
+
+        let mut change = IdentityChange::new();
+        change.uuid = Some([0x5a; 16]);
+        let before = disk.clone();
+        let err = rewrite_identity_at(
+            &mut Cursor::new(&mut disk),
+            &change,
+            BASE as u64,
+            Some(16 * MIB),
+        )
+        .expect_err("a group past the region is refused");
+        assert!(
+            matches!(
+                err,
+                IdentityError::BackupPastEnd {
+                    group: 2,
+                    blocks: 16384,
+                    ..
+                }
+            ),
+            "expected BackupPastEnd at group 2 of a 16 MiB region, got {err:?}"
+        );
+        assert_eq!(disk, before, "a refused rewrite writes nothing");
+
+        // The control: the same disk with no region ends at the file's end, which holds
+        // every group, and every copy is patched.
+        let report = rewrite_identity_at(&mut Cursor::new(&mut disk), &change, BASE as u64, None)
+            .expect("rewrite");
+        assert_eq!(report.superblocks, 3, "groups 0, 1 and 3 carry a copy");
     }
 
     /// A handle that keeps every write issued to it, at the offset it was issued at, so a

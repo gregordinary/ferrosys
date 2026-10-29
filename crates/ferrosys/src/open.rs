@@ -49,6 +49,9 @@ pub enum FsReader<R> {
     /// A btrfs filesystem.
     #[cfg(feature = "btrfs")]
     Btrfs(crate::btrfs::Reader<R>),
+    /// One volume of an APFS container: the volume in its first occupied slot.
+    #[cfg(feature = "apfs")]
+    Apfs(crate::apfs::Reader<R>),
 }
 
 impl<R> FsReader<R> {
@@ -66,6 +69,8 @@ impl<R> FsReader<R> {
             FsReader::ExFat(_) => crate::finding::Family::ExFat,
             #[cfg(feature = "btrfs")]
             FsReader::Btrfs(_) => crate::finding::Family::Btrfs,
+            #[cfg(feature = "apfs")]
+            FsReader::Apfs(_) => crate::finding::Family::Apfs,
         }
     }
 }
@@ -118,7 +123,7 @@ pub fn open<R: Read + Seek>(src: R) -> Result<FsReader<R>, OpenError> {
 /// The image is classified the way [`detect_with`](crate::detect_with) classifies it, and
 /// the family that claimed it opens its own reader over the same source at the same offset.
 ///
-/// [`OpenOptions`] carries the three inputs every family takes and no more, so a family's
+/// [`OpenOptions`] carries the inputs every family takes and no more, so a family's
 /// own knob is at its default here — a FAT volume's short names are read as the bytes they
 /// are, interpreting no code page. A caller who needs one opens `fat::Reader` directly.
 ///
@@ -137,7 +142,8 @@ pub fn open_with<R: Read + Seek>(
     mut src: R,
     options: &OpenOptions,
 ) -> Result<FsReader<R>, OpenError> {
-    let detect = crate::DetectOptions::new().base(options.base);
+    let mut detect = crate::DetectOptions::new().base(options.base);
+    detect.len = options.len;
     // Classified through the same handle the reader will use, so the answer and the read
     // are about one source rather than two that might differ.
     match crate::detect_with(&mut src, &detect)? {
@@ -175,6 +181,16 @@ pub fn open_with<R: Read + Seek>(
                 family: crate::finding::Family::Btrfs,
                 message: e.to_string(),
             }),
+        #[cfg(feature = "apfs")]
+        crate::Filesystem::Apfs => {
+            let apfs = crate::apfs::OpenOptions::new().common(*options);
+            crate::apfs::Reader::open_with(src, &apfs)
+                .map(FsReader::Apfs)
+                .map_err(|e| OpenError::Refused {
+                    family: crate::finding::Family::Apfs,
+                    message: e.to_string(),
+                })
+        }
     }
 }
 
@@ -187,8 +203,8 @@ mod tests {
     use std::io::Cursor;
 
     /// The instant every formatted fixture stamps with, so nothing here depends on a clock.
-    /// Compiled where a family with a formatter is: the newest family has none, and its
-    /// fixture is assembled byte by byte rather than stamped.
+    /// Compiled where a family whose fixture is formatted is: the btrfs and APFS fixtures are
+    /// assembled byte by byte rather than stamped.
     #[cfg(any(feature = "ext", feature = "fat", feature = "exfat"))]
     const TIME: Timestamp = Timestamp::from_secs(1_426_325_212);
 
@@ -230,14 +246,23 @@ mod tests {
         }
         #[cfg(feature = "btrfs")]
         {
-            // The one family with no formatter to build a fixture with, so the fixture is the
-            // filesystem its own gates are written against — assembled byte by byte rather
-            // than formatted. It is a real image either way, which is what this seam needs.
+            // The filesystem this family's own gates are written against, assembled byte by
+            // byte rather than formatted. It is a real image either way, which is what this
+            // seam needs.
             use std::io::Read;
             let mut src = crate::btrfs::forge::Forge::populated().source();
             let mut bytes = Vec::new();
             src.read_to_end(&mut bytes).expect("the forged device");
             out.push((crate::finding::Family::Btrfs, bytes));
+        }
+        #[cfg(feature = "apfs")]
+        {
+            // The forge's container, assembled byte by byte: one volume holding one of
+            // everything the reader reads.
+            out.push((
+                crate::finding::Family::Apfs,
+                crate::apfs::forge::Forge::populated().image(),
+            ));
         }
         assert!(
             !out.is_empty(),
@@ -278,6 +303,8 @@ mod tests {
                 FsReader::ExFat(mut r) => paths(&mut r),
                 #[cfg(feature = "btrfs")]
                 FsReader::Btrfs(mut r) => paths(&mut r),
+                #[cfg(feature = "apfs")]
+                FsReader::Apfs(mut r) => paths(&mut r),
             };
             // What every family promises a walk, and all a caller that has not matched can
             // rely on: the root comes first under the empty path, and no name repeats.

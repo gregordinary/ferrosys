@@ -1645,7 +1645,7 @@ proptest! {
             let clusters = u64::from(p.layout().clusters);
             match spec.slack {
                 Slack::Bytes(n) => n.div_ceil(u64::from(p.layout().bytes_per_cluster())),
-                Slack::Share(h) => clusters * u64::from(h) / 10_000,
+                Slack::Share(h) => (clusters * u64::from(h)).div_ceil(10_000),
                 _ => 0,
             }
         };

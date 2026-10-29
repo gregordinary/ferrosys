@@ -225,6 +225,27 @@ jobs:
             *) echo "::error::exfat-populate pin mismatch"; exit 1 ;;
           esac
 
+      # The decoder differential's references: Apple's lzfse project, the reference
+      # implementation of LZVN and LZFSE, and libzbitmap, the LZBITMAP decoder the crate's is
+      # read against, each pinned to a commit by its tarball's SHA-256. `ci/codec-reference.c`
+      # is the command line neither ships. It needs a C compiler and nothing else.
+      - name: Cache the pinned codec reference
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ferrosys/codec-reference
+          key: codec-reference-${{ hashFiles('ci/build-codec-reference.sh', 'ci/codec-reference.c') }}
+
+      - name: Build the codec reference, put it on PATH, assert the version
+        run: |
+          bash ci/build-codec-reference.sh
+          prefix="$(bash ci/build-codec-reference.sh --print-prefix)"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          banner="$("$prefix/bin/codec-reference" --version 2>/dev/null || true)"
+          case "$banner" in
+            *"codec-reference ($(bash ci/build-codec-reference.sh --print-version))"*) ;;
+            *) echo "::error::codec-reference pin mismatch"; exit 1 ;;
+          esac
+
       # The btrfs oracle tier, pinned on the same grounds and for more of them. `btrfs
       # check` decides whether a btrfs image is acceptable and `--check-data-csum` is a
       # second question it answers about the same image; `mkfs.btrfs` is the baseline,
@@ -272,6 +293,19 @@ jobs:
           test -x "$prefix/bin/btrfs-corrupt-block" \
             || { echo "::error::btrfs-corrupt-block was not installed"; exit 1; }
 
+      # APFS's oracle is macOS, which runs on none of these runners, so its gate reads a
+      # corpus instead: the containers macOS made and its listings of them, one release
+      # asset the script pins by sha256. Cached like the oracle builds, and fetched again
+      # only when the pin moves; the test step asserts it rather than skipping without it.
+      - name: Cache the APFS corpus
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ferrosys/apfs-corpus
+          key: apfs-corpus-${{ hashFiles('ci/fetch-apfs-corpus.sh') }}
+
+      - name: Fetch the APFS corpus and assert its hash
+        run: bash ci/fetch-apfs-corpus.sh
+
       # `--all-features` builds the `tar` archive source and the `dir` directory source,
       # so their PAX/xattr/ACL surface is tested, linted, and doc-checked rather than
       # shipping unexercised.
@@ -287,6 +321,12 @@ jobs:
         run: cargo test --workspace --all-features --profile ci --no-fail-fast
         env:
           FERROSYS_REQUIRE_HOST_TOOLS: "1"
+          # The APFS corpus read back and written again, record for record: minutes in a
+          # debug build, so it runs here, optimized, and in none of the library runs below.
+          FERROSYS_APFS_CORPUS_DIFFERENTIAL: "1"
+          # The LZVN, LZFSE and LZBITMAP decoders held to the pinned references, here for the
+          # same reason.
+          FERROSYS_CODEC_DIFFERENTIAL: "1"
 
       # The CLI depends on ferrosys with the `tar` feature on, so every build that
       # includes it has that feature enabled. Nothing else would then ever build the
@@ -300,7 +340,7 @@ jobs:
       - name: Base library builds and passes its tests without the archive source
         run: cargo test -p ferrosys --no-default-features --lib
 
-      # The default build: four families and three decoders, and none of the two ends of a
+      # The default build: five families and six decoders, and none of the two ends of a
       # tree or the derives. It is what `cargo add` gives, so it is the configuration most
       # consumers compile, and every other run here either names its features or has the
       # CLI's on. A test that needs `tar` and is not gated on it fails here first.
@@ -337,10 +377,10 @@ jobs:
       - name: Library builds and passes its tests with exFAT as the only family
         run: cargo test -p ferrosys --no-default-features --features exfat --lib
 
-      # The newest family, alone. It is the one family whose reader descends a tree of
-      # its own before it reaches a file, so a `#[cfg]` written as "any family" and meaning
-      # "any family that addresses blocks directly" builds an item nothing can reach --
-      # and this is the configuration that fails on it.
+      # btrfs alone. Its reader descends a tree of its own before it reaches a file, so a
+      # `#[cfg]` written as "any family" and meaning "any family that addresses blocks
+      # directly" builds an item nothing can reach -- and this is the configuration that
+      # fails on it.
       - name: Library builds and passes its tests with btrfs as the only family
         run: cargo test -p ferrosys --no-default-features --features btrfs --lib
 
@@ -350,6 +390,18 @@ jobs:
       # reads, and a change that broke either would leave the other passing.
       - name: Library builds and passes its tests with btrfs and every decoder
         run: cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib
+
+      # The newest family, alone. A `#[cfg]` written as "any family" and meaning one of the
+      # four before it builds an item nothing behind this one fills, and this is the
+      # configuration that fails on it.
+      - name: Library builds and passes its tests with APFS as the only family
+        run: cargo test -p ferrosys --no-default-features --features apfs --lib
+
+      # The same family with the decoders its compressed files are stored with. Both rows
+      # run: the one above is what a build without them refuses, and this is what a build
+      # with them reads.
+      - name: Library builds and passes its tests with APFS and its decoders
+        run: cargo test -p ferrosys --no-default-features --features apfs,zlib,lzvn,lzfse,lzbitmap --lib
 
       # The fuzz package sets its own `[workspace]`, so `cargo test --workspace` never
       # compiles it: a target that stopped matching the reader's API would rot silently
@@ -613,7 +665,7 @@ jobs:
       # against does not carry makes its examples fail to compile, and marking them
       # uncompiled instead would let them rot.
       - name: Build crate
-        run: cargo build --features fat,exfat,btrfs
+        run: cargo build --features fat,exfat,btrfs,apfs
 
       - name: Build book
         run: mdbook build book

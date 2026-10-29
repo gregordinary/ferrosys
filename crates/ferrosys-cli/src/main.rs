@@ -44,6 +44,7 @@
 // The tool inherits the library's bar: there is no `unsafe` here, ever.
 #![forbid(unsafe_code)]
 
+mod apfs;
 mod args;
 mod dest;
 mod detect;
@@ -67,7 +68,7 @@ use ferrosys::{DetectError, OpenError, TreeError};
 use ferrosys::ArchiveError;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use ferrosys::HostError;
-use ferrosys::ext::{FormatError, GeometryError, IdentityError, ReadError, Severity};
+use ferrosys::ext::{FormatError, GeometryError, IdentityError, ModelError, ReadError, Severity};
 
 use crate::args::{Command, Topic, UsageError};
 
@@ -165,12 +166,59 @@ pub enum Error {
         #[source]
         source: OpenError,
     },
+    /// An APFS container was opened to read a volume `--volume` or `--snapshot` chose, and the
+    /// container or the volume refused, in the words and the class an open naming neither
+    /// refuses it in.
+    #[error("{path}: apfs image refused: {source}")]
+    Apfs {
+        /// The file that was opened.
+        path: String,
+        /// What the container or the volume refused.
+        #[source]
+        source: ferrosys::apfs::ReadError,
+    },
+    /// `--volume` named no volume of the container.
+    #[error("the container holds no volume {wanted}; it holds {holds}")]
+    NoSuchVolume {
+        /// The volume as it was asked for.
+        wanted: String,
+        /// Every volume it does hold, by name and slot.
+        holds: String,
+    },
+    /// An APFS container lists no volume, so a read naming none has none to read.
+    #[error("{path}: apfs image refused: the container holds no volume at all")]
+    NoVolume {
+        /// The file that was opened.
+        path: String,
+    },
+    /// `--volume` named more than one volume of the container.
+    #[error(
+        "the container holds more than one volume named {wanted}, in slots {slots}; name one by \
+         its slot or its identifier"
+    )]
+    AmbiguousVolume {
+        /// The name as it was asked for.
+        wanted: String,
+        /// The slots of the volumes that have it.
+        slots: String,
+    },
+    /// `--snapshot` named no snapshot of the volume.
+    #[error("the volume holds no snapshot {wanted}; it holds {holds}")]
+    NoSuchSnapshot {
+        /// The snapshot as it was asked for.
+        wanted: String,
+        /// Every snapshot it does hold, by name.
+        holds: String,
+    },
     /// An option naming a concept the image's family does not have.
     ///
     /// Reported rather than passed over. A run that asked for something and was handed a
     /// report silently missing it has been told the image holds none of that thing, which is
     /// a different claim from the question not applying to this family at all.
-    #[error("{option} does not apply to a {family} filesystem: {reason}")]
+    #[error(
+        "{option} does not apply to {} {family} filesystem: {reason}",
+        article(.family)
+    )]
     NotForFamily {
         /// The option as it was typed.
         option: &'static str,
@@ -225,6 +273,22 @@ pub enum Error {
     /// word for.
     #[error(transparent)]
     BtrfsFormat(#[from] ferrosys::btrfs::FormatError),
+    /// Writing an APFS container failed.
+    ///
+    /// A fifth variant for the reason the fourth one is: what an APFS format can refuse is an
+    /// identifier that is zero or repeated, a name the release does not hold, and a container
+    /// too small for its volumes or with too few slots for them, and none of the four above
+    /// has a word for a volume.
+    #[error(transparent)]
+    ApfsFormat(#[from] ferrosys::apfs::FormatError),
+    /// An APFS `--firmlinks` list is not one.
+    #[error("{path}: not a firmlink list: {source}")]
+    Firmlinks {
+        /// The list as the command line named it.
+        path: String,
+        /// The first line that is not one.
+        source: ferrosys::apfs::FirmlinksError,
+    },
     /// The source archive could not be read.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -280,6 +344,19 @@ pub enum Error {
         /// count and the severity a floor rather than the whole account.
         truncated: bool,
     },
+    /// The source the image is read from failed a read while the scan ran, for a reason
+    /// other than ending, so the scan did not look at the whole filesystem and no verdict
+    /// about it was formed. The report the scan made is emitted all the same.
+    #[error(
+        "the image could not be read whole, so no verdict was reached: {first}{}",
+        if *failures > 1 { format!(" (and {} more reads)", failures - 1) } else { String::new() }
+    )]
+    SourceFailed {
+        /// How many reads the source failed.
+        failures: usize,
+        /// What the first failure said, and where the scan was.
+        first: String,
+    },
     /// `--cat` named something that is not a regular file.
     #[error("{}: not a regular file", String::from_utf8_lossy(.0))]
     NotAFile(Vec<u8>),
@@ -312,6 +389,12 @@ impl Error {
                      filesystem without one, as does `-O ^has_journal,^orphan_file`"
                 ))
             }
+            // A host tree's times carry fractions, which a 128-byte inode has no words for.
+            Error::ExtFormat(FormatError::Model(ModelError::FractionNotHeld { .. })) => Some(
+                "an inode of 256 bytes, the default, holds a time to the nanosecond, and \
+                 `--fixed-time SECS` writes every time as whole seconds"
+                    .to_string(),
+            ),
             Error::ExtFormat(FormatError::JournalDoesNotFit { .. }) => Some(
                 "`--journal N` sets the log's size in filesystem blocks, and `-t ext2` \
                  builds without one"
@@ -343,17 +426,20 @@ impl Error {
                 _ => exit::IMAGE_BAD,
             },
             Error::Archive(ArchiveError::Acl { .. }) => exit::IMAGE_BAD,
-            // Re-identifying splits the same way. A superblock that does not check and a
-            // backup copy that is not one are verdicts about the image; a UUID that would
-            // invalidate the checksums, and a seed asked for where it does nothing, are
-            // verdicts about the *request* — the filesystem is sound and the change cannot
-            // be made — so they read as a command that could not be carried out.
+            // Re-identifying splits the same way. A superblock that does not check, a
+            // backup copy that is not one, and a filesystem longer than its image are
+            // verdicts about the image, the last the one `inspect` fails the same image on; a
+            // UUID that would invalidate the checksums, and a seed asked for where it does
+            // nothing, are verdicts about the *request* — the filesystem is sound and the
+            // change cannot be made — so they read as a command that could not be carried
+            // out.
             Error::Identity { source, .. } => match source {
                 IdentityError::Read(ReadError::Io { .. }) | IdentityError::Io(_) => {
                     exit::OPERATIONAL
                 }
                 IdentityError::Read(_)
                 | IdentityError::BackupNotASuperblock { .. }
+                | IdentityError::BackupPastEnd { .. }
                 | IdentityError::SuperblockChecksumMismatch { .. } => exit::IMAGE_BAD,
                 _ => exit::OPERATIONAL,
             },
@@ -386,16 +472,32 @@ impl Error {
             | Error::IdentityNotExt { .. }
             | Error::NotAFilesystem { .. }
             | Error::NotForFamily { .. }
+            | Error::Apfs { .. }
+            | Error::NoSuchVolume { .. }
+            | Error::NoSuchSnapshot { .. }
+            | Error::AmbiguousVolume { .. }
+            | Error::NoVolume { .. }
             | Error::UnsupportedFamily
             | Error::ExtFormat(_)
             | Error::FatFormat(_)
             | Error::ExFatFormat(_)
             | Error::BtrfsFormat(_)
+            | Error::ApfsFormat(_)
+            | Error::Firmlinks { .. }
             | Error::Archive(_)
             | Error::ImageIo(_)
             | Error::NoSuchPath(_)
             | Error::NotAFile(_) => exit::OPERATIONAL,
+            // A source that failed under the scan says nothing about the filesystem, as an
+            // i/o failure under an extraction does not.
+            Error::SourceFailed { .. } => exit::OPERATIONAL,
         }
+    }
+
+    /// Whether this is a family refusing an image it recognized, which a read retried
+    /// leniently might get past, rather than a failure of the source or of the command line.
+    fn is_a_refusal(&self) -> bool {
+        matches!(self, Error::NotAFilesystem { .. } | Error::Apfs { .. })
     }
 
     /// An I/O failure against a named file.
@@ -404,6 +506,16 @@ impl Error {
             what: what.as_ref().display().to_string(),
             source,
         }
+    }
+}
+
+/// The indefinite article a family's word takes in a sentence: an exfat filesystem, a btrfs
+/// filesystem. Each family's word is spoken as it is spelled, so its first letter decides.
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
     }
 }
 
@@ -458,8 +570,8 @@ fn from_exfat_read(e: ferrosys::exfat::ReadError) -> Error {
 
 /// And for a read of a btrfs filesystem.
 ///
-/// One arm more than its neighbours have, because this family resolves a path through symbolic
-/// links and the others do not: a chain that does not end is a statement about the path that was
+/// One arm more than the three above have, because this family resolves a path through symbolic
+/// links and those do not: a chain that does not end is a statement about the path that was
 /// asked for rather than about the filesystem, so it reads as a path that names nothing rather
 /// than as an image that is malformed.
 fn from_btrfs_read(e: ferrosys::btrfs::ReadError) -> Error {
@@ -469,6 +581,19 @@ fn from_btrfs_read(e: ferrosys::btrfs::ReadError) -> Error {
         BtrfsError::NotFound { path, .. }
         | BtrfsError::NotADirectory { path, .. }
         | BtrfsError::SymlinkLoop { path, .. } => Error::NoSuchPath(path),
+        other => Error::from(TreeError::from(other)),
+    }
+}
+
+/// And for a read of an APFS volume, which resolves a path through symbolic links as btrfs does,
+/// and so has the same arm for a chain that does not end.
+fn from_apfs_read(e: ferrosys::apfs::ReadError) -> Error {
+    use ferrosys::apfs::ReadError as ApfsError;
+    match e {
+        ApfsError::Io { message, .. } => Error::ImageIo(message),
+        ApfsError::NotFound { path, .. }
+        | ApfsError::NotADirectory { path, .. }
+        | ApfsError::SymlinkLoop { path, .. } => Error::NoSuchPath(path),
         other => Error::from(TreeError::from(other)),
     }
 }
@@ -557,7 +682,7 @@ fn help(topic: Topic) -> &'static str {
 }
 
 const GENERAL_HELP: &str = "\
-ferrosys — write, inspect, and read back ext2/3/4, FAT12/16/32, exFAT, and btrfs
+ferrosys — write, inspect, and read back ext2/3/4, FAT12/16/32, exFAT, btrfs, and APFS
 filesystems
 
 usage:
@@ -581,6 +706,8 @@ filesystems:
                         options rather than a variant to name. `format -t` selects which;
                         every command identifies whichever family an image turns out to
                         hold
+  apfs                  the same. A container holds several volumes: `format --volume`
+                        lists them, and --volume and --snapshot say which one a read reads
 
 exit codes (as e2fsck's):
   0   the command did what it was asked
@@ -596,14 +723,16 @@ of its inputs alone: the same inputs write the same bytes.
 ";
 
 const FORMAT_HELP: &str = "\
-ferrosys format — write an ext2/3/4 filesystem, a FAT12/16/32 volume, an exFAT volume, or
-a btrfs filesystem
+ferrosys format — write an ext2/3/4 filesystem, a FAT12/16/32 volume, an exFAT volume, a
+btrfs filesystem, or an APFS container
 
 usage:
   ferrosys format --size SIZE --uuid HEX --time SECS [options] OUT.img
   ferrosys format -t fat32 --size SIZE --volume-id HEX --time SECS [options] OUT.img
   ferrosys format -t exfat --size SIZE --volume-serial HEX [options] OUT.img
   ferrosys format -t btrfs --size SIZE --fsid HEX --time SECS [options] OUT.img
+  ferrosys format -t apfs --size SIZE --container-uuid HEX --volume UUID:NAME \\
+    --time SECS [options] OUT.img
 
   ferrosys format --size 512M --uuid \"$(uuidgen)\" --time \"$(date +%s)\" rootfs.img
 
@@ -617,6 +746,10 @@ usage:
   ferrosys format -t btrfs --size 8G --fsid \"$(uuidgen)\" --time \"$(date +%s)\" \\
     --subvol \"$(uuidgen):/@\" --subvol \"$(uuidgen):/@home\" --default-subvol /@ \\
     --owner 0:0 --from-dir staging root.img
+
+  ferrosys format -t apfs --size auto --slack 8M --container-uuid \"$(uuidgen)\" \\
+    --volume \"case-sensitive:$(uuidgen):ramdisk\" --time \"$(date +%s)\" \\
+    --owner 0:0 --from-dir staging ramdisk.img
 
 -t names the filesystem, and each family takes its own identity and its own options; an
 option of a family that was not named is refused by name rather than passed over. Naming
@@ -647,7 +780,12 @@ required:
                        as ext's and a different field of a different format, so a flag of
                        its own; a btrfs records four more identifiers beside it, under
                        `identity (btrfs)` below
-  --time SECS          (ext, fat, btrfs) the filesystem's creation time, in seconds since
+  --container-uuid HEX (apfs) the container's identifier, dashed or bare (32 hex digits).
+                       Every volume in the container records an identifier of its own
+                       beside it, which --volume states, under `volumes (apfs)` below
+  --volume [KIND:]UUID:NAME
+                       (apfs) a volume of the container, at least one: see below
+  --time SECS          (ext, fat, btrfs, apfs) the filesystem's creation time, in seconds since
                        the epoch. Taken from SOURCE_DATE_EPOCH when the option is absent.
                        A FAT directory entry represents 1980-01-01 through 2107-12-31 at a
                        two-second granularity, so a time outside that is refused for one
@@ -672,8 +810,8 @@ contents (at most one):
                        Walking a tree records Linux inode metadata and Linux extended
                        attributes, so this option is carried out on Linux alone;
                        --from-tar reads an archive anywhere
-  --owner UID:GID      own every entry of a --from-dir tree by this user and group,
-                       whatever the host files say. A build that does not run as root
+  --owner UID:GID      own every entry of a --from-dir or --volume-from-dir tree by this
+                       user and group, whatever the host files say. A build that does not run as root
                        usually wants --owner 0:0: without it the image is owned by the
                        user that built it
 
@@ -684,10 +822,11 @@ labelling:
                        anything outside ASCII, and must be text for the same reason — and
                        up to 255 bytes on a btrfs, which records no encoding for them and
                        so takes them as they come. A label the field cannot hold is refused
-                       rather than truncated
+                       rather than truncated. An APFS container records no label: each of
+                       its volumes has a name, given with its identifier in --volume
 
 filesystem:
-  -t, --type ext2|ext3|ext4|fat12|fat16|fat32|exfat|btrfs
+  -t, --type ext2|ext3|ext4|fat12|fat16|fat32|exfat|btrfs|apfs
                        which filesystem to write (default ext4). For ext it is also the
                        base feature set: -O and the geometry options layer on top, so
                        `-t ext2 -O has_journal` is ext3, and the image is judged by the
@@ -698,7 +837,9 @@ filesystem:
                        variant, and takes the size it is given: --size auto is refused for
                        it, because the search behind `auto` is a family's own and this one
                        has none. btrfs names no variant either and has no search either,
-                       and what would have been a variant is `geometry (btrfs)` below
+                       and what would have been a variant is `geometry (btrfs)` below.
+                       apfs names no variant and has a search, and its volumes and its
+                       geometry are `volumes (apfs)` and `geometry (apfs)` below
 
 identity (btrfs):
   A btrfs records five identifiers where the other three record one, and a filesystem whose
@@ -732,6 +873,60 @@ subvolumes (btrfs):
                        the path it was asked for. Without it, a mount lands on the
                        top-level tree every btrfs starts with, which is what `subvolid=5`
                        names
+
+volumes (apfs):
+  An APFS container is a pool of blocks shared by up to a hundred volumes, each a filesystem
+  of its own with its own name and identifier. The first volume holds the contents; every
+  other one holds the tree --volume-from-dir gives it, or is empty but for its root
+  directory. A container has one volume slot for every 512M of it or part of 512M, so two
+  volumes need a container larger than 512M.
+
+  --volume [KIND:]UUID:NAME
+                       a volume, in slot order. Repeatable, and each needs its own UUID,
+                       apart from the container's: two volumes or a volume and its
+                       container sharing one is refused. KIND is how the volume compares
+                       names: `case-insensitive` (the default, what macOS formats) or
+                       `case-sensitive`, the words `inspect` prints. Either way two names
+                       that differ only in how a character is composed are one name. NAME
+                       is everything after the identifier, so it may hold a colon: UTF-8,
+                       up to 255 bytes. A source holding two names its volume compares as
+                       one is refused, naming both
+  --root-snapshot UUID:NAME
+                       a snapshot of the first volume taken as it is formatted, which the
+                       volume records as the one it roots from. It keeps the whole tree,
+                       and the volume goes on from it as from a snapshot macOS took. Its
+                       UUID is apart from the container's and every volume's. NAME is
+                       everything after the identifier: UTF-8, up to 255 bytes
+  --volume-from-dir SLOT:DIR
+                       populate the volume in SLOT, counted from 0 in --volume order, from
+                       a directory tree on this machine, as --from-dir populates the first.
+                       Repeatable, once per volume; SLOT is 1 or more, since the first
+                       holds --from-dir's or --from-tar's tree. --owner applies to it too
+  --volume-group SYSTEM:DATA
+                       join the volumes in slots SYSTEM and DATA as a volume group, as
+                       macOS boots from: each records its role, both record the Data
+                       volume's identifier as the group's, and the System volume numbers
+                       its files from a range of its own
+  --firmlinks FILE     mark the directories FILE lists in the group's System volume as
+                       firmlinks to paths in its Data volume. FILE is a firmlink list:
+                       each line a directory's absolute path, a tab, and the target's path
+                       relative to the Data volume, of at most 1,023 bytes, ending in a
+                       newline. Each listed directory the System volume holds is given
+                       the flag 0x800000 and the attribute com.apple.fs.firmlink holding
+                       its target; one it does not hold is passed over, and the summary
+                       counts both
+
+geometry (apfs):
+  --block-size N       4096 (the default), 8192, 16384, 32768, or 65536. Every block of the
+                       container is this size
+  --profile macos14|macos15|macos26|macos27
+                       the macOS release whose shape the container is written in (default
+                       macos26). It decides which Unicode version a name is held to, a code
+                       point that version leaves unassigned being refused, and two words of
+                       each volume's superblock. macOS 26's kernel mounts either shape
+  --formatted-by TEXT  the program every volume records as having formatted it: up to 31
+                       bytes. Defaults to this tool's name and version, so name it to write
+                       the same bytes with two versions of this tool
 
 fidelity (fat, exfat):
   --accept-loss LIST   which properties of the source this build may lose: `all`, or a
@@ -768,11 +963,17 @@ fidelity (fat, exfat):
                        this, `auto` leaves nothing — the right answer for an image that
                        will only be read, and useless for one that will be written to.
                        The share is of the finished filesystem, so `--slack 20%` is what
-                       `df` reports as 80% used. Up to 90%
+                       `df` reports as 80% used. Up to 90%. For APFS it is room any user
+                       can write on macOS, a MiB or less a call, past what macOS keeps
+                       free before a write and the room it gives a growing file
 
 geometry (ext):
-  --block-size N       1024, 2048, or 4096 (the default)
-  --inode-size N       a power of two from 128 up to the block size (default 256)
+  --block-size N       1024, 2048, or 4096 (the default). An APFS container takes this too,
+                       under `geometry (apfs)` above
+  --inode-size N       a power of two from 128 up to the block size (default 256). A
+                       128-byte inode holds times from 1901 to 2038 in whole seconds, so
+                       a tree whose times carry fractions, as a host's do, takes
+                       --fixed-time
   --inodes N           the inode count, rounded up to fill each group's tables. Overrides
                        the size-driven default
   --bytes-per-inode N  one inode per N bytes of filesystem — the density the count is
@@ -881,6 +1082,10 @@ options:
   --offset N           where the filesystem begins within the file, for a partition
                        inside a whole-disk image. A byte count, optionally suffixed K, M,
                        G, or T
+  --length N           how many bytes from the offset on are the filesystem's: the
+                       partition's length. Nothing past them is read, so a filesystem
+                       longer than its partition is reported as truncated. Without it the
+                       filesystem may run to the end of the file
   --json               report as JSON rather than as text
   --sarif              report the scan's findings as a SARIF 2.1.0 log, for a static-
                        analysis or forensic pipeline; reports findings alone, not the
@@ -892,6 +1097,13 @@ options:
                        over
   --quick              report the superblock alone, without scanning the image. There is
                        then no scan for a verdict to read, so it cannot pair with --fail-on
+  --volume NAME        (apfs) the volume of the container to report on and scan: by name, by
+                       the identifier a report prints, or by slot number where neither
+                       answers. Without it, the first volume this tool reads: one before
+                       it that it refuses, as a Mac's sealed system volume, is passed over,
+                       and the standard error says so
+  --snapshot NAME      (apfs) the snapshot of that volume to scan instead of the volume as
+                       it is
   --fail-on SEVERITY|never
                        the severity at which the scan's findings make the filesystem bad:
                        cosmetic, conformance, integrity (the default), structural, or
@@ -906,6 +1118,11 @@ which defaults to `integrity`: a filesystem whose own bytes contradict each othe
 and a valid filesystem that another tool wrote does not. That is the default a CI gate
 inherits, and `--fail-on conformance` is the stricter line to draw deliberately.
 
+A read the file fails during the scan, other than one past its end, is a failure of the
+host rather than of the filesystem. It is reported as a source failure beside the findings,
+counts towards no verdict, and exits 8 whatever --fail-on says, since the scan did not
+look at what that read held. A file that ends early is the image's fault, and a finding.
+
 The four severities mean the same thing for every family; the categories a finding falls
 into are each family's own, since a superblock and a boot sector are not the same subsystem
 under two names.
@@ -915,40 +1132,50 @@ const EXTRACT_HELP: &str = "\
 ferrosys extract — read a filesystem's contents back out
 
 usage:
-  ferrosys extract [--offset N] IMAGE --to-tar FILE|-
-  ferrosys extract [--offset N] IMAGE --to-dir DIR
-  ferrosys extract [--offset N] IMAGE --cat PATH
-  ferrosys extract [--offset N] IMAGE --stat PATH [--json]
-  ferrosys extract [--offset N] IMAGE --list [--json]
+  ferrosys extract [--offset N [--length N]] IMAGE --to-tar FILE|-
+  ferrosys extract [--offset N [--length N]] IMAGE --to-dir DIR
+  ferrosys extract [--offset N [--length N]] IMAGE --cat PATH
+  ferrosys extract [--offset N [--length N]] IMAGE --stat PATH [--json]
+  ferrosys extract [--offset N [--length N]] IMAGE --list [--json]
 
 exactly one of:
   --to-tar FILE|-      write the whole tree as a tar archive; `-` writes the standard
                        output. Ownership, modes, times (to the nanosecond), symlinks,
                        hard links, device and FIFO nodes, extended attributes, and POSIX
-                       ACLs all survive, carried in PAX records
+                       ACLs all survive, in the header and its PAX records. A socket,
+                       which tar has no type for, and a device number past 16777215,
+                       which its header cannot hold, are refused. A Darwin filesystem's
+                       BSD flags have no field, and the entries carrying any are counted
+                       on the standard error
   --to-dir DIR         write the whole tree into a directory on this host, the inverse of
                        `format --from-dir`. DIR is made if it is not there and must be
                        empty. Everything the archive carries is carried here too, set on
                        the files themselves; DIR takes the filesystem root's own mode,
-                       ownership, times, and attributes, and `/lost+found` is not written.
-                       A device node needs CAP_MKNOD and a recorded owner needs CAP_CHOWN,
-                       so an unprivileged run stops at the first of either unless
-                       --skip-privileged is given. Two things no host lets a caller set:
-                       an inode's change time and its creation time, so the tree carries
-                       the times it was written for those two alone
+                       ownership, times, and attributes, and an ext filesystem's
+                       `/lost+found` is not written.
+                       A device node needs CAP_MKNOD and a recorded owner needs CAP_CHOWN
+                       (and, in a user namespace, an id it maps), so an unprivileged run
+                       stops at the first of either unless
+                       --skip-privileged is given; a name longer than DIR takes, an
+                       attribute DIR will not hold, or a Darwin filesystem's BSD flags,
+                       stops it unless --skip-unsupported is given. Two things no host
+                       lets a caller set: an inode's change time and its creation time,
+                       so the tree carries the times it was written for those two alone
   --cat PATH           write one file's bytes to the standard output, and nothing else.
                        PATH is a path inside the image, taken as the bytes you typed
   --stat PATH          report everything the filesystem records about one path: its type,
                        mode (octal and symbolic), ownership, size, times, and — where the
                        family records them — its inode number, link count, a device node's
-                       numbers, a symlink's target, and its extended attributes with any
-                       POSIX ACL decoded. A path naming a symlink describes the link, not
+                       numbers, a symlink's target, a Darwin filesystem's BSD flags, and
+                       its extended attributes with any POSIX ACL decoded. A path naming a symlink describes the link, not
                        its target; --json reports it as JSON
   --list               list the tree; --json lists it as JSON, with each entry's extended
                        attributes and decoded ACLs
 
 options:
   --offset N           where the filesystem begins within the file
+  --length N           how many bytes from the offset on are the filesystem's; nothing
+                       past them is read
   --max-file-bytes N   refuse to read a file larger than N bytes. A file's size is the
                        image's own claim, and a sparse file legitimately dwarfs the
                        filesystem holding it, so nothing structural bounds it: an inode
@@ -963,11 +1190,30 @@ options:
                        tree is owned by this process, and a security or trusted extended
                        attribute it may not set is not set. What was left out is named on
                        the standard error, so an incomplete tree says so
+  --skip-unsupported   with --to-dir, write what DIR will hold rather than failing on what
+                       it will not: an entry whose name is longer than DIR takes is left
+                       out, a directory with everything under it, and an extended
+                       attribute DIR refuses is not set — one in no namespace this host
+                       knows, as another operating system's attributes are named, a user
+                       attribute on a symbolic link, or a value larger than DIR holds for
+                       one attribute — a device node whose number this host makes as
+                       another device is not left in place, and a time DIR holds as
+                       another time, before or after its range or finer than its
+                       fraction, is kept as DIR holds it, and BSD flags are not set. Each
+                       limit is DIR's own, so a destination that holds more leaves out
+                       less. What was left out is named on the standard error; --to-tar
+                       keeps all of it but the BSD flags, which it counts there
   --atomic             with --to-tar FILE, write the archive to a sibling temporary file
                        and rename it over FILE once the walk is complete, so a walk that
                        fails part-way leaves whatever was at FILE untouched. --to-dir has
                        no equivalent — no rename publishes a whole tree at once — which is
                        why its destination must start empty
+  --volume NAME        (apfs) the volume of the container to read: by name, by the identifier
+                       a report prints, or by slot number where neither answers. Without it,
+                       the first volume this tool reads: one before it that it refuses, as a
+                       Mac's sealed system volume, is passed over, and the standard error
+                       says so
+  --snapshot NAME      (apfs) read that volume as its snapshot of this name keeps it
   --strict             refuse an image the reader cannot hold to its format, rather than
                        interpreting it best-effort. Extraction writes what it read
                        somewhere, so a filesystem carrying a deviation this reader does not
@@ -989,9 +1235,10 @@ options:
 Reading holds no whole file: --cat streams to the standard output and --to-tar streams each
 member into the archive, so a multi-gigabyte file costs a working set rather than its size.
 
-The archive holds a `./` member for the root and skips `/lost+found`, so what comes out
-is what `ferrosys format --from-tar` reads back in; --to-dir writes the tree the same way,
-so `format --from-dir` reads that one back.
+The archive holds a `./` member for the root and skips an ext filesystem's `/lost+found`,
+which the format makes for itself, so what comes out is what `ferrosys format --from-tar`
+reads back in; --to-dir writes the tree the same way, so `format --from-dir` reads that one
+back.
 
 A JSON mode's `mode` field is the permission bits as a decimal number, since JSON has no
 octal literal — 509 is 0o775 — and `mode_octal` beside it carries the usual spelling.
@@ -1007,17 +1254,19 @@ const DETECT_HELP: &str = "\
 ferrosys detect — say which filesystem an image holds
 
 usage:
-  ferrosys detect [--offset N] [--json] IMAGE
+  ferrosys detect [--offset N [--length N]] [--json] IMAGE
 
 options:
   --offset N           where the filesystem begins within the file, for a partition inside
                        a whole-disk image or a region a carver located. A byte count,
                        optionally suffixed K, M, G, or T
+  --length N           how many bytes from the offset on the region holds; nothing past
+                       them is read
   --json               report as JSON rather than as one word
 
 The answer is one word on the standard output — ext2, ext3, ext4, fat12, fat16, fat32,
-exfat, btrfs, or `unrecognized` — so it reads well in a shell test. It is the same word
-`format -t` takes.
+exfat, btrfs, apfs, or `unrecognized` — so it reads well in a shell test. For every family
+this tool writes, it is the same word `format -t` takes.
 An unrecognized image exits 8, since there is no filesystem to have an opinion about. One
 further word, `unknown`, is the answer when the library classifies a family this build has
 no name for: something recognized the image, so calling it unrecognized would be wrong.
@@ -1035,6 +1284,9 @@ usage:
 options:
   --offset N           where the filesystem begins within the file, for a partition inside
                        a whole-disk image. A byte count, optionally suffixed K, M, G, or T
+  --length N           how many bytes from the offset on are the filesystem's: the
+                       partition's length. Nothing past them is read or written, so a
+                       filesystem longer than its partition is refused untouched
   --uuid HEX           the new filesystem UUID: 32 hex digits, dashed or bare
   --label TEXT         the new volume label, at most 16 bytes
   --set-checksum-seed  record the seed the current UUID implies and set

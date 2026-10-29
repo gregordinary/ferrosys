@@ -1,15 +1,15 @@
 # Formatting and reading images
 
 `ferrosys` has two halves: a formatter that writes a filesystem image, and a reader
-that parses one back. Each filesystem family lives in a module of its own, which writes and
-reads its formats. `ext` covers ext2, ext3, and ext4, `fat` FAT12, FAT16, and FAT32,
-`exfat` exFAT, and `btrfs` btrfs.
+that parses one back. Each filesystem family lives in a module of its own. `ext` covers
+ext2, ext3, and ext4, `fat` FAT12, FAT16, and FAT32, `exfat` exFAT, and `btrfs` btrfs, and
+each writes and reads its formats. `apfs` reads and writes an APFS container.
 
 A third vocabulary belongs to neither half and lives at the crate root. It describes a
 directory tree, reports what a format could not hold, and says what an image is.
 
 Most of this page is the ext family, which is the one with the fullest surface. The
-sections on FAT, exFAT, and btrfs say what differs for each.
+sections on FAT, exFAT, btrfs, and APFS say what differs for each.
 
 ## Describing the contents
 
@@ -68,6 +68,13 @@ Each entry's access, change, and modification times default to the one timestamp
 passed to `Metadata::new`. `Metadata::with_times` sets them independently. A
 fixed-time option on the format call overrides every entry's times for
 byte-reproducible output regardless of the source.
+
+`Metadata::with_birth_time` states when the entry was created. Every family's format has a
+field for one, and writes the modification time there for an entry that states none. A host
+directory, an archive and a `TreeBuilder` state none unless the caller sets one. A tree read
+from an image states the one its format records. A family whose field cannot hold the
+instant refuses it, as it refuses any other time. An ext inode of 128 bytes has no creation
+field at all, and APFS refuses one before 1970, which macOS will not read.
 
 With the `tar` feature enabled, an `ArchiveSource` parses a tar archive into the same
 entries a `TreeBuilder` produces. The rest of the pipeline is therefore identical. It reads
@@ -145,6 +152,59 @@ wants both reproducible bytes and per-file times. `FormatOptions::fixed_time` is
 for one that forces every inode to a single time instead, and gives up per-file times to do
 it.
 
+### A tree from an image
+
+An `ImageSource` turns a tree this crate reads into a source. Hand it any family's reader, and
+another family's format writes the same tree:
+
+```rust
+# extern crate ferrosys;
+use std::io::Cursor;
+use ferrosys::apfs::{FormatOptions, Reader, VolumeName, VolumeRequest, format};
+use ferrosys::{ImageSource, Metadata, Synthesis, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let tree = TreeBuilder::new()
+    .directory("/etc", Metadata::new(0o755, time))
+    .file("/etc/hostname", "ferrosys\n", Metadata::new(0o644, time));
+let options = ferrosys::ext::FormatOptions::new([1; 16], time, [2; 16]);
+let ext = ferrosys::ext::format(tree, 32 << 20, options)?;
+
+// The ext filesystem's tree, written again as an APFS volume.
+let reader = ferrosys::ext::Reader::open(Cursor::new(ext.into_bytes()))?;
+let source = ImageSource::read(reader, &Synthesis::default())?;
+assert!(source.fidelity().is_faithful());
+let volume = VolumeRequest::new(VolumeName::new("Copy")?, [0x22; 16]);
+let apfs = format(source, 64 << 20, FormatOptions::new([0x11; 16], time, volume))?;
+
+let mut reader = Reader::open(Cursor::new(apfs.as_bytes()))?;
+let node = reader.lookup(b"/etc/hostname")?;
+assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Each entry the walk meets comes back as the entry that writes it again. That is its path, its
+kind, its owner, mode and times, its birth time where the format records one, and its extended
+attributes. A second name for a node is a hard link to the first name the walk met.
+
+A regular file's content is an `ImageFile`, which reads the file from the image when a format
+places it. A source over a large image therefore holds its entries' records and none of their
+bytes. The image must stay unchanged until the format finishes.
+
+A family whose format records no owner or mode fills one from the `Synthesis` the caller
+hands it. `ImageSource::fidelity` names each value filled that way, entry by entry, so a
+caller knows which values the image never held.
+
+An entry read from an APFS volume also carries its `Darwin` part. That is its BSD flags and,
+for a compressed file, the form its content is stored in. APFS writes both. Every other
+family names the flags as `Property::BsdFlags`:
+
+- A FAT or exFAT volume writes the tree without them once `accepted_loss` names the property.
+- An ext or btrfs volume refuses them as `ModelError::BsdFlagsNotHeld`, naming the entry.
+- Clearing an entry's `darwin` field writes the tree without them on any family.
+
+A compressed file's content is its decoded bytes, so every family writes the file whole.
+
 ### Composing sources
 
 A `LayeredSource` puts one source over another, so a later layer's entry replaces an
@@ -172,11 +232,28 @@ configuration layer is additive. Replacing a directory with something that is no
 different. The entries beneath it would have nowhere to live, so they are dropped with it.
 
 Paths are compared as the model compares them, so `/etc/hostname` and `//etc//hostname` are
-one path and the second does replace the first. There is no deletion marker. A layer states
-what is present, so the result always holds the union of the layers' paths.
+one path and the second does replace the first.
 
-A file's contents are a `FileContent`, which is either `Owned` bytes or a `Range` of a host
-file. Both coexist in one entry list. That is what lets a caller take an archive-backed
+A layer states what is present. Taking a path out is a step of its own, `remove`, over what
+the layers so far compose. The path goes with everything beneath it, and a later layer can
+place it again:
+
+```rust,ignore
+# extern crate ferrosys;
+let source = LayeredSource::new()
+    .layer(ImageSource::read(reader, &Synthesis::default())?)
+    .remove("/usr/share/doc")?
+    .layer(DirectorySource::from_path("overlay")?);
+```
+
+A path nothing composed holds is `RemovalError::NotHeld`, so a misspelled removal is an
+error. A name is what goes, and a file with another name keeps it. Take a file whose own name
+is removed while a hard link elsewhere names it. The first of its remaining names in path order
+holds the file, and the other names link to that one. A layer replacing a directory treats the
+names beneath it the same way.
+
+A file's contents are a `FileContent`: `Owned` bytes, a `Range` of a host file, or an `Image`
+file in an image this crate reads. All three coexist in one entry list. That is what lets a caller take an archive-backed
 list and replace one entry's contents with bytes it computed. Every other entry stays on
 disk.
 
@@ -486,7 +563,7 @@ filesystem holding a source is one with nothing left in it:
 |---|---|
 | `Slack::None` | the floor: `plan.size_bytes()` is then the minimum size for this source |
 | `Slack::Bytes(64 << 20)` | at least 64 MiB free, rounded up to whole blocks |
-| `Slack::Share(2000)` | at least a fifth of the filesystem free, in hundredths of one percent |
+| `Slack::Share(2000)` | at least a fifth of the filesystem free, in hundredths of one percent, rounded up to whole blocks |
 
 The measure is free blocks, the same count `s_free_blocks_count` carries. The super-user
 reservation is separate accounting over the same blocks. A filesystem left a fifth free
@@ -860,8 +937,9 @@ println!("{} names written", report.written);
 
 The destination must exist and be empty. It takes the filesystem root's own mode,
 ownership, times, and extended attributes, and everything the filesystem holds appears
-beneath it. `/lost+found` is omitted, so the tree is one `DirectorySource` reads straight
-back. A file's bytes are streamed a window at a time, so a tree far larger than memory
+beneath it. An ext filesystem's `/lost+found` is omitted, since the format makes it, so the
+tree is one `DirectorySource` reads straight back. On every other family a directory of that
+name is the volume's own and is written like any other. A file's bytes are streamed a window at a time, so a tree far larger than memory
 costs a working set.
 
 **The image is untrusted, and a name in it is not a path to resolve**. Every directory is
@@ -890,14 +968,28 @@ unprivileged extraction of such a tree succeed rather than fail part-way with a 
 Four parts of a tree take privileges:
 
 - A device node needs `CAP_MKNOD`.
-- Setting a recorded owner needs `CAP_CHOWN`.
+- Setting a recorded owner needs `CAP_CHOWN`, and in a user namespace an id the namespace maps.
 - An extended attribute in the `security` or `trusted` namespace is the host's to write.
 - A destination filesystem with no notion of a second name for a node refuses a hard link.
 
 By default a host that refuses any of them is `HostError::Unprivileged`, naming the entry.
 `skip_privileged` is the opt-in for an unprivileged extraction. What it left out comes back
 in the `ExtractReport` rather than in silence, as `skipped`, `ownership_dropped`, and
-`xattrs_dropped`.
+`dropped_xattrs`.
+
+Two parts of a tree can have no place on the destination whatever privilege the process has:
+
+- A name longer than the destination takes. A format storing up to 255 UTF-16 units holds
+  names of as many as 765 bytes of UTF-8, and a Linux filesystem takes 255 bytes.
+- An extended attribute the destination will not hold. Another operating system names its
+  attributes in no namespace this host knows. A destination can hold no attributes at all.
+  And the kernel holds a `user` attribute only on a regular file or a directory.
+
+Each limit is the destination's own, and the refusal is the one the destination gave:
+`HostError::NameTooLong` or `HostError::UnsupportedAttribute`, naming the entry.
+`skip_unsupported` is the opt-in that writes the rest. An entry whose name is refused is left
+out, a directory with everything under it, and its path is in `skipped`. An attribute the
+destination refuses is named once in `dropped_xattrs`.
 
 A file's contents are written as the filesystem reports them, and a hole reads as zeros. A
 sparse file therefore lands in the destination fully allocated.
@@ -1064,7 +1156,11 @@ neighboring partition, or the rest of a disk. That is the read the block count r
 The source's length here is the length from `base` on, measured once when the filesystem is
 opened. That is the filesystem's share of the source. A 16 MiB partition at the end of a
 2 TiB disk image is bounded by the 16 MiB that could hold it. It is not bounded by
-everything in front of it. A source that cannot report its own end fails the open.
+everything in front of it.
+
+A partition anywhere else on the disk is bounded by its own end when `OpenOptions::len` names
+it, and by the disk's end when nothing does. A source that cannot report its own end fails
+the open.
 Answering zero would leave every bound built on it satisfied by a filesystem with nothing
 in it.
 
@@ -1079,12 +1175,13 @@ the directory holding it.
 `Reader::open_with` takes an `OpenOptions` carrying everything else:
 
 - Where the filesystem begins within the source, which is a partition offset.
+- How many bytes from there on are the filesystem's, which is a partition's length.
 - The `ReadPolicy` to hold it to.
 - A `Limits` capping what one read can allocate.
 - A `metadata_csum` seed to verify against, where the image's stored seed and UUID no
   longer agree.
 
-The first three are the crate's own `OpenOptions`, held in a `common` field rather than
+The first four are the crate's own `OpenOptions`, held in a `common` field rather than
 restated. An input every family takes is therefore named in one place, and reaches every
 family at once. The builders below set through it, so a caller writes the same thing either
 way.
@@ -2326,6 +2423,238 @@ which of those directories becomes the root of a tree of its own. A hard link ca
 of them, and no btrfs holds one. A source that names one is therefore refused rather than
 written as a copy.
 
+## Reading an APFS container
+
+An APFS partition holds one container, and the container lists up to a hundred volumes.
+Each volume is a filesystem of its own, with its own tree of files and its own inode
+numbers, and none is inside another. So the family has two entry points. `Container` is the
+pool of blocks: its newest whole checkpoint, its object map, and every volume it lists.
+`Reader` is one volume read as files.
+
+```rust,no_run
+# extern crate ferrosys;
+use ferrosys::apfs::{Container, OpenOptions, Reader, VolumeSelector};
+
+let container = Container::open(std::fs::File::open("disk.img")?)?;
+for volume in container.volumes() {
+    // A volume this crate does not read says why, before anything is opened.
+    let state = volume.refusal().map_or("read".to_string(), |why| why.to_string());
+    println!("{} {}: {state}", volume.slot, String::from_utf8_lossy(volume.name()));
+}
+
+// One volume, by name. Without a selection, the volume in the container's first slot.
+let options = OpenOptions::new().volume(VolumeSelector::Name(b"Data".to_vec()));
+let mut reader = Reader::open_with(std::fs::File::open("disk.img")?, &options)?;
+for entry in reader.walk()? {
+    println!("{} bytes  {}", entry.node.size(), String::from_utf8_lossy(&entry.path));
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Every object the read reaches is verified by its checksum. It is held to the reference that
+reached it: its type, the identifier it records as its own, and the transaction that wrote
+it. A tree node's first key is held to its parent's key for it. Four things are refused: an
+incompatible feature this crate does not read, an encrypted volume, a sealed one, and a
+Fusion container. Each refusal names what it would take to read it.
+
+A path component finds the entry whose stored name is exactly it, or else the one the volume
+takes to be the same name. Two names are the same where their canonical decompositions are,
+case-folded on a volume whose names fold case.
+
+A file's content is its data stream's extents. A hole is an extent at block zero and reads as
+zeros, and a window no extent covers is refused.
+
+A file macOS compressed keeps its content
+after its compression header or in its resource fork instead, and is read through that. The
+header is followed by one chunk, or the fork by a chunk table and then each 64 KiB chunk. Each
+chunk is a zlib, LZVN, LZFSE or LZBITMAP stream, read under that algorithm's feature. Or it is
+the content itself after the marker byte `0xCC`, which every build reads. A compression type the crate does not decode is refused
+by its number rather than read as the file's empty data stream.
+
+A volume's snapshots are views of it. `snapshots` lists them, and a volume opened at one
+reads as that snapshot keeps it:
+
+```rust,no_run
+# extern crate ferrosys;
+use ferrosys::apfs::{OpenOptions, Reader};
+
+let mut reader = Reader::open(std::fs::File::open("disk.img")?)?;
+for snapshot in reader.snapshots()? {
+    println!("{} at transaction {}", String::from_utf8_lossy(&snapshot.name), snapshot.xid);
+}
+
+let options = OpenOptions::new().snapshot(b"before-upgrade".to_vec());
+let mut past = Reader::open_with(std::fs::File::open("disk.img")?, &options)?;
+let node = past.lookup(b"/notes.txt")?;
+let then = past.read_data(&node)?;
+# let _ = then;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`scan` holds a volume to its own account of itself. It verifies every node of its tree, and
+checks the counts its superblock keeps against the records the volume holds. It checks each
+directory's child count, each link count, each entry's type and hash, and each data stream's
+reference count the same way. Every inode a name reaches is read as a read of it would be,
+short of decoding its content. So an extent, an attribute, a chunk table, or a link target a
+read refuses is a finding.
+
+## Formatting an APFS container
+
+`ferrosys::apfs::format` writes a container, its first volume populated from a source and
+each other volume from the contents its request gives it. What comes out is this:
+
+- Two transactions, both kept. The first commits the container alone, and the second adds
+  the volumes, everything they hold, and frees what it supersedes.
+- Every object checksummed, and block zero a copy of the newest checkpoint's superblock.
+- Empty, one volume is block for block what `newfs_apfs` writes into a file of that size and
+  block size, on the profile's release. Only five things differ: the
+  identifiers, the times, the program name, the counters and the newest mounted version. The
+  first two are inputs.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::apfs::{
+    Container, FormatOptions, NameKind, ReleaseProfile, Reader, VolumeName, VolumeRequest, format,
+};
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+
+// Every value a formatter would conventionally invent is an input: the container's identifier,
+// each volume's, and the one instant the container records.
+let time = Timestamp::from_secs(1_700_000_000);
+let volume = VolumeRequest::new(VolumeName::new("Data")?, [0x22; 16])
+    .names(NameKind::CaseKeeping);
+let options = FormatOptions::new([0x11; 16], time, volume).profile(ReleaseProfile::Macos26);
+let source = TreeBuilder::new()
+    .root(Metadata::new(0o755, time).owned_by(501, 20))
+    .directory("/etc", Metadata::new(0o755, time))
+    .file("/etc/hostname", "ferrosys\n", Metadata::new(0o644, time));
+
+let image = format(source.clone(), 64 << 20, options.clone())?;
+assert_eq!(image.as_bytes(), format(source, 64 << 20, options)?.as_bytes());
+
+// Read it back with this crate's reader, and hold it to its own account of itself.
+let container = Container::open(std::io::Cursor::new(image.as_bytes()))?;
+assert_eq!(container.volumes()[0].name(), b"Data");
+let mut reader = Reader::open(std::io::Cursor::new(image.as_bytes()))?;
+let node = reader.lookup(b"/etc/hostname")?;
+assert_eq!(reader.read_data(&node)?, b"ferrosys\n");
+assert!(reader.scan().anomalies().is_empty());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A volume holds every property a source states. That is owners, modes, four times to the
+nanosecond, hard links, device nodes, pipes, sockets and extended attributes.
+
+An attribute of up to 3,800 bytes is held in its record, and a larger one in a stream of its
+own. A name is at most 127 bytes, the longest `setxattr` sets on macOS (`MAX_XATTR_NAME`). The writer refuses a
+longer one, which macOS lists and refuses to read. An entry naming one attribute twice is
+refused. Attributes of every namespace are stored as given, `security.*` and the POSIX ACLs of
+`system.posix_acl_*` among them, which macOS keeps and does not interpret.
+
+A name is held to what macOS creates under the profile's Unicode version. It is UTF-8, at most
+255 UTF-16 code units, and every code point in it is one the version assigns. Two names a
+directory compares as one are refused, naming both.
+
+An entry's `Darwin` part is held too: its BSD flags, and a compressed file's stored form. The
+header and resource fork are written as given, under the flags macOS gives a compressed file,
+and a read decodes them. The part's `UF_COMPRESSED` follows the form: it is set where a form
+is given and cleared where none is. A form whose header contradicts the file is refused as
+`ModelError::CompressedForm`, naming the `CompressedFault`.
+
+Identifiers are taken in a depth-first walk of the tree. Each directory's entries are taken in
+the order its records sort. That is how `hdiutil create -srcfolder` numbers a tree on a volume
+of the same kind.
+
+`NameKind::CaseFolding`, the default, compares names with case folded, as a Mac formats a
+volume unless told otherwise. `NameKind::CaseKeeping` keeps case, as `newfs_apfs -e` does.
+Both compare a name by its canonical decomposition, so two spellings of one accented letter
+are one name on either.
+
+The release profile fixes the two words of a volume superblock that differ between releases.
+It also fixes the Unicode version names are held to, and it is macOS 26 by default. `format_to` writes to a
+seekable destination instead, touching only the blocks the container occupies and reading a
+file's bytes a window at a time. A 16 TiB container is a sparse file of a few megabytes of
+writes and what its volume holds. A second volume and more take the next places and
+identifiers, each holding what `VolumeRequest::contents` gives it, or nothing.
+
+A `VolumeGroup` joins a System volume and a Data volume as macOS joins the two it boots from.
+Each records its role, and both record the Data volume's identifier as the group's. The System
+volume numbers its files from `0x0FFF_FFFF_0000_0010` on. No inode of it shares a number with
+one of the Data volume's. Every object is where it is in the same
+container without the group. A root snapshot of the System volume carries the group as one
+taken after the volume joined it would.
+
+`VolumeRequest::firmlinks` gives the System volume `Firmlinks`, the directories macOS joins to a
+path in the Data volume. Each listed directory it holds gets the flag `FIRMLINK_FLAG` beside its
+own, as macOS 27 marks its own. It also gets the attribute `com.apple.fs.firmlink`, holding its
+target and a NUL, at most `MAX_FIRMLINK_TARGET` bytes before it.
+`FormatPlan::firmlinked` counts the directories marked, since a line naming one the volume does
+not hold marks nothing.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::apfs::{
+    Firmlinks, FormatOptions, FormatPlan, VolumeGroup, VolumeName, VolumeRequest,
+};
+use ferrosys::{Metadata, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let dir = Metadata::new(0o755, time);
+let system = TreeBuilder::new()
+    .directory("/etc", dir)
+    .directory("/shared", dir);
+let data = TreeBuilder::new().directory("/shared", dir);
+let links = Firmlinks::parse(b"/shared\tshared\n")?;
+
+let options = FormatOptions::new(
+    [0x11; 16],
+    time,
+    VolumeRequest::new(VolumeName::new("System")?, [0x22; 16]).firmlinks(links),
+)
+.volume(VolumeRequest::new(VolumeName::new("Data")?, [0x33; 16]).contents(data))
+.volume_group(VolumeGroup::new(0, 1));
+let plan = FormatPlan::new(system, 1 << 30, options)?;
+assert_eq!(plan.firmlinked(), 1);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`FormatPlan::fit` sizes a container to its contents instead, with room left in it, as ext's
+does. It plans candidate sizes and places every volume's content into each. The size it
+returns is a whole number of blocks that places, and the block below it does not.
+
+The room is what macOS lets any user write, `ApfsLayout::writable_blocks`. It is the free
+blocks the newest space manager records, less what macOS keeps free before a write. A change
+is refused where fewer blocks are free than it asks for, what its transaction holds, and a
+margin. A write of up to a mebibyte asks for its data's blocks and up to 172 more. For a
+process that is not root, the margin is a hundredth of the blocks counted twice. The first
+count is held to 100 to 4,000, the second to 25 to 4,096.
+
+A file that grows is given room ahead of it, as much as 4,095 blocks in one change once it is
+large. That change asks for 256 blocks beside them, and a transaction held at most 143 at any
+refusal. The writable count leaves all of it out, so no write of the room misses.
+
+Each file's records take room beside its data, about a block for every sixteen files.
+`Slack::None` asks for no room. It gives the smallest container, which macOS mounts and
+refuses a new file in.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::apfs::{FormatOptions, FormatPlan, NameKind, VolumeName, VolumeRequest};
+use ferrosys::{Metadata, Slack, Timestamp, TreeBuilder};
+
+let time = Timestamp::from_secs(1_700_000_000);
+let volume = VolumeRequest::new(VolumeName::new("ramdisk")?, [0x22; 16])
+    .names(NameKind::CaseKeeping);
+let options = FormatOptions::new([0x11; 16], time, volume);
+let source = TreeBuilder::new().file("/hello", "hello\n", Metadata::new(0o644, time));
+
+// The smallest container that holds the source with a mebibyte of it still free.
+let plan = FormatPlan::fit(source, options, Slack::Bytes(1 << 20))?;
+assert!(plan.layout().free_blocks() >= 256);
+assert_eq!(plan.container_bytes() % 4096, 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## Opening an image without knowing what it is
 
 `open` classifies a source and hands back the reader for whichever family claimed it,
@@ -2354,8 +2683,8 @@ a file's bytes, and resolves a link. An extraction therefore needs no `match` at
 `ArchiveSink` and `DirectorySink` are written once against it, and drain whichever family
 answered.
 
-`open_with` takes the crate's own `OpenOptions`, which carries the three inputs every family
-takes. Those are where the filesystem begins, how strictly it is read, and what one read
+`open_with` takes the crate's own `OpenOptions`, which carries the inputs every family takes.
+Those are where the filesystem begins and ends, how strictly it is read, and what one read
 allocates.
 
 A knob only one family has is on that family's own open, reached by opening its reader

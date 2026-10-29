@@ -1521,12 +1521,26 @@ mod differential {
             force: Some(FatType::Fat12),
             ..Case::new(128 << 20)
         };
-        let (_image, bpb, _) = baseline(&case).expect("the baseline builds this");
+        let (image, bpb, _) = baseline(&case).expect("the baseline builds this");
         assert!(
             u64::from(bpb.sectors_per_cluster) * u64::from(bpb.bytes_per_sector)
                 > u64::from(ferrosys::fat::MAX_BYTES_PER_CLUSTER),
             "the baseline no longer needs an allocation unit past the cap to reach FAT12 here"
         );
+        // This crate does not write such a volume, and it reads one: a strict open takes it,
+        // and the one thing a scan says of it is that its clusters are past the guidance.
+        let bytes = std::fs::read(image.path()).expect("read the baseline's image");
+        let mut ours = ferrosys::fat::Reader::open(std::io::Cursor::new(&bytes))
+            .expect("a strict read opens it");
+        let report = ours.scan();
+        let details: Vec<&str> = report
+            .anomalies()
+            .iter()
+            .map(|a| a.detail.as_str())
+            .collect();
+        assert_eq!(report.anomalies().len(), 1, "{details:?}");
+        assert_eq!(report.anomalies()[0].severity, ferrosys::Severity::Cosmetic);
+        assert!(details[0].contains("65536 bytes"), "{details:?}");
         let refused = plan_layout(&request(&case, &bpb));
         assert!(
             matches!(
@@ -1883,6 +1897,107 @@ mod populated {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn a_parent_past_cluster_65535_is_named_whole_by_its_childs_dot_dot() {
+        if !available("fsck.fat") || !available("mdir") {
+            return;
+        }
+        // On FAT32 a cluster number is two halves, and below 65536 the high one is zero
+        // whoever writes it. A file of 40 MiB at one sector a cluster ahead of two nested
+        // directories puts both past that, so the inner one's `..` names its parent through
+        // the high half as well.
+        use ferrosys::fat::{ClusterSize, OpenOptions, Reader, Storage};
+        let source = TreeBuilder::new()
+            .file(
+                b"/a.bin".to_vec(),
+                vec![0x5a; 40 << 20],
+                Metadata::new(0o644, TIME),
+            )
+            .directory(b"/z".to_vec(), Metadata::new(0o755, TIME))
+            .directory(b"/z/y".to_vec(), Metadata::new(0o755, TIME))
+            .file(
+                b"/z/y/f.txt".to_vec(),
+                b"deep\n".to_vec(),
+                Metadata::new(0o644, TIME),
+            );
+        let options = FormatOptions::new(0x1234_abcd, TIME).plan(
+            PlanRequest::new(0)
+                .fat_type(FatTypeRequest::Exactly(FatType::Fat32))
+                .cluster_size(ClusterSize::Sectors(1)),
+        );
+        let file = tempfile::NamedTempFile::new().expect("create a temporary image");
+        format_to(source, 64 << 20, options, file.as_file()).expect("write the volume");
+
+        // The fixture has the property it is here for.
+        let image = std::fs::read(file.path()).expect("read the image");
+        let mut ours = Reader::open_with(std::io::Cursor::new(&image), &OpenOptions::new())
+            .expect("a strict open");
+        for path in [&b"/z"[..], b"/z/y"] {
+            let Storage::Chain(first) = ours.lookup(path).expect("the directory").storage else {
+                panic!("a directory owns a chain");
+            };
+            assert!(
+                first > 0xffff,
+                "{} begins at cluster {first}, below the high half",
+                String::from_utf8_lossy(path)
+            );
+        }
+        // A strict walk holds every `..` to the directory it was listed in, both halves.
+        assert_eq!(ours.walk().expect("a strict walk").len(), 4);
+        // And two implementations that are not this one read the same volume.
+        fsck_fat_clean(file.path())
+            .unwrap_or_else(|e| panic!("the checker rejected the volume: {e}"));
+        let out = tool("mdir")
+            .args(["-/", "-b", "-i"])
+            .arg(file.path())
+            .arg("::/z/y")
+            .output()
+            .expect("spawn mdir");
+        assert!(
+            out.status.success(),
+            "mdir could not reach the nested directory:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("f.txt"));
+    }
+
+    #[test]
+    fn a_name_carrying_a_byte_the_short_field_reserves_takes_one_the_checker_accepts() {
+        if !available("fsck.fat") {
+            return;
+        }
+        // 0x7F and `+` are legal in a long name. The checker refuses 0x7F in a short name
+        // (observed), and the format reserves `+` there (documented), so the short name this
+        // crate derives carries an underscore for each and the long name keeps them.
+        let source = TreeBuilder::new()
+            .file(
+                b"/a\x7fb.txt".to_vec(),
+                b"del".to_vec(),
+                Metadata::new(0o644, TIME),
+            )
+            .file(
+                b"/c+d.txt".to_vec(),
+                b"plus".to_vec(),
+                Metadata::new(0o644, TIME),
+            );
+        let options = FormatOptions::new(0x1234_abcd, TIME)
+            .plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat16)));
+        let file = tempfile::NamedTempFile::new().expect("create a temporary image");
+        format_to(source, 64 << 20, options, file.as_file()).expect("write the volume");
+        fsck_fat_clean(file.path())
+            .unwrap_or_else(|e| panic!("the checker rejected the short names: {e}"));
+        let image = std::fs::read(file.path()).expect("read the image");
+        let mut ours =
+            ferrosys::fat::Reader::open(std::io::Cursor::new(&image)).expect("a strict open");
+        let names: Vec<Vec<u8>> = ours
+            .read_dir(&ours.root())
+            .expect("the root")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, [b"a\x7fb.txt".to_vec(), b"c+d.txt".to_vec()]);
     }
 
     #[test]
@@ -3138,7 +3253,7 @@ mod fitted {
                 let want = match slack {
                     Slack::None => 0,
                     Slack::Bytes(n) => n.div_ceil(cluster_bytes),
-                    Slack::Share(h) => u64::from(clusters) * u64::from(h) / 10_000,
+                    Slack::Share(h) => (u64::from(clusters) * u64::from(h)).div_ceil(10_000),
                     _ => 0,
                 };
                 assert!(

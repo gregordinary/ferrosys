@@ -2,23 +2,23 @@
 name = "ferrosys"
 # Every format is spelled in full: a registry search for `ext4` or `fat32` matches this
 # line word for word, and `ext2/3/4` is no word at all.
-description = "Pure-Rust filesystem formatter and reader: ext4, ext3, ext2, FAT32, FAT16, FAT12, exFAT, and btrfs — rootless, in userspace, byte-reproducible"
+description = "Pure-Rust filesystem formatter and reader: ext4, ext3, ext2, FAT32, FAT16, FAT12, exFAT, btrfs, and APFS — rootless, in userspace, byte-reproducible"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Five is the registry's limit, so each family gets the one name someone searches for rather
-# than one entry per format. The lineages they cover — ext2 and ext3, FAT12 and FAT16 — are
-# in the description, which the registry's own search reads; exFAT has no lineage to spell,
-# being one revision of one format, and neither has btrfs. Four families leave one slot, and
-# `disk-image` has it: it is what someone building boot media, a virtual machine's disk, or
-# an embedded root filesystem is looking for, and it is the only word here that names the
-# artifact rather than a format. `mkfs` is the binary's, one crate over, where a search for
-# the tool being replaced should land. `filesystem` is absent because it is in `categories`
-# and in the description, both of which that search reads.
-keywords = ["ext4", "btrfs", "exfat", "fat32", "disk-image"]
+# Five is the registry's limit. Its search reads the description, which spells every format,
+# so a keyword earns its slot by the page it lists the crate on: a family's name is a page of a
+# few dozen crates, the one someone who needs that format looks at. Four families take four
+# slots, the ones fewest other crates write: ext4, APFS, btrfs and exFAT. FAT32, which many
+# crates write, is found through the description. `disk-image` takes the fifth: it is what
+# someone building boot media, a virtual machine's disk, or an embedded root filesystem looks
+# for, and the one word here that names the artifact and not a format. `mkfs` is the binary's,
+# one crate over, where a search for the tool being replaced lands. `filesystem` is in
+# `categories` and in the description, both of which that search reads.
+keywords = ["ext4", "apfs", "btrfs", "exfat", "disk-image"]
 # `virtualization` because a microVM root disk is a filesystem image built by a program
 # rather than by a person, which is this crate's shape of consumer.
 categories = ["filesystem", "os", "virtualization"]
@@ -33,10 +33,10 @@ documentation = "https://docs.rs/ferrosys"
 # `detect` selector, and the source and extraction vocabulary — and `detect` recognizes
 # nothing.
 #
-# The default carries all four families and the three decoders, so a default build reads
-# what a Linux kernel mounts, a compressed btrfs root included. A consumer that wants fewer
-# turns the default off and names them.
-default = ["ext", "fat", "exfat", "btrfs", "zlib", "lzo", "zstd"]
+# The default carries all five families and every decoder, so a default build reads what a
+# Linux kernel mounts, a compressed btrfs root included, and a Mac's compressed files. A
+# consumer that wants fewer turns the default off and names them.
+default = ["ext", "fat", "exfat", "btrfs", "apfs", "zlib", "lzo", "zstd", "lzvn", "lzfse", "lzbitmap"]
 # The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
 # structures, reached through the `ext` module.
 ext = []
@@ -55,6 +55,10 @@ exfat = []
 # space, where a chunk tree maps that space onto the device and every metadata block
 # carries its own checksum.
 btrfs = []
+# The APFS family, reached through the `apfs` module: a container of volumes, each a tree of
+# records found through an object map, under a checkpoint. It shares no structure with any of
+# the four above.
+apfs = []
 # The tar/PAX archive `Source` and `Sink`. Off by default; enabling it pulls in the `tar`
 # crate (no default features, so no host-side xattr writes) for parsing archives, their PAX
 # timestamps and xattrs, and SCHILY ACL records. It names no family: a source feeds
@@ -67,7 +71,7 @@ tar = ["dep:tar"]
 # ends read and write Linux inode metadata and Linux extended attributes, so they are
 # present on Linux. Like `tar`, neither end names a family.
 dir = ["dep:rustix"]
-# The three ways a filesystem stores a run of bytes in fewer of them, each behind its own
+# The ways a filesystem stores a run of bytes in fewer of them, each behind its own
 # feature. A build carrying one reads a file whose extents are encoded that way; a build
 # without it reports such a file as one it does not decode, naming the algorithm, rather
 # than handing back the bytes on the volume as though they were the file's. Verification is
@@ -76,8 +80,8 @@ dir = ["dep:rustix"]
 #
 # Named for the algorithm rather than for a family, as `tar` and `dir` are named for what
 # they are: an encoding is a property of a run of bytes and not of the format around it, and
-# the decoder is at the crate root beside `crc32c` for the same reason. Today the btrfs
-# family is what reads them, so a build wanting one wants `btrfs` beside it.
+# the decoder is at the crate root beside `crc32c` for the same reason. btrfs and APFS are
+# the families that read them, so a build wanting one wants one of those beside it.
 #
 # DEFLATE, as `zlib` frames it. The dependency is `#![forbid(unsafe_code)]`, which is this
 # crate's own bar.
@@ -90,6 +94,15 @@ lzo = []
 # the one place this crate's dependency graph departs from its own bar, taken because the
 # alternative for this format is a C library.
 zstd = ["dep:ruzstd"]
+# LZVN, an encoding an APFS compressed file keeps its content in. It takes no dependency: the
+# decoder is small and written here in safe Rust, from the format as Apple's own reference
+# implementation decodes it.
+lzvn = []
+# LZFSE, another, decoded the same way. A stream of it carries LZVN blocks among its own, so
+# it carries that decoder too.
+lzfse = ["lzvn"]
+# LZBITMAP, a third, decoded the same way.
+lzbitmap = []
 # `Serialize` on the values a consumer embeds in a report of its own: the findings taxonomy
 # (`Finding`, `FindingReport`, `Severity`, `Coordinate`), each family's planned geometry
 # (`Layout`, `GroupLayout`, `BlockRange`; `FatLayout`, `Fat32Layout`, `FatType`), and the ext
@@ -137,6 +150,8 @@ serde_json = { workspace = true }
 # format, so what the decoder is held against is a stream this crate had no hand in
 # producing. Never shipped.
 lzokay = { workspace = true }
+# Digests of what the APFS corpus gate reads, held to the ones macOS recorded. Never shipped.
+sha2 = { workspace = true }
 
 [package.metadata.docs.rs]
 # Document the archive and directory sources on docs.rs.

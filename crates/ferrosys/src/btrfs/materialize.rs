@@ -449,6 +449,18 @@ pub enum FormatError {
         /// Bytes of data the planner was told to make room for.
         planned: u64,
     },
+    /// The format's instant has a fraction of a second of a second or more, which no time an
+    /// inode or a root records has.
+    #[error(
+        "{} seconds and {} nanoseconds since 1970 is not a time the filesystem records",
+        time.secs,
+        time.nanos
+    )]
+    #[non_exhaustive]
+    TimeOutOfRange {
+        /// The time given.
+        time: Timestamp,
+    },
     /// The image is larger than this machine can hold in memory.
     ///
     /// Reached only by [`format()`], which collects the whole image. [`format_to`] streams and
@@ -733,6 +745,9 @@ fn prepare(
     volume_bytes: u64,
     options: &FormatOptions,
 ) -> Result<Prepared, FormatError> {
+    if !options.time.has_proper_fraction() {
+        return Err(FormatError::TimeOutOfRange { time: options.time });
+    }
     let mut request = options.plan;
     request.volume_bytes = volume_bytes;
     let (sector_size, node_size) = block_sizes(&request)?;
@@ -1974,11 +1989,11 @@ fn inode_record(
                 sequence: 0,
                 atime: object.meta.atime,
                 ctime: object.meta.ctime,
-                // No source records a birth time, so the modification time stands for it: it is
-                // the earliest instant anything states about this object, and the alternative is
-                // a value invented out of nothing.
                 mtime: object.meta.mtime,
-                otime: object.meta.mtime,
+                // Where the source states no birth time, the modification time stands for it: it
+                // is the earliest instant anything states about this object, and the alternative
+                // is a value invented out of nothing.
+                otime: object.meta.btime.unwrap_or(object.meta.mtime),
             }
             .write_to(buf);
         }),
@@ -3460,6 +3475,35 @@ mod tests {
             "only {formatted} of {} combinations produced a filesystem",
             formatted + refused
         );
+    }
+
+    #[test]
+    fn a_format_instant_with_a_fraction_of_a_second_or_more_is_refused() {
+        // The instant is stamped on every root, the ones no entry describes among them.
+        for nanos in [999_999_999, 1_000_000_000, 1_500_000_000] {
+            let mut options = options();
+            options.time = Timestamp {
+                secs: 1_700_000_000,
+                nanos,
+            };
+            let mut sink = Cursor::new(Vec::new());
+            match format_to(&mut sink, TreeBuilder::new(), 256 * MIB, options) {
+                Err(err @ FormatError::TimeOutOfRange { time }) => {
+                    assert!(nanos >= Timestamp::NANOS_PER_SEC, "{nanos}");
+                    assert_eq!(time.nanos, nanos);
+                    assert_eq!(
+                        err.to_string(),
+                        format!(
+                            "1700000000 seconds and {nanos} nanoseconds since 1970 is not a \
+                             time the filesystem records"
+                        )
+                    );
+                    assert!(sink.into_inner().is_empty());
+                }
+                Ok(_) => assert!(nanos < Timestamp::NANOS_PER_SEC, "{nanos}"),
+                Err(e) => panic!("{nanos}: {e}"),
+            }
+        }
     }
 
     #[test]

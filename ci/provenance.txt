@@ -63,6 +63,8 @@ prefix|msdos_|the FAT implementation in Linux
 prefix|exfat_|the exFAT implementation in Linux, exfatprogs, and relan/exfat
 prefix|lzo1x_|the LZO library, and its port in Linux
 prefix|lzo_|the LZO library, and its port in Linux
+prefix|apfs_|the out-of-tree APFS module for Linux, and apfsprogs
+prefix|libfsapfs_|libyal's libfsapfs
 
 name|str2hashbuf|the directory-index hash input packing in Linux and e2fsprogs
 name|dx_hack_hash|the legacy directory-index hash in Linux and e2fsprogs
@@ -78,10 +80,18 @@ path|e2fsprogs's library sources|\blib/(ext2fs|e2p|support)/
 path|e2fsprogs's program sources|\b(e2fsck|misc|resize|debugfs)/[A-Za-z0-9_-]+\.[ch]\b
 path|btrfs-progs's sources|\b(kernel-shared|kernel-lib|cmds|check)/[A-Za-z0-9_/-]*\.[ch]\b|\bmkfs/[A-Za-z0-9_-]+\.[ch]\b
 path|relan/exfat's library sources|\blibexfat/
+path|apfs-fuse's library sources|\bApfsLib/
+path|libyal's libfsapfs sources|\blibfsapfs/[A-Za-z0-9_-]+\.[ch]\b
+path|a link into an APFS implementation's sources|github\.com/(linux-apfs/linux-apfs-rw|linux-apfs/apfsprogs|sgan81/apfs-fuse|libyal/libfsapfs|jivanpal/drat|fox-it/dissect\.apfs|sleuthkit/sleuthkit)/(blob|tree)/
+path|drat's sources|github\.com/jivanpal/drat\b
+path|Fox-IT's dissect.apfs sources|\bdissect[./]apfs\b
+path|The Sleuth Kit's APFS sources|\btsk/fs/apfs[A-Za-z0-9_]*\.(c|cpp|h|hpp)\b
+path|7-Zip's APFS handler|\bApfsHandler\.(cpp|h)\b
+path|Apple's published sources|opensource\.apple\.com/(source|tarballs|releases)/|github\.com/apple-oss-distributions/
 path|a line of a C source file|\b[A-Za-z0-9_-]+\.[ch]:[0-9]+
 
 macro|an internal macro of the ext4 implementation in Linux|\bEXT4_FITS_IN_INODE\b
-macro|a function-like macro of another implementation|\b(EXT[234]|JBD2|BTRFS|EXFAT|MSDOS|VFAT)_[A-Z0-9_]+\(
+macro|a function-like macro of another implementation|\b(EXT[234]|JBD2|BTRFS|EXFAT|MSDOS|VFAT|APFS)_[A-Z0-9_]+\(
 macro|the kernel's byte-order and buffer interface|\b(le|be)(16|32|64)_to_cpu\b|\bcpu_to_(le|be)(16|32|64)\b|\bbuffer_head\b|\bsb_bread\b|\bbrelse\b
 
 # --- the format's own names -----------------------------------------------------------
@@ -134,7 +144,6 @@ operational|ci/build-exfat-populate.sh|builds libexfat from its release tarball,
 
 known|CHANGELOG.md|ext4_acl_from_disk|recorded when the gate began
 known|CHANGELOG.md|ext4_inode_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/compress/lzo.rs|lzo1x_1_compress|recorded when the gate began
 known|crates/ferrosys/src/csum.rs|ext4_block_bitmap_csum_set|recorded when the gate began
 known|crates/ferrosys/src/csum.rs|ext4_inode_bitmap_csum_set|recorded when the gate began
 known|crates/ferrosys/src/materialize.rs|ext4_block_bitmap_csum_set|recorded when the gate began

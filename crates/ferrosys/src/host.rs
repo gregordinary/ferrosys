@@ -257,21 +257,26 @@ pub enum HostError {
         /// The most directories one extraction defers.
         limit: usize,
     },
-    /// This host will not hold this extended attribute on a node of this kind, whatever
-    /// privilege the process has.
+    /// The destination will not hold this extended attribute, whatever privilege the process
+    /// has.
     ///
-    /// The kernel restricts two attributes by the *type* of what they are set on rather than
-    /// by who is setting them: a `user.*` attribute is refused on anything that is not a
-    /// regular file or a directory, and a default POSIX ACL is refused on anything that is
-    /// not a directory. Both come back as the errno a missing privilege uses, and neither is
-    /// one — running as root fails identically. A filesystem that records no such rule can
-    /// hold either combination perfectly well, so an image carrying one is not malformed;
-    /// this host simply has nowhere to put it.
+    /// Two rules put an attribute out of reach. The kernel restricts two attributes by the
+    /// *type* of what they are set on rather than by who is setting them: a `user.*`
+    /// attribute is refused on anything that is not a regular file or a directory, and a
+    /// default POSIX ACL is refused on anything that is not a directory. Both come back as
+    /// the errno a missing privilege uses, and neither is one — running as root fails
+    /// identically. And a destination holds attributes only in the namespaces this host
+    /// knows, and only if it holds attributes at all: a name in no such namespace, which is
+    /// how another operating system names its attributes, is refused on every node. And a
+    /// value has a size the destination holds: the kernel takes at most 64 KiB for one value,
+    /// and a destination keeps a room of its own for a node's attributes, which a large value
+    /// can be past. A filesystem that records none of these rules holds any of them perfectly
+    /// well, so an image carrying one is not malformed; this destination simply has nowhere to
+    /// put it.
     ///
-    /// [`DirectorySink::skip_privileged`] records it as a dropped attribute instead.
+    /// [`DirectorySink::skip_unsupported`] records it as a dropped attribute instead.
     #[error(
-        "{}: this host will not hold {} on a node of this kind, whatever privilege the \
-         process has",
+        "{}: this host will not hold {}, whatever privilege the process has: {why}",
         printable(.path),
         printable(.name)
     )]
@@ -281,6 +286,30 @@ pub enum HostError {
         path: Vec<u8>,
         /// The attribute's name.
         name: Vec<u8>,
+        /// Which rule the destination applied.
+        why: &'static str,
+    },
+    /// The destination will not hold a name this long, whatever privilege the process has.
+    ///
+    /// A format storing a name as up to 255 UTF-16 units holds names of as many as 765 bytes
+    /// of UTF-8, and a Linux filesystem takes 255 bytes. The limit is the destination's own,
+    /// so the refusal is the one the destination gave. A symbolic link's target is held to a
+    /// limit of the destination's as well, and the host answers both refusals alike, so the
+    /// entry names a link as either.
+    ///
+    /// [`DirectorySink::skip_unsupported`] leaves the entry out instead, and a directory with
+    /// everything under it.
+    #[error(
+        "{}: the destination will not hold {what}, whatever privilege the process has",
+        printable(.path)
+    )]
+    #[non_exhaustive]
+    NameTooLong {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// What the destination refused: the name, or for a symbolic link the name or its
+        /// target.
+        what: &'static str,
     },
     /// Reproducing an entry needs a privilege this process does not have.
     #[error("{}: {what}", printable(.path))]
@@ -305,6 +334,63 @@ pub enum HostError {
         uid: u32,
         /// The recorded group id.
         gid: u32,
+    },
+    /// An entry is a device node whose number this host does not hold: the node made from it,
+    /// read back, names another device, and it is taken out again. A device number is the
+    /// image's, and another operating system's can be wider than this host's.
+    ///
+    /// [`DirectorySink::skip_unsupported`] leaves the node out instead.
+    #[error(
+        "{}: records device {major}:{minor}, which this host makes as another device",
+        printable(.path)
+    )]
+    #[non_exhaustive]
+    UnrepresentableDevice {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// The recorded major number.
+        major: u32,
+        /// The recorded minor number.
+        minor: u32,
+    },
+    /// An entry records BSD flags, `UF_HIDDEN` and the rest, which a Darwin filesystem holds and
+    /// no destination this host writes does.
+    ///
+    /// [`DirectorySink::skip_unsupported`] leaves the flags out instead, and records them in
+    /// the report's fidelity as dropped.
+    #[error(
+        "{}: records BSD flags {flags:#x}, which this destination does not hold",
+        printable(.path)
+    )]
+    #[non_exhaustive]
+    FlagsNotHeld {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// The flags it records, less the compression flag, whose content is read decoded.
+        flags: u32,
+    },
+    /// An entry records a time the destination holds as another: one before the earliest time
+    /// it keeps, past the latest, or with a fraction finer than it keeps. The call that set the
+    /// time succeeded, and the node, read back, holds the other time.
+    ///
+    /// [`DirectorySink::skip_unsupported`] keeps the time the destination holds and names the
+    /// entry instead.
+    #[error(
+        "{}: its {which} time is {} in the image, and this destination holds it as {}",
+        printable(.path),
+        seconds(.recorded),
+        seconds(.held)
+    )]
+    #[non_exhaustive]
+    TimeNotHeld {
+        /// The offending path inside the filesystem.
+        path: Vec<u8>,
+        /// Which time: `access` or `modification`.
+        which: &'static str,
+        /// The time the image records.
+        recorded: Timestamp,
+        /// The time the destination holds.
+        held: Timestamp,
     },
     /// Two paths in the tree name one directory, which a bind mount produces.
     #[error(
@@ -347,6 +433,13 @@ fn unstable_subject(name: &Option<Vec<u8>>) -> String {
         Some(name) => format!("extended attribute {}", printable(name)),
         None => "list of extended attributes".to_string(),
     }
+}
+
+/// A time as whole seconds and nanoseconds, for [`HostError::TimeNotHeld`]'s message: the two
+/// fields as they are, since a decimal fraction of a time before the epoch reads as the
+/// instant a second away from the one it names.
+fn seconds(t: &Timestamp) -> String {
+    format!("{} s {} ns", t.secs, t.nanos)
 }
 
 /// A [`Source`] that yields the entries walked from a directory on the host.
@@ -562,6 +655,7 @@ impl DirectorySource {
                 kind,
                 meta: metadata_of(&meta),
                 xattrs,
+                darwin: None,
             });
         }
         Ok(Self { entries })

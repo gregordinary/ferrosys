@@ -36,6 +36,7 @@ MTOOLS="4.0.49"
 EXFATPROGS="1.4.2"
 RELAN_EXFAT="1.4.0"
 BTRFS_PROGS="7.1"
+CODEC_REFERENCE="$(bash "$root/ci/build-codec-reference.sh" --print-version)"
 UUID="f0e17055-0000-4000-8000-000000000000"
 FAKE_TIME="1700000000"
 
@@ -171,9 +172,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # is still the check worth making — a partial install is a partial install, and each name
 # a gate calls has to be there.
 #
-# `exfat-populate` is the one binary this project compiles rather than installs, and what
-# it reports is the relan/exfat release it was linked against — the pin that decides what
-# the volumes it fills look like.
+# `exfat-populate` and `codec-reference` are the two binaries this project compiles rather
+# than installs, and what each reports is the releases it was linked against: relan/exfat's,
+# which decides what the volumes the first fills look like, and lzfse's and libzbitmap's,
+# which decide what the second decodes.
 #
 # btrfs-progs names the tool ahead of the suite everywhere but in the multiplexer, which
 # is the suite. It is also the one suite whose banner *ends* at the version, so the marker
@@ -202,6 +204,7 @@ HOST_TOOLS=(
     "dump.exfat|exfatprogs version : $EXFATPROGS (|-V"
     "exfatlabel|exfatprogs version : $EXFATPROGS (|-V"
     "exfat-populate|exfat-populate (relan/exfat) $RELAN_EXFAT|--version"
+    "codec-reference|codec-reference ($CODEC_REFERENCE)|--version"
     "mkfs.btrfs|mkfs.btrfs, part of $BTRFS_MARK|--version"
     "btrfs|$BTRFS_MARK|--version"
     "btrfstune|btrfstune, part of $BTRFS_MARK|--version"
@@ -245,6 +248,16 @@ missing_host_tool() {
             return 1
         fi
     done
+    # The APFS gate's oracle is a corpus rather than a tool: macOS's containers and its
+    # listings of them, unpacked by the script that pins them. A cache from another release
+    # is not this corpus.
+    local corpus pinned
+    corpus="$(bash "$root/ci/fetch-apfs-corpus.sh" --print-prefix)"
+    pinned="$(bash "$root/ci/fetch-apfs-corpus.sh" --print-sha256)"
+    if [ "$(cat "$corpus/.complete" 2>/dev/null)" != "$pinned" ]; then
+        echo "the APFS corpus is not at $corpus — run ci/fetch-apfs-corpus.sh"
+        return 1
+    fi
     return 0
 }
 
@@ -283,8 +296,12 @@ NOT_APPLICABLE = {
         "the version already on PATH is asserted rather than built",
     "Build the exFAT populator, put it on PATH, assert the version":
         "the version already on PATH is asserted rather than built",
+    "Build the codec reference, put it on PATH, assert the version":
+        "the version already on PATH is asserted rather than built",
     "Build btrfs-progs, put it on PATH, assert the version":
         "the version already on PATH is asserted rather than built",
+    "Fetch the APFS corpus and assert its hash":
+        "the corpus already in the cache is asserted rather than fetched",
 }
 
 # Each workflow step, and the gate here that mirrors it -- by the label that gate
@@ -318,9 +335,13 @@ MIRRORED = {
     "Library builds and passes its tests with exFAT as the only family":
         "lib with exFAT as the only family",
     "Library builds and passes its tests with btrfs as the only family":
-        "lib with the newest family as the only one",
+        "lib with btrfs as the only family",
     "Library builds and passes its tests with btrfs and every decoder":
-        "lib with that family and every decoder",
+        "lib with btrfs and every decoder",
+    "Library builds and passes its tests with APFS as the only family":
+        "lib with APFS as the only family",
+    "Library builds and passes its tests with APFS and its decoders":
+        "lib with APFS and its decoders",
     "Fuzz targets still type-check": "fuzz targets type-check",
     "Fuzz seeds are still readable images": "fuzz seeds are readable images",
     "Fuzz archive seed still parses, and reproduces from its generator":
@@ -443,8 +464,9 @@ gates preflight runs, mirroring .github/workflows/ci.yml:
               holds every file to naming no other implementation's internals, the
               workspace suite, the
               base library without the archive source, the library under the default
-              features, the library with each family as its only one and btrfs again
-              with every decoder, three fuzz gates, and rustdoc over private items
+              features, the library with each family as its only one and btrfs and
+              APFS again with their decoders, three fuzz gates, and rustdoc over private
+              items
   deps        cargo deny over this workspace and the fuzz package: advisories,
               licenses, and sources, against deny.toml
   cross       ${CROSS_TARGETS[0]%%|*}, ${CROSS_TARGETS[1]%%|*}, ${CROSS_TARGETS[2]%%|*}
@@ -483,6 +505,7 @@ if ! host_tools_reason="$(missing_host_tool)"; then
     skip "test (workspace, host tools)" "$host_tools_reason"
 else
     gate_tests "test (workspace, host tools)" workspace \
+        env FERROSYS_APFS_CORPUS_DIFFERENTIAL=1 FERROSYS_CODEC_DIFFERENTIAL=1 \
         cargo test --workspace --all-features --profile ci --no-fail-fast
 fi
 
@@ -498,13 +521,19 @@ gate_tests "lib with a family, a source, and a sink, and no ext" fat-dir \
     cargo test -p ferrosys --no-default-features --features fat,dir --lib
 gate_tests "lib with exFAT as the only family" exfat-only \
     cargo test -p ferrosys --no-default-features --features exfat --lib
-gate_tests "lib with the newest family as the only one" btrfs-only \
+gate_tests "lib with btrfs as the only family" btrfs-only \
     cargo test -p ferrosys --no-default-features --features btrfs --lib
 # The same family with the three decoders, which is the only configuration where a
 # compressed extent is undone rather than declined. Both rows are run: the one above is what
 # a build without them refuses, and this is what a build with them reads.
-gate_tests "lib with that family and every decoder" btrfs-decoders \
+gate_tests "lib with btrfs and every decoder" btrfs-decoders \
     cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib
+# The newest family, alone, and then with the decoders its compressed files are stored with,
+# for the same two reasons as the pair above.
+gate_tests "lib with APFS as the only family" apfs-only \
+    cargo test -p ferrosys --no-default-features --features apfs --lib
+gate_tests "lib with APFS and its decoders" apfs-decoders \
+    cargo test -p ferrosys --no-default-features --features apfs,zlib,lzvn,lzfse,lzbitmap --lib
 gate "fuzz targets type-check" \
     cargo check --manifest-path crates/ferrosys/fuzz/Cargo.toml --all-targets
 
@@ -616,7 +645,7 @@ else
     # against does not carry makes its examples fail to compile, and marking them
     # uncompiled instead would let them rot.
     gate "book: build the crate it links against" \
-        env CARGO_TARGET_DIR="$book_target" cargo build --features fat,exfat,btrfs
+        env CARGO_TARGET_DIR="$book_target" cargo build --features fat,exfat,btrfs,apfs
     gate "book: mdbook build" mdbook build book
 
     # `mdbook test` spawns `rustdoc` from a temporary directory, outside the reach of

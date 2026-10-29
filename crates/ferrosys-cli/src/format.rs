@@ -42,6 +42,7 @@
 //! each family's module carries the boundary rather than the whole tool: `from_dir` is the
 //! walk on Linux and a typed refusal elsewhere.
 
+mod apfs;
 mod btrfs;
 mod exfat;
 mod ext;
@@ -52,7 +53,7 @@ use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use ferrosys::DirectorySource;
-use ferrosys::{ArchiveSource, Slack, Source, TreeBuilder};
+use ferrosys::{ArchiveSource, Slack, Source, SourceEntry, TreeBuilder};
 
 use crate::Error;
 use crate::args::{Contents, FormatArgs, Size, Stream, Target};
@@ -65,6 +66,7 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
         Target::Fat(target) => fat::run(&args, target),
         Target::ExFat(target) => exfat::run(&args, target),
         Target::Btrfs(target) => btrfs::run(&args, target),
+        Target::Apfs(target) => apfs::run(&args, target),
     }
 }
 
@@ -76,8 +78,8 @@ pub fn run(args: FormatArgs) -> Result<(), Error> {
 ///
 /// The trait exists so that [`planned`] is written once. Which source a run reads and how a
 /// size is arrived at are questions about the command line rather than about a filesystem,
-/// and answering them per family is three copies of a four-arm match that must stay in step
-/// on a change to either question.
+/// and answering them per family is a copy of a four-arm match in every family's module, each
+/// of which must stay in step on a change to either question.
 pub(crate) trait Plan: Sized {
     /// The options that family's format takes.
     type Options;
@@ -110,10 +112,10 @@ pub(crate) trait Plan: Sized {
 
 /// A family whose plan is carried through to an image by [`realize`] and nothing else.
 ///
-/// Two of the three are: their whole write step is open the destination, write, commit, and
+/// Every family but ext is: its whole write step is open the destination, write, commit, and
 /// report the geometry that came back. ext's is not — it reads the filesystem's own free
 /// counts back out of what was just written, between the write and the commit — so it opens
-/// the destination itself and this trait is the two that do not.
+/// the destination itself, and this trait is every other family's.
 ///
 /// That is the shape the split follows generally: what every family does identically is
 /// written once, and a family that does something more keeps its own body rather than the
@@ -121,9 +123,9 @@ pub(crate) trait Plan: Sized {
 pub(crate) trait Written: Plan {
     /// The geometry this family's format realizes.
     ///
-    /// Unbounded, because a geometry is whatever the family's is: three of them fit in a
-    /// register and btrfs's is a list of chunks. What [`realize`] does with one is hand it
-    /// back, which needs nothing of it.
+    /// Unbounded, because a geometry is whatever the family's is: the FATs' fit in a register,
+    /// btrfs's is a list of chunks and APFS's a list of what each checkpoint placed. What
+    /// [`realize`] does with one is hand it back, which needs nothing of it.
     type Layout;
 
     /// The geometry the plan will realize, before anything is written.
@@ -201,14 +203,19 @@ fn read_as_placed<P: Plan>(
     options: P::Options,
 ) -> Result<(P, Reads), Error> {
     let entries = source.into_entries();
-    let reads = if args.atomic || args.dry_run {
-        Reads::default()
-    } else {
-        let reads = Reads::of(&entries);
-        reads.refuse(&args.out)?;
-        reads
-    };
+    let reads = reads_of(&entries, args)?;
     Ok((at_size(entries, args, options)?, reads))
+}
+
+/// The host files `entries` read as they are placed, with the destination refused if it is one
+/// of them, or none where the destination is not written in place.
+pub(crate) fn reads_of(entries: &[SourceEntry], args: &FormatArgs) -> Result<Reads, Error> {
+    if args.atomic || args.dry_run {
+        return Ok(Reads::default());
+    }
+    let reads = Reads::of(entries);
+    reads.refuse(&args.out)?;
+    Ok(reads)
 }
 
 /// Plan one source at whichever size the arguments asked for.
@@ -233,17 +240,23 @@ fn at_size<P: Plan>(
 ///
 /// The ownership override is applied to the walk, since it is what records the host's ids in
 /// the first place.
-#[cfg(any(target_os = "linux", target_os = "android"))]
 fn from_dir<P: Plan>(
     path: &Path,
     args: &FormatArgs,
     options: P::Options,
 ) -> Result<(P, Reads), Error> {
+    read_as_placed(walked(path, args)?, args, options)
+}
+
+/// The entries of the directory tree at `path`, each owned as `--owner` says where it is
+/// given.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn walked(path: &Path, args: &FormatArgs) -> Result<Vec<SourceEntry>, Error> {
     let mut source = DirectorySource::from_path(path)?;
     if let Some((uid, gid)) = args.owner {
         source = source.owner(uid, gid);
     }
-    read_as_placed(source, args, options)
+    Ok(source.into_entries())
 }
 
 /// The same, on a platform the library builds no directory source for: a named failure
@@ -252,11 +265,7 @@ fn from_dir<P: Plan>(
 /// The refusal is the whole of what `--from-dir` does here, and it happens before the
 /// destination is opened, like every other planning failure.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn from_dir<P: Plan>(
-    _path: &Path,
-    _args: &FormatArgs,
-    _options: P::Options,
-) -> Result<(P, Reads), Error> {
+pub(crate) fn walked(_path: &Path, _args: &FormatArgs) -> Result<Vec<SourceEntry>, Error> {
     Err(Error::NoDirectorySource)
 }
 
@@ -266,10 +275,10 @@ fn from_dir<P: Plan>(
 /// reads: a property this table names is one that can be typed straight back into the command
 /// line that produced it.
 ///
-/// Shared by the two families that record a name, a few attribute bits and some times and have
-/// nowhere to put anything else. They lose the same six properties for the same reason, so the
-/// accounting behind this is already one function in the library; what a person reads off it
-/// is one function here for the same reason.
+/// Shared by every family whose summary reports a fidelity. FAT and exFAT lose the same six
+/// properties for the same reason, and btrfs and APFS lose none and say so in the same line, so
+/// the accounting behind this is one function in the library and what a person reads off it is
+/// one function here.
 pub(crate) fn fidelity_table(fidelity: &ferrosys::FidelityReport) -> String {
     let summary = fidelity.summary();
     if summary.is_empty() {
@@ -289,6 +298,31 @@ pub(crate) fn fidelity_table(fidelity: &ferrosys::FidelityReport) -> String {
         s.push_str("(more entries than the report stores individually; the counts are whole)\n");
     }
     s
+}
+
+/// What the build could not carry, as each receipt that reports a fidelity records it under
+/// `fidelity`.
+///
+/// Whether or not it carried everything: `faithful` is the one field a caller acts on, and it
+/// is always there to be read. The words are [`fidelity_table`]'s, the ones `--accept-loss`
+/// reads.
+pub(crate) fn fidelity_receipt(
+    o: &mut crate::json::Object<'_>,
+    fidelity: &ferrosys::FidelityReport,
+) {
+    let mut f = o.obj("fidelity");
+    f.bool("faithful", fidelity.is_faithful());
+    f.bool("truncated", fidelity.is_truncated());
+    let mut a = f.arr("summary");
+    for (direction, property, entries) in fidelity.summary() {
+        let mut r = a.obj();
+        r.str("direction", direction.as_str());
+        r.str("property", crate::parse::property_name(property));
+        r.u64("entries", entries);
+        r.end();
+    }
+    a.end();
+    f.end();
 }
 
 /// The most an archive arriving on the standard input may be.

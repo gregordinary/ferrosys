@@ -36,7 +36,6 @@ use std::io::{Read, Seek, Write};
 use crate::compress::Algorithm;
 use crate::fidelity::Synthesis;
 use crate::finding::{Family, Severity};
-use crate::path::is_hostile_component;
 use crate::policy::MAX_PATH;
 use crate::source::Metadata;
 use crate::time::Timestamp;
@@ -71,6 +70,22 @@ pub struct Node {
 }
 
 impl Node {
+    /// The inode's ownership, permission bits and times, as the shared vocabulary carries
+    /// them: the twelve bits below the file type, which the node's kind supplies, and the
+    /// four times whole, `otime` as the birth time.
+    #[must_use]
+    pub fn metadata(&self) -> Metadata {
+        Metadata {
+            mode: (self.item.mode & 0o7777) as u16,
+            uid: self.item.uid,
+            gid: self.item.gid,
+            atime: self.item.atime,
+            ctime: self.item.ctime,
+            mtime: self.item.mtime,
+            btime: Some(self.item.otime),
+        }
+    }
+
     /// Whether the inode is a directory.
     #[must_use]
     pub const fn is_dir(&self) -> bool {
@@ -587,14 +602,27 @@ impl<R: Read + Seek> Reader<R> {
     /// Stream a regular file's bytes to `out`, returning how many were written.
     ///
     /// Bounded by a fixed buffer rather than by the file, so a file far larger than memory
-    /// streams through. [`Limits::max_file_bytes`](crate::Limits::max_file_bytes) is not
-    /// applied: what a caller has asked for here is a stream, and it costs the buffer.
+    /// streams through. The same [`Limits::max_file_bytes`](crate::Limits::max_file_bytes)
+    /// cap applies as to [`read_data`](Self::read_data), checked before a byte is written:
+    /// what the cap expresses is distrust of the declared length, and a stream writes every
+    /// byte that length claims — a hole reads back as zeros — as surely as a buffer holds them.
     ///
     /// # Errors
     ///
-    /// Whatever [`read_into`](Self::read_into) refuses, and [`ReadError::Io`] where the
-    /// destination could not be written.
+    /// [`ReadError::FileTooLarge`] where the file is longer than that cap, whatever
+    /// [`read_into`](Self::read_into) refuses, and [`ReadError::Io`] where the destination
+    /// could not be written.
     pub fn read_data_to(&mut self, node: &Node, mut out: impl Write) -> Result<u64, ReadError> {
+        let size = node.item.size;
+        let cap = self.limits().max_file_bytes;
+        if size > cap {
+            return Err(ReadError::FileTooLarge {
+                tree: node.tree,
+                inode: node.inode,
+                size,
+                cap,
+            });
+        }
         let mut buf = vec![0u8; STREAM_BUFFER];
         let mut at = 0u64;
         loop {
@@ -658,8 +686,9 @@ impl<R: Read + Seek> Reader<R> {
     /// # Errors
     ///
     /// Whatever the visitor returns, and a [`ReadError`] converted into it where the filesystem
-    /// cannot be walked — including [`ReadError::WalkTooLarge`] where the walk reaches the
-    /// caller's cap.
+    /// cannot be walked — including [`ReadError::RepeatedDirectory`] under
+    /// [`ReadPolicy::Strict`] where an entry names a directory the tree already reaches, and
+    /// [`ReadError::WalkTooLarge`] where the walk reaches the caller's cap.
     pub fn walk_with<E, F>(&mut self, mut visit: F) -> Result<(), E>
     where
         E: From<ReadError>,
@@ -710,6 +739,24 @@ impl<R: Read + Seek> Reader<R> {
                     format!("copy {index} of the superblock: {detail}"),
                 );
             }
+        }
+        // A device longer than its source: the bytes past the source's end are bytes the
+        // filesystem counts on and does not have. `btrfs check` 7.1 reports it as an error
+        // (observed), and nothing else here does where no copy of the superblock and no tree
+        // block falls in the missing part.
+        let device = self.volume.superblock().dev_item.total_bytes;
+        let held = self.volume.source_bytes();
+        if device > held {
+            scan.at(
+                Category::Superblock,
+                Severity::Structural,
+                None,
+                None,
+                format!(
+                    "the device records {device} bytes and the source holds {held} from where \
+                     the filesystem begins"
+                ),
+            );
         }
 
         if has_live_log(&self.volume) {
@@ -1036,21 +1083,20 @@ impl<R: Read + Seek> Reader<R> {
         dir: &Node,
         path: &[u8],
     ) -> Result<Vec<(Vec<u8>, u64, DiskKey)>, ReadError> {
-        let mut out = Vec::new();
-        for entry in self.read_dir(dir)? {
-            if is_hostile_component(&entry.name) {
-                return Err(ReadError::HostileName { name: entry.name });
-            }
-            let child = crate::walk::child_path(path, &entry.name).ok_or_else(|| {
-                let mut too_long = path.to_vec();
-                too_long.push(b'/');
-                too_long.extend_from_slice(&entry.name);
-                ReadError::PathTooLong { path: too_long }
-            })?;
-            out.push((child, dir.tree, entry.location));
-        }
-        out.reverse();
-        Ok(out)
+        let entries = self
+            .read_dir(dir)?
+            .into_iter()
+            .map(|e| (e.name, e.location));
+        let pending = crate::walk::frontier(
+            path,
+            entries,
+            |name| ReadError::HostileName { name },
+            |path| ReadError::PathTooLong { path },
+        )?;
+        Ok(pending
+            .into_iter()
+            .map(|(child, location)| (child, dir.tree, location))
+            .collect())
     }
 
     /// The node a directory entry's location names, given the subvolume the entry was found in.
@@ -1557,6 +1603,18 @@ impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
         Ok(WalkEntry { path, node })
     }
 
+    fn repeated(&mut self, entry: &WalkEntry) -> Result<(), ReadError> {
+        // Every record parses, and the records disagree about the tree they make: integrity
+        // damage, which a strict read refuses and a lenient one passes over.
+        if self.policy().is_fatal(Severity::Integrity) {
+            return Err(ReadError::RepeatedDirectory {
+                tree: entry.node.tree,
+                inode: entry.node.inode,
+            });
+        }
+        Ok(())
+    }
+
     fn descend_key(&self, entry: &WalkEntry) -> Option<(u64, u64)> {
         entry
             .node
@@ -1686,15 +1744,9 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         // Nothing is synthesized. btrfs records an owner, a group, a mode, and four times of
         // full nanosecond resolution, so every property the shared frame carries is one this
         // filesystem holds — and the caller's fallbacks are ignored rather than mixed in.
-        let meta = Metadata {
-            mode: node.item.mode as u16,
-            uid: node.item.uid,
-            gid: node.item.gid,
-            atime: node.item.atime,
-            ctime: node.item.ctime,
-            mtime: node.item.mtime,
-        };
-        Ok(Attributes::read(meta, self.xattrs(node)?))
+        // The mode's file-type bits are the node's kind, which the walk reports; the
+        // metadata carries the twelve below them.
+        Ok(Attributes::read(node.metadata(), self.xattrs(node)?))
     }
 
     fn read_bytes(&mut self, node: &Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> {
@@ -1880,6 +1932,35 @@ mod tests {
         // The four times a btrfs inode carries, all of them read rather than derived.
         assert_eq!(root.item.mtime, TIME);
         assert_eq!(root.item.otime, TIME);
+        // What the shared surface reports is the permission bits alone: the kind is the
+        // walk's to say, and a writer handed the metadata refuses a mode carrying both.
+        let meta = FsTree::stat(&mut reader, &root, &Synthesis::default())
+            .expect("stats")
+            .meta;
+        assert_eq!(meta.mode, 0o755);
+        assert_eq!(meta, root.metadata(), "the one projection");
+        assert_eq!(meta.btime, Some(TIME), "otime is the birth time");
+    }
+
+    #[test]
+    fn a_mode_wider_than_a_hosts_narrows_to_its_permission_bits() {
+        // The field is thirty-two bits and a host's is sixteen, so what crosses is the low
+        // twelve. A cast without the mask would carry the file-type bits into a permission
+        // value and give a directory the set-user-id bit. And the high half is not permission
+        // bits either: every filesystem in circulation carries zero there, and a reader that
+        // trusted that rather than masking would hand a sink a mode out of an image that had
+        // not.
+        let forge = Forge::populated();
+        let mut node = open(&forge).root().expect("the root directory");
+        for (mode, bits) in [
+            (0o040_755, 0o755),
+            (0o100_644, 0o644),
+            (0o120_777, 0o777),
+            (0xFFFF_0000 | 0o644, 0o644),
+        ] {
+            node.item.mode = mode;
+            assert_eq!(node.metadata().mode, bits, "{mode:#o}");
+        }
     }
 
     #[test]
@@ -2509,10 +2590,11 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_reachable_from_itself_is_descended_into_once_rather_than_forever() {
+    fn a_directory_reachable_from_itself_is_refused_strictly_and_descended_once_leniently() {
         // No formatter writes this and a crafted image is exactly where it appears. Nothing
         // about a bound on one entry sees it: every record is well-formed, and a walk that
-        // followed the entries would not terminate.
+        // followed the entries would not terminate. A btrfs directory has one name, so a
+        // strict walk refuses the filesystem for the repeat.
         let mut items = vec![(
             DiskKey::new(257, ItemType::INODE_ITEM, 0),
             inode_item(MODE_DIR | 0o755, 0, 1),
@@ -2532,10 +2614,21 @@ mod tests {
             DirEntryType::Dir,
         ));
         let forge = a_filesystem_holding(items);
-        let mut reader = open(&forge);
+        assert!(matches!(
+            open(&forge).walk(),
+            Err(ReadError::RepeatedDirectory {
+                inode: ROOT_DIR,
+                ..
+            })
+        ));
+        let mut reader = Reader::open_with(
+            forge.source(),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("a forged filesystem");
         let paths: Vec<Vec<u8>> = reader
             .walk()
-            .expect("a walk terminates")
+            .expect("a lenient walk terminates")
             .into_iter()
             .map(|walked| walked.path)
             .collect();
@@ -2694,6 +2787,48 @@ mod tests {
         let mut reader = open(&forge);
         let node = reader.lookup(b"/reserved").expect("the file");
         reader.verify_data(&node).expect("nothing has been written");
+    }
+
+    #[test]
+    fn a_device_longer_than_its_region_is_found_short_and_one_inside_it_is_not() {
+        // The forged device a mebibyte into a disk, and a neighbour's bytes after it. The
+        // device's only copy of the superblock and its one chunk lie in its first 384 KiB,
+        // so a region of 512 KiB opens strictly, and nothing the scan reads is missing.
+        const BASE: u64 = 1 << 20;
+        let mut device = Vec::new();
+        std::io::Read::read_to_end(&mut Forge::populated().source(), &mut device)
+            .expect("the forged device");
+        let len = device.len() as u64;
+        let mut disk = vec![0u8; BASE as usize];
+        disk.extend_from_slice(&device);
+        disk.extend(vec![0xee; 1 << 20]);
+        let scan = |len: Option<u64>| {
+            let mut options = OpenOptions::new().base(BASE);
+            options.len = len;
+            Reader::open_with(std::io::Cursor::new(disk.as_slice()), &options)
+                .expect("open")
+                .scan()
+        };
+
+        let report = scan(Some(512 << 10));
+        assert_eq!(report.anomalies().len(), 1, "{:?}", report.anomalies());
+        let short = &report.anomalies()[0];
+        assert_eq!(
+            (short.category, short.severity),
+            (Category::Superblock, Severity::Structural)
+        );
+        assert!(
+            short.detail.contains(&format!(
+                "records {len} bytes and the source holds {}",
+                512 << 10
+            )),
+            "{}",
+            short.detail
+        );
+        for len in [Some(len), None] {
+            let report = scan(len);
+            assert!(report.is_clean(), "{len:?}: {:?}", report.anomalies());
+        }
     }
 
     #[test]
@@ -2870,9 +3005,26 @@ mod tests {
                 ..
             })
         ));
-        // Streaming is not held to it, because what it costs is the buffer rather than the
-        // file — and that is the escape hatch the cap leaves.
+        // Streaming is held to it as well: what the cap expresses is distrust of the declared
+        // length, and a stream writes every byte that length claims as surely as a buffer
+        // holds them. Nothing is written before the refusal.
         let mut out = Vec::new();
+        assert!(matches!(
+            reader.read_data_to(&node, &mut out),
+            Err(ReadError::FileTooLarge {
+                size: 6,
+                cap: 4,
+                ..
+            })
+        ));
+        assert!(out.is_empty());
+        // Under the cap the stream is the file.
+        let mut reader = Reader::open_with(
+            forge.source(),
+            &OpenOptions::new().limits(Limits::new().max_file_bytes(6)),
+        )
+        .expect("a forged filesystem");
+        let node = reader.lookup(b"/hello.txt").expect("the file");
         assert_eq!(reader.read_data_to(&node, &mut out).expect("streaming"), 6);
     }
 

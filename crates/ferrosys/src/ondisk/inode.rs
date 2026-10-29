@@ -85,15 +85,23 @@ pub const TIME_SECS_MIN: i64 = i32::MIN as i64;
 /// (2446-05-10).
 pub const TIME_SECS_MAX: i64 = i32::MAX as i64 + (3 << 32);
 
-/// Whether an instant reaches an inode without loss: its seconds lie within
-/// [`TIME_SECS_MIN`]`..=`[`TIME_SECS_MAX`] and its fraction divides a second.
+/// Whether an instant reaches an inode of `inode_size` bytes without loss.
+///
+/// An inode larger than 128 bytes holds each time's extra word, so an instant reaches it when
+/// its seconds lie within [`TIME_SECS_MIN`]`..=`[`TIME_SECS_MAX`] and its fraction divides a
+/// second. A 128-byte inode ends before the extra words: it holds the signed 32-bit seconds
+/// field alone, from 1901-12-13 to 2038-01-19, and no fraction of a second.
 ///
 /// An instant that does not would have its epoch bits or its nanoseconds masked to their
-/// field widths by [`encode_time`], so callers check here and reject with a typed error
-/// instead.
+/// field widths by [`encode_time`], or dropped with the words a 128-byte inode ends before,
+/// so callers check here and reject with a typed error instead.
 #[must_use]
-pub const fn time_is_representable(t: Timestamp) -> bool {
-    t.secs >= TIME_SECS_MIN && t.secs <= TIME_SECS_MAX && t.nanos < Timestamp::NANOS_PER_SEC
+pub const fn time_is_representable(t: Timestamp, inode_size: u16) -> bool {
+    if inode_size as usize > GOOD_OLD_SIZE {
+        t.secs >= TIME_SECS_MIN && t.secs <= TIME_SECS_MAX && t.has_proper_fraction()
+    } else {
+        t.secs >= TIME_SECS_MIN && t.secs <= i32::MAX as i64 && t.nanos == 0
+    }
 }
 
 /// Encode an instant to the `(field, extra)` pair an inode stores.
@@ -281,6 +289,16 @@ impl Inode {
         Self::fits(inode_size, extra_isize, Self::CHECKSUM_HI_OFFSET, 2)
     }
 
+    /// Where `i_crtime`, the creation time's seconds, sits in the extended area.
+    pub const CRTIME_OFFSET: usize = 0x90;
+
+    /// Whether this inode carries `i_crtime`, a creation time: an inode of 128 bytes, or
+    /// one whose extra area does not reach the field, records none.
+    #[must_use]
+    pub const fn has_crtime(inode_size: u16, extra_isize: u16) -> bool {
+        Self::fits(inode_size, extra_isize, Self::CRTIME_OFFSET, 4)
+    }
+
     /// An empty inode with the extra area an inode of `inode_size` carries: all fields
     /// zero, the block area cleared. Reserved inodes that hold nothing (bad-blocks, the
     /// unused reserved range) serialize from this.
@@ -395,8 +413,8 @@ impl Inode {
         if fits(0x8c, 4) {
             put_u32(b, 0x8c, atime_x);
         }
-        if fits(0x90, 4) {
-            put_u32(b, 0x90, crtime);
+        if fits(Self::CRTIME_OFFSET, 4) {
+            put_u32(b, Self::CRTIME_OFFSET, crtime);
         }
         if fits(0x94, 4) {
             put_u32(b, 0x94, crtime_x);
@@ -514,7 +532,7 @@ impl Inode {
             atime: decode_time(get_u32(buf, 0x08), extra(0x8c)),
             ctime: decode_time(get_u32(buf, 0x0c), extra(0x84)),
             mtime: decode_time(get_u32(buf, 0x10), extra(0x88)),
-            crtime: decode_time(extra(0x90), extra(0x94)),
+            crtime: decode_time(extra(Self::CRTIME_OFFSET), extra(0x94)),
             dtime: get_u32(buf, 0x14),
             generation: get_u32(buf, 0x64),
             // The same, gated on `64bit` rather than on `huge_file`: without it 0x76 is
@@ -825,20 +843,38 @@ mod tests {
     fn timestamp_representable_range_tracks_the_on_disk_limits() {
         assert_eq!(TIME_SECS_MIN, -(1 << 31));
         assert_eq!(TIME_SECS_MAX, (1 << 31) - 1 + (3 << 32));
-        assert!(time_is_representable(Timestamp::from_secs(0)));
-        assert!(time_is_representable(Timestamp::from_secs(TIME_SECS_MIN)));
-        assert!(time_is_representable(Timestamp::from_secs(TIME_SECS_MAX)));
-        assert!(!time_is_representable(Timestamp::from_secs(
-            TIME_SECS_MIN - 1
-        )));
-        assert!(!time_is_representable(Timestamp::from_secs(
-            TIME_SECS_MAX + 1
-        )));
+        let held = |t: Timestamp| time_is_representable(t, 256);
+        assert!(held(Timestamp::from_secs(0)));
+        assert!(held(Timestamp::from_secs(TIME_SECS_MIN)));
+        assert!(held(Timestamp::from_secs(TIME_SECS_MAX)));
+        assert!(!held(Timestamp::from_secs(TIME_SECS_MIN - 1)));
+        assert!(!held(Timestamp::from_secs(TIME_SECS_MAX + 1)));
         // A nanosecond fraction at or past one second cannot be represented.
-        assert!(!time_is_representable(Timestamp {
+        assert!(!held(Timestamp {
             secs: 0,
             nanos: Timestamp::NANOS_PER_SEC
         }));
+    }
+
+    #[test]
+    fn an_inode_with_no_extra_words_holds_a_signed_second_and_no_fraction() {
+        let held = |t: Timestamp| time_is_representable(t, 128);
+        assert!(held(Timestamp::from_secs(TIME_SECS_MIN)));
+        assert!(held(Timestamp::from_secs(i64::from(i32::MAX))));
+        assert!(!held(Timestamp::from_secs(i64::from(i32::MAX) + 1)));
+        assert!(!held(Timestamp { secs: 0, nanos: 1 }));
+        // What either would lose: the 128-byte inode writes the seconds field alone.
+        let t = Timestamp {
+            secs: i64::from(i32::MAX) + 1,
+            nanos: 5,
+        };
+        let mut ino = Inode::empty(128);
+        ino.mtime = t;
+        let mut buf = vec![0u8; 128];
+        ino.write_to(&mut buf, 128).expect("writes");
+        let back = Inode::read_from(&buf, 128).expect("parses");
+        assert_ne!(back.mtime, t, "the instant does not survive");
+        assert!(time_is_representable(t, 256));
     }
 
     #[test]

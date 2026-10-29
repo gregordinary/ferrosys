@@ -45,8 +45,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::fidelity::{Direction, FidelityReport, LossPolicy, Property, WRITE_BITS};
 use crate::path::canonical_key;
 use crate::source::{
-    ClassifyError, EntryKind, FileContent, LinkEnd, LinkStep, Metadata, PathFault, SourceEntry,
-    classify_paths, follow_hard_link,
+    ClassifyError, Darwin, EntryKind, FileContent, LinkEnd, LinkStep, Metadata, PathFault,
+    SourceEntry, classify_paths, follow_hard_link,
 };
 use crate::time::{DosTimestamp, Timestamp};
 
@@ -62,10 +62,13 @@ pub const MAX_FILE_BYTES: u64 = u32::MAX as u64;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum TimeField {
-    /// The modification time, which the entry records as both its write and creation time.
+    /// The modification time, which the entry records as its write time, and as its creation
+    /// time where no birth time is stated.
     Modification,
     /// The access time, which the entry records as a date.
     Access,
+    /// The birth time, which the entry records as its creation time.
+    Birth,
 }
 
 impl TimeField {
@@ -75,6 +78,7 @@ impl TimeField {
         match self {
             TimeField::Modification => "modification time",
             TimeField::Access => "access time",
+            TimeField::Birth => "birth time",
         }
     }
 }
@@ -603,6 +607,7 @@ impl<'a> Builder<'a> {
             kind,
             meta,
             xattrs,
+            darwin,
         } = entry;
         let key = canonical_key(&path);
 
@@ -637,7 +642,7 @@ impl<'a> Builder<'a> {
         let placed = self.name_in(parent, &name, &path)?;
         let times = self.times_for(&meta, &path)?;
         let is_dir = matches!(node, Node::Dir(_));
-        self.record_losses(&meta, &xattrs, is_dir, &path)?;
+        self.record_losses(&meta, &xattrs, darwin.as_ref(), is_dir, &path)?;
 
         let mut attributes = if is_dir {
             Attributes::DIRECTORY
@@ -817,11 +822,15 @@ impl<'a> Builder<'a> {
 
     /// The times this entry records, refusing an instant the fields cannot hold.
     ///
-    /// The creation time is derived from the modification time, as no source carries a birth
-    /// time and reading the clock would make two formats of one tree differ.
+    /// The creation field holds the entry's birth time, or its modification time where the
+    /// source states none: reading the clock would make two formats of one tree differ.
     fn times_for(&mut self, meta: &Metadata, path: &[u8]) -> Result<EntryTimes, ModelError> {
         let write = self.encode(meta.mtime, TimeField::Modification, path)?;
         let access = self.encode(meta.atime, TimeField::Access, path)?;
+        let create = match meta.btime {
+            Some(btime) => self.encode(btime, TimeField::Birth, path)?,
+            None => write,
+        };
         // The write field counts seconds in twos and has no hundredths of its own — the
         // creation field has the only one — so an odd second is where a modification time
         // stops surviving. It is recorded and never refuses: a build can avoid it by naming
@@ -831,12 +840,18 @@ impl<'a> Builder<'a> {
         // The access field is a *date*. No build keeps a time of day in it, so there is
         // nothing a caller could act on and nothing to record per entry; that the format
         // stores an access date rather than an access time is said here once instead.
-        if meta.mtime.secs % 2 != 0 || meta.mtime.nanos != 0 {
+        //
+        // The creation field keeps hundredths, so a birth time is stored to ten milliseconds and
+        // is lost only below that, recorded the same way.
+        let birth_precise = meta
+            .btime
+            .is_none_or(|btime| btime.nanos.is_multiple_of(10_000_000));
+        if meta.mtime.secs % 2 != 0 || meta.mtime.nanos != 0 || !birth_precise {
             self.fidelity
                 .record(Direction::Dropped, path, Property::TimePrecision);
         }
         Ok(EntryTimes {
-            create: write,
+            create,
             write,
             access_date: access.date,
         })
@@ -868,12 +883,13 @@ impl<'a> Builder<'a> {
         &mut self,
         meta: &Metadata,
         xattrs: &[crate::xattr::Xattr],
+        darwin: Option<&Darwin>,
         is_dir: bool,
         path: &[u8],
     ) -> Result<(), ModelError> {
         self.config
             .loss
-            .record_losses(&mut self.fidelity, meta, xattrs, is_dir, path)
+            .record_losses(&mut self.fidelity, meta, xattrs, darwin, is_dir, path)
             .map_err(|property| ModelError::LossNotAccepted {
                 path: path.to_vec(),
                 property,
@@ -1524,6 +1540,45 @@ mod tests {
         assert!(matches!(
             model_of(source, AcceptedLoss::ALL),
             Err(ModelError::RootNotDirectory { .. })
+        ));
+    }
+
+    #[test]
+    fn a_birth_time_is_held_to_the_fat_creation_field() {
+        // The creation field keeps hundredths, so a birth time is stored to ten milliseconds and
+        // an odd second whole, where the write field beside it keeps neither.
+        let born = Timestamp {
+            secs: TIME.secs + 1,
+            nanos: 230_000_000,
+        };
+        let file = |meta: Metadata| TreeBuilder::new().file(b"/f".to_vec(), b"x", meta);
+        let model =
+            model_of(file(meta(0o644).with_birth_time(born)), AcceptedLoss::NONE).expect("held");
+        assert!(model.fidelity.is_faithful());
+        let times = model.dirs[0].entries[0].times;
+        assert_eq!(times.create, DosTimestamp::encode(born).expect("in range"));
+        assert_eq!(times.write, DosTimestamp::encode(TIME).expect("in range"));
+
+        // A finer fraction is the precision it loses, recorded and never refused.
+        let finer = Timestamp { nanos: 1, ..born };
+        let model =
+            model_of(file(meta(0o644).with_birth_time(finer)), AcceptedLoss::NONE).expect("held");
+        assert_eq!(
+            model
+                .fidelity
+                .count(Direction::Dropped, Property::TimePrecision),
+            1
+        );
+
+        // An instant outside the field is refused, and names the birth time.
+        let before = meta(0o644).with_birth_time(Timestamp::from_secs(0));
+        assert!(matches!(
+            model_of(file(before), AcceptedLoss::ALL),
+            Err(ModelError::TimeOutOfRange {
+                field: TimeField::Birth,
+                secs: 0,
+                ..
+            })
         ));
     }
 

@@ -22,7 +22,7 @@
 
 use crate::fidelity::{Property, Synthesis};
 use crate::finding::Family;
-use crate::source::Metadata;
+use crate::source::{Darwin, Metadata};
 use crate::xattr::Xattr;
 
 /// The most bytes of a file a sink asks [`FsTree::read_bytes`] for at a time. Large enough
@@ -223,7 +223,7 @@ impl Attributes {
     }
 
     /// What a [`stat`](FsTree::stat) answers on a family whose whole record of a node is a
-    /// read-only bit and two times.
+    /// read-only bit and three times.
     ///
     /// This is the read-side mirror of
     /// [`LossPolicy::record_losses`](crate::fidelity::LossPolicy), which is the one place
@@ -231,11 +231,12 @@ impl Attributes {
     /// six properties for the same reason and invent the same four back, so both answers
     /// have one home and neither can gain a clause the other does not.
     ///
-    /// `times` is `(access, modification)`, or `None` for a node the format stores no entry
-    /// for — the root directory on both families, which therefore has no times at all rather
-    /// than invented ones. There is no change time in either format, so the modification time
-    /// stands for it: it is the closest thing the volume records, and the alternative is a
-    /// value invented out of nothing.
+    /// `times` is `(access, modification, birth)`, or `None` for a node the format stores no
+    /// entry for — the root directory on both families, which therefore has no times at all
+    /// rather than invented ones. The birth time is `None` where the entry records that it was
+    /// not kept. There is no change time in either format, so the modification time stands for
+    /// it: it is the closest thing the volume records, and the alternative is a value invented
+    /// out of nothing.
     ///
     /// The read-only bit is the single permission bit either format holds, and it clears the
     /// write bits of whatever mode the caller named. The other eight still came from the
@@ -246,7 +247,11 @@ impl Attributes {
         synthesis: &Synthesis,
         is_dir: bool,
         read_only: bool,
-        times: Option<(crate::time::Timestamp, crate::time::Timestamp)>,
+        times: Option<(
+            crate::time::Timestamp,
+            crate::time::Timestamp,
+            Option<crate::time::Timestamp>,
+        )>,
     ) -> Self {
         let mut mode = if is_dir {
             synthesis.dir_mode
@@ -257,7 +262,7 @@ impl Attributes {
             mode &= !crate::fidelity::WRITE_BITS;
         }
         let zero = crate::time::Timestamp::from_secs(0);
-        let (atime, mtime) = times.unwrap_or((zero, zero));
+        let (atime, mtime, btime) = times.unwrap_or((zero, zero, None));
         let mut synthesized = vec![
             Property::Ownership,
             Property::Permissions,
@@ -275,6 +280,7 @@ impl Attributes {
                 atime,
                 ctime: mtime,
                 mtime,
+                btime,
             },
             xattrs: Vec::new(),
             synthesized,
@@ -365,6 +371,28 @@ pub trait FsTree {
         buf: &mut [u8],
     ) -> Result<usize, TreeError>;
 
+    /// What a Darwin filesystem records of the node beyond what [`stat`](Self::stat)
+    /// answers: its BSD flags, and a compressed file's content as stored. [`None`] on every
+    /// family but those, which is every family's answer unless it says otherwise.
+    ///
+    /// # Errors
+    ///
+    /// A [`TreeError`] if the node's record or its compressed form cannot be read.
+    fn darwin(&mut self, node: &Self::Node) -> Result<Option<Darwin>, TreeError> {
+        let _ = node;
+        Ok(None)
+    }
+
+    /// The node's BSD flags, as [`darwin`](Self::darwin) answers them, without reading a
+    /// compressed file's stored form: 0 on every family but a Darwin one.
+    ///
+    /// # Errors
+    ///
+    /// A [`TreeError`] if the node's record cannot be read.
+    fn bsd_flags(&mut self, node: &Self::Node) -> Result<u32, TreeError> {
+        Ok(self.darwin(node)?.map_or(0, |darwin| darwin.bsd_flags))
+    }
+
     /// A symbolic link's target, exactly as the filesystem records it.
     ///
     /// The target is reproduced as it stands — a link pointing at `/etc/passwd` or at
@@ -405,7 +433,13 @@ pub trait FsTree {
     // predicate names every family, so a build carrying any one of them reaches every line
     // here and carries no allowance hiding what the allowance was scoped to expose.
     #[cfg_attr(
-        not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")),
+        not(any(
+            feature = "ext",
+            feature = "fat",
+            feature = "exfat",
+            feature = "btrfs",
+            feature = "apfs"
+        )),
         allow(unreachable_code, unused_variables)
     )]
     fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
@@ -424,6 +458,32 @@ pub trait FsTree {
     }
 }
 
+/// Whether `path` is one `family`'s format makes for itself, which a sink and an image source
+/// therefore leave out: `/lost+found` and everything under it, on an ext filesystem.
+///
+/// Every ext filesystem holds that directory from its first format, and the ext formatter
+/// refuses a source that names it, so a tree carrying one is a tree that does not format back.
+/// No other family's format makes one, and there a directory of that name is the volume's own,
+/// written out like any other.
+pub(crate) fn made_by_the_format(path: &[u8], family: Family) -> bool {
+    #[cfg(feature = "ext")]
+    if family == Family::Ext {
+        return path == b"/lost+found" || path.starts_with(b"/lost+found/");
+    }
+    let _ = (family, path);
+    false
+}
+
+/// The BSD flags of `node` an extraction does not carry, since no destination it writes holds
+/// them: every one the node records but [`Darwin::COMPRESSED`], whose content a read decodes.
+#[cfg(any(
+    feature = "tar",
+    all(feature = "dir", any(target_os = "linux", target_os = "android"))
+))]
+pub(crate) fn flags_not_carried<T: FsTree>(tree: &mut T, node: &T::Node) -> Result<u32, TreeError> {
+    Ok(Darwin::new(tree.bsd_flags(node)?).stated_flags())
+}
+
 /// Every failure a walk through [`FsTree::walk_tree`] can have, kept apart until the walk
 /// ends.
 ///
@@ -438,17 +498,26 @@ pub trait FsTree {
 /// a blanket one here would collide with the reflexive `From<T> for T`.
 ///
 /// Compiled where a family is: with none there is no tree to walk.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) enum WalkFail<R, E> {
     /// The filesystem's own failure, which the family's walk produced.
     Read(R),
     /// A node the walk reached that the shared frame cannot describe.
     ///
     /// A property of this surface rather than of any family, which is why every family's
-    /// walk handles it. Only the ext family produces one today: an inode's mode nibble can
-    /// name no file type, where every FAT node is a directory or a file and both are kinds
-    /// the frame has.
-    #[cfg_attr(not(feature = "ext"), allow(dead_code))]
+    /// walk handles it. The ext, btrfs and APFS families produce one, for a mode naming no
+    /// file type; every FAT and exFAT node is a directory or a file, and both are kinds the
+    /// frame has.
+    #[cfg_attr(
+        not(any(feature = "ext", feature = "btrfs", feature = "apfs")),
+        allow(dead_code)
+    )]
     Tree(TreeError),
     /// The visitor's own failure, which is the sink's.
     Visitor(E),
@@ -466,5 +535,42 @@ mod tests {
         // A node the family says has more than one name carries the identity the names
         // share, which is what lets a sink write the second as a link to the first.
         assert_eq!(entry.shared(12).shared, Some(12));
+    }
+
+    #[cfg(all(
+        feature = "ext",
+        any(
+            feature = "tar",
+            all(feature = "dir", any(target_os = "linux", target_os = "android"))
+        )
+    ))]
+    #[test]
+    fn lost_and_found_is_the_formats_own_on_ext_with_its_contents() {
+        use super::made_by_the_format;
+        use crate::finding::Family;
+        assert!(made_by_the_format(b"/lost+found", Family::Ext));
+        assert!(made_by_the_format(b"/lost+found/17", Family::Ext));
+        // A name that merely begins the same way is a different file.
+        assert!(!made_by_the_format(b"/lost+found-old", Family::Ext));
+        assert!(!made_by_the_format(b"/etc/lost+found", Family::Ext));
+    }
+
+    #[cfg(all(
+        any(feature = "fat", feature = "exfat", feature = "btrfs"),
+        any(
+            feature = "tar",
+            all(feature = "dir", any(target_os = "linux", target_os = "android"))
+        )
+    ))]
+    #[test]
+    fn lost_and_found_is_the_volumes_own_where_the_format_makes_none() {
+        use super::made_by_the_format;
+        use crate::finding::Family;
+        #[cfg(feature = "fat")]
+        assert!(!made_by_the_format(b"/lost+found", Family::Fat));
+        #[cfg(feature = "exfat")]
+        assert!(!made_by_the_format(b"/lost+found/kept", Family::ExFat));
+        #[cfg(feature = "btrfs")]
+        assert!(!made_by_the_format(b"/lost+found", Family::Btrfs));
     }
 }

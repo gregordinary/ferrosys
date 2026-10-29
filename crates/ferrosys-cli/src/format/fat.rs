@@ -176,21 +176,7 @@ fn receipt(
         o.u64("total_sectors", u64::from(layout.total_sectors));
         o.u64("clusters", u64::from(layout.clusters));
         o.u64("free_clusters", u64::from(free_clusters));
-        // What the format could not carry, whether or not it carried everything: `faithful`
-        // is the one field a caller acts on, and it is always there to be read.
-        let mut f = o.obj("fidelity");
-        f.bool("faithful", fidelity.is_faithful());
-        f.bool("truncated", fidelity.is_truncated());
-        let mut a = f.arr("summary");
-        for (direction, property, entries) in fidelity.summary() {
-            let mut r = a.obj();
-            r.str("direction", direction.as_str());
-            r.str("property", crate::parse::property_name(property));
-            r.u64("entries", entries);
-            r.end();
-        }
-        a.end();
-        f.end();
+        crate::format::fidelity_receipt(o, fidelity);
         o.bool("written", written);
     })
 }

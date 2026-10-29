@@ -15,6 +15,10 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use ferrosys::Slack;
+use ferrosys::apfs::{
+    BlockSize as ApfsBlockSize, ProgramName, ReleaseProfile, RootSnapshot, VolumeGroup,
+    VolumeRequest as ApfsVolumeRequest,
+};
 use ferrosys::btrfs::{
     DEFAULT_COMPAT_RO, DEFAULT_INCOMPAT, Profile as BtrfsProfile, SubvolumeRequest,
     VolumeLabel as BtrfsVolumeLabel,
@@ -212,6 +216,8 @@ pub enum Target {
     ExFat(ExFatTarget),
     /// A btrfs filesystem.
     Btrfs(Box<BtrfsTarget>),
+    /// An APFS container.
+    Apfs(Box<ApfsTarget>),
 }
 
 /// What only an ext format takes.
@@ -333,6 +339,33 @@ pub struct BtrfsTarget {
     pub default_subvolume: Option<Vec<u8>>,
 }
 
+/// What only an APFS format takes.
+///
+/// A container records an identifier of its own and one for each volume in it, and each volume
+/// a name and how it compares names, so a volume is one directive carrying all three rather
+/// than three flags that would have to agree on which volume they meant. What remains is the
+/// container's: its block size, the release whose shape it is written in, and the program
+/// every volume records as having formatted it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ApfsTarget {
+    /// The container's identifier. This family's identity field, as the UUID is ext's.
+    pub container_uuid: [u8; 16],
+    /// The volumes, in slot order: at least one, and the first holds the contents.
+    pub volumes: Vec<ApfsVolumeRequest>,
+    /// The size of every block.
+    pub block_size: ApfsBlockSize,
+    /// The macOS release whose shape the container is written in.
+    pub profile: ReleaseProfile,
+    /// The program every volume records as having formatted it.
+    pub formatted_by: ProgramName,
+    /// The System and Data volumes joined as a volume group, where two are.
+    pub volume_group: Option<VolumeGroup>,
+    /// The directory tree each volume after the first holds, by slot, where it holds one.
+    pub volume_dirs: Vec<(u32, PathBuf)>,
+    /// The firmlink list the group's System volume is given, where it is given one.
+    pub firmlinks: Option<PathBuf>,
+}
+
 /// `ferrosys inspect`: what to report on, and what counts as a failing verdict.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InspectArgs {
@@ -340,6 +373,9 @@ pub struct InspectArgs {
     pub image: PathBuf,
     /// Where the filesystem begins within it.
     pub offset: u64,
+    /// How many bytes from the offset on are the filesystem's, or `None` for the rest of
+    /// the file.
+    pub length: Option<u64>,
     /// Report as JSON rather than as text.
     pub json: bool,
     /// Report the scan's findings as a SARIF log, and nothing else.
@@ -351,6 +387,35 @@ pub struct InspectArgs {
     /// The severity at which the scan's findings make the filesystem bad, or `None` when
     /// nothing does.
     pub fail_on: Option<Severity>,
+    /// Which volume of an APFS container to report on, and at which snapshot.
+    pub choice: VolumeChoice,
+}
+
+/// Which volume of an APFS container a read reads, and at which of its snapshots.
+///
+/// An APFS container holds several volumes, each a filesystem of its own, and none of the other
+/// families holds more than one, so both selections are refused for an image of any other
+/// family once it has been classified.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct VolumeChoice {
+    /// A volume by name, or by slot number where no volume has that name. `None` reads the
+    /// first volume this tool reads, passing over one before it that this tool refuses.
+    pub volume: Option<Vec<u8>>,
+    /// A snapshot of that volume, by name. `None` reads the volume as it is.
+    pub snapshot: Option<Vec<u8>>,
+}
+
+impl VolumeChoice {
+    /// The option that asked for a selection, where one did.
+    pub fn named_option(&self) -> Option<&'static str> {
+        if self.volume.is_some() {
+            Some("--volume")
+        } else if self.snapshot.is_some() {
+            Some("--snapshot")
+        } else {
+            None
+        }
+    }
 }
 
 /// `ferrosys detect`: which image to classify, and where the filesystem begins in it.
@@ -360,6 +425,9 @@ pub struct DetectArgs {
     pub image: PathBuf,
     /// Where the filesystem begins within it.
     pub offset: u64,
+    /// How many bytes from the offset on are the filesystem's, or `None` for the rest of
+    /// the file.
+    pub length: Option<u64>,
     /// Report as JSON rather than as one line of text.
     pub json: bool,
 }
@@ -372,6 +440,9 @@ pub struct IdentityArgs {
     /// Where the filesystem begins within the file, for a partition inside a whole-disk
     /// image. Zero when the filesystem is the file.
     pub offset: u64,
+    /// How many bytes from the offset on are the filesystem's, or `None` for the rest of
+    /// the file. Nothing past them is read or written.
+    pub length: Option<u64>,
     /// The new filesystem UUID, or `None` to leave it.
     pub uuid: Option<[u8; 16]>,
     /// The new volume label, NUL-padded, or `None` to leave it.
@@ -390,6 +461,9 @@ pub struct ExtractArgs {
     pub image: PathBuf,
     /// Where the filesystem begins within it.
     pub offset: u64,
+    /// How many bytes from the offset on are the filesystem's, or `None` for the rest of
+    /// the file.
+    pub length: Option<u64>,
     /// What to produce.
     pub mode: ExtractMode,
     /// The largest file a read will return, or `None` to derive it from the image's own
@@ -419,6 +493,8 @@ pub struct ExtractArgs {
     /// recoverable, and says on the standard error which deviation it decided to interpret
     /// through.
     pub strict: bool,
+    /// Which volume of an APFS container to read, and at which snapshot.
+    pub choice: VolumeChoice,
 }
 
 /// The one thing an extract produces. Exactly one is asked for.
@@ -432,6 +508,8 @@ pub enum ExtractMode {
         path: PathBuf,
         /// Write what an unprivileged process may rather than failing on what it may not.
         skip_privileged: bool,
+        /// Write what the destination will hold rather than failing on what it will not.
+        skip_unsupported: bool,
     },
     /// Write one file's bytes, and nothing else.
     Cat(Vec<u8>),
@@ -521,9 +599,61 @@ pub enum UsageError {
     /// `--owner` was given to a format with no directory tree to apply it to.
     #[error(
         "format: --owner replaces the ownership a walked directory tree records, so it \
-         goes with --from-dir"
+         goes with --from-dir or --volume-from-dir"
     )]
     OwnerWithoutDir,
+    /// `--firmlinks` was given to a format joining no volumes as a group.
+    #[error(
+        "format: --firmlinks marks directories of a volume group's System volume, so it goes \
+         with --volume-group"
+    )]
+    FirmlinksWithoutGroup,
+    /// `--volume-from-dir` named the first volume, which holds `--from-dir`'s or
+    /// `--from-tar`'s tree.
+    #[error(
+        "format: --volume-from-dir 0: the first volume holds the tree --from-dir or \
+         --from-tar gives"
+    )]
+    VolumeDirFirstSlot,
+    /// `--volume-from-dir` named a slot no `--volume` fills.
+    #[error("format: --volume-from-dir names slot {slot}, and the container has {volumes} volumes")]
+    VolumeDirSlot {
+        /// The slot named.
+        slot: u32,
+        /// How many volumes the line names.
+        volumes: usize,
+    },
+    /// Two of the container's identifiers, among `--container-uuid`, `--volume` and
+    /// `--root-snapshot`, are one.
+    #[error("format: {first} and {second} both name {uuid}: each needs an identifier of its own")]
+    IdentifierRepeated {
+        /// The identifier both name.
+        uuid: String,
+        /// The first flag that names it.
+        first: String,
+        /// The flag after it that names it too.
+        second: String,
+    },
+    /// `--volume-group` named a slot no `--volume` fills.
+    #[error("format: --volume-group names slot {slot}, and the container has {volumes} volumes")]
+    VolumeGroupSlot {
+        /// The slot named.
+        slot: u32,
+        /// How many volumes the line names.
+        volumes: usize,
+    },
+    /// `--volume-group` named one slot for both its volumes.
+    #[error("format: --volume-group names slot {slot} for both its System and its Data volume")]
+    VolumeGroupOneSlot {
+        /// The slot named.
+        slot: u32,
+    },
+    /// `--volume-from-dir` named one slot twice.
+    #[error("format: --volume-from-dir names slot {slot} twice")]
+    VolumeDirTwice {
+        /// The slot named.
+        slot: u32,
+    },
     /// An option belonging to one family, or to a class of them, was given to a format
     /// writing another.
     ///
@@ -583,6 +713,9 @@ pub enum UsageError {
     /// `--skip-privileged` was given to an extract that writes no tree it could apply to.
     #[error("extract: --skip-privileged applies to --to-dir")]
     SkipPrivilegedWithoutDir,
+    /// `--skip-unsupported` was given to an extract that writes no tree it could apply to.
+    #[error("extract: --skip-unsupported applies to --to-dir")]
+    SkipUnsupportedWithoutDir,
     /// `--json` was given to an extract that produces bytes, which have no JSON form.
     #[error("extract: --json applies to --list and --stat")]
     JsonWithoutReport,
@@ -813,12 +946,21 @@ const EXT: &[&str] = &["ext"];
 const FAT: &[&str] = &["fat"];
 const EXFAT: &[&str] = &["exfat"];
 const BTRFS: &[&str] = &["btrfs"];
+const APFS: &[&str] = &["apfs"];
 const FIDELITY: &[&str] = &["fat", "exfat"];
 /// The families whose format records an instant of its own — ext in its superblock, FAT in
-/// its label entry, btrfs in its subvolume items — which is the class `--time` belongs to.
-/// exFAT has no field for one anywhere: every time on such a volume belongs to an entry and
-/// comes from the source that named it.
-const TIMED: &[&str] = &["ext", "fat", "btrfs"];
+/// its label entry, btrfs in its subvolume items, APFS in every volume's superblock — which is
+/// the class `--time` belongs to. exFAT has no field for one anywhere: every time on such a
+/// volume belongs to an entry and comes from the source that named it.
+const TIMED: &[&str] = &["ext", "fat", "btrfs", "apfs"];
+/// The two families a caller gives one block size for every block of, which is the class
+/// `--block-size` belongs to. btrfs states two sizes, a sector's and a tree block's, and the
+/// FATs derive theirs from the volume's size.
+const BLOCK_SIZED: &[&str] = &["ext", "apfs"];
+/// The families that record one name for the whole filesystem, which is the class `--label`
+/// belongs to. An APFS container records none: each volume has a name of its own, given with
+/// its identifier in `--volume`.
+const LABELLED: &[&str] = &["ext", "fat", "exfat", "btrfs"];
 /// The two families whose on-disk format carries feature words a caller names, which is the
 /// class `-O` belongs to. The other two record a fixed structure and have no word to set.
 const FEATURES: &[&str] = &["ext", "btrfs"];
@@ -861,6 +1003,16 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     let mut data_profile = ferrosys::btrfs::DEFAULT_DATA_PROFILE;
     let mut subvolumes: Vec<SubvolumeRequest> = Vec::new();
     let mut default_subvolume: Option<Vec<u8>> = None;
+    // APFS's: the container's identifier, required like every family's, and its volumes, of
+    // which at least one is.
+    let mut container_uuid: Option<[u8; 16]> = None;
+    let mut apfs_volumes: Vec<ApfsVolumeRequest> = Vec::new();
+    let mut root_snapshot: Option<RootSnapshot> = None;
+    let mut volume_group: Option<VolumeGroup> = None;
+    let mut volume_dirs: Vec<(u32, PathBuf)> = Vec::new();
+    let mut firmlinks: Option<PathBuf> = None;
+    let mut profile = ReleaseProfile::default();
+    let mut formatted_by = ProgramName::default();
     let mut time: Option<i64> = None;
     let mut from_tar: Option<Stream> = None;
     let mut from_dir: Option<PathBuf> = None;
@@ -943,11 +1095,9 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                                 .map_err(value_err(&flag))?,
                         );
                     }
-                    // An exFAT volume's identity, and a third flag rather than a reuse of
-                    // FAT's: the field is `VolumeSerialNumber` where FAT's is `BS_VolID`, the
-                    // two are in different structures of different formats, and a shared flag
-                    // would say the families share a field they do not. Same width, which is
-                    // a coincidence of the lineage rather than a reason.
+                    // An exFAT volume's identity, a flag of its own: the field is
+                    // `VolumeSerialNumber`, in a structure of this format, and FAT's `BS_VolID`
+                    // is a field of another. The two have one width and are two fields.
                     "volume-serial" => {
                         family_only.push(("--volume-serial", EXFAT));
                         volume_serial = Some(
@@ -955,10 +1105,8 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                                 .map_err(value_err(&flag))?,
                         );
                     }
-                    // btrfs's identity, and a fourth flag rather than a reuse of `--uuid`:
-                    // the field is `fsid`, it belongs to a different format, and a filesystem
-                    // carries four more identifiers beside it that `--uuid` would say nothing
-                    // about. Same width as ext's, which is a coincidence rather than a reason.
+                    // btrfs's identity, a flag of its own: the field is `fsid`, of this format,
+                    // and a filesystem carries four more identifiers beside it.
                     "fsid" => {
                         family_only.push(("--fsid", BTRFS));
                         fsid = Some(
@@ -1031,6 +1179,67 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         family_only.push(("--default-subvol", BTRFS));
                         default_subvolume = Some(os::bytes(&value).to_vec());
                     }
+                    // APFS's identity, a flag of its own: the field is the container
+                    // superblock's, and every volume in it records an identifier of its own
+                    // beside it, which `--volume` states.
+                    "container-uuid" => {
+                        family_only.push(("--container-uuid", APFS));
+                        container_uuid = Some(
+                            parse::hex16(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // The volumes of an APFS container, in slot order. Repeatable and
+                    // accumulating, as `--subvol` is: a container holds as many as the caller
+                    // names.
+                    "volume" => {
+                        family_only.push(("--volume", APFS));
+                        apfs_volumes.push(
+                            parse::apfs_volume(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // The snapshot the first volume is formatted with and roots from. One
+                    // volume holds the contents, so one snapshot of it is what a root needs.
+                    "root-snapshot" => {
+                        family_only.push(("--root-snapshot", APFS));
+                        root_snapshot = Some(
+                            parse::apfs_root_snapshot(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // Two volumes joined as a group, by slot: the System volume's, then the
+                    // Data volume's.
+                    "volume-group" => {
+                        family_only.push(("--volume-group", APFS));
+                        volume_group = Some(
+                            parse::apfs_volume_group(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    // A tree for a volume after the first, by slot. Repeatable, one per
+                    // volume, as `--volume` is.
+                    "volume-from-dir" => {
+                        family_only.push(("--volume-from-dir", APFS));
+                        volume_dirs.push(
+                            parse::apfs_volume_dir(&args.value(&flag, attached)?)
+                                .map_err(value_err(&flag))?,
+                        );
+                    }
+                    "firmlinks" => {
+                        family_only.push(("--firmlinks", APFS));
+                        firmlinks = Some(PathBuf::from(args.value(&flag, attached)?));
+                    }
+                    "profile" => {
+                        family_only.push(("--profile", APFS));
+                        profile = parse::apfs_profile(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
+                    "formatted-by" => {
+                        family_only.push(("--formatted-by", APFS));
+                        formatted_by = parse::program_name(&args.value(&flag, attached)?)
+                            .map_err(value_err(&flag))?;
+                    }
                     "time" => {
                         family_only.push(("--time", TIMED));
                         time = Some(
@@ -1057,7 +1266,7 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                         );
                     }
                     "block-size" => {
-                        family_only.push(("--block-size", EXT));
+                        family_only.push(("--block-size", BLOCK_SIZED));
                         block_size = Some(
                             parse::count_u32(&args.value(&flag, attached)?)
                                 .map_err(value_err(&flag))?,
@@ -1096,6 +1305,7 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                     // bytes, as a path inside the image is. What fits is the family's
                     // question, asked once `-t` is known.
                     "label" => {
+                        family_only.push(("--label", LABELLED));
                         let value = args.value(&flag, attached)?;
                         label = Some(os::bytes(&value).to_vec());
                     }
@@ -1290,7 +1500,7 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
     };
     // An archive carries its own ownership and an empty filesystem has nothing to own, so
     // an override with nothing to override is a mistake caught rather than ignored.
-    if owner.is_some() && !matches!(contents, Some(Contents::Dir(_))) {
+    if owner.is_some() && !matches!(contents, Some(Contents::Dir(_))) && volume_dirs.is_empty() {
         return Err(UsageError::OwnerWithoutDir);
     }
     // `--atomic` is about how the destination is replaced, and `--dry-run` never opens one:
@@ -1446,6 +1656,92 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                 default_subvolume,
             }))
         }
+        FsType::Apfs => {
+            let container_uuid = container_uuid.ok_or(UsageError::MissingRequired {
+                command: CMD,
+                flag: "--container-uuid",
+            })?;
+            // A container is formatted with at least one volume: it is the second transaction
+            // that adds them, and a container without one has nothing a mount can open.
+            if apfs_volumes.is_empty() {
+                return Err(UsageError::MissingRequired {
+                    command: CMD,
+                    flag: "--volume",
+                });
+            }
+            // Every identifier in a container is its own: the container's, each volume's and
+            // the root snapshot's. Caught by the flags the caller typed, as two subvolumes
+            // sharing one are.
+            let mut identifiers = vec![("--container-uuid".to_string(), container_uuid)];
+            for volume in &apfs_volumes {
+                identifiers.push((format!("--volume {}", volume.name.as_str()), volume.uuid));
+            }
+            if let Some(snapshot) = &root_snapshot {
+                identifiers.push((
+                    format!("--root-snapshot {}", snapshot.name()),
+                    snapshot.uuid(),
+                ));
+            }
+            for (at, (second, uuid)) in identifiers.iter().enumerate() {
+                if let Some((first, _)) = identifiers[..at].iter().find(|(_, u)| u == uuid) {
+                    return Err(UsageError::IdentifierRepeated {
+                        uuid: crate::render::uuid(uuid),
+                        first: first.clone(),
+                        second: second.clone(),
+                    });
+                }
+            }
+            if let Some(snapshot) = root_snapshot {
+                apfs_volumes[0] = apfs_volumes[0].clone().root_snapshot(snapshot);
+            }
+            // A group joins two of the volumes the line names.
+            if let Some(group) = volume_group {
+                for slot in [group.system, group.data] {
+                    if slot as usize >= apfs_volumes.len() {
+                        return Err(UsageError::VolumeGroupSlot {
+                            slot,
+                            volumes: apfs_volumes.len(),
+                        });
+                    }
+                }
+                if group.system == group.data {
+                    return Err(UsageError::VolumeGroupOneSlot { slot: group.system });
+                }
+            }
+            // Each tree goes to a volume the line names and the first does not hold, once:
+            // the first holds the tree --from-dir or --from-tar gives.
+            for (i, (slot, _)) in volume_dirs.iter().enumerate() {
+                if *slot == 0 {
+                    return Err(UsageError::VolumeDirFirstSlot);
+                }
+                if *slot as usize >= apfs_volumes.len() {
+                    return Err(UsageError::VolumeDirSlot {
+                        slot: *slot,
+                        volumes: apfs_volumes.len(),
+                    });
+                }
+                if volume_dirs[..i].iter().any(|(earlier, _)| earlier == slot) {
+                    return Err(UsageError::VolumeDirTwice { slot: *slot });
+                }
+            }
+            if firmlinks.is_some() && volume_group.is_none() {
+                return Err(UsageError::FirmlinksWithoutGroup);
+            }
+            let block_size = match block_size {
+                Some(bytes) => parse::apfs_block_size(bytes).map_err(value_err("--block-size"))?,
+                None => ApfsBlockSize::default(),
+            };
+            Target::Apfs(Box::new(ApfsTarget {
+                container_uuid,
+                volumes: apfs_volumes,
+                block_size,
+                profile,
+                formatted_by,
+                volume_group,
+                volume_dirs,
+                firmlinks,
+            }))
+        }
     };
 
     Ok(Command::Format(Box::new(FormatArgs {
@@ -1466,6 +1762,7 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "inspect";
     let mut image: Option<PathBuf> = None;
     let mut offset = 0u64;
+    let mut length: Option<u64> = None;
     let mut json = false;
     let mut sarif = false;
     let mut groups = false;
@@ -1485,6 +1782,7 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     // pairing check below needs to tell them apart, because refusing the default would refuse
     // every `--quick` run there is.
     let mut fail_on_given = false;
+    let mut choice = VolumeChoice::default();
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -1495,9 +1793,20 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
                         Args::no_value(&flag, attached)?;
                         return Ok(Command::Help(Topic::Inspect));
                     }
+                    "volume" => {
+                        choice.volume = Some(os::bytes(&args.value(&flag, attached)?).to_vec());
+                    }
+                    "snapshot" => {
+                        choice.snapshot = Some(os::bytes(&args.value(&flag, attached)?).to_vec());
+                    }
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
+                    }
+                    "length" => {
+                        length = Some(
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        );
                     }
                     "fail-on" => {
                         fail_on = parse::fail_on(&args.value(&flag, attached)?)
@@ -1577,11 +1886,13 @@ fn inspect(args: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Inspect(InspectArgs {
         image,
         offset,
+        length,
         json,
         sarif,
         groups,
         quick,
         fail_on,
+        choice,
     }))
 }
 
@@ -1590,6 +1901,7 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "detect";
     let mut image: Option<PathBuf> = None;
     let mut offset = 0u64;
+    let mut length: Option<u64> = None;
     let mut json = false;
 
     while let Some(arg) = args.next()? {
@@ -1604,6 +1916,11 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
+                    }
+                    "length" => {
+                        length = Some(
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        );
                     }
                     "json" => {
                         Args::no_value(&flag, attached)?;
@@ -1643,6 +1960,7 @@ fn detect(args: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Detect(DetectArgs {
         image,
         offset,
+        length,
         json,
     }))
 }
@@ -1652,6 +1970,7 @@ fn identity(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "identity";
     let mut image: Option<PathBuf> = None;
     let mut offset = 0u64;
+    let mut length: Option<u64> = None;
     let mut uuid: Option<[u8; 16]> = None;
     let mut volume_name: Option<[u8; 16]> = None;
     let mut set_checksum_seed = false;
@@ -1669,6 +1988,11 @@ fn identity(args: &mut Args) -> Result<Command, UsageError> {
                     "offset" => {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
+                    }
+                    "length" => {
+                        length = Some(
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        );
                     }
                     "uuid" => {
                         uuid = Some(
@@ -1733,6 +2057,7 @@ fn identity(args: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Identity(IdentityArgs {
         image,
         offset,
+        length,
         uuid,
         volume_name,
         set_checksum_seed,
@@ -1745,9 +2070,11 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     const CMD: &str = "extract";
     let mut image: Option<PathBuf> = None;
     let mut offset = 0u64;
+    let mut length: Option<u64> = None;
     let mut to_tar: Option<Stream> = None;
     let mut to_dir: Option<PathBuf> = None;
     let mut skip_privileged = false;
+    let mut skip_unsupported = false;
     let mut cat: Option<Vec<u8>> = None;
     let mut stat: Option<Vec<u8>> = None;
     let mut list = false;
@@ -1756,6 +2083,7 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     let mut atomic = false;
     let mut strict = false;
     let mut synthesis = Synthesis::new();
+    let mut choice = VolumeChoice::default();
 
     while let Some(arg) = args.next()? {
         match arg {
@@ -1770,11 +2098,26 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
                         offset =
                             parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?;
                     }
+                    "length" => {
+                        length = Some(
+                            parse::size(&args.value(&flag, attached)?).map_err(value_err(&flag))?,
+                        );
+                    }
+                    "volume" => {
+                        choice.volume = Some(os::bytes(&args.value(&flag, attached)?).to_vec());
+                    }
+                    "snapshot" => {
+                        choice.snapshot = Some(os::bytes(&args.value(&flag, attached)?).to_vec());
+                    }
                     "to-tar" => to_tar = Some(Stream::from_value(args.value(&flag, attached)?)),
                     "to-dir" => to_dir = Some(PathBuf::from(args.value(&flag, attached)?)),
                     "skip-privileged" => {
                         Args::no_value(&flag, attached)?;
                         skip_privileged = true;
+                    }
+                    "skip-unsupported" => {
+                        Args::no_value(&flag, attached)?;
+                        skip_unsupported = true;
                     }
                     // A path inside the image is a byte string, not text: it is taken as
                     // the bytes the argument holds, and never rendered through a
@@ -1861,6 +2204,7 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
         (None, Some(path), None, None, false) => ExtractMode::ToDir {
             path,
             skip_privileged,
+            skip_unsupported,
         },
         (None, None, Some(path), None, false) => ExtractMode::Cat(path),
         (None, None, None, Some(path), false) => ExtractMode::Stat { path, json },
@@ -1872,6 +2216,11 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
     // something no other mode does.
     if skip_privileged && !matches!(mode, ExtractMode::ToDir { .. }) {
         return Err(UsageError::SkipPrivilegedWithoutDir);
+    }
+    // And `--skip-unsupported` is about what a destination directory will hold. An archive
+    // holds every name and attribute a tree carries, so there is nothing for it to skip.
+    if skip_unsupported && !matches!(mode, ExtractMode::ToDir { .. }) {
+        return Err(UsageError::SkipUnsupportedWithoutDir);
     }
     // JSON is a rendering of a report, so it goes with the two modes that produce one. A
     // tar stream and a file's bytes are not reports and have no JSON form.
@@ -1890,10 +2239,12 @@ fn extract(args: &mut Args) -> Result<Command, UsageError> {
         image,
         strict,
         offset,
+        length,
         mode,
         max_file_bytes,
         atomic,
         synthesis,
+        choice,
     }))
 }
 
@@ -2549,6 +2900,35 @@ mod tests {
     }
 
     #[test]
+    fn every_verb_reading_an_image_takes_its_region() {
+        // The filesystem runs to the end of the file unless a length says otherwise.
+        let region = |line_text: &str| match line(line_text).expect("parses") {
+            Command::Inspect(a) => (a.offset, a.length),
+            Command::Detect(a) => (a.offset, a.length),
+            Command::Identity(a) => (a.offset, a.length),
+            Command::Extract(a) => (a.offset, a.length),
+            other => panic!("expected a verb reading an image, got {other:?}"),
+        };
+        for verb in [
+            "inspect",
+            "detect",
+            "identity --uuid 5a5a5a5a5a5a4a5a8a5a5a5a5a5a5a5a",
+            "extract --list",
+        ] {
+            assert_eq!(region(&format!("{verb} disk.img")), (0, None), "{verb}");
+            assert_eq!(
+                region(&format!("{verb} --offset 1M --length 16M disk.img")),
+                (1 << 20, Some(16 << 20)),
+                "{verb}"
+            );
+        }
+        assert!(matches!(
+            line("inspect --length -1 disk.img"),
+            Err(UsageError::Value { .. })
+        ));
+    }
+
+    #[test]
     fn inspect_scans_by_default_and_faults_a_filesystem_that_is_unsound() {
         match line("inspect image.img").expect("parses") {
             Command::Inspect(a) => {
@@ -2647,6 +3027,7 @@ mod tests {
                 ExtractMode::ToDir {
                     path: "unpacked".into(),
                     skip_privileged: false,
+                    skip_unsupported: false,
                 }
             ),
             other => panic!("expected extract, got {other:?}"),
@@ -2657,6 +3038,20 @@ mod tests {
                 ExtractMode::ToDir {
                     path: "unpacked".into(),
                     skip_privileged: true,
+                    skip_unsupported: false,
+                }
+            ),
+            other => panic!("expected extract, got {other:?}"),
+        }
+        // The two skips are separate questions — what this process may write, and what the
+        // destination will hold — and each is asked alone.
+        match line("extract --to-dir unpacked --skip-unsupported image.img").expect("parses") {
+            Command::Extract(a) => assert_eq!(
+                a.mode,
+                ExtractMode::ToDir {
+                    path: "unpacked".into(),
+                    skip_privileged: false,
+                    skip_unsupported: true,
                 }
             ),
             other => panic!("expected extract, got {other:?}"),
@@ -2704,6 +3099,16 @@ mod tests {
             assert_eq!(
                 line(spelling).unwrap_err(),
                 UsageError::SkipPrivilegedWithoutDir,
+                "{spelling}"
+            );
+        }
+        for spelling in [
+            "extract --to-tar out.tar --skip-unsupported image.img",
+            "extract --list --skip-unsupported image.img",
+        ] {
+            assert_eq!(
+                line(spelling).unwrap_err(),
+                UsageError::SkipUnsupportedWithoutDir,
                 "{spelling}"
             );
         }

@@ -1,17 +1,20 @@
 //! The gate for the crate's family-agnostic surface: what a caller reaches without naming
-//! a family, driven against the one family there is.
+//! a family, driven against every family this crate writes.
 //!
 //! Everything here is written in root vocabulary alone — `ferrosys::open`, `ferrosys::FsTree`,
-//! `ferrosys::Finding` — and never in `ferrosys::ext::`. That is the point: these cases pass
-//! only while the shared surface is genuinely usable without knowing which format answered,
-//! and a later family runs the same cases against itself.
+//! `ferrosys::Finding` — and never in a family's own. That is the point: these cases pass only
+//! while the shared surface is genuinely usable without knowing which format answered, and each
+//! family runs the same cases against itself.
 //!
-//! The one thing here that does name a family is the fixture: an image has to be written by
-//! something, and only ext writes one that every case below can read. So the target needs
-//! that family even though nothing it asserts does. What a build carrying some other family
-//! reaches is pinned by the API snapshots instead, which is the instrument that notices an
-//! item gated on the wrong family.
+//! The one thing here that does name a family is each fixture: an image has to be written by
+//! something, and each family's module formats its own with that family's writer. The ext
+//! cases sit at the top of the file and the FAT, exFAT, btrfs and APFS cases in a module each, so
+//! the target needs ext and each module needs its own family besides. What a build carrying some
+//! other set of families reaches is pinned by the API snapshots instead, which is the
+//! instrument that notices an item gated on the wrong family.
 #![cfg(feature = "ext")]
+
+mod util;
 
 use std::io::Cursor;
 
@@ -21,8 +24,8 @@ use ferrosys::{
     TreeError, open, open_with,
 };
 
-/// A formatted image holding a small tree, built through the ext writer because it is the
-/// only writer there is. Nothing below reads it through ext vocabulary.
+/// A formatted image holding a small tree, built through the ext writer. Nothing below reads it
+/// through ext vocabulary.
 fn image() -> Vec<u8> {
     use ferrosys::ext::{FormatOptions, TreeBuilder, format};
 
@@ -272,7 +275,8 @@ fn a_source_written_outside_the_crate_builds_its_entries_through_the_constructor
         })
         .expect("the walk succeeds");
     let motd = motd.expect("/etc/motd was walked");
-    assert_eq!(motd.meta, meta);
+    // A source stating no birth time is written the modification time in its place.
+    assert_eq!(motd.meta, meta.with_birth_time(meta.mtime));
     assert_eq!(motd.xattrs.len(), 1);
     assert_eq!(motd.xattrs[0].name, b"user.origin");
     assert_eq!(motd.xattrs[0].value, b"listed");
@@ -506,6 +510,7 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
         ("fat_reader", cfg!(feature = "fat")),
         ("exfat_reader", cfg!(feature = "exfat")),
         ("btrfs_reader", cfg!(feature = "btrfs")),
+        ("apfs_reader", cfg!(feature = "apfs")),
     ];
     let mut checked = 0usize;
     for &(corpus, compiled) in corpora {
@@ -545,6 +550,8 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
                 FsReader::ExFat(mut r) => walk(&mut r).0,
                 #[cfg(feature = "btrfs")]
                 FsReader::Btrfs(mut r) => walk(&mut r).0,
+                #[cfg(feature = "apfs")]
+                FsReader::Apfs(mut r) => walk(&mut r).0,
                 _ => panic!("{name}: no compiled-in family claimed a committed seed"),
             };
             assert_eq!(names[0].0, "", "{name}: the root is the walk's first entry");
@@ -557,10 +564,76 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
         );
         checked += in_corpus;
     }
-    let full = cfg!(all(feature = "fat", feature = "exfat", feature = "btrfs"));
+    let full = cfg!(all(
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ));
     if full {
         assert!(checked >= 20, "only {checked} seeds were checked");
     }
+}
+
+/// The report a lenient scan makes through the shared frame once every read of its source
+/// fails, the source having opened soundly.
+fn scan_through_a_failing_source(bytes: &[u8]) -> ferrosys::FindingReport {
+    let (source, failing) = util::Failing::new(Cursor::new(bytes));
+    let reader = open_with(source, &OpenOptions::new().policy(ReadPolicy::Lenient))
+        .unwrap_or_else(|e| panic!("open: {e}"));
+    failing.set(true);
+    match reader {
+        FsReader::Ext(mut r) => r.scan().to_report(),
+        #[cfg(feature = "fat")]
+        FsReader::Fat(mut r) => r.scan().to_report(),
+        #[cfg(feature = "exfat")]
+        FsReader::ExFat(mut r) => r.scan().to_report(),
+        #[cfg(feature = "btrfs")]
+        FsReader::Btrfs(mut r) => r.scan().to_report(),
+        #[cfg(feature = "apfs")]
+        FsReader::Apfs(mut r) => r.scan().to_report(),
+        _ => panic!("no compiled-in family claimed the image"),
+    }
+}
+
+/// What every family's scan promises of a source that fails a read rather than ending: the
+/// failure is recorded, as the family's own, apart from the findings; no finding comes of it;
+/// and no verdict counts it, though the report is not clean.
+fn assert_source_failures_held_apart(report: &ferrosys::FindingReport, family: Family) {
+    assert!(
+        !report.source_failures().is_empty(),
+        "{family:?}: no source failure recorded"
+    );
+    for failure in report.source_failures() {
+        assert_eq!(failure.family, family);
+        assert_eq!(failure.category, "source");
+        assert!(
+            failure.detail.contains("the medium failed"),
+            "{}",
+            failure.detail
+        );
+    }
+    assert!(
+        report.findings().is_empty(),
+        "{family:?}: a failing source was reported as a fault in the filesystem: {}",
+        report.to_table()
+    );
+    assert_eq!(report.worst_severity(), None);
+    assert!(!report.has_fatal(ReadPolicy::Strict));
+    assert!(!report.is_clean());
+    assert!(report.to_json().contains("\"source_failures\":[{"));
+    assert!(report.to_table().contains("source failure"));
+    assert!(
+        report
+            .to_sarif(None)
+            .contains("\"executionSuccessful\":false")
+    );
+}
+
+#[test]
+fn a_scan_whose_source_fails_holds_the_failure_apart_from_its_findings() {
+    let report = scan_through_a_failing_source(&image());
+    assert_source_failures_held_apart(&report, Family::Ext);
 }
 
 /// The same claims the cases above make of the ext family, made of the FAT family.
@@ -571,7 +644,9 @@ fn every_committed_fuzz_seed_still_opens_and_walks_without_naming_a_family() {
 /// surface that reads both without a `match` is a surface that abstracted the right things.
 #[cfg(feature = "fat")]
 mod fat {
-    use super::{Name, Shared, walk};
+    use super::{
+        Name, Shared, assert_source_failures_held_apart, scan_through_a_failing_source, walk,
+    };
     use ferrosys::{
         Family, FsReader, FsTree, Metadata, NodeKind, OpenOptions, Property, ReadPolicy, Severity,
         Synthesis, Timestamp, TreeBuilder, TreeError, open, open_with,
@@ -813,6 +888,12 @@ mod fat {
     }
 
     #[test]
+    fn a_scan_whose_source_fails_holds_the_failure_apart_from_its_findings() {
+        let report = scan_through_a_failing_source(&image());
+        assert_source_failures_held_apart(&report, Family::Fat);
+    }
+
+    #[test]
     fn an_extraction_from_a_family_that_records_nothing_reports_what_it_invented() {
         // The mirror of the ext case, and the reason the fidelity report carries both
         // directions in one type: a caller draining a FAT image into an archive is asking
@@ -843,6 +924,68 @@ mod fat {
             );
         }
     }
+
+    // What this asks of is a sink, so a build carrying neither has nothing to ask.
+    #[test]
+    #[cfg(any(
+        feature = "tar",
+        all(feature = "dir", any(target_os = "linux", target_os = "android"))
+    ))]
+    fn a_lost_and_found_the_volume_holds_is_written_out_like_any_directory() {
+        // An ext filesystem makes `/lost+found` for itself, which is why a sink leaves an ext
+        // one out. A FAT volume makes nothing of the kind, so a directory of that name is the
+        // volume's own, and leaving it out would drop it and everything in it in silence.
+        use ferrosys::fat::{FatType, FatTypeRequest, FormatOptions, PlanRequest, format};
+
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new()
+            .directory(b"/lost+found".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/lost+found/kept".to_vec(),
+                b"mine\n".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        let bytes = format(
+            source,
+            16 << 20,
+            FormatOptions::new(0x1234_abcd, time)
+                .plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat16))),
+        )
+        .expect("format")
+        .into_bytes();
+
+        #[cfg(feature = "tar")]
+        {
+            let mut archive = Vec::new();
+            ferrosys::ArchiveSink::new(&mut archive)
+                .write_tree(&mut reader(&bytes))
+                .expect("write the archive");
+            assert!(
+                archive
+                    .windows(b"./lost+found/kept".len())
+                    .any(|w| w == b"./lost+found/kept"),
+                "the archive carries the volume's own lost+found"
+            );
+        }
+
+        #[cfg(all(feature = "dir", any(target_os = "linux", target_os = "android")))]
+        {
+            let host = tempfile::tempdir().expect("temp dir");
+            let out = host.path().join("out");
+            std::fs::create_dir(&out).expect("destination");
+            // FAT records no owner, so the one synthesized is root's, which an ordinary
+            // process may not set; what this asks is which names are written.
+            ferrosys::DirectorySink::new(&out)
+                .expect("an empty destination")
+                .skip_privileged()
+                .write_tree(&mut reader(&bytes))
+                .expect("extract");
+            assert_eq!(
+                std::fs::read(out.join("lost+found/kept")).expect("the volume's own file"),
+                b"mine\n"
+            );
+        }
+    }
 }
 
 /// The same claims again, made of the third family.
@@ -854,7 +997,9 @@ mod fat {
 /// nothing about, which is none of FAT's machinery.
 #[cfg(feature = "exfat")]
 mod exfat {
-    use super::{Name, Shared, walk};
+    use super::{
+        Name, Shared, assert_source_failures_held_apart, scan_through_a_failing_source, walk,
+    };
     use ferrosys::{
         Family, FsReader, FsTree, Metadata, NodeKind, OpenOptions, Property, ReadPolicy, Severity,
         Synthesis, Timestamp, TreeBuilder, TreeError, open, open_with,
@@ -1104,5 +1249,469 @@ mod exfat {
                 fidelity.to_table()
             );
         }
+    }
+
+    #[test]
+    fn a_scan_whose_source_fails_holds_the_failure_apart_from_its_findings() {
+        let report = scan_through_a_failing_source(&image());
+        assert_source_failures_held_apart(&report, Family::ExFat);
+    }
+}
+
+/// The same claims made of the btrfs family, which records nearly everything ext does — owners,
+/// modes, links, attributes — through trees rather than tables, and names a node by its
+/// subvolume as well as its inode.
+#[cfg(feature = "btrfs")]
+mod btrfs {
+    use super::{
+        Name, Shared, assert_source_failures_held_apart, scan_through_a_failing_source, walk,
+    };
+    use ferrosys::{
+        Family, FsReader, FsTree, Metadata, NodeKind, OpenOptions, ReadPolicy, Severity, Synthesis,
+        Timestamp, TreeBuilder, TreeError, open, open_with,
+    };
+    use std::io::Cursor;
+
+    /// The same tree the ext fixture holds, which this family can hold whole.
+    fn image() -> Vec<u8> {
+        use ferrosys::btrfs::{FormatOptions, format};
+
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/etc/hostname".to_vec(),
+                b"ferrosys\n".to_vec(),
+                Metadata::new(0o644, time).owned_by(0, 42),
+            )
+            .file(
+                b"/etc/issue".to_vec(),
+                b"welcome\n".to_vec(),
+                Metadata::new(0o600, time),
+            )
+            .xattr(b"user.note".to_vec(), b"hello".to_vec())
+            .symlink(
+                b"/etc/mtab".to_vec(),
+                b"/proc/mounts".to_vec(),
+                Metadata::new(0o777, time),
+            )
+            .file(
+                b"/one".to_vec(),
+                b"shared\n".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .hardlink(
+                b"/two".to_vec(),
+                b"/one".to_vec(),
+                Metadata::new(0o644, time),
+            );
+
+        format(source, 128 << 20, FormatOptions::new([0x5b; 16], time))
+            .expect("format")
+            .into_bytes()
+    }
+
+    fn reader(bytes: &[u8]) -> ferrosys::btrfs::Reader<Cursor<&[u8]>> {
+        match open(Cursor::new(bytes)).expect("open") {
+            FsReader::Btrfs(r) => r,
+            _ => panic!("the btrfs family claimed the image"),
+        }
+    }
+
+    #[test]
+    fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
+        let bytes = image();
+        let handle = open(Cursor::new(&bytes)).expect("open");
+        assert_eq!(handle.family(), Family::Btrfs);
+        assert_eq!(
+            ferrosys::detect(Cursor::new(&bytes)).expect("detect"),
+            ferrosys::Filesystem::Btrfs
+        );
+        // The concrete reader behind the variant is this family's whole surface: the
+        // subvolumes it holds are reachable, and no other family has such a thing to reach.
+        match handle {
+            FsReader::Btrfs(r) => assert!(!r.subvolumes().is_empty()),
+            _ => panic!("the btrfs family claimed the image"),
+        }
+    }
+
+    #[test]
+    fn a_walk_yields_the_root_first_and_then_the_tree_in_order() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let (names, shared): (Vec<Name>, Vec<Shared>) = walk(&mut r);
+        let paths: Vec<&str> = names.iter().map(|(p, _)| p.as_str()).collect();
+
+        assert_eq!(paths[0], "", "the root is the walk's first entry");
+        assert_eq!(names[0].1, NodeKind::Directory);
+        let etc = paths.iter().position(|p| *p == "/etc").expect("/etc");
+        let hostname = paths
+            .iter()
+            .position(|p| *p == "/etc/hostname")
+            .expect("/etc/hostname");
+        assert!(etc < hostname, "a parent precedes its children: {paths:?}");
+
+        let kind = |path: &str| names.iter().find(|(p, _)| p == path).expect(path).1;
+        assert_eq!(kind("/etc/hostname"), NodeKind::File { size: 9 });
+        assert_eq!(kind("/etc/mtab"), NodeKind::Symlink);
+
+        // Two names for one file share one identity, as they do on ext.
+        let one = shared.iter().find(|(p, _)| p == "/one").expect("/one");
+        let two = shared.iter().find(|(p, _)| p == "/two").expect("/two");
+        assert_eq!(one.1, two.1);
+    }
+
+    #[test]
+    fn a_stat_is_complete_and_says_nothing_was_invented() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut seen = Vec::new();
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            let attrs = tree.stat(&entry.node, &Synthesis::new())?;
+            seen.push((String::from_utf8_lossy(&entry.path).into_owned(), attrs));
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        let at = |path: &str| {
+            &seen
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{path} was walked"))
+                .1
+        };
+        let hostname = at("/etc/hostname");
+        assert_eq!((hostname.meta.uid, hostname.meta.gid), (0, 42));
+        assert_eq!(hostname.meta.mode & 0o7777, 0o644);
+        assert!(
+            seen.iter().all(|(_, a)| a.synthesized.is_empty()),
+            "a family that records everything invents nothing"
+        );
+        assert!(
+            at("/etc/issue")
+                .xattrs
+                .iter()
+                .any(|x| x.name == b"user.note" && x.value == b"hello")
+        );
+    }
+
+    #[test]
+    fn a_files_bytes_stream_through_the_shared_surface() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut read: Option<Vec<u8>> = None;
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            if let NodeKind::File { size } = entry.kind
+                && entry.path == b"/etc/hostname"
+            {
+                let mut out = Vec::new();
+                let mut buf = [0u8; 4];
+                let mut offset = 0u64;
+                while offset < size {
+                    let filled = tree.read_bytes(&entry.node, offset, &mut buf)?;
+                    if filled == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..filled]);
+                    offset += filled as u64;
+                }
+                read = Some(out);
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        assert_eq!(read.expect("/etc/hostname was read"), b"ferrosys\n");
+    }
+
+    #[test]
+    fn the_wrong_operation_for_a_node_is_a_typed_error_rather_than_a_wrong_answer() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut root = None;
+        r.walk_tree::<TreeError, _>(|_, entry| {
+            if entry.path.is_empty() {
+                root = Some(entry.node);
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        let root = root.expect("the root was walked");
+        // Through the shared surface by name: the reader has a method of its own by the same
+        // name, which answers in this family's error rather than the shared one.
+        let err = FsTree::link_target(&mut r, &root).expect_err("the root is not a link");
+        assert!(
+            matches!(
+                err,
+                TreeError::Malformed {
+                    family: Family::Btrfs,
+                    ..
+                }
+            ),
+            "expected a malformed-node error, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_scan_projects_into_the_shared_findings_frame() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let report = r.scan().to_report();
+        assert!(report.is_clean(), "{}", report.to_table());
+
+        // Damaged: the second copy of the superblock, 64 MiB in, no longer covered by its own
+        // checksum. Every family has something that stands for integrity, and each reaches the
+        // shared frame at the same severity.
+        let mut damaged = bytes.clone();
+        damaged[(64 << 20) + 0x100] ^= 0xff;
+        let FsReader::Btrfs(mut r) = open_with(
+            Cursor::new(&damaged),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("open") else {
+            panic!("the btrfs family claimed the image")
+        };
+        let report = r.scan().to_report();
+        let finding = report
+            .findings()
+            .iter()
+            .find(|f| f.severity == Severity::Integrity)
+            .expect("an integrity finding");
+        assert_eq!(finding.family, Family::Btrfs);
+        assert_eq!(finding.category, "superblock");
+        assert!(report.has_fatal(ReadPolicy::Strict));
+        assert!(report.to_json().contains("\"family\":\"btrfs\""));
+        assert!(
+            report
+                .to_sarif(None)
+                .contains("\"ruleId\":\"btrfs/superblock\"")
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_source_fails_holds_the_failure_apart_from_its_findings() {
+        let report = scan_through_a_failing_source(&image());
+        assert_source_failures_held_apart(&report, Family::Btrfs);
+    }
+}
+
+/// The same claims made of the APFS family, which records what btrfs does and more — a birth
+/// time and the flags a Mac sets — in a container that may hold several volumes, of which a read
+/// naming none reads the first.
+#[cfg(feature = "apfs")]
+mod apfs {
+    use super::{
+        Name, Shared, assert_source_failures_held_apart, scan_through_a_failing_source, walk,
+    };
+    use ferrosys::{
+        Family, FsReader, FsTree, Metadata, NodeKind, OpenOptions, ReadPolicy, Synthesis,
+        Timestamp, TreeBuilder, TreeError, open, open_with,
+    };
+    use std::io::Cursor;
+
+    /// The same tree the ext fixture holds, which this family can hold whole.
+    fn image() -> Vec<u8> {
+        use ferrosys::apfs::{FormatOptions, VolumeName, VolumeRequest, format};
+
+        let time = Timestamp::from_secs(1_700_000_000);
+        let source = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/etc/hostname".to_vec(),
+                b"ferrosys\n".to_vec(),
+                Metadata::new(0o644, time).owned_by(0, 42),
+            )
+            .file(
+                b"/etc/issue".to_vec(),
+                b"welcome\n".to_vec(),
+                Metadata::new(0o600, time),
+            )
+            .xattr(b"user.note".to_vec(), b"hello".to_vec())
+            .symlink(
+                b"/etc/mtab".to_vec(),
+                b"/proc/mounts".to_vec(),
+                Metadata::new(0o777, time),
+            )
+            .file(
+                b"/one".to_vec(),
+                b"shared\n".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .hardlink(
+                b"/two".to_vec(),
+                b"/one".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        let volume = VolumeRequest::new(VolumeName::new("seam").expect("a name"), [0x22; 16]);
+        format(
+            source,
+            64 << 20,
+            FormatOptions::new([0x11; 16], time, volume),
+        )
+        .expect("format")
+        .into_bytes()
+    }
+
+    fn reader(bytes: &[u8]) -> ferrosys::apfs::Reader<Cursor<&[u8]>> {
+        match open(Cursor::new(bytes)).expect("open") {
+            FsReader::Apfs(r) => r,
+            _ => panic!("the APFS family claimed the image"),
+        }
+    }
+
+    #[test]
+    fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
+        let bytes = image();
+        let handle = open(Cursor::new(&bytes)).expect("open");
+        assert_eq!(handle.family(), Family::Apfs);
+        assert_eq!(
+            ferrosys::detect(Cursor::new(&bytes)).expect("detect"),
+            ferrosys::Filesystem::Apfs
+        );
+    }
+
+    #[test]
+    fn a_walk_yields_the_root_first_and_then_the_tree_in_order() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let (names, shared): (Vec<Name>, Vec<Shared>) = walk(&mut r);
+        let paths: Vec<&str> = names.iter().map(|(p, _)| p.as_str()).collect();
+
+        assert_eq!(paths[0], "", "the root is the walk's first entry");
+        assert_eq!(names[0].1, NodeKind::Directory);
+        let etc = paths.iter().position(|p| *p == "/etc").expect("/etc");
+        let hostname = paths
+            .iter()
+            .position(|p| *p == "/etc/hostname")
+            .expect("/etc/hostname");
+        assert!(etc < hostname, "a parent precedes its children: {paths:?}");
+
+        let kind = |path: &str| names.iter().find(|(p, _)| p == path).expect(path).1;
+        assert_eq!(kind("/etc/hostname"), NodeKind::File { size: 9 });
+        assert_eq!(kind("/etc/mtab"), NodeKind::Symlink);
+
+        // Two names for one file share one identity, as they do on ext.
+        let one = shared.iter().find(|(p, _)| p == "/one").expect("/one");
+        let two = shared.iter().find(|(p, _)| p == "/two").expect("/two");
+        assert_eq!(one.1, two.1);
+    }
+
+    #[test]
+    fn a_stat_is_complete_and_says_nothing_was_invented() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut seen = Vec::new();
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            let attrs = tree.stat(&entry.node, &Synthesis::new())?;
+            seen.push((String::from_utf8_lossy(&entry.path).into_owned(), attrs));
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        let at = |path: &str| {
+            &seen
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{path} was walked"))
+                .1
+        };
+        let hostname = at("/etc/hostname");
+        assert_eq!((hostname.meta.uid, hostname.meta.gid), (0, 42));
+        assert_eq!(hostname.meta.mode & 0o7777, 0o644);
+        assert!(
+            seen.iter().all(|(_, a)| a.synthesized.is_empty()),
+            "a family that records everything invents nothing"
+        );
+        assert!(
+            at("/etc/issue")
+                .xattrs
+                .iter()
+                .any(|x| x.name == b"user.note" && x.value == b"hello")
+        );
+    }
+
+    #[test]
+    fn a_files_bytes_stream_through_the_shared_surface() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut read: Option<Vec<u8>> = None;
+        r.walk_tree::<TreeError, _>(|tree, entry| {
+            if let NodeKind::File { size } = entry.kind
+                && entry.path == b"/etc/hostname"
+            {
+                let mut out = Vec::new();
+                let mut buf = [0u8; 4];
+                let mut offset = 0u64;
+                while offset < size {
+                    let filled = tree.read_bytes(&entry.node, offset, &mut buf)?;
+                    if filled == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..filled]);
+                    offset += filled as u64;
+                }
+                read = Some(out);
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        assert_eq!(read.expect("/etc/hostname was read"), b"ferrosys\n");
+    }
+
+    #[test]
+    fn the_wrong_operation_for_a_node_is_a_typed_error_rather_than_a_wrong_answer() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let mut root = None;
+        r.walk_tree::<TreeError, _>(|_, entry| {
+            if entry.path.is_empty() {
+                root = Some(entry.node.clone());
+            }
+            Ok(())
+        })
+        .expect("the walk succeeds");
+        let root = root.expect("the root was walked");
+        // Through the shared surface by name: the reader has a method of its own by the same
+        // name, which answers in this family's error rather than the shared one.
+        let err = FsTree::link_target(&mut r, &root).expect_err("the root is not a link");
+        assert!(
+            matches!(
+                err,
+                TreeError::Malformed {
+                    family: Family::Apfs,
+                    ..
+                }
+            ),
+            "expected a malformed-node error, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_scan_projects_into_the_shared_findings_frame() {
+        let bytes = image();
+        let mut r = reader(&bytes);
+        let report = r.scan().to_report();
+        assert!(report.is_clean(), "{}", report.to_table());
+        assert!(report.to_json().contains("\"source_failures\":[]"));
+
+        // Damaged: block zero, the container superblock's first copy, no longer covered by its
+        // own checksum. A lenient read opens the container through its checkpoint and says so.
+        let mut damaged = bytes.clone();
+        damaged[0x100] ^= 0xff;
+        let FsReader::Apfs(mut r) = open_with(
+            Cursor::new(&damaged),
+            &OpenOptions::new().policy(ReadPolicy::Lenient),
+        )
+        .expect("open") else {
+            panic!("the APFS family claimed the image")
+        };
+        let report = r.scan().to_report();
+        assert!(!report.is_clean());
+        let finding = &report.findings()[0];
+        assert_eq!(finding.family, Family::Apfs);
+        assert!(report.to_json().contains("\"family\":\"apfs\""));
+    }
+
+    #[test]
+    fn a_scan_whose_source_fails_holds_the_failure_apart_from_its_findings() {
+        let report = scan_through_a_failing_source(&image());
+        assert_source_failures_held_apart(&report, Family::Apfs);
     }
 }

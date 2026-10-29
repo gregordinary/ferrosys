@@ -35,10 +35,11 @@
 //! # What a process may not do
 //!
 //! Three parts of a tree take privileges: a device node needs `CAP_MKNOD`, setting a file's
-//! recorded owner needs `CAP_CHOWN`, and an extended attribute in the `security` or `trusted`
-//! namespace is the host's to write rather than an ordinary process's. By default a host that
-//! refuses any of them is an error naming the entry, so an extraction that cannot reproduce
-//! the tree says so instead of quietly producing a different one.
+//! recorded owner needs `CAP_CHOWN` (and, in a user namespace, an id the namespace maps), and
+//! an extended attribute in the `security` or `trusted` namespace is the host's to write
+//! rather than an ordinary process's. By default a host that refuses any of them is an error
+//! naming the entry, so an extraction that cannot reproduce the tree says so instead of
+//! quietly producing a different one.
 //! [`skip_privileged`](DirectorySink::skip_privileged) is the opt-in for an unprivileged
 //! extraction that wants what it can have: what was left out comes back in the
 //! [`ExtractReport`], never in silence.
@@ -48,12 +49,36 @@
 //! `security.selinux` on nearly every inode, so an unprivileged extraction of a real root
 //! filesystem meets this before it meets anything else.
 //!
+//! # What a destination cannot hold
+//!
+//! Some of what an image records has no place on the destination whatever privilege the
+//! process has. A name can be longer than the destination takes: a format storing up to 255
+//! UTF-16 units holds names of as many as 765 bytes of UTF-8, and a Linux filesystem takes 255
+//! bytes. An extended attribute can be one the destination will not hold: a name in no
+//! namespace this host knows, which is how another operating system names its attributes; any
+//! attribute, on a destination that holds none; a `user` attribute on a symbolic link or a
+//! device node; and a value larger than the destination holds — past the kernel's 64 KiB for
+//! one value, or past the room the destination keeps for a node's attributes. And a device
+//! node can record a number wider than this host's: the node is read back once made, and one
+//! the host made as another device is taken out again rather than left naming it. Each limit
+//! is the destination's own, and the refusal is the one the destination gave. A Darwin
+//! filesystem's BSD flags, `UF_HIDDEN` and the rest, no destination holds. By default each is
+//! an error naming the entry.
+//! [`skip_unsupported`](DirectorySink::skip_unsupported) is the opt-in that writes the rest:
+//! an entry whose name is refused is left out, a directory with everything under it, and what
+//! was left out comes back in the [`ExtractReport`].
+//!
 //! # What no extraction can carry
 //!
 //! An inode's change time is the kernel's to set, so a tree written here carries the time it
 //! was written rather than the one recorded. Access and modification times are set exactly,
-//! to the nanosecond. `/lost+found` is not written: every filesystem makes it for itself, and
-//! a tree carrying one would be a tree a format refuses to read back.
+//! to the nanosecond, and read back: a destination keeps a time to a range and a fraction of
+//! its own, and one it holds as another time is an error naming the entry, or under
+//! [`skip_unsupported`](DirectorySink::skip_unsupported) is kept as the destination holds it
+//! and named in the [`ExtractReport`]. An ext filesystem's `/lost+found` is not written: every ext filesystem
+//! makes it for itself, and a tree carrying one is a tree the ext formatter refuses to read
+//! back. On every other family a directory of that name is the volume's own and is written
+//! like any other.
 //!
 //! # Memory
 //!
@@ -71,17 +96,22 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, Timespec, Timestamps, Uid};
 
-use crate::fidelity::{Direction, FidelityReport, Synthesis};
+use crate::fidelity::{Direction, FidelityReport, Property, Synthesis};
 use crate::host::{HostError, fd_path, io_at};
 use crate::path::{canonical_parts, is_hostile_component};
 use crate::source::Metadata;
 use crate::time::Timestamp;
-use crate::tree::{Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{
+    Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError, flags_not_carried,
+    made_by_the_format,
+};
 use crate::xattr::Xattr;
 
-/// `/lost+found`, the one path an extraction must not write: every filesystem makes it for
-/// itself, and a source that tries to make it again is refused.
-const LOST_FOUND: &[u8] = b"/lost+found";
+/// What [`HostError::NameTooLong`] names as refused, for every entry but a symbolic link.
+const NAME: &str = "a name this long";
+
+/// The same for a symbolic link, whose target the destination holds to a limit of its own.
+const NAME_OR_TARGET: &str = "a name or a link target this long";
 
 /// The mode a directory is created with, before its children are written.
 ///
@@ -97,9 +127,13 @@ const BUILDING: Mode = Mode::from_bits_retain(0o700);
 pub struct ExtractReport {
     /// Names written into the destination, not counting the destination directory itself.
     pub written: u64,
-    /// The paths not written because this process may not create them, in the image's own
-    /// spelling. Empty unless [`skip_privileged`](DirectorySink::skip_privileged) was set —
-    /// without it, the first such entry is an error instead.
+    /// The paths not written because the host refused to create them, in the image's own
+    /// spelling: a node this process may not make, under
+    /// [`skip_privileged`](DirectorySink::skip_privileged), and a name longer than the
+    /// destination takes or a device number wider than this host's, under
+    /// [`skip_unsupported`](DirectorySink::skip_unsupported).
+    /// Without the matching opt-in, the first such entry is an error instead. A directory's
+    /// path stands for everything under it.
     ///
     /// Named rather than counted, because a device node left out is a specific gap in a
     /// specific tree and a caller acts on which. The list stops at
@@ -114,16 +148,36 @@ pub struct ExtractReport {
     /// the process that wrote it. Only ever true under
     /// [`skip_privileged`](DirectorySink::skip_privileged).
     pub ownership_dropped: bool,
-    /// Whether any extended attribute could not be set because this process may not write it,
-    /// so an entry carrying one is written without it. `security.capability` on a setuid-free
-    /// binary and `security.selinux` on a labelled tree are the ones a root filesystem
-    /// carries. Only ever true under [`skip_privileged`](DirectorySink::skip_privileged).
+    /// The extended attributes left out of the tree, by name, each named once.
     ///
-    /// A flag rather than a list of paths, as
-    /// [`ownership_dropped`](Self::ownership_dropped) is: an SELinux-labelled tree carries a
-    /// reserved attribute on nearly every inode, and naming each would make what an extraction
-    /// holds grow with the size of the tree.
-    pub xattrs_dropped: bool,
+    /// An attribute is left out when the host refuses to set it and the matching opt-in was
+    /// given: one in the `security` or `trusted` namespace under
+    /// [`skip_privileged`](DirectorySink::skip_privileged), and one the destination will not
+    /// hold under [`skip_unsupported`](DirectorySink::skip_unsupported). Without it, the first
+    /// refusal is an error instead. `security.capability` on a setuid-free binary and
+    /// `security.selinux` on a labelled tree are the ones a root filesystem carries;
+    /// `com.apple.quarantine` is the one a volume a Mac wrote carries.
+    ///
+    /// Names rather than paths: an SELinux-labelled tree carries a reserved attribute on
+    /// nearly every inode, and naming each entry would make what an extraction holds grow
+    /// with the size of the tree. A name is the same however many entries carry it. The list
+    /// stops at [`MAX_DROPPED_XATTRS`](Self::MAX_DROPPED_XATTRS) names and
+    /// [`more_dropped_xattrs`](Self::more_dropped_xattrs) says the rest are not there.
+    pub dropped_xattrs: Vec<Vec<u8>>,
+    /// Whether more attribute names were left out than
+    /// [`dropped_xattrs`](Self::dropped_xattrs) names.
+    pub more_dropped_xattrs: bool,
+    /// The entries whose access or modification time the destination holds as another time
+    /// than the image records, under [`skip_unsupported`](DirectorySink::skip_unsupported):
+    /// a time before the earliest the destination keeps, past the latest, or finer than the
+    /// fraction it keeps. Each entry keeps the time the destination holds. Without the opt-in
+    /// the first such entry is an error instead. The list stops at
+    /// [`MAX_SKIPPED`](Self::MAX_SKIPPED) names and
+    /// [`more_times_not_held`](Self::more_times_not_held) says the rest are not there.
+    pub times_not_held: Vec<Vec<u8>>,
+    /// Whether more entries' times were not held than
+    /// [`times_not_held`](Self::times_not_held) names.
+    pub more_times_not_held: bool,
     /// What the source filesystem had no field for, so the tree carries an invented value of.
     ///
     /// A filesystem that records ownership, permission bits, and times reports nothing here,
@@ -131,9 +185,11 @@ pub struct ExtractReport {
     /// no notion of an owner — has those values filled from the [`Synthesis`] the sink was
     /// given, and every entry it happened to is named.
     ///
-    /// This is separate from [`skipped`](Self::skipped) and the two flags above, which are
-    /// about what *this host* refused. A property the image never held is not something the
-    /// host declined to write.
+    /// This is separate from [`skipped`](Self::skipped) and the fields above, which are about
+    /// what *this host* refused. A property the image never held is not something the
+    /// host declined to write. The one property recorded here as dropped is an entry's BSD
+    /// flags, which a Darwin filesystem records and no destination holds, under
+    /// [`skip_unsupported`](DirectorySink::skip_unsupported).
     pub fidelity: FidelityReport,
 }
 
@@ -163,6 +219,7 @@ pub struct DirectorySink {
     /// What the destination is called, for the failures that name it.
     root_path: PathBuf,
     skip_privileged: bool,
+    skip_unsupported: bool,
     synthesis: Synthesis,
 }
 
@@ -204,6 +261,7 @@ impl DirectorySink {
             root: fd,
             root_path,
             skip_privileged: false,
+            skip_unsupported: false,
             synthesis: Synthesis::new(),
         })
     }
@@ -224,9 +282,10 @@ impl DirectorySink {
 
     /// Write what this process may, rather than failing on what it may not.
     ///
-    /// A device node needs `CAP_MKNOD`, a recorded owner needs `CAP_CHOWN`, and an extended
-    /// attribute in the `security` or `trusted` namespace needs a privilege of its own, so an
-    /// extraction running as an ordinary user cannot reproduce a root filesystem exactly.
+    /// A device node needs `CAP_MKNOD`, a recorded owner needs `CAP_CHOWN` and, in a user
+    /// namespace, an id the namespace maps, and an extended attribute in the `security` or
+    /// `trusted` namespace needs a privilege of its own, so an extraction running as an
+    /// ordinary user cannot reproduce a root filesystem exactly.
     /// Without this it says so and stops, which is right when the tree is meant to be
     /// faithful. With it, a node the host refuses to make is left out, the tree is owned by
     /// the process that wrote it, and an attribute the host reserves is not set — and the
@@ -238,10 +297,34 @@ impl DirectorySink {
         self
     }
 
+    /// Write what the destination will hold, rather than failing on what it will not.
+    ///
+    /// Some of what an image records has no place on the destination whatever privilege the
+    /// process has: a name longer than the destination takes, and an extended attribute it
+    /// will not hold — one in no namespace this host knows, any attribute on a destination
+    /// that holds none, a `user` attribute on a symbolic link or a device node, a value larger
+    /// than the destination holds — a device number wider than this host's, a time the
+    /// destination keeps as another time, and the BSD flags a Darwin filesystem records.
+    /// Without this the extraction says so and stops. With it, an entry whose name the
+    /// destination refuses is left out, a directory with everything under it, an attribute the
+    /// destination refuses is not set, and BSD flags are not set — and the [`ExtractReport`]
+    /// names every path skipped and every attribute left out, and its fidelity every entry
+    /// whose flags were.
+    ///
+    /// Each limit but the flags is the destination's own: an entry or an attribute is left out
+    /// only after the destination has refused it, so a destination that holds more leaves out
+    /// less.
+    #[must_use]
+    pub fn skip_unsupported(mut self) -> Self {
+        self.skip_unsupported = true;
+        self
+    }
+
     /// Write the filesystem's whole tree into the destination.
     ///
     /// The destination directory takes the filesystem root's own mode, ownership, times, and
-    /// extended attributes; `/lost+found` and everything under it is omitted. Every other
+    /// extended attributes; an ext filesystem's `/lost+found` and everything under it is
+    /// omitted, since the format makes it for itself. Every other
     /// name the filesystem holds is written exactly once, with the second and later names for
     /// one node created as hard links to the first.
     ///
@@ -261,8 +344,12 @@ impl DirectorySink {
     /// [`HostError::Read`] if the filesystem cannot be read; [`HostError::Io`] if the
     /// destination cannot be written; [`HostError::HostileName`] if the image holds a name a
     /// directory cannot; [`HostError::Unprivileged`] if the tree needs a privilege this
-    /// process does not have and [`skip_privileged`](Self::skip_privileged) was not set; and
-    /// [`HostError::Acl`] if a stored POSIX ACL does not decode.
+    /// process does not have and [`skip_privileged`](Self::skip_privileged) was not set;
+    /// [`HostError::NameTooLong`], [`HostError::UnsupportedAttribute`] and
+    /// [`HostError::FlagsNotHeld`] if the tree holds a name, an attribute or BSD flags the
+    /// destination will not hold and [`skip_unsupported`](Self::skip_unsupported) was not set;
+    /// and [`HostError::Acl`] if a
+    /// stored POSIX ACL does not decode.
     pub fn write_tree<T: FsTree>(self, tree: &mut T) -> Result<ExtractReport, HostError> {
         let mut state = Extraction {
             sink: &self,
@@ -270,6 +357,7 @@ impl DirectorySink {
             named: HashMap::new(),
             open: Vec::new(),
             held: Vec::new(),
+            left_out: None,
         };
         let synthesis = self.synthesis;
 
@@ -279,7 +367,7 @@ impl DirectorySink {
         // with the root, under the empty path, which is what every top-level entry's parent
         // is.
         tree.walk_tree(|tree, entry| {
-            if is_lost_found(&entry.path) {
+            if made_by_the_format(&entry.path, tree.family()) {
                 return Ok(());
             }
             if entry.path.is_empty() {
@@ -288,6 +376,7 @@ impl DirectorySink {
                 // waits, like every directory's, until its children are written.
                 let attrs = tree.stat(&entry.node, &synthesis)?;
                 state.note_synthesis(&attrs, b"/");
+                state.note_flags(tree, &entry.node, b"/")?;
                 state.open.push(OpenDir {
                     path: Vec::new(),
                     fd: rustix::fs::openat(
@@ -348,6 +437,13 @@ impl ExtractReport {
     /// more than this many entries a process may not create is one where the *pattern* is
     /// the answer — no privilege at all — rather than a list to work through.
     pub const MAX_SKIPPED: usize = 1024;
+
+    /// The most attribute names one report lists as left out.
+    ///
+    /// Past it the names stop and [`more_dropped_xattrs`](Self::more_dropped_xattrs) says so.
+    /// A tree carries a handful of distinct attribute names; how many it carries is the
+    /// image's own claim, and what a report holds is a property of this crate.
+    pub const MAX_DROPPED_XATTRS: usize = 256;
 }
 
 /// One run of [`DirectorySink::write_tree`]: what has been written, and where it is being
@@ -365,6 +461,9 @@ struct Extraction<'a> {
     /// because the mode the image records for them denies their owner search permission.
     /// Drained once the walk is over.
     held: Vec<OpenDir>,
+    /// The directory most recently left out because the destination refused its name. The
+    /// walk reaches everything under it next, and there is no directory to create it in.
+    left_out: Option<Vec<u8>>,
 }
 
 impl Extraction<'_> {
@@ -375,6 +474,15 @@ impl Extraction<'_> {
         entry: TreeEntry<T::Node>,
         synthesis: &Synthesis,
     ) -> Result<(), HostError> {
+        // Everything under a directory the destination refused is left out with it, and the
+        // directory's own path in the report stands for all of it. The walk is depth-first,
+        // so the first entry outside that directory is the end of what it holds.
+        if let Some(dir) = &self.left_out {
+            if entry.path.starts_with(dir) && entry.path.get(dir.len()) == Some(&b'/') {
+                return Ok(());
+            }
+            self.left_out = None;
+        }
         let (parent, name) = split(&entry.path)?;
         // Every directory deeper than this entry's parent is finished: the walk is
         // depth-first, so nothing will be added to one again.
@@ -405,6 +513,7 @@ impl Extraction<'_> {
 
         let attrs = tree.stat(&entry.node, synthesis)?;
         self.note_synthesis(&attrs, &entry.path);
+        self.note_flags(tree, &entry.node, &entry.path)?;
 
         // A regular file is the one kind that leaves a handle behind, since writing it is
         // what opened one; its attributes and metadata go through that rather than through
@@ -412,13 +521,21 @@ impl Extraction<'_> {
         // effect of its own.
         let handle = match entry.kind {
             NodeKind::Directory => {
-                self.make_directory(name, &entry.path, &attrs)?;
+                if !self.make_directory(name, &entry.path, &attrs)? {
+                    self.left_out = Some(entry.path.clone());
+                    return Ok(());
+                }
                 None
             }
-            NodeKind::File { size } => Some(self.write_file(tree, name, &entry, size)?),
+            NodeKind::File { size } => match self.write_file(tree, name, &entry, size)? {
+                Some(fd) => Some(fd),
+                None => return Ok(()),
+            },
             NodeKind::Symlink => {
                 let target = tree.link_target(&entry.node)?;
-                self.make_symlink(&target, name, &entry.path)?;
+                if !self.make_symlink(&target, name, &entry.path)? {
+                    return Ok(());
+                }
                 None
             }
             NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } => {
@@ -490,6 +607,31 @@ impl Extraction<'_> {
         }
     }
 
+    /// Hold the BSD flags a node records to the destination, which holds none: an error naming
+    /// the entry, or under [`DirectorySink::skip_unsupported`] the flags left out and recorded
+    /// in the report's fidelity as dropped.
+    fn note_flags<T: FsTree>(
+        &mut self,
+        tree: &mut T,
+        node: &T::Node,
+        path: &[u8],
+    ) -> Result<(), HostError> {
+        let flags = flags_not_carried(tree, node)?;
+        if flags == 0 {
+            return Ok(());
+        }
+        if !self.sink.skip_unsupported {
+            return Err(HostError::FlagsNotHeld {
+                path: path.to_vec(),
+                flags,
+            });
+        }
+        self.report
+            .fidelity
+            .record(Direction::Dropped, path, Property::BsdFlags);
+        Ok(())
+    }
+
     /// The handle the entry being written goes into.
     fn dir(&self) -> &OwnedFd {
         &self
@@ -500,14 +642,18 @@ impl Extraction<'_> {
     }
 
     /// Create a directory and open it, so its children are written through a handle rather
-    /// than through its name.
+    /// than through its name. Reports whether it was created: a name the destination refuses
+    /// is left out rather than made under [`DirectorySink::skip_unsupported`].
     fn make_directory(
         &mut self,
         name: &[u8],
         path: &[u8],
         attrs: &Attributes,
-    ) -> Result<(), HostError> {
-        rustix::fs::mkdirat(self.dir(), name, BUILDING).map_err(|e| self.io(path, e.into()))?;
+    ) -> Result<bool, HostError> {
+        if let Err(e) = rustix::fs::mkdirat(self.dir(), name, BUILDING) {
+            self.refused_name(e, path, NAME)?;
+            return Ok(false);
+        }
         let fd = rustix::fs::openat(
             self.dir(),
             name,
@@ -521,7 +667,7 @@ impl Extraction<'_> {
             meta: attrs.meta,
             xattrs: attrs.xattrs.clone(),
         });
-        Ok(())
+        Ok(true)
     }
 
     /// A directory whose children are all written: finish it, or hold it back until the walk
@@ -568,7 +714,8 @@ impl Extraction<'_> {
     }
 
     /// Create a regular file and stream its contents into it, returning the handle its
-    /// attributes and metadata are then set through.
+    /// attributes and metadata are then set through — or nothing, for a name the destination
+    /// refuses under [`DirectorySink::skip_unsupported`].
     ///
     /// The bytes written are the file's contents as the filesystem reports them, and a hole
     /// reads as zeros — so a sparse file lands in the destination fully allocated, and a tree
@@ -580,7 +727,7 @@ impl Extraction<'_> {
         name: &[u8],
         entry: &TreeEntry<T::Node>,
         size: u64,
-    ) -> Result<OwnedFd, HostError> {
+    ) -> Result<Option<OwnedFd>, HostError> {
         // What a tree *writes* is driven entirely by the length the filesystem declares, and
         // a hole reads back as zeros — so an inode claiming terabytes and mapping nothing
         // fills the destination until it runs out of room, from an image of a few kilobytes.
@@ -589,13 +736,18 @@ impl Extraction<'_> {
         tree.check_file_size(&entry.path, size)?;
         // `EXCL` is what makes this a file this run created: nothing already at the name is
         // opened, written through, or followed.
-        let fd = rustix::fs::openat(
+        let fd = match rustix::fs::openat(
             self.dir(),
             name,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_bits_retain(0o600),
-        )
-        .map_err(|e| self.io(&entry.path, e.into()))?;
+        ) {
+            Ok(fd) => fd,
+            Err(e) => {
+                self.refused_name(e, &entry.path, NAME)?;
+                return Ok(None);
+            }
+        };
 
         let mut out = std::fs::File::from(fd);
         // The window is a ceiling, not the size: most entries in a root filesystem are a few
@@ -626,20 +778,28 @@ impl Extraction<'_> {
                 .map_err(|e| self.io(&entry.path, e))?;
             offset += filled as u64;
         }
-        Ok(OwnedFd::from(out))
+        Ok(Some(OwnedFd::from(out)))
     }
 
-    /// Create a symbolic link holding exactly the target the image records.
+    /// Create a symbolic link holding exactly the target the image records. Reports whether
+    /// it was created, as [`make_directory`](Self::make_directory) does.
     ///
     /// The target is written as it stands, absolute or `..`-relative or neither: reproducing
     /// the link is the whole point, and nothing here ever resolves one.
-    fn make_symlink(&mut self, target: &[u8], name: &[u8], path: &[u8]) -> Result<(), HostError> {
-        rustix::fs::symlinkat(target, self.dir(), name).map_err(|e| self.io(path, e.into()))
+    fn make_symlink(&mut self, target: &[u8], name: &[u8], path: &[u8]) -> Result<bool, HostError> {
+        match rustix::fs::symlinkat(target, self.dir(), name) {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                self.refused_name(e, path, NAME_OR_TARGET)?;
+                Ok(false)
+            }
+        }
     }
 
     /// Create a device node, FIFO, or socket. Reports whether it was created: a node this
     /// process may not make is skipped rather than made under
-    /// [`DirectorySink::skip_privileged`].
+    /// [`DirectorySink::skip_privileged`], and a name the destination refuses under
+    /// [`DirectorySink::skip_unsupported`].
     ///
     /// A device node is the one of the three that ordinarily needs a privilege, but all
     /// three answer a refusal the same way — a caller that asked for what it could have gets
@@ -653,6 +813,9 @@ impl Extraction<'_> {
         attrs: &Attributes,
     ) -> Result<bool, HostError> {
         match rustix::fs::mknodat(self.dir(), name, file_type, mode_of(&attrs.meta), dev) {
+            Ok(()) if matches!(file_type, FileType::CharacterDevice | FileType::BlockDevice) => {
+                self.held_device(name, path, dev)
+            }
             Ok(()) => Ok(true),
             Err(e) if forbidden(e) => {
                 if !self.sink.skip_privileged {
@@ -669,13 +832,55 @@ impl Extraction<'_> {
                 self.note_skipped(path);
                 Ok(false)
             }
-            Err(e) => Err(self.io(path, e.into())),
+            Err(e) => {
+                self.refused_name(e, path, NAME)?;
+                Ok(false)
+            }
         }
+    }
+
+    /// Read back the number a device node was made with, and take the node out again where
+    /// the host made it as another device. Reports whether the node stays, as
+    /// [`make_node`](Self::make_node) does.
+    ///
+    /// A device number is the image's, and another operating system's can be wider than this
+    /// host holds: a node made from it is then a node for whatever device the host's own
+    /// numbers came out as, made with no error. Reading the node back is what tells the two
+    /// apart, so it is the host's own answer that decides rather than a limit written here.
+    /// Under [`DirectorySink::skip_unsupported`] the node is left out and named; otherwise it
+    /// is an error naming the entry.
+    fn held_device(
+        &mut self,
+        name: &[u8],
+        path: &[u8],
+        dev: rustix::fs::Dev,
+    ) -> Result<bool, HostError> {
+        let made = rustix::fs::statat(self.dir(), name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| self.io(path, e.into()))?
+            .st_rdev;
+        let wanted = (rustix::fs::major(dev), rustix::fs::minor(dev));
+        if (rustix::fs::major(made), rustix::fs::minor(made)) == wanted {
+            return Ok(true);
+        }
+        // The node was made by this run a moment ago, through the handle to its directory, so
+        // the name removed is the one this run created.
+        rustix::fs::unlinkat(self.dir(), name, AtFlags::empty())
+            .map_err(|e| self.io(path, e.into()))?;
+        if !self.sink.skip_unsupported {
+            return Err(HostError::UnrepresentableDevice {
+                path: path.to_vec(),
+                major: wanted.0,
+                minor: wanted.1,
+            });
+        }
+        self.note_skipped(path);
+        Ok(false)
     }
 
     /// Create another name for a file already written, from the path that first named it.
     /// Reports whether it was created, as [`make_node`](Self::make_node) does: a link this
-    /// host refuses is skipped rather than made under [`DirectorySink::skip_privileged`].
+    /// host refuses is skipped rather than made under [`DirectorySink::skip_privileged`], and
+    /// a name the destination refuses under [`DirectorySink::skip_unsupported`].
     ///
     /// The first name's directory is re-opened one component at a time from the destination,
     /// since the walk has usually left it behind by the time a second name for it appears.
@@ -704,7 +909,10 @@ impl Extraction<'_> {
                 self.note_skipped(path);
                 Ok(false)
             }
-            Err(e) => Err(self.io(path, e.into())),
+            Err(e) => {
+                self.refused_name(e, path, NAME)?;
+                Ok(false)
+            }
         }
     }
 
@@ -775,7 +983,9 @@ impl Extraction<'_> {
         self.chown_fd(fd, meta, path)?;
         rustix::fs::fchmod(fd, mode_of(meta)).map_err(|e| self.io(path, e.into()))?;
         self.set_xattrs_on_fd(fd, xattrs, path)?;
-        rustix::fs::futimens(fd, &times_of(meta)).map_err(|e| self.io(path, e.into()))
+        rustix::fs::futimens(fd, &times_of(meta)).map_err(|e| self.io(path, e.into()))?;
+        let held = rustix::fs::fstat(fd).map_err(|e| self.io(path, e.into()))?;
+        self.took_times(meta, held_times(&held), path)
     }
 
     /// The same for a name in the current directory, which is what everything that cannot be
@@ -806,7 +1016,57 @@ impl Extraction<'_> {
         }
         self.set_xattrs_by_name(name, xattrs, path)?;
         rustix::fs::utimensat(self.dir(), name, &times_of(meta), flags)
-            .map_err(|e| self.io(path, e.into()))
+            .map_err(|e| self.io(path, e.into()))?;
+        let held =
+            rustix::fs::statat(self.dir(), name, flags).map_err(|e| self.io(path, e.into()))?;
+        self.took_times(meta, held_times(&held), path)
+    }
+
+    /// Judge the times a node holds once set, against the ones the image records: the same,
+    /// or an error naming the entry — or, under [`DirectorySink::skip_unsupported`], the time
+    /// the destination holds kept and the entry named.
+    ///
+    /// A destination keeps a time to a range and a fraction of its own. One written before the
+    /// earliest it keeps or past the latest is held as that bound, and a fraction finer than
+    /// it keeps is cut, and the call that set it reports no error either way. Reading the node
+    /// back is what tells the two apart, so it is the destination's own answer that decides
+    /// rather than a limit written here.
+    fn took_times(
+        &mut self,
+        meta: &Metadata,
+        held: [(i64, u32); 2],
+        path: &[u8],
+    ) -> Result<(), HostError> {
+        let recorded = [("access", meta.atime), ("modification", meta.mtime)];
+        for ((which, recorded), held) in recorded.into_iter().zip(held) {
+            if instant(recorded) == held {
+                continue;
+            }
+            if !self.sink.skip_unsupported {
+                return Err(HostError::TimeNotHeld {
+                    path: path.to_vec(),
+                    which,
+                    recorded,
+                    held: Timestamp {
+                        secs: held.0,
+                        nanos: held.1,
+                    },
+                });
+            }
+            self.note_time_not_held(path);
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Record an entry whose times the destination holds as other times, up to the ceiling the
+    /// report holds itself to.
+    fn note_time_not_held(&mut self, path: &[u8]) {
+        if self.report.times_not_held.len() < ExtractReport::MAX_SKIPPED {
+            self.report.times_not_held.push(path.to_vec());
+        } else {
+            self.report.more_times_not_held = true;
+        }
     }
 
     /// Set a name's recorded owner, honouring the skip policy.
@@ -836,20 +1096,24 @@ impl Extraction<'_> {
         result: rustix::io::Result<()>,
         path: &[u8],
     ) -> Result<(), HostError> {
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) if forbidden(e) => {
-                if !self.sink.skip_privileged {
-                    return Err(HostError::Unprivileged {
-                        path: path.to_vec(),
-                        what: "an owner other than this process's needs CAP_CHOWN to set",
-                    });
-                }
-                self.report.ownership_dropped = true;
-                Ok(())
+        // Root in a user namespace holds CAP_CHOWN and still cannot give a node an owner the
+        // namespace maps to no id, which the kernel answers with EINVAL.
+        let what = match result {
+            Ok(()) => return Ok(()),
+            Err(e) if forbidden(e) => "an owner other than this process's needs CAP_CHOWN to set",
+            Err(rustix::io::Errno::INVAL) => {
+                "an owner this user namespace maps to no id cannot be set"
             }
-            Err(e) => Err(self.io(path, e.into())),
+            Err(e) => return Err(self.io(path, e.into())),
+        };
+        if !self.sink.skip_privileged {
+            return Err(HostError::Unprivileged {
+                path: path.to_vec(),
+                what,
+            });
         }
+        self.report.ownership_dropped = true;
+        Ok(())
     }
 
     /// Set the extended attributes of a name in the current directory.
@@ -919,7 +1183,15 @@ impl Extraction<'_> {
     /// so on a symbolic link or a device node they fail identically for root. Reported as a
     /// missing privilege they would name a namespace the attribute is not in and prescribe a
     /// privilege that would not help, so they are told apart here: `opened` is false exactly
-    /// for the kinds the rule applies to, since it is those that cannot be opened.
+    /// for the kinds the rule applies to, since it is those that cannot be opened. They are
+    /// the destination's rule rather than the process's, and go with
+    /// [`DirectorySink::skip_unsupported`].
+    ///
+    /// So does `EOPNOTSUPP`, the answer to a name in no namespace this host knows and to any
+    /// name on a destination that holds no attributes, and so do `E2BIG`, `ENOSPC` and
+    /// `ERANGE`, the answers to a value larger than the kernel takes for one attribute, than
+    /// the room the destination keeps for a node's attributes, or than a limit of its own:
+    /// no privilege changes any of them.
     fn took_xattr(
         &mut self,
         result: rustix::io::Result<()>,
@@ -927,30 +1199,84 @@ impl Extraction<'_> {
         name: &[u8],
         opened: bool,
     ) -> Result<(), HostError> {
-        match result {
-            Ok(()) => Ok(()),
+        let why = match result {
+            Ok(()) => return Ok(()),
             Err(e) if forbidden(e) => {
                 let by_kind = !opened
                     && (name.starts_with(b"user.") || name == crate::acl::Acl::DEFAULT_NAME);
-                if !self.sink.skip_privileged {
-                    return Err(if by_kind {
-                        HostError::UnsupportedAttribute {
-                            path: path.to_vec(),
-                            name: name.to_vec(),
-                        }
-                    } else {
-                        HostError::Unprivileged {
+                if !by_kind {
+                    if !self.sink.skip_privileged {
+                        return Err(HostError::Unprivileged {
                             path: path.to_vec(),
                             what: "an extended attribute in the security or trusted namespace \
                                    needs privilege to set",
-                        }
-                    });
+                        });
+                    }
+                    self.note_dropped_xattr(name);
+                    return Ok(());
                 }
-                self.report.xattrs_dropped = true;
-                Ok(())
+                "it holds this attribute only on other kinds of node"
             }
-            Err(e) => Err(self.io(path, e.into())),
+            Err(rustix::io::Errno::OPNOTSUPP) => {
+                "the destination holds no attribute in this namespace"
+            }
+            // Past the kernel's ceiling for one value, past the room the destination keeps
+            // for a node's attributes, or past a limit of the destination's own.
+            Err(
+                rustix::io::Errno::TOOBIG | rustix::io::Errno::NOSPC | rustix::io::Errno::RANGE,
+            ) => "the destination holds no attribute this large",
+            Err(e) => return Err(self.io(path, e.into())),
+        };
+        if !self.sink.skip_unsupported {
+            return Err(HostError::UnsupportedAttribute {
+                path: path.to_vec(),
+                name: name.to_vec(),
+                why,
+            });
         }
+        self.note_dropped_xattr(name);
+        Ok(())
+    }
+
+    /// Record an attribute name this run left out, once, up to the ceiling the report holds
+    /// itself to.
+    fn note_dropped_xattr(&mut self, name: &[u8]) {
+        let dropped = &mut self.report.dropped_xattrs;
+        if dropped.iter().any(|seen| seen == name) {
+            return;
+        }
+        if dropped.len() < ExtractReport::MAX_DROPPED_XATTRS {
+            dropped.push(name.to_vec());
+        } else {
+            self.report.more_dropped_xattrs = true;
+        }
+    }
+
+    /// Judge a create call the destination refused: an error naming the entry, or — for a
+    /// name longer than the destination takes, under [`DirectorySink::skip_unsupported`] —
+    /// the entry recorded as skipped, after which the caller writes nothing for it.
+    ///
+    /// `ENAMETOOLONG` is the destination's own limit and no privilege changes it, so it is the
+    /// one refusal here an opt-in can step past. `what` names what was too long: a symbolic
+    /// link's target is held to a limit of the destination's as well, and the host answers
+    /// both alike.
+    fn refused_name(
+        &mut self,
+        e: rustix::io::Errno,
+        path: &[u8],
+        what: &'static str,
+    ) -> Result<(), HostError> {
+        if e != rustix::io::Errno::NAMETOOLONG {
+            return Err(self.io(path, e.into()));
+        }
+        if !self.sink.skip_unsupported {
+            return Err(HostError::NameTooLong {
+                path: path.to_vec(),
+                what,
+            });
+        }
+        self.note_skipped(path);
+        Ok(())
     }
 
     /// Record a path this run left out, up to the ceiling the report holds itself to.
@@ -1030,11 +1356,6 @@ fn check_name(name: &[u8], path: &[u8]) -> Result<(), HostError> {
     })
 }
 
-/// Whether a path is `/lost+found` or something inside it.
-fn is_lost_found(path: &[u8]) -> bool {
-    path == LOST_FOUND || path.starts_with(b"/lost+found/")
-}
-
 /// An image path or name as an [`OsStr`](std::ffi::OsStr): the bytes themselves, since a path
 /// on this host is bytes too.
 fn display(bytes: &[u8]) -> &Path {
@@ -1087,21 +1408,40 @@ fn times_of(meta: &Metadata) -> Timestamps {
     }
 }
 
-/// One recorded time as the host takes it.
+/// One recorded time as the instant it names: whole seconds, and a fraction below one.
 ///
 /// A filesystem's stored fraction need not divide a second — ext4's is a thirty-bit field —
 /// so an image this crate did not write can name more nanoseconds than a second holds, which
 /// `utimensat` refuses outright. The excess is carried into the seconds, so the time set is
-/// the instant the two fields describe.
-fn timespec(t: Timestamp) -> Timespec {
+/// the instant the two fields describe, and the time read back is compared with that instant.
+fn instant(t: Timestamp) -> (i64, u32) {
     let carry = i64::from(t.nanos / Timestamp::NANOS_PER_SEC);
-    let nanos = t.nanos % Timestamp::NANOS_PER_SEC;
+    (
+        t.secs.saturating_add(carry),
+        t.nanos % Timestamp::NANOS_PER_SEC,
+    )
+}
+
+/// One recorded time as the host takes it.
+fn timespec(t: Timestamp) -> Timespec {
+    let (tv_sec, nanos) = instant(t);
     Timespec {
-        tv_sec: t.secs.saturating_add(carry),
-        // Bounded below a second by the line above, so it is exact at every width the host
-        // spells this field in.
+        tv_sec,
+        // Below a second, so it is exact at every width the host spells this field in.
         tv_nsec: nanos as _,
     }
+}
+
+/// The access and modification times a node holds, as the host reports them.
+///
+/// Each field's width is the platform's own, and each is read into the one pair of widths the
+/// recorded times are compared in: the seconds are signed on every platform, and the fraction
+/// is below a second.
+fn held_times(stat: &rustix::fs::Stat) -> [(i64, u32); 2] {
+    [
+        (stat.st_atime as _, stat.st_atime_nsec as _),
+        (stat.st_mtime as _, stat.st_mtime_nsec as _),
+    ]
 }
 
 impl From<TreeError> for HostError {
@@ -1113,6 +1453,181 @@ impl From<TreeError> for HostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One run of a sink, for the tests that judge a single answer the host gave.
+    fn extraction(sink: &DirectorySink) -> Extraction<'_> {
+        Extraction {
+            sink,
+            report: ExtractReport::default(),
+            named: HashMap::new(),
+            open: Vec::new(),
+            held: Vec::new(),
+            left_out: None,
+        }
+    }
+
+    #[test]
+    fn an_owner_the_user_namespace_does_not_map_is_a_privilege_the_run_lacks() {
+        // Root in a user namespace holds CAP_CHOWN, and the kernel answers EINVAL for an owner
+        // the namespace maps to no id: the owner cannot be set here, as without the privilege.
+        let host = tempfile::tempdir().expect("temp dir");
+        for refusal in [rustix::io::Errno::PERM, rustix::io::Errno::INVAL] {
+            let strict = DirectorySink::new(host.path()).expect("an empty destination");
+            let mut run = extraction(&strict);
+            assert!(
+                matches!(
+                    run.took_ownership(Err(refusal), b"/file"),
+                    Err(HostError::Unprivileged { .. })
+                ),
+                "{refusal:?}"
+            );
+            let lenient = DirectorySink::new(host.path())
+                .expect("an empty destination")
+                .skip_privileged();
+            let mut run = extraction(&lenient);
+            run.took_ownership(Err(refusal), b"/file")
+                .expect("left to the process that wrote it");
+            assert!(run.report.ownership_dropped, "{refusal:?}");
+        }
+    }
+
+    #[test]
+    fn a_node_the_host_made_as_another_device_is_taken_out_again() {
+        // Making a device node takes a privilege, so this asks the read-back of a node any
+        // process can make: a FIFO carries no device number, so read back against one it is
+        // a node the host made as another device than the one asked for.
+        let host = tempfile::tempdir().expect("temp dir");
+        let wanted = rustix::fs::makedev(255, 16_777_215);
+        for skip in [false, true] {
+            let sink = DirectorySink::new(host.path()).expect("an empty destination");
+            let sink = if skip { sink.skip_unsupported() } else { sink };
+            let mut run = extraction(&sink);
+            run.open.push(OpenDir {
+                path: Vec::new(),
+                fd: rustix::fs::openat(
+                    &sink.root,
+                    c".",
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .expect("the destination"),
+                meta: Metadata::new(0o755, Timestamp::from_secs(0)),
+                xattrs: Vec::new(),
+            });
+            rustix::fs::mknodat(
+                run.dir(),
+                "node",
+                FileType::Fifo,
+                Mode::from_bits_retain(0o600),
+                0,
+            )
+            .expect("a FIFO");
+            let held = run.held_device(b"node", b"/node", wanted);
+            if skip {
+                assert!(!held.expect("left out on request"));
+                assert_eq!(run.report.skipped, vec![b"/node".to_vec()]);
+            } else {
+                assert!(matches!(
+                    held,
+                    Err(HostError::UnrepresentableDevice {
+                        major: 255,
+                        minor: 16_777_215,
+                        ..
+                    })
+                ));
+            }
+            assert!(
+                !host.path().join("node").exists(),
+                "the node made as another device is not left behind"
+            );
+        }
+    }
+
+    #[test]
+    fn a_time_the_destination_holds_as_another_is_refused_or_named() {
+        // Which times a destination keeps is its own: a range, and a fraction. The node is read
+        // back once its times are set, and these are the answers that read-back can give.
+        let host = tempfile::tempdir().expect("temp dir");
+        let recorded = Metadata::new(0o644, Timestamp::from_secs(-2_208_988_805));
+        let held = [(-2_147_483_648, 0), (-2_208_988_805, 0)];
+        let sink = DirectorySink::new(host.path()).expect("an empty destination");
+        let mut run = extraction(&sink);
+        assert!(matches!(
+            run.took_times(&recorded, held, b"/old"),
+            Err(HostError::TimeNotHeld {
+                which: "access",
+                ..
+            })
+        ));
+        let sink = DirectorySink::new(host.path())
+            .expect("an empty destination")
+            .skip_unsupported();
+        let mut run = extraction(&sink);
+        run.took_times(&recorded, held, b"/old")
+            .expect("kept as held on request");
+        assert_eq!(run.report.times_not_held, vec![b"/old".to_vec()]);
+        // A fraction cut, and a fraction past a second carried into the seconds it names:
+        // the first is another time, the second is the same one.
+        let fine = Metadata::new(
+            0o644,
+            Timestamp {
+                secs: 10,
+                nanos: 123_456_789,
+            },
+        );
+        assert!(
+            run.took_times(&fine, [(10, 123_456_000); 2], b"/fine")
+                .is_ok()
+        );
+        assert_eq!(run.report.times_not_held.len(), 2);
+        let carried = Metadata::new(
+            0o644,
+            Timestamp {
+                secs: 10,
+                nanos: 1_500_000_000,
+            },
+        );
+        run.took_times(&carried, [(11, 500_000_000); 2], b"/carried")
+            .expect("the same instant");
+        assert_eq!(run.report.times_not_held.len(), 2);
+    }
+
+    #[test]
+    fn an_attribute_too_large_for_the_destination_is_the_destinations_refusal() {
+        // A value past the kernel's ceiling for one attribute, one the destination has no
+        // room for, and one past a limit of the destination's own are each the destination
+        // declining to hold it, whatever privilege the process has — the same refusal as an
+        // attribute in no namespace the host knows.
+        use rustix::io::Errno;
+        let host = tempfile::tempdir().expect("temp dir");
+        for errno in [Errno::TOOBIG, Errno::NOSPC, Errno::RANGE] {
+            let sink = DirectorySink::new(host.path()).expect("an empty destination");
+            let mut run = extraction(&sink);
+            assert!(
+                matches!(
+                    run.took_xattr(Err(errno), b"/f", b"user.big", true),
+                    Err(HostError::UnsupportedAttribute { .. })
+                ),
+                "{errno:?} is refused by name"
+            );
+            let sink = DirectorySink::new(host.path())
+                .expect("an empty destination")
+                .skip_unsupported();
+            let mut run = extraction(&sink);
+            run.took_xattr(Err(errno), b"/f", b"user.big", true)
+                .expect("left out on request");
+            assert_eq!(run.report.dropped_xattrs, vec![b"user.big".to_vec()]);
+        }
+        // A failure that is no rule of the destination's stays the failure it was.
+        let sink = DirectorySink::new(host.path())
+            .expect("an empty destination")
+            .skip_unsupported();
+        let mut run = extraction(&sink);
+        assert!(matches!(
+            run.took_xattr(Err(Errno::IO), b"/f", b"user.big", true),
+            Err(HostError::Io { .. })
+        ));
+    }
 
     #[test]
     fn an_image_path_lands_under_the_destination_rather_than_replacing_it() {
@@ -1156,14 +1671,5 @@ mod tests {
         for name in [&b"etc"[..], b"..a", b"a..", b"...", b"\xff\xfe"] {
             assert!(check_name(name, b"/x").is_ok(), "{name:?} is a name");
         }
-    }
-
-    #[test]
-    fn lost_and_found_is_recognized_with_its_contents() {
-        assert!(is_lost_found(b"/lost+found"));
-        assert!(is_lost_found(b"/lost+found/17"));
-        // A name that merely begins the same way is a different file.
-        assert!(!is_lost_found(b"/lost+found-old"));
-        assert!(!is_lost_found(b"/etc/lost+found"));
     }
 }

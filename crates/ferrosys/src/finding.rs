@@ -77,6 +77,9 @@ pub enum Family {
     /// The btrfs family.
     #[cfg(feature = "btrfs")]
     Btrfs,
+    /// The APFS family.
+    #[cfg(feature = "apfs")]
+    Apfs,
 }
 
 impl Family {
@@ -94,6 +97,8 @@ impl Family {
             Family::ExFat => "exfat",
             #[cfg(feature = "btrfs")]
             Family::Btrfs => "btrfs",
+            #[cfg(feature = "apfs")]
+            Family::Apfs => "apfs",
         }
     }
 }
@@ -152,7 +157,7 @@ pub struct Finding {
 /// consumer can branch on. It changes only when the shape changes: a field added, renamed,
 /// or removed, or a value's spelling altered. The [SARIF](FindingReport::to_sarif)
 /// projection is versioned by SARIF itself and does not carry this.
-pub const FINDINGS_SCHEMA_VERSION: u32 = 2;
+pub const FINDINGS_SCHEMA_VERSION: u32 = 3;
 
 /// A set of findings and what the scan that produced them managed to look at.
 ///
@@ -163,7 +168,10 @@ pub const FINDINGS_SCHEMA_VERSION: u32 = 2;
 /// [`to_table`](Self::to_table) project them for a machine or a person.
 ///
 /// A report says through [`is_truncated`](Self::is_truncated) when the scan stopped at its
-/// findings cap with the image still unfinished.
+/// findings cap with the image still unfinished, and through
+/// [`source_failures`](Self::source_failures) when the source the image was read from failed
+/// a read.
+///
 /// # Two serializations, and which is the document
 ///
 /// [`to_json`](Self::to_json) and [`to_sarif`](Self::to_sarif) emit *documents*: a shape
@@ -180,6 +188,9 @@ pub const FINDINGS_SCHEMA_VERSION: u32 = 2;
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FindingReport {
     findings: Vec<Finding>,
+    /// Reads the source failed for a reason other than ending, each projected as a finding
+    /// would be. See [`source_failures`](Self::source_failures).
+    source_failures: Vec<Finding>,
     truncated: bool,
     /// The findings cap the scan that produced this report ran under, which a caller may
     /// set to anything. Kept so a truncation notice names the bound that actually applied
@@ -196,6 +207,7 @@ impl Default for FindingReport {
     fn default() -> Self {
         Self {
             findings: Vec::new(),
+            source_failures: Vec::new(),
             truncated: false,
             cap: Self::MAX_FINDINGS,
         }
@@ -222,15 +234,41 @@ impl FindingReport {
     pub fn new(findings: Vec<Finding>, truncated: bool, cap: usize) -> Self {
         Self {
             findings,
+            source_failures: Vec::new(),
             truncated,
             cap,
         }
+    }
+
+    /// This report, recording `failures` as reads the source failed.
+    #[must_use]
+    pub fn with_source_failures(mut self, failures: Vec<Finding>) -> Self {
+        self.source_failures = failures;
+        self
     }
 
     /// The findings, in the order the scan walked them.
     #[must_use]
     pub fn findings(&self) -> &[Finding] {
         &self.findings
+    }
+
+    /// The reads the source failed while the scan ran, for a reason other than ending, each
+    /// as a finding would name where it was.
+    ///
+    /// A failure of the source is the environment's and not the image's — a disk returning
+    /// an error, a network share going away — so none is a finding, and none counts towards
+    /// [`worst_severity`](Self::worst_severity) or [`has_fatal`](Self::has_fatal). A source
+    /// that *ends* early is the image's, and a short read stays a finding of the family that
+    /// met it.
+    ///
+    /// A scan whose source failed has not looked at what the failed read held, nor at what
+    /// that would have led to, so a report holding one is never [clean](Self::is_clean), and
+    /// its findings are what the scan met before and around the failures rather than an
+    /// account of the image.
+    #[must_use]
+    pub fn source_failures(&self) -> &[Finding] {
+        &self.source_failures
     }
 
     /// Whether the scan stopped at its findings cap with the image still unfinished.
@@ -251,10 +289,11 @@ impl FindingReport {
     /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
     /// holds. The cap can be set low enough that a scan stops before reporting anything —
     /// at zero, before reading a single structure — and an empty report from a scan that
-    /// stopped is an absence of looking, not an absence of faults.
+    /// stopped is an absence of looking, not an absence of faults. A report holding a
+    /// [source failure](Self::source_failures) is not clean either, for the same reason.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        !self.truncated && self.findings.is_empty()
+        !self.truncated && self.findings.is_empty() && self.source_failures.is_empty()
     }
 
     /// The severity of the most serious finding, or `None` when the report is clean.
@@ -272,12 +311,12 @@ impl FindingReport {
     }
 
     /// Render the report as a JSON object: `schema`, `clean` (bool), `count`, `truncated`
-    /// (bool), and a `findings` array. A projection computed here, not a stored wire
-    /// format.
+    /// (bool), a `findings` array, and a `source_failures` array whose records are shaped as
+    /// the findings' are. A projection computed here, not a stored wire format.
     ///
-    /// `truncated` is always present, true or false: a consumer must be able to tell a
-    /// complete report from one that stopped at its findings cap, and an absent field would
-    /// read as complete.
+    /// `truncated` and `source_failures` are always present: a consumer must be able to tell
+    /// a complete report from one that stopped at its findings cap or lost a read to its
+    /// source, and an absent field would read as complete. `count` counts the findings.
     ///
     /// The document opens with `"schema"`, holding [`FINDINGS_SCHEMA_VERSION`]. A
     /// downstream parser has a contract that no Rust signature describes, so the emitted
@@ -296,6 +335,11 @@ impl FindingReport {
             push_finding_json(findings.obj(), f);
         }
         findings.end();
+        let mut failures = o.arr("source_failures");
+        for f in &self.source_failures {
+            push_finding_json(failures.obj(), f);
+        }
+        failures.end();
         o.end();
         out
     }
@@ -315,9 +359,10 @@ impl FindingReport {
     ///
     /// A report that stopped at its findings cap carries a warning-level
     /// `toolExecutionNotifications` entry saying so, naming the cap that applied, which is
-    /// where SARIF records something about the run rather than about the artifact. A
-    /// complete report emits no `invocations` at all, so the document a clean or short scan
-    /// renders is unchanged by the cap existing.
+    /// where SARIF records something about the run rather than about the artifact. Each
+    /// [source failure](Self::source_failures) is an error-level entry there, and marks the
+    /// invocation as not successful. A complete report emits no `invocations` at all, so the
+    /// document a clean or short scan renders is unchanged by the cap existing.
     ///
     /// `artifact_uri`, when set, becomes each result's physical artifact location: a reader
     /// reads an anonymous stream, so the image's identity is the caller's to supply. It is
@@ -351,20 +396,30 @@ impl FindingReport {
         }
         results.end();
 
-        if self.truncated {
+        if self.truncated || !self.source_failures.is_empty() {
             let mut invocations = run.arr("invocations");
             let mut invocation = invocations.obj();
-            // `executionSuccessful` is required of an invocation: the scan did run to the
-            // cap, so it succeeded — the notification is what says the results stop short of
-            // the image.
-            invocation.bool("executionSuccessful", true);
+            // `executionSuccessful` is required of an invocation. A scan that ran to the cap
+            // succeeded, and the notification is what says the results stop short of the
+            // image; a scan its source failed did not.
+            invocation.bool("executionSuccessful", self.source_failures.is_empty());
             let mut notifications = invocation.arr("toolExecutionNotifications");
-            let mut notification = notifications.obj();
-            notification.str("level", "warning");
-            let mut message = notification.obj("message");
-            message.str("text", &self.truncation_notice());
-            message.end();
-            notification.end();
+            for f in &self.source_failures {
+                let mut notification = notifications.obj();
+                notification.str("level", "error");
+                let mut message = notification.obj("message");
+                message.str("text", &source_failure_line(f));
+                message.end();
+                notification.end();
+            }
+            if self.truncated {
+                let mut notification = notifications.obj();
+                notification.str("level", "warning");
+                let mut message = notification.obj("message");
+                message.str("text", &self.truncation_notice());
+                message.end();
+                notification.end();
+            }
             notifications.end();
             invocation.end();
             invocations.end();
@@ -382,17 +437,32 @@ impl FindingReport {
     ///
     /// A [`truncated`](Self::is_truncated) report ends with the notice saying so, whether
     /// or not it holds findings — an empty one is the case where saying so matters most,
-    /// since `no findings` on its own would read as a verdict the scan never reached.
+    /// since `no findings` on its own would read as a verdict the scan never reached. Each
+    /// [source failure](Self::source_failures) is a line after the findings, for the same
+    /// reason.
     #[must_use]
     pub fn to_table(&self) -> String {
-        if self.findings.is_empty() {
-            let mut out = String::from("no findings\n");
-            if self.truncated {
-                out.push('\n');
-                out.push_str(&self.truncation_notice());
+        let mut out = self.findings_table();
+        if !self.source_failures.is_empty() {
+            out.push('\n');
+            for f in &self.source_failures {
+                out.push_str(&source_failure_line(f));
                 out.push('\n');
             }
-            return out;
+        }
+        if self.truncated {
+            out.push('\n');
+            out.push_str(&self.truncation_notice());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The findings as the table renders them: a clean `no findings` line, or a header row
+    /// and one row per finding.
+    fn findings_table(&self) -> String {
+        if self.findings.is_empty() {
+            return String::from("no findings\n");
         }
         let rows: Vec<(&str, &str, String, &str)> = self
             .findings
@@ -421,11 +491,6 @@ impl FindingReport {
         for (s, c, l, d) in &rows {
             out.push_str(&format!("{s:<sev_w$}  {c:<cat_w$}  {l:<loc_w$}  {d}\n"));
         }
-        if self.truncated {
-            out.push('\n');
-            out.push_str(&self.truncation_notice());
-            out.push('\n');
-        }
         out
     }
 
@@ -440,6 +505,17 @@ impl FindingReport {
             "report truncated at {} findings; the rest of the image was not scanned",
             self.cap
         )
+    }
+}
+
+/// The one line a source failure renders as, in the table and in a SARIF notification: what
+/// failed, and where the scan was when it did.
+fn source_failure_line(f: &Finding) -> String {
+    let location = location_compact(f);
+    if location == "-" {
+        format!("source failure: {}", f.detail)
+    } else {
+        format!("source failure at {location}: {}", f.detail)
     }
 }
 
@@ -461,6 +537,14 @@ pub trait Deviation {
     /// it is supplied rather than carried by the deviation because it is a property of the
     /// filesystem the scan ran over rather than of any one finding in it.
     fn to_finding(&self, unit: u32) -> Finding;
+
+    /// Whether this records a read the source failed for a reason other than ending, rather
+    /// than a deviation of the filesystem.
+    ///
+    /// A scan reports such a record among its
+    /// [`source_failures`](ScanReport::source_failures) rather than among its findings, so a
+    /// failing disk is never a verdict about the filesystem on it.
+    fn is_source_failure(&self) -> bool;
 }
 
 /// Build a [`Finding`] from a family's severity, subsystem, description, and named
@@ -481,7 +565,13 @@ pub trait Deviation {
 /// The multiplication is checked. A block or sector number out of an untrusted image can be
 /// anything, and a product that does not fit means the unit is not in the image at all, so
 /// there is no offset to name rather than a wrapped one to name wrongly.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn project(
     severity: Severity,
     family: Family,
@@ -523,6 +613,8 @@ pub(crate) fn project(
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ScanReport<A> {
     anomalies: Vec<A>,
+    /// Reads the source failed. See [`source_failures`](Self::source_failures).
+    source_failures: Vec<A>,
     truncated: bool,
     /// The findings cap the scan that produced this report ran under — the
     /// [`Limits::max_findings`](crate::Limits::max_findings) it was opened with, which a
@@ -548,6 +640,7 @@ impl<A> Default for ScanReport<A> {
     fn default() -> Self {
         Self {
             anomalies: Vec::new(),
+            source_failures: Vec::new(),
             truncated: false,
             cap: FindingReport::MAX_FINDINGS,
             unit: 0,
@@ -560,6 +653,19 @@ impl<A> ScanReport<A> {
     #[must_use]
     pub fn anomalies(&self) -> &[A] {
         &self.anomalies
+    }
+
+    /// The reads the source failed while the scan ran, for a reason other than ending, in
+    /// scan order.
+    ///
+    /// None is a deviation of the filesystem, and none counts towards
+    /// [`worst_severity`](Self::worst_severity) or [`has_fatal`](Self::has_fatal): a disk
+    /// returning an error says nothing about the filesystem on it. A report holding one is
+    /// never [clean](Self::is_clean), since the scan did not look at what the failed read
+    /// held. [`FindingReport::source_failures`] says the rest.
+    #[must_use]
+    pub fn source_failures(&self) -> &[A] {
+        &self.source_failures
     }
 
     /// Whether the scan stopped at its findings cap with the filesystem still unfinished.
@@ -580,22 +686,34 @@ impl<A> ScanReport<A> {
     /// A [`truncated`](Self::is_truncated) report is never clean, however few findings it
     /// holds. The cap can be set low enough that a scan stops before reporting anything — at
     /// zero, before reading a single structure — and an empty report from a scan that stopped
-    /// is an absence of looking, not an absence of faults.
+    /// is an absence of looking, not an absence of faults. A report holding a
+    /// [source failure](Self::source_failures) is not clean either, for the same reason.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        !self.truncated && self.anomalies.is_empty()
+        !self.truncated && self.anomalies.is_empty() && self.source_failures.is_empty()
     }
 }
 
 impl<A: Deviation> ScanReport<A> {
-    /// A report holding `anomalies`, from a scan that ran under `cap` over a filesystem
-    /// addressing in units of `unit` bytes, and stopped early if `truncated`.
+    /// A report holding what `met` records, from a scan that ran under `cap` over a
+    /// filesystem addressing in units of `unit` bytes, and stopped early if `truncated`.
+    ///
+    /// The source failures among `met` are held apart from the deviations, in the order they
+    /// were met, which is what keeps every family's scan from deciding it at each read.
     ///
     /// Compiled where a family is: with none there is no scan to produce one.
-    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
-    pub(crate) fn new(anomalies: Vec<A>, truncated: bool, cap: usize, unit: u32) -> Self {
+    #[cfg(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ))]
+    pub(crate) fn new(met: Vec<A>, truncated: bool, cap: usize, unit: u32) -> Self {
+        let (source_failures, anomalies) = met.into_iter().partition(Deviation::is_source_failure);
         Self {
             anomalies,
+            source_failures,
             truncated,
             cap,
             unit,
@@ -627,17 +745,14 @@ impl<A: Deviation> ScanReport<A> {
     ///
     /// Each deviation becomes a [`Finding`] carrying the same severity, its family's own
     /// subsystem word as the category, its coordinates under that family's own names, and —
-    /// where the location resolves to one — the byte offset it sits at. Truncation and the cap
-    /// that caused it carry across, so the projected report says the same thing about how much
-    /// of the filesystem was looked at.
+    /// where the location resolves to one — the byte offset it sits at. Truncation, the cap
+    /// that caused it, and the source failures carry across, so the projected report says the
+    /// same thing about how much of the filesystem was looked at.
     #[must_use]
     pub fn to_report(&self) -> FindingReport {
-        let findings = self
-            .anomalies
-            .iter()
-            .map(|a| a.to_finding(self.unit))
-            .collect();
-        FindingReport::new(findings, self.truncated, self.cap)
+        let project = |met: &[A]| met.iter().map(|a| a.to_finding(self.unit)).collect();
+        FindingReport::new(project(&self.anomalies), self.truncated, self.cap)
+            .with_source_failures(project(&self.source_failures))
     }
 }
 
@@ -645,11 +760,18 @@ impl<A: Deviation> ScanReport<A> {
 ///
 /// One sentence for every family, because it is one fact each format records in a place of
 /// its own: a FAT volume's boot sector or table, an exFAT volume's flags, an ext superblock's
-/// state or its journal's recovery flag, and a btrfs superblock's log tree. It says what the
+/// state or its journal's recovery flag, a btrfs superblock's log tree, and an APFS checkpoint
+/// a write began and did not finish. It says what the
 /// record means rather than which field held it, so a caller reads the same line whichever
 /// family answered. The record is the format working rather than failing, so every family
 /// reports it at [`Severity::Cosmetic`], and a strict read is unaffected by it.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) const NOT_CLEANLY_UNMOUNTED: &str =
     "the filesystem was not cleanly unmounted, so its metadata may not describe its contents";
 
@@ -672,14 +794,26 @@ pub(crate) const MEDIUM_FAILURE: &str =
 /// discard.
 ///
 /// Compiled where a family is: with none there is no scan to collect into one.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) struct Findings<A> {
     anomalies: Vec<A>,
     cap: usize,
     truncated: bool,
 }
 
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 impl<A> Findings<A> {
     /// An empty accumulator holding at most `cap` deviations.
     pub(crate) fn new(cap: usize) -> Self {
@@ -751,12 +885,29 @@ impl<A> Findings<A> {
     }
 }
 
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 impl<A: Deviation> Findings<A> {
     /// The report these deviations make, over a filesystem addressing in units of `unit`
     /// bytes.
     pub(crate) fn into_report(self, unit: u32) -> ScanReport<A> {
         ScanReport::new(self.anomalies, self.truncated, self.cap, unit)
+    }
+
+    /// Whether a read of the source failed while these were gathered.
+    ///
+    /// A question only the whole filesystem answers — which clusters nothing reaches — has
+    /// no answer then, since what the failed read held was not looked at.
+    ///
+    /// Compiled where a family asks such a question of a walk, which is FAT's and exFAT's.
+    #[cfg(any(feature = "fat", feature = "exfat"))]
+    pub(crate) fn met_source_failure(&self) -> bool {
+        self.anomalies.iter().any(Deviation::is_source_failure)
     }
 }
 

@@ -1,4 +1,4 @@
-//! Undoing the three encodings a filesystem stores a run of bytes in fewer of them.
+//! Undoing the six encodings a filesystem stores a run of bytes in fewer of them.
 //!
 //! A format that compresses records, per run of bytes, which algorithm produced them and how
 //! many bytes they expand to. Everything above this module knows that much and no more: it
@@ -7,12 +7,12 @@
 //!
 //! This module is pure — bytes in, bytes out, no I/O — and it is at the crate root rather than
 //! inside a family for the reason [`crc32c`](crate::crc32c()) is: an encoding is a property of a
-//! run of bytes rather than of the format around it, and the same three algorithms appear in
-//! more than one filesystem. What is *not* here is how a format frames them — how many streams
+//! run of bytes rather than of the format around it, and the same algorithms appear in more than
+//! one filesystem. What is *not* here is how a format frames them — how many streams
 //! one extent is cut into, and where each begins — which is the format's own and belongs to
 //! it.
 //!
-//! # One signature, three algorithms, and a bound that is the caller's
+//! # One signature, six algorithms, and a bound that is the caller's
 //!
 //! Each decoder fills a caller-supplied slice and reports how much of it was filled. That
 //! shape is deliberate: the expected length is a number the *image* supplied, so the only
@@ -27,7 +27,7 @@
 //!
 //! # Each algorithm is a feature, and a build without one says so
 //!
-//! [`Algorithm`] names all three whatever a build carries, because *recognizing* an encoding
+//! [`Algorithm`] names all six whatever a build carries, because *recognizing* an encoding
 //! and *undoing* it are different questions and a reader has to answer the first either way: a
 //! file this build cannot decode is reported as one it cannot decode, naming the algorithm,
 //! rather than as a file whose bytes are what the volume holds.
@@ -38,12 +38,26 @@
 /// [`decompress`] can undo it, which [`Algorithm::available`] answers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Algorithm {
+    // Each is constructed by the family that stores runs in it, so a build without that
+    // family names it and never meets it.
     /// DEFLATE, as `zlib` frames it.
+    #[cfg_attr(not(feature = "btrfs"), allow(dead_code))]
     Zlib,
     /// LZO1X.
+    #[cfg_attr(not(feature = "btrfs"), allow(dead_code))]
     Lzo,
     /// Zstandard.
+    #[cfg_attr(not(feature = "btrfs"), allow(dead_code))]
     Zstd,
+    /// LZVN, an encoding an APFS compressed file stores its content in.
+    #[cfg_attr(not(feature = "apfs"), allow(dead_code))]
+    Lzvn,
+    /// LZFSE, another.
+    #[cfg_attr(not(feature = "apfs"), allow(dead_code))]
+    Lzfse,
+    /// LZBITMAP, a third.
+    #[cfg_attr(not(feature = "apfs"), allow(dead_code))]
+    Lzbitmap,
 }
 
 impl Algorithm {
@@ -53,6 +67,9 @@ impl Algorithm {
             Algorithm::Zlib => "zlib",
             Algorithm::Lzo => "lzo",
             Algorithm::Zstd => "zstd",
+            Algorithm::Lzvn => "lzvn",
+            Algorithm::Lzfse => "lzfse",
+            Algorithm::Lzbitmap => "lzbitmap",
         }
     }
 
@@ -66,6 +83,9 @@ impl Algorithm {
             Algorithm::Zlib => cfg!(feature = "zlib"),
             Algorithm::Lzo => cfg!(feature = "lzo"),
             Algorithm::Zstd => cfg!(feature = "zstd"),
+            Algorithm::Lzvn => cfg!(feature = "lzvn"),
+            Algorithm::Lzfse => cfg!(feature = "lzfse"),
+            Algorithm::Lzbitmap => cfg!(feature = "lzbitmap"),
         }
     }
 }
@@ -83,7 +103,13 @@ impl Algorithm {
 // A build carrying no decoder constructs only `Unavailable` — which is the honest state of
 // such a build rather than an oversight, so the other two are allowed to go unbuilt there.
 #[cfg_attr(
-    not(any(feature = "zlib", feature = "lzo", feature = "zstd")),
+    not(any(
+        feature = "zlib",
+        feature = "lzo",
+        feature = "zstd",
+        feature = "lzvn",
+        feature = "lzbitmap"
+    )),
     allow(dead_code)
 )]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
@@ -125,10 +151,16 @@ pub(crate) enum Error {
 ///
 /// [`Error::Unavailable`] where this build carries no decoder for `algorithm`, and otherwise
 /// whatever the stream turns out to be wrong about.
-// A build carrying none of the three reaches only the last arm, which needs neither the bytes
+// A build carrying none of the decoders reaches only the last arm, which needs neither the bytes
 // nor the room. The names stay, because they are the signature every build offers.
 #[cfg_attr(
-    not(any(feature = "zlib", feature = "lzo", feature = "zstd")),
+    not(any(
+        feature = "zlib",
+        feature = "lzo",
+        feature = "zstd",
+        feature = "lzvn",
+        feature = "lzbitmap"
+    )),
     allow(unused_variables)
 )]
 pub(crate) fn decompress(
@@ -143,7 +175,13 @@ pub(crate) fn decompress(
         Algorithm::Lzo => lzo::decompress(input, out),
         #[cfg(feature = "zstd")]
         Algorithm::Zstd => zstd::decompress(input, out),
-        // Whichever of the three this build did not take. Reached only through a caller that
+        #[cfg(feature = "lzvn")]
+        Algorithm::Lzvn => lzvn::decompress(input, out),
+        #[cfg(feature = "lzfse")]
+        Algorithm::Lzfse => lzfse::decompress(input, out),
+        #[cfg(feature = "lzbitmap")]
+        Algorithm::Lzbitmap => lzbitmap::decompress(input, out),
+        // Whichever of the algorithms this build did not take. Reached only through a caller that
         // did not ask `available` first, which is a caller reporting a file it cannot read
         // rather than one refusing a filesystem it cannot open.
         #[allow(unreachable_patterns)]
@@ -226,7 +264,9 @@ mod zstd {
         // to the caller's buffer: a stream never needs a window past what it decodes to, and
         // an encoder that knows its input sizes the window down to the input's next power of
         // two, so no frame a real writer produces is refused. The format's own floor is kept
-        // for the smallest buffers.
+        // for the smallest buffers. The decoder holds each block's output to that window, as
+        // the format bounds a block, so the clamp bounds what a whole decode holds and not only
+        // its history.
         let window_cap = (out.len() as u64).next_power_of_two().max(MIN_WINDOW);
         let mut decoder =
             ruzstd::decoding::StreamingDecoder::new_with_max_window_size(input, window_cap)
@@ -259,8 +299,90 @@ mod zstd {
     }
 }
 
+/// Write the `count` bytes from `distance` back at `at` of `out`, a byte at a time: a copy may
+/// reach into the run it is producing, so a distance of one and a count of ten is ten copies of
+/// one byte, and a block move would read bytes not yet written. `false`, copying nothing, where
+/// the distance is zero or reaches before the output's start. The caller holds `at + count` to
+/// the output's length.
+#[cfg(any(feature = "lzo", feature = "lzvn", feature = "lzfse"))]
+fn copy_back(out: &mut [u8], at: usize, distance: usize, count: usize) -> bool {
+    if distance == 0 || distance > at {
+        return false;
+    }
+    for i in at..at + count {
+        out[i] = out[i - distance];
+    }
+    true
+}
+
 #[cfg(feature = "lzo")]
 pub(crate) mod lzo;
+
+#[cfg(feature = "lzvn")]
+mod lzvn;
+
+#[cfg(feature = "lzfse")]
+mod lzfse;
+
+#[cfg(feature = "lzbitmap")]
+mod lzbitmap;
+
+#[cfg(all(test, feature = "lzvn", feature = "lzfse", feature = "lzbitmap"))]
+mod reference;
+
+/// Drive `decode` over every one-byte change of `stream`, a stream it decodes whole, and every
+/// cut of it, into `room` bytes, and hold it to the property [`sweep_arbitrary_bytes`] holds
+/// it to.
+///
+/// Arbitrary bytes seldom get past a format's first length field, so a sweep of them reaches
+/// the header and little after it. A stream the decoder reads whole, changed one byte at a
+/// time, reaches every field after the header: a table, a count, a distance, the last block.
+#[cfg(all(
+    test,
+    any(
+        feature = "lzo",
+        feature = "zlib",
+        feature = "zstd",
+        feature = "lzvn",
+        feature = "lzbitmap"
+    )
+))]
+pub(crate) fn sweep_changes_of<E>(
+    stream: &[u8],
+    room: usize,
+    mut decode: impl FnMut(&[u8], &mut [u8]) -> Result<usize, E>,
+) {
+    const GUARD: u8 = 0xee;
+    let mut held = |bytes: &[u8], what: &dyn Fn() -> String| {
+        let mut out = vec![GUARD; room + 64];
+        if let Ok(produced) = decode(bytes, &mut out[..room]) {
+            assert!(produced <= room, "{} reported {produced} of {room}", what());
+        }
+        assert!(
+            out[room..].iter().all(|&b| b == GUARD),
+            "{} wrote past the buffer it was given",
+            what()
+        );
+    };
+    let mut changed = stream.to_vec();
+    for at in 0..stream.len() {
+        for value in [
+            stream[at] ^ 0x01,
+            stream[at] ^ 0x80,
+            !stream[at],
+            0x00,
+            0x7F,
+            0xFF,
+        ] {
+            changed[at] = value;
+            held(&changed, &|| format!("byte {at} as {value:#04x}"));
+        }
+        changed[at] = stream[at];
+    }
+    for len in 0..stream.len() {
+        held(&stream[..len], &|| format!("the first {len} bytes"));
+    }
+}
 
 /// Drive `decode` over arbitrary bytes and hold it to the one property every layer of this
 /// has: whatever it is handed, it either produces bytes inside the buffer it was given or
@@ -275,10 +397,19 @@ pub(crate) mod lzo;
 /// The buffer is longer than the room offered and the tail is a fixed byte, which is what
 /// turns "wrote past the end" from a memory fault into an assertion.
 ///
-/// Compiled with any algorithm whose decoder sweeps: each of the three streams runs it over
+/// Compiled with any algorithm whose decoder sweeps: each stream decoder runs it over
 /// its own decode, and the LZO framing runs it a second time over the segmenting around the
 /// stream.
-#[cfg(all(test, any(feature = "lzo", feature = "zlib", feature = "zstd")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "lzo",
+        feature = "zlib",
+        feature = "zstd",
+        feature = "lzvn",
+        feature = "lzbitmap"
+    )
+))]
 pub(crate) fn sweep_arbitrary_bytes<E>(
     salt: u32,
     mut decode: impl FnMut(&[u8], &mut [u8]) -> Result<usize, E>,
@@ -318,6 +449,9 @@ mod tests {
             (Algorithm::Zlib, "zlib"),
             (Algorithm::Lzo, "lzo"),
             (Algorithm::Zstd, "zstd"),
+            (Algorithm::Lzvn, "lzvn"),
+            (Algorithm::Lzfse, "lzfse"),
+            (Algorithm::Lzbitmap, "lzbitmap"),
         ] {
             assert_eq!(algorithm.name(), name);
             // And the refusal a build without the decoder gives names it too.
@@ -331,9 +465,16 @@ mod tests {
     #[test]
     fn an_algorithm_this_build_does_not_carry_is_refused_rather_than_attempted() {
         // The one property this dispatch has in every configuration: what it will not do is
-        // decode a stream with the wrong decoder. Whichever of the three is absent here
-        // reports itself absent, and whichever are present do not.
-        for algorithm in [Algorithm::Zlib, Algorithm::Lzo, Algorithm::Zstd] {
+        // decode a stream with the wrong decoder. Whichever of them is absent here reports
+        // itself absent, and whichever are present do not.
+        for algorithm in [
+            Algorithm::Zlib,
+            Algorithm::Lzo,
+            Algorithm::Zstd,
+            Algorithm::Lzvn,
+            Algorithm::Lzfse,
+            Algorithm::Lzbitmap,
+        ] {
             let mut out = [0u8; 8];
             let refused = decompress(algorithm, b"", &mut out);
             assert_eq!(
@@ -407,6 +548,44 @@ mod tests {
 
     #[cfg(feature = "zstd")]
     #[test]
+    fn a_zstd_block_expanding_past_its_window_is_refused_rather_than_produced() {
+        // Laid out by hand from RFC 8878: a frame whose window descriptor follows, one raw
+        // block of the byte `A`, and a last compressed block holding no literals and one
+        // sequence — the three codes each in RLE mode, a copy of 65,539 bytes at offset 1 —
+        // whose bitstream is the marker bit over eighteen zero bits. The format bounds what one
+        // block expands to by the frame's window, and the window clamp above bounds memory
+        // only because the decoder holds a block to it: a frame of a few kilobytes made of such
+        // sequences otherwise expands to gigabytes inside the decoder, before the record's
+        // declared size is ever compared. So the same block is refused under a four-kibibyte
+        // window as a frame that does not decode, which is the decoder's refusal, rather than
+        // as one that expands past the record, which is this module's after the block was
+        // produced; and it decodes under a window that holds it, which makes the frame well
+        // formed in everything else.
+        const fn frame(window: u8) -> [u8; 22] {
+            [
+                0x28, 0xb5, 0x2f, 0xfd, 0x00, window, 0x08, 0x00, 0x00, b'A', 0x4d, 0x00, 0x00,
+                0x00, 0x01, 0x54, 0x00, 0x02, 0x34, 0x00, 0x00, 0x04,
+            ]
+        }
+        let mut out = vec![0u8; 4096];
+        assert_eq!(
+            decompress(Algorithm::Zstd, &frame(0x10), &mut out),
+            Err(Error::Malformed {
+                algorithm: Algorithm::Zstd,
+                fault: "the frame does not decode",
+            })
+        );
+
+        let mut out = vec![0u8; 1 + 65_539];
+        assert_eq!(
+            decompress(Algorithm::Zstd, &frame(0x38), &mut out),
+            Ok(out.len())
+        );
+        assert!(out.iter().all(|&byte| byte == b'A'));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
     fn a_zstd_frame_decodes_to_what_it_stands_for() {
         // As above, produced outside this crate: `zstd -19` over the same bytes.
         const FRAME: &[u8] = &[
@@ -434,7 +613,7 @@ mod tests {
     // The deterministic never-panic sweeps, one per decoder this build carries: arbitrary
     // bytes either refuse or fit the buffer offered, and nothing is written past it. The
     // hand vectors above pin what a correct stream decodes to; these pin what every other
-    // input does. The salts keep the three from sweeping the same bytes.
+    // input does. The salts keep them from sweeping the same bytes.
 
     #[cfg(feature = "zlib")]
     #[test]
@@ -446,5 +625,37 @@ mod tests {
     #[test]
     fn arbitrary_bytes_are_a_zstd_frame_that_refuses_or_fits() {
         sweep_arbitrary_bytes(3, |bytes, out| decompress(Algorithm::Zstd, bytes, out));
+    }
+
+    #[cfg(feature = "lzvn")]
+    #[test]
+    fn arbitrary_bytes_are_an_lzvn_stream_that_refuses_or_fits() {
+        sweep_arbitrary_bytes(4, |bytes, out| decompress(Algorithm::Lzvn, bytes, out));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn a_zlib_stream_changed_a_byte_at_a_time_refuses_or_fits() {
+        // The stream `a_zlib_stream_decodes_to_what_it_stands_for` holds the decoder to.
+        const STREAM: &[u8] = &[
+            0x78, 0xda, 0x4b, 0x4b, 0x2d, 0x2a, 0xca, 0x2f, 0xae, 0x2c, 0x4e, 0x23, 0x93, 0x06,
+            0x00, 0x88, 0x65, 0x1b, 0xe9,
+        ];
+        sweep_changes_of(STREAM, 64 + 16, |bytes, out| {
+            decompress(Algorithm::Zlib, bytes, out)
+        });
+    }
+
+    #[cfg(feature = "lzfse")]
+    #[test]
+    fn arbitrary_bytes_are_an_lzfse_stream_that_refuses_or_fits() {
+        // Arbitrary bytes seldom open with a block's magic, so each is given one of the four
+        // kinds to open with and is swept as that kind's body.
+        for (i, magic) in [b"bvx-", b"bvxn", b"bvx2", b"bvx$"].into_iter().enumerate() {
+            sweep_arbitrary_bytes(5 + i as u32, |bytes, out| {
+                let stream = [&magic[..], bytes].concat();
+                decompress(Algorithm::Lzfse, &stream, out)
+            });
+        }
     }
 }

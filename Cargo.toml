@@ -3,16 +3,22 @@ resolver = "3"
 members = ["crates/ferrosys-cli", "crates/ferrosys"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
 # checks the crate still builds on this floor, so dev on the newer pin cannot
 # silently raise it.
 rust-version = "1.88"
-# Permissive dual-license, the Rust-ecosystem norm for a library meant to be
-# depended on widely.
-license = "MIT OR Apache-2.0"
+# The crates' own code is under a permissive dual license, the Rust-ecosystem norm for
+# a library meant to be depended on widely. The Unicode character tables APFS names are
+# held to are data from the Unicode Character Database, under the Unicode License v3,
+# which each crate's LICENSE-UNICODE carries. The LZVN and LZFSE decoders are derived from
+# Apple's lzfse project, under BSD-3-Clause, whose notice each crate's THIRD-PARTY-NOTICES
+# carries. The expression covers the package as published, which holds all of that code; a
+# build compiles the tables with the `apfs` feature and the decoders with `lzvn` and `lzfse`,
+# so a build without those three compiles code under MIT OR Apache-2.0 alone.
+license = "(MIT OR Apache-2.0) AND Unicode-3.0 AND BSD-3-Clause"
 # Both crates share one guide, so the URL is declared once here and inherited. A
 # registry links it from every crate's page.
 homepage = "https://gregordinary.github.io/ferrosys/"
@@ -67,21 +73,28 @@ miniz_oxide = { version = "0.9.1", default-features = false }
 # It carries `unsafe` in a hand-written ring buffer, which is a departure from this crate's
 # own bar and is stated here rather than left to be discovered. The feature is in the
 # default build, so a consumer that wants none of it turns the default off and leaves `zstd`
-# out of the features it names.
-ruzstd = { version = "0.9.0", default-features = false, features = ["std"] }
+# out of the features it names. The floor is above 0.9.0, the last release RUSTSEC-2026-0344
+# applies to: 0.9.1 holds each block's output to the frame's window, which is what makes the
+# reader's window clamp a bound on what a decode holds.
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 # The `serde` feature's gate reads what the derives emit, so the shape a consumer sees is
 # asserted rather than assumed. A development dependency only; never shipped.
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 tempfile = "3.27.0"
-proptest = "1.11.0"
+proptest = "1.12.0"
 # A second, independent LZO1X implementation, used only to *produce* streams the decoder in
 # this crate is held against. Compression alone, so what it brings is the encoder; the
 # decoder it also ships is never called, because a decoder checked against itself checks
 # nothing. A development dependency, never shipped.
 lzokay = { version = "2.0.1", default-features = false, features = ["compress", "std"] }
+# SHA-256, for the APFS corpus gate: macOS's listing of a volume records a digest of every
+# file and attribute, and the corpus index one of every image. default-features off, which
+# leaves the hash and drops the object identifiers and the allocator helpers. A development
+# dependency, never shipped.
+sha2 = { version = "0.11.1", default-features = false }
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.6"` resolves `>=0.6.0, <0.7.0` — the published
+# minor is the breaking axis, so `"0.7"` resolves `>=0.7.0, <0.8.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
-ferrosys = { path = "crates/ferrosys", version = "0.6" }
+ferrosys = { path = "crates/ferrosys", version = "0.7" }

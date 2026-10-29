@@ -11,7 +11,9 @@
 //! the times (to the nanosecond, and negative where the file predates the epoch), the paths,
 //! the ids, the extended attributes, and the POSIX ACLs come out in PAX records, because the
 //! header cannot hold them. A socket has no tar entry type at all, so a filesystem holding
-//! one is a typed error rather than an archive quietly missing a file.
+//! one is a typed error rather than an archive quietly missing a file. A device number is
+//! written into the header exactly — eight octal digits filling the field where seven do not
+//! hold it — and one past what eight digits hold is a typed error too.
 //!
 //! The PAX record is authoritative for every field it carries, and it is always written. The
 //! header's own path and link-target fields hold the same value when it fits in them, and
@@ -32,8 +34,10 @@
 //! # What comes out is what goes back in
 //!
 //! The archive opens with a `./` member describing the root directory, which is how the
-//! root's own metadata survives a round trip, and it omits `/lost+found`, which every
-//! filesystem makes for itself and which a formatter refuses to be told to make.
+//! root's own metadata survives a round trip. It omits an ext filesystem's `/lost+found`,
+//! which every ext filesystem makes for itself and which the ext formatter refuses to be told
+//! to make; on every other family a directory of that name is the volume's own and is written
+//! like any other.
 //!
 //! # Memory
 //!
@@ -48,13 +52,12 @@ use std::io::{Read, Write};
 use tar::{Builder, EntryType, Header};
 
 use crate::archive::ArchiveError;
-use crate::fidelity::{Direction, FidelityReport, Synthesis};
+use crate::fidelity::{Direction, FidelityReport, Property, Synthesis};
 use crate::time::Timestamp;
-use crate::tree::{Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError};
-
-/// `/lost+found`, the one path an archive must not carry: every filesystem makes it for
-/// itself, and a formatter refuses a source that tries to make it again.
-const LOST_FOUND: &[u8] = b"/lost+found";
+use crate::tree::{
+    Attributes, BODY_WINDOW, FsTree, NodeKind, TreeEntry, TreeError, flags_not_carried,
+    made_by_the_format,
+};
 
 /// Writes a filesystem's contents out as a tar archive with PAX extensions.
 ///
@@ -105,20 +108,23 @@ impl<W: Write> ArchiveSink<W> {
     /// Write the filesystem's whole tree, then finish the archive.
     ///
     /// The archive's first member is `./`, the root directory, so the root's own metadata
-    /// and attributes survive; `/lost+found` and everything under it is omitted. Every other
+    /// and attributes survive; an ext filesystem's `/lost+found` and everything under it is
+    /// omitted, since the format makes it for itself. Every other
     /// name the filesystem holds appears exactly once, with the second and later names for
     /// one node written as hard links to the first.
     ///
     /// The returned [`FidelityReport`] names every property the source filesystem had no
-    /// field for and the archive therefore carries an invented value of. It is faithful for
-    /// a family that records everything.
+    /// field for and the archive therefore carries an invented value of, and as dropped every
+    /// entry's BSD flags, which a Darwin filesystem records and a tar header has no field for.
+    /// It is faithful for a family that records everything a tar member holds.
     ///
     /// # Errors
     ///
     /// [`ArchiveError::Read`] if the filesystem cannot be read; [`ArchiveError::Io`] if the
     /// destination cannot be written; [`ArchiveError::Unrepresentable`] if the filesystem
-    /// holds a socket, and [`ArchiveError::XattrNameUnrepresentable`] if an attribute's name
-    /// cannot be written to a PAX record.
+    /// holds a socket, [`ArchiveError::DeviceUnrepresentable`] if it holds a device node whose
+    /// numbers a tar header cannot hold, and [`ArchiveError::XattrNameUnrepresentable`] if an
+    /// attribute's name cannot be written to a PAX record.
     pub fn write_tree<T: FsTree>(mut self, tree: &mut T) -> Result<FidelityReport, ArchiveError> {
         // The first name to reach a node is the file; every later name for the same node is
         // another name for it — a hard link — and the archive says so rather than storing
@@ -133,7 +139,7 @@ impl<W: Write> ArchiveSink<W> {
         // cannot be read both stop it as themselves. The root arrives first, under the empty
         // path, which is what becomes the `./` member.
         tree.walk_tree(|tree, entry| {
-            if is_lost_found(&entry.path) {
+            if made_by_the_format(&entry.path, tree.family()) {
                 return Ok(());
             }
             let member = Member::of(tree, entry, &mut named, &synthesis, &mut fidelity)?;
@@ -212,9 +218,11 @@ impl<W: Write> ArchiveSink<W> {
         header.set_mtime(u64::try_from(meta.mtime.secs).unwrap_or(0));
         if let NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } =
             m.kind
+            && let Some(ustar) = header.as_ustar_mut()
         {
-            header.set_device_major(major).map_err(ArchiveError::Io)?;
-            header.set_device_minor(minor).map_err(ArchiveError::Io)?;
+            // Both fit: `Member::of` refused a node whose numbers do not.
+            device_field(&mut ustar.dev_major, major);
+            device_field(&mut ustar.dev_minor, minor);
         }
         // A path or a target that is text and short enough goes into the header as well,
         // where a reader that ignores PAX records finds it. One that is neither — not text,
@@ -260,10 +268,18 @@ impl<W: Write> ArchiveSink<W> {
         // the filesystem moves up to a mebibyte, which is what lets a reader fetch the
         // blocks of a contiguous file in one request rather than two at a time.
         let window = usize::try_from(size).unwrap_or(usize::MAX).min(BODY_WINDOW);
-        let body = std::io::BufReader::with_capacity(window, NodeData::new(tree, &m.node, size));
-        self.builder
-            .append(&header, body)
-            .map_err(|e| ArchiveError::from_body_io(e, &m.path))
+        let mut body =
+            std::io::BufReader::with_capacity(window, NodeData::new(tree, &m.node, size));
+        match self.builder.append(&header, &mut body) {
+            Ok(()) => Ok(()),
+            // The filesystem's own verdict, kept beside the I/O error it had to travel as,
+            // so a file the image cannot yield is the image's failure and not the
+            // destination's.
+            Err(e) => Err(match body.into_inner().failed {
+                Some(source) => ArchiveError::Read(source),
+                None => ArchiveError::from_body_io(e, &m.path),
+            }),
+        }
     }
 }
 
@@ -278,6 +294,9 @@ struct NodeData<'a, T: FsTree> {
     /// The length the header declared, which the body is held to exactly: a filesystem
     /// yielding more than was promised would push the archive's framing out of step with it.
     size: u64,
+    /// The filesystem's failure, when a read of it is what stopped the body. A `Read` can
+    /// only speak `io::Error`, so this is where the typed verdict waits to be handed back.
+    failed: Option<TreeError>,
 }
 
 impl<'a, T: FsTree> NodeData<'a, T> {
@@ -287,6 +306,7 @@ impl<'a, T: FsTree> NodeData<'a, T> {
             node,
             offset: 0,
             size,
+            failed: None,
         }
     }
 }
@@ -298,16 +318,23 @@ impl<T: FsTree> Read for NodeData<'_, T> {
             return Ok(0);
         }
         let want = usize::try_from(left).unwrap_or(usize::MAX).min(buf.len());
-        // A read failure of the *filesystem* has to reach the caller through `io::Error`,
-        // because that is the only failure a `Read` has. The kind is kept, and the message
-        // carries what the reader said, so nothing is lost on the way through.
-        let filled = self
+        // A read failure of the *filesystem* has to leave through `io::Error`, because that
+        // is the only failure a `Read` has. The typed error is kept here as well, and the
+        // sink hands that back rather than the I/O error it travelled as.
+        let filled = match self
             .tree
             .read_bytes(self.node, self.offset, &mut buf[..want])
-            .map_err(|e| match e {
-                TreeError::Io { kind, message } => std::io::Error::new(kind, message),
-                other => std::io::Error::other(other.to_string()),
-            })?;
+        {
+            Ok(filled) => filled,
+            Err(e) => {
+                let carried = match &e {
+                    TreeError::Io { kind, message } => std::io::Error::new(*kind, message.clone()),
+                    other => std::io::Error::other(other.to_string()),
+                };
+                self.failed = Some(e);
+                return Err(carried);
+            }
+        };
         self.offset += filled as u64;
         Ok(filled)
     }
@@ -348,6 +375,11 @@ impl<N> Member<N> {
         if matches!(kind, NodeKind::Socket) {
             return Err(ArchiveError::Unrepresentable { path });
         }
+        if let NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } = kind
+            && (major > DEVICE_MAX || minor > DEVICE_MAX)
+        {
+            return Err(ArchiveError::DeviceUnrepresentable { path, major, minor });
+        }
 
         // A node the walk says is reachable by more than one name is the file the first time
         // it is seen and a hard link every time after. Only such a node carries an identity,
@@ -368,6 +400,10 @@ impl<N> Member<N> {
         let mut attrs = tree.stat(&node, synthesis)?;
         for property in &attrs.synthesized {
             fidelity.record(Direction::Synthesized, &path, *property);
+        }
+        // A tar header has no field a BSD flag goes in, so the archive does not carry one.
+        if hardlink.is_none() && flags_not_carried(tree, &node)? != 0 {
+            fidelity.record(Direction::Dropped, &path, Property::BsdFlags);
         }
         // A hard link carries nothing of its own: the contents and the attributes belong to
         // the node, which the name that came first already wrote.
@@ -392,9 +428,24 @@ impl<N> Member<N> {
     }
 }
 
-/// Whether a path is `/lost+found` or something inside it.
-fn is_lost_found(path: &[u8]) -> bool {
-    path == LOST_FOUND || path.starts_with(b"/lost+found/")
+/// The largest device number a tar header holds: eight octal digits filling its field.
+const DEVICE_MAX: u32 = 0o7777_7777;
+
+/// Write a device number into a header's eight-byte field: seven octal digits and a
+/// terminator where they hold it, as every tar writer spells it, and eight digits filling the
+/// field where they do not — the form bsdtar writes for a number past seven digits and GNU tar
+/// reads back (both observed). Reports whether the number fit; one past [`DEVICE_MAX`] fits
+/// neither form, and the field is left as it was.
+fn device_field(field: &mut [u8; 8], value: u32) -> bool {
+    let digits = if value <= 0o777_7777 {
+        format!("{value:07o}\0")
+    } else if value <= DEVICE_MAX {
+        format!("{value:08o}")
+    } else {
+        return false;
+    };
+    field.copy_from_slice(digits.as_bytes());
+    true
 }
 
 /// The name a path takes inside an archive: `/etc/hostname` becomes `./etc/hostname`, and
@@ -454,13 +505,14 @@ fn pax_time(t: Timestamp) -> String {
 /// The PAX keyword for an extended attribute, `SCHILY.xattr.<name>`.
 ///
 /// A PAX record's keyword is text and cannot hold an `=` (its key/value delimiter) or a
-/// newline (its record terminator), so a name carrying either — or one that is not valid
-/// UTF-8 — has no faithful spelling. It is refused rather than flattened through U+FFFD or
-/// split at a delimiter into a differently-named attribute, which would corrupt the round
-/// trip silently. Standard attribute names are ASCII without these bytes.
+/// newline (its record terminator), and a reader taking it as a C string ends it at a NUL, so
+/// a name carrying any of the three, an empty name, or one that is not valid UTF-8 has no
+/// faithful spelling. It is refused rather than flattened through U+FFFD or split at a
+/// delimiter into a differently-named attribute, which would corrupt the round trip silently.
+/// Standard attribute names are ASCII without these bytes.
 fn pax_xattr_key(path: &[u8], name: &[u8]) -> Result<String, ArchiveError> {
     match std::str::from_utf8(name) {
-        Ok(text) if !text.contains('=') && !text.contains('\n') => {
+        Ok(text) if !text.is_empty() && !text.contains(['=', '\n', '\0']) => {
             Ok(format!("SCHILY.xattr.{text}"))
         }
         _ => Err(ArchiveError::XattrNameUnrepresentable {
@@ -484,12 +536,27 @@ mod tests {
     }
 
     #[test]
-    fn lost_and_found_is_recognized_with_its_contents() {
-        assert!(is_lost_found(b"/lost+found"));
-        assert!(is_lost_found(b"/lost+found/17"));
-        // A name that merely begins the same way is a different file.
-        assert!(!is_lost_found(b"/lost+found-old"));
-        assert!(!is_lost_found(b"/etc/lost+found"));
+    fn a_device_number_fills_the_header_field_as_far_as_it_reads_back() {
+        // Seven digits and a terminator up to 2097151, eight filling the field up to
+        // 16777215 — Darwin's twenty-four-bit minor numbers among them — and each reads back
+        // through the header as the number written.
+        for value in [0u32, 3, 0o777_7777, 0o1000_0000, 16_777_215] {
+            let mut header = Header::new_ustar();
+            let ustar = header.as_ustar_mut().expect("a ustar header");
+            assert!(device_field(&mut ustar.dev_minor, value), "{value}");
+            assert_eq!(header.device_minor().expect("a number"), Some(value));
+        }
+        // The seven-digit form is the one every tar writer spells, so an archive of ordinary
+        // devices is the bytes it is without this.
+        let mut ours = Header::new_ustar();
+        device_field(&mut ours.as_ustar_mut().expect("ustar").dev_minor, 3);
+        let mut theirs = Header::new_ustar();
+        theirs.set_device_minor(3).expect("a ustar header");
+        assert_eq!(ours.as_bytes(), theirs.as_bytes());
+        // Past eight digits there is no spelling, and nothing is written.
+        let mut header = Header::new_ustar();
+        let ustar = header.as_ustar_mut().expect("a ustar header");
+        assert!(!device_field(&mut ustar.dev_minor, DEVICE_MAX + 1));
     }
 
     #[test]
@@ -501,9 +568,15 @@ mod tests {
         );
 
         // A name a PAX keyword cannot carry faithfully is a typed error, not a silently
-        // corrupted record: an embedded '=' or newline (the record's own delimiters) or a
-        // byte that is not valid UTF-8.
-        for bad in [&b"user.a=b"[..], b"user.a\nb", b"user.\xff"] {
+        // corrupted record: an embedded '=' or newline (the record's own delimiters), a NUL a
+        // C-string reader ends the keyword at, no name at all, or a byte that is not valid UTF-8.
+        for bad in [
+            &b"user.a=b"[..],
+            b"user.a\nb",
+            b"user.a\0b",
+            b"",
+            b"user.\xff",
+        ] {
             assert!(
                 matches!(
                     pax_xattr_key(b"/f", bad),

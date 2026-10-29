@@ -62,6 +62,9 @@ pub enum Property {
     TimePrecision,
     /// The entry's name, exactly as it was given.
     Name,
+    /// The BSD flags a Darwin filesystem records, `UF_HIDDEN` and the rest, which no other
+    /// family's vocabulary holds.
+    BsdFlags,
 }
 
 impl Property {
@@ -79,6 +82,7 @@ impl Property {
             Property::ModificationTime => "modification time",
             Property::TimePrecision => "time precision",
             Property::Name => "name",
+            Property::BsdFlags => "bsd flags",
         }
     }
 
@@ -98,6 +102,7 @@ impl Property {
             Property::ModificationTime => 1 << 7,
             Property::TimePrecision => 1 << 8,
             Property::Name => 1 << 9,
+            Property::BsdFlags => 1 << 10,
         }
     }
 }
@@ -489,6 +494,7 @@ impl LossPolicy {
         report: &mut FidelityReport,
         meta: &crate::source::Metadata,
         xattrs: &[crate::xattr::Xattr],
+        darwin: Option<&crate::source::Darwin>,
         is_dir: bool,
         path: &[u8],
     ) -> Result<(), Property> {
@@ -526,6 +532,9 @@ impl LossPolicy {
         }
         if !xattrs.is_empty() {
             lose(Property::ExtendedAttributes)?;
+        }
+        if darwin.is_some_and(|d| d.stated_flags() != 0) {
+            lose(Property::BsdFlags)?;
         }
         Ok(())
     }

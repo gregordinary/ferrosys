@@ -23,11 +23,12 @@ pub fn words(found: &Filesystem) -> (&'static str, Option<&'static str>) {
     match found {
         Filesystem::Ext(profile) => ("ext", Some(profile.as_str())),
         Filesystem::Fat(fat_type) => ("fat", Some(fat_type.as_str())),
-        // No variant, and the null is the answer rather than a gap: these two families have one
-        // format each, with no lineage to spell and no revisions to tell apart, so the family
-        // *is* the finer answer and there is nothing finer to give.
+        // No variant, and the null is the answer rather than a gap: these three families have
+        // one format each, with no lineage to spell and no revisions to tell apart, so the
+        // family *is* the finer answer and there is nothing finer to give.
         Filesystem::ExFat => ("exfat", None),
         Filesystem::Btrfs => ("btrfs", None),
+        Filesystem::Apfs => ("apfs", None),
         // A family the library classified and this binary has no name for, which a newer
         // library linked against an older tool would produce. Saying `unknown` is honest;
         // saying `unrecognized` would not be, since something did recognize it.
@@ -38,7 +39,9 @@ pub fn words(found: &Filesystem) -> (&'static str, Option<&'static str>) {
 /// Classify the image the arguments name.
 pub fn run(args: crate::args::DetectArgs) -> Result<(), Error> {
     let file = File::open(&args.image).map_err(|e| Error::io(&args.image, e))?;
-    let found = ferrosys::detect_with(file, &DetectOptions::new().base(args.offset));
+    let mut options = DetectOptions::new().base(args.offset);
+    options.len = args.length;
+    let found = ferrosys::detect_with(file, &options);
 
     // The classification is the artifact of the run, so it goes to the standard output —
     // including the negative answer, which is as much an answer as the positive one. An

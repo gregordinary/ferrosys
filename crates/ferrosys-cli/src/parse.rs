@@ -12,8 +12,13 @@
 
 use std::ffi::OsStr;
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use ferrosys::Slack;
+use ferrosys::apfs::{
+    BlockSize as ApfsBlockSize, NameKind, ProgramName, ReleaseProfile, RootSnapshot, VolumeGroup,
+    VolumeName, VolumeRequest,
+};
 use ferrosys::btrfs::ondisk::{CompatRoFlags as BtrfsCompatRo, IncompatFlags as BtrfsIncompat};
 use ferrosys::btrfs::{Profile as BtrfsProfile, SubvolumeRequest, VolumeLabel as BtrfsVolumeLabel};
 use ferrosys::exfat::VolumeLabel as ExFatVolumeLabel;
@@ -47,6 +52,11 @@ pub enum FsType {
     /// and neither is a variant a `-t` value could name. So `btrfs` names the family and the
     /// format at once, and the geometry is options of its own.
     Btrfs,
+    /// An APFS container.
+    ///
+    /// It carries nothing: what varies between two containers is a block size, the release
+    /// whose shape they are written in and the volumes they hold, each an option of its own.
+    Apfs,
 }
 
 /// ext4 is what naming no type at all means, which is what keeps every command line that
@@ -66,6 +76,7 @@ impl FsType {
             FsType::Fat(_) => "fat",
             FsType::ExFat => EXFAT,
             FsType::Btrfs => BTRFS,
+            FsType::Apfs => APFS,
         }
     }
 
@@ -81,6 +92,7 @@ impl FsType {
             FsType::Fat(_) => "fat",
             FsType::ExFat => EXFAT,
             FsType::Btrfs => BTRFS,
+            FsType::Apfs => APFS,
         }
     }
 
@@ -88,12 +100,12 @@ impl FsType {
     ///
     /// A property of the family rather than of the command line: a filesystem's free room
     /// follows from its size, so the size that just holds a tree is a fixed point that has to
-    /// be searched for by planning candidates and placing into them. Two families have that
-    /// search; the third takes the size it is given.
+    /// be searched for by planning candidates and placing into them. Three families have that
+    /// search; the other two take the size they are given.
     #[must_use]
     pub fn has_fit(self) -> bool {
         match self {
-            FsType::Ext(_) | FsType::Fat(_) => true,
+            FsType::Ext(_) | FsType::Fat(_) | FsType::Apfs => true,
             FsType::ExFat | FsType::Btrfs => false,
         }
     }
@@ -111,6 +123,9 @@ const EXFAT: &str = "exfat";
 
 /// The one word the btrfs family answers to, for the reason [`EXFAT`] is a literal.
 const BTRFS: &str = "btrfs";
+
+/// The one word the APFS family answers to, for the same reason.
+const APFS: &str = "apfs";
 
 /// A value an option cannot take.
 ///
@@ -180,6 +195,38 @@ pub enum ValueError {
     /// A `--subvol` directive with no path after its identifier.
     #[error("{0}: expected [ro:]UUID:PATH, a subvolume's own identifier and where it goes")]
     NotASubvolume(String),
+    /// An APFS `--volume` directive with no name after its identifier.
+    #[error(
+        "{0}: expected [case-insensitive:|case-sensitive:]UUID:NAME, a volume's own \
+         identifier and its name"
+    )]
+    NotAnApfsVolume(String),
+    /// An APFS volume's name that is not text.
+    ///
+    /// A volume superblock records its name as UTF-8, so a name that is not is one the field
+    /// has no encoding for.
+    #[error("{0}: an APFS volume's name is UTF-8 text, and this is not")]
+    NotTextVolumeName(String),
+    /// An APFS `--root-snapshot` directive with no name after its identifier.
+    #[error("{0}: expected UUID:NAME, a snapshot's own identifier and its name")]
+    NotAnApfsSnapshot(String),
+    /// An APFS `--volume-group` directive that is not two slots.
+    #[error("{0}: expected SYSTEM:DATA, the slots of the group's System and Data volumes")]
+    NotAnApfsGroup(String),
+    /// An APFS `--volume-from-dir` directive with no directory after its slot.
+    #[error("{0}: expected SLOT:DIR, a volume's slot and the tree it holds")]
+    NotAnApfsVolumeDir(String),
+    /// An APFS snapshot's name that is not text.
+    ///
+    /// A snapshot's records hold its name as UTF-8, so a name that is not is one they have no
+    /// encoding for.
+    #[error("{0}: an APFS snapshot's name is UTF-8 text, and this is not")]
+    NotTextSnapshotName(String),
+    /// A name an APFS field cannot hold: empty, longer than the field, or holding a NUL.
+    ///
+    /// The library's own refusal rides along, because it names the limit and what was given.
+    #[error(transparent)]
+    NotAnApfsName(#[from] ferrosys::apfs::NameError),
     /// The value is not eight hexadecimal digits.
     #[error("{0}: expected 4 bytes of hex (8 digits; dashes are ignored)")]
     NotHex32(String),
@@ -678,10 +725,13 @@ pub fn fs_type(v: &OsStr) -> Result<FsType, ValueError> {
     if name == Some(BTRFS) {
         return Ok(FsType::Btrfs);
     }
+    if name == Some(APFS) {
+        return Ok(FsType::Apfs);
+    }
     Err(ValueError::NotOneOf {
         value: shown(v),
         expected: format!(
-            "{}, {}, {EXFAT}, {BTRFS}",
+            "{}, {}, {EXFAT}, {BTRFS}, {APFS}",
             names_of::<Profile>(),
             names_of::<FatType>()
         ),
@@ -781,6 +831,7 @@ const PROPERTY_NAMES: &[(&str, Property)] = &[
     ("modification-time", Property::ModificationTime),
     ("time-precision", Property::TimePrecision),
     ("name", Property::Name),
+    ("bsd-flags", Property::BsdFlags),
 ];
 
 /// The value that accepts every property, including one a later version of the library
@@ -881,6 +932,148 @@ pub fn btrfs_block_size(v: &OsStr) -> Result<Option<u32>, ValueError> {
 /// Written once and read by the parser and by the phrase a refusal offers, so an option cannot
 /// come to accept a word it does not offer.
 const AUTO: &str = "auto";
+
+/// One `--volume` directive of an APFS format: `[KIND:]UUID:NAME`.
+///
+/// The form `--subvol` takes, for the same reason: the identifier leads and the name is
+/// everything after it, so a name may hold a colon and a UUID may not. A kind in front, in the
+/// words `inspect` prints for one, says how the volume compares names; without one it folds
+/// case, as macOS formats a volume unless told otherwise. A kind is a word and a UUID is hex,
+/// so the two cannot be mistaken for each other.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnApfsVolume`] if the value has no name after its identifier,
+/// [`ValueError::NotHex16`] if what leads it is not a UUID, [`ValueError::NotTextVolumeName`]
+/// if the name is not UTF-8, and [`ValueError::NotAnApfsName`] if the field cannot hold it.
+pub fn apfs_volume(v: &OsStr) -> Result<VolumeRequest, ValueError> {
+    fn split(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+        let at = bytes.iter().position(|&byte| byte == b':')?;
+        Some((&bytes[..at], &bytes[at + 1..]))
+    }
+    let bytes = crate::args::os::bytes(v);
+    let (head, rest) = split(bytes).ok_or_else(|| ValueError::NotAnApfsVolume(shown(v)))?;
+    let kind = std::str::from_utf8(head).ok().and_then(NameKind::from_name);
+    let (uuid, name) = match kind {
+        Some(_) => split(rest).ok_or_else(|| ValueError::NotAnApfsVolume(shown(v)))?,
+        None => (head, rest),
+    };
+    let uuid = std::str::from_utf8(uuid)
+        .map_err(|_| ValueError::NotHex16(shown(v)))
+        .and_then(|digits| hex16(OsStr::new(digits)))?;
+    if name.is_empty() {
+        return Err(ValueError::NotAnApfsVolume(shown(v)));
+    }
+    let name = std::str::from_utf8(name).map_err(|_| ValueError::NotTextVolumeName(shown(v)))?;
+    Ok(VolumeRequest::new(VolumeName::new(name)?, uuid).names(kind.unwrap_or_default()))
+}
+
+/// An APFS `--root-snapshot` directive: `UUID:NAME`, the snapshot's identifier and its name.
+///
+/// The form `--volume` takes after its kind, and for the same reason: the identifier leads and
+/// the name is everything after it, so a name may hold a colon.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnApfsSnapshot`] if the value has no name after its identifier,
+/// [`ValueError::NotHex16`] if what leads it is not a UUID,
+/// [`ValueError::NotTextSnapshotName`] if the name is not UTF-8, and
+/// [`ValueError::NotAnApfsName`] if the name is longer than a snapshot's may be.
+pub fn apfs_root_snapshot(v: &OsStr) -> Result<RootSnapshot, ValueError> {
+    let bytes = crate::args::os::bytes(v);
+    let at = bytes
+        .iter()
+        .position(|&byte| byte == b':')
+        .ok_or_else(|| ValueError::NotAnApfsSnapshot(shown(v)))?;
+    let (uuid, name) = (&bytes[..at], &bytes[at + 1..]);
+    let uuid = std::str::from_utf8(uuid)
+        .map_err(|_| ValueError::NotHex16(shown(v)))
+        .and_then(|digits| hex16(OsStr::new(digits)))?;
+    if name.is_empty() {
+        return Err(ValueError::NotAnApfsSnapshot(shown(v)));
+    }
+    let name = std::str::from_utf8(name).map_err(|_| ValueError::NotTextSnapshotName(shown(v)))?;
+    Ok(RootSnapshot::new(name, uuid)?)
+}
+
+/// An APFS `--volume-group` directive: `SYSTEM:DATA`, the slots of the group's System and Data
+/// volumes, each counted from 0 in the order the `--volume` directives give them.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnApfsGroup`] if the value is not two decimal slots joined by a colon.
+pub fn apfs_volume_group(v: &OsStr) -> Result<VolumeGroup, ValueError> {
+    let not = || ValueError::NotAnApfsGroup(shown(v));
+    let text = v.to_str().ok_or_else(not)?;
+    let (system, data) = text.split_once(':').ok_or_else(not)?;
+    let slot = |s: &str| {
+        s.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| s.parse::<u32>().ok())
+            .flatten()
+            .ok_or_else(not)
+    };
+    Ok(VolumeGroup::new(slot(system)?, slot(data)?))
+}
+
+/// An APFS `--volume-from-dir` directive: `SLOT:DIR`, a volume's slot and the directory tree it
+/// holds. The directory is everything after the slot, so its path may hold a colon.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnApfsVolumeDir`] if the value is not a decimal slot, a colon and a path.
+pub fn apfs_volume_dir(v: &OsStr) -> Result<(u32, PathBuf), ValueError> {
+    let not = || ValueError::NotAnApfsVolumeDir(shown(v));
+    let bytes = crate::args::os::bytes(v);
+    let at = bytes.iter().position(|&b| b == b':').ok_or_else(not)?;
+    let (slot, dir) = (&bytes[..at], &bytes[at + 1..]);
+    if slot.is_empty() || !slot.iter().all(u8::is_ascii_digit) || dir.is_empty() {
+        return Err(not());
+    }
+    let slot = std::str::from_utf8(slot)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(not)?;
+    let dir = crate::args::os::string(dir).ok_or_else(not)?;
+    Ok((slot, PathBuf::from(dir)))
+}
+
+/// The block size an APFS container is formatted with, given as the byte count `--block-size`
+/// took.
+///
+/// # Errors
+///
+/// [`ValueError::NotOneOf`] if a container has no block size of that many bytes.
+pub fn apfs_block_size(bytes: u32) -> Result<ApfsBlockSize, ValueError> {
+    ApfsBlockSize::new(bytes).ok_or_else(|| ValueError::NotOneOf {
+        value: bytes.to_string(),
+        expected: ApfsBlockSize::ALL
+            .iter()
+            .map(|size| size.bytes().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+/// The macOS release whose shape an APFS container is written in: `macos14`, `macos15`,
+/// `macos26` or `macos27`.
+///
+/// # Errors
+///
+/// [`ValueError::NotOneOf`] if the text names none of them.
+pub fn apfs_profile(v: &OsStr) -> Result<ReleaseProfile, ValueError> {
+    named(v)
+}
+
+/// The name every volume of an APFS container records for the program that formatted it, as
+/// the argument's bytes.
+///
+/// # Errors
+///
+/// [`ValueError::NotAnApfsName`] if the field cannot hold it.
+pub fn program_name(v: &OsStr) -> Result<ProgramName, ValueError> {
+    Ok(ProgramName::new(crate::args::os::bytes(v))?)
+}
 
 /// How a btrfs block group is replicated: `single` or `dup`.
 ///
@@ -1329,8 +1522,66 @@ mod tests {
         ));
         assert_eq!(
             fs_type(os("xfs")).unwrap_err().to_string(),
-            "xfs: expected one of ext2, ext3, ext4, fat12, fat16, fat32, exfat, btrfs"
+            "xfs: expected one of ext2, ext3, ext4, fat12, fat16, fat32, exfat, btrfs, apfs"
         );
+        assert_eq!(fs_type(os("apfs")).unwrap(), FsType::Apfs);
+        assert_eq!(FsType::Apfs.name(), "apfs");
+        assert!(FsType::Apfs.has_fit());
+    }
+
+    #[test]
+    fn an_apfs_volume_directive_reads_its_kind_its_identifier_and_its_name() {
+        let uuid = [
+            0xa9, 0xf5, 0xc0, 0xde, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 2,
+        ];
+        // Without a kind it folds case, as macOS formats a volume unless told otherwise; the
+        // name is everything after the identifier, colons and all.
+        let volume = apfs_volume(os("a9f5c0de-0000-4000-8000-000000000002:Macintosh: HD")).unwrap();
+        assert_eq!(volume.uuid, uuid);
+        assert_eq!(volume.name.as_str(), "Macintosh: HD");
+        assert_eq!(volume.names, NameKind::CaseFolding);
+        // Each kind is the word `inspect` prints for it.
+        for kind in NameKind::NAMES {
+            let text = format!("{}:a9f5c0de000040008000000000000002:Data", kind.as_str());
+            let volume = apfs_volume(os(&text)).unwrap();
+            assert_eq!(volume.names, *kind, "{text}");
+            assert_eq!(volume.name.as_str(), "Data");
+        }
+        // No name, a kind with nothing after it, and an identifier that is not one.
+        for text in [
+            "a9f5c0de000040008000000000000002",
+            "a9f5c0de000040008000000000000002:",
+            "case-sensitive:a9f5c0de000040008000000000000002",
+            "Data",
+        ] {
+            assert!(
+                matches!(apfs_volume(os(text)), Err(ValueError::NotAnApfsVolume(_))),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            apfs_volume(os("case-blind:a9f5c0de000040008000000000000002:Data")),
+            Err(ValueError::NotHex16(_))
+        ));
+        // A name the field cannot hold is the library's refusal, naming the limit.
+        let long = format!("a9f5c0de000040008000000000000002:{}", "n".repeat(256));
+        assert_eq!(
+            apfs_volume(os(&long)).unwrap_err().to_string(),
+            "the name is 256 bytes and the field holds 255"
+        );
+    }
+
+    #[test]
+    fn an_apfs_block_size_and_profile_are_each_a_value_the_family_has() {
+        assert_eq!(apfs_block_size(65536).unwrap(), ApfsBlockSize::K64);
+        assert_eq!(
+            apfs_block_size(2048).unwrap_err().to_string(),
+            "2048: expected one of 4096, 8192, 16384, 32768, 65536"
+        );
+        for profile in ReleaseProfile::NAMES {
+            assert_eq!(apfs_profile(os(profile.as_str())).unwrap(), *profile);
+        }
+        assert_eq!(ReleaseProfile::default().as_str(), "macos26");
     }
 
     #[test]

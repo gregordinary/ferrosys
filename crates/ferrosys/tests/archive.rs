@@ -1151,3 +1151,67 @@ fn a_mangled_archive_never_panics() {
         }
     }
 }
+
+/// A character device member whose header holds `major` and `minor` as the `tar` crate
+/// writes them, preceded by the PAX records given.
+fn device_archive(records: &[(&str, &[u8])], major: u32, minor: u32) -> Vec<u8> {
+    let mut b = Builder::new(Vec::new());
+    if !records.is_empty() {
+        b.append_pax_extensions(records.iter().copied()).unwrap();
+    }
+    let mut h = Header::new_ustar();
+    h.set_entry_type(EntryType::Char);
+    h.set_mode(0o644);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_mtime(FAKE);
+    h.set_size(0);
+    h.set_device_major(major).unwrap();
+    h.set_device_minor(minor).unwrap();
+    h.set_path("cdev").unwrap();
+    h.set_cksum();
+    b.append(&h, io::empty()).unwrap();
+    b.into_inner().unwrap()
+}
+
+#[test]
+fn a_device_number_a_pax_record_carries_is_the_one_read() {
+    // A ustar header holds a device number in seven octal digits terminated, and Darwin's
+    // minor numbers run to twenty-four bits, past it. bsdtar writes the exact value in a
+    // `SCHILY.devmajor` or `SCHILY.devminor` record beside the header, and a record is
+    // authoritative over the header field it shadows, as every other record is. The header
+    // here holds what a seven-digit field keeps of 16777215.
+    let tar_bytes = device_archive(
+        &[
+            ("SCHILY.devmajor", &b"255"[..]),
+            ("SCHILY.devminor", &b"16777215"[..]),
+        ],
+        255,
+        16_777_215,
+    );
+    let entries = ArchiveSource::from_reader(&tar_bytes[..])
+        .expect("parse")
+        .into_entries();
+    let cdev = entries
+        .iter()
+        .find(|e| e.path == b"/cdev")
+        .expect("the node");
+    assert!(
+        matches!(
+            cdev.kind,
+            EntryKind::CharDevice {
+                major: 255,
+                minor: 16_777_215
+            }
+        ),
+        "{:?}",
+        cdev.kind
+    );
+
+    // A record that is not a number is refused rather than read past.
+    let tar_bytes = device_archive(&[("SCHILY.devminor", &b"lots"[..])], 1, 3);
+    assert!(matches!(
+        ArchiveSource::from_reader(&tar_bytes[..]),
+        Err(ArchiveError::Bad { .. })
+    ));
+}

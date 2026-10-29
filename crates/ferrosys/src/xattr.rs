@@ -29,13 +29,27 @@ pub struct Xattr {
     pub value: Vec<u8>,
 }
 
+/// The first name `xattrs` states a second time, if any.
+///
+/// An inode holds one value under each attribute name, so a list naming one twice states two
+/// values for one attribute. Every family that holds attributes refuses such a list rather than
+/// keep one of the values or write both under the one name.
+#[cfg(any(feature = "ext", feature = "btrfs", feature = "apfs"))]
+pub(crate) fn repeated_name(xattrs: &[Xattr]) -> Option<&[u8]> {
+    let mut seen = std::collections::HashSet::new();
+    xattrs
+        .iter()
+        .map(|x| x.name.as_slice())
+        .find(|name| !seen.insert(*name))
+}
+
 /// Whether two attribute lists state the same attributes, in whatever order.
 ///
 /// Order-insensitive because a source states attributes in the order its producer
 /// happened to write them, and a set is what an inode holds. Every model that gives one
 /// inode two names asks this question when the second name repeats the first's attributes,
-/// which is the two families with attributes to repeat.
-#[cfg(any(feature = "ext", feature = "btrfs"))]
+/// which is every family with attributes to repeat.
+#[cfg(any(feature = "ext", feature = "btrfs", feature = "apfs"))]
 pub(crate) fn same_xattrs(a: &[Xattr], b: &[Xattr]) -> bool {
     fn sorted(list: &[Xattr]) -> Vec<&Xattr> {
         let mut refs: Vec<&Xattr> = list.iter().collect();

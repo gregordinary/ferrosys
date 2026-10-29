@@ -45,8 +45,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::fidelity::{Direction, FidelityReport, LossPolicy, Property, WRITE_BITS};
 use crate::path::canonical_key;
 use crate::source::{
-    ClassifyError, EntryKind, FileContent, LinkEnd, LinkStep, Metadata, PathFault, SourceEntry,
-    classify_paths, follow_hard_link,
+    ClassifyError, Darwin, EntryKind, FileContent, LinkEnd, LinkStep, Metadata, PathFault,
+    SourceEntry, classify_paths, follow_hard_link,
 };
 use crate::time::{DosTimestamp, Timestamp};
 
@@ -81,11 +81,13 @@ pub(crate) const ROOT_DIR: usize = 0;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum TimeField {
-    /// The modification time, which the entry records as both its creation and modification
-    /// time.
+    /// The modification time, which the entry records as its modification time, and as its
+    /// creation time where no birth time is stated.
     Modification,
     /// The access time.
     Access,
+    /// The birth time, which the entry records as its creation time.
+    Birth,
 }
 
 impl TimeField {
@@ -95,6 +97,7 @@ impl TimeField {
         match self {
             TimeField::Modification => "modification time",
             TimeField::Access => "access time",
+            TimeField::Birth => "birth time",
         }
     }
 }
@@ -565,6 +568,7 @@ impl<'a> Builder<'a> {
             kind,
             meta,
             xattrs,
+            darwin,
         } = entry;
         let key = canonical_key(&path);
 
@@ -599,7 +603,7 @@ impl<'a> Builder<'a> {
         let placed = self.name_in(parent, &name, &path)?;
         let times = self.times_for(&meta, &path)?;
         let is_dir = matches!(node, Node::Dir(_));
-        self.record_losses(&meta, &xattrs, is_dir, &path)?;
+        self.record_losses(&meta, &xattrs, darwin.as_ref(), is_dir, &path)?;
 
         let mut attributes = if is_dir {
             FileAttributes::DIRECTORY
@@ -743,29 +747,37 @@ impl<'a> Builder<'a> {
 
     /// The times this entry records, refusing an instant the fields cannot hold.
     ///
-    /// The creation time is derived from the modification time, as no source carries a birth
-    /// time and reading the clock would make two formats of one tree differ.
+    /// The creation field holds the entry's birth time, or its modification time where the
+    /// source states none: reading the clock would make two formats of one tree differ.
     fn times_for(&mut self, meta: &Metadata, path: &[u8]) -> Result<EntryTimes, ModelError> {
         let modify = self.encode(meta.mtime, TimeField::Modification, path)?;
         let mut access = self.encode(meta.atime, TimeField::Access, path)?;
+        let create = match meta.btime {
+            Some(btime) => self.encode(btime, TimeField::Birth, path)?,
+            None => modify,
+        };
         // The access field has no hundredths byte, so what the entry stores is the two-second
         // unit alone. Dropped here rather than at the write, so the model holds what the volume
         // will hold and a reader of the model is not told a precision the image has not got.
         access.tenth = 0;
 
         // What survives, field by field: the creation and modification times keep hundredths,
-        // so a modification time is stored to ten milliseconds and is lost only below that; the
-        // access time keeps none, so it is stored to two seconds. Recorded and never refused —
-        // a build can avoid the first by naming a rounder instant, and the second fires on half
-        // of all trees, so a refusal would be one a caller learns to accept blanket.
+        // so a modification or birth time is stored to ten milliseconds and is lost only below
+        // that; the access time keeps none, so it is stored to two seconds. Recorded and never
+        // refused — a build can avoid the first by naming a rounder instant, and the second
+        // fires on half of all trees, so a refusal would be one a caller learns to accept
+        // blanket.
         let modify_precise = meta.mtime.nanos.is_multiple_of(10_000_000);
+        let birth_precise = meta
+            .btime
+            .is_none_or(|btime| btime.nanos.is_multiple_of(10_000_000));
         let access_precise = meta.atime.secs % 2 == 0 && meta.atime.nanos == 0;
-        if !modify_precise || !access_precise {
+        if !modify_precise || !birth_precise || !access_precise {
             self.fidelity
                 .record(Direction::Dropped, path, Property::TimePrecision);
         }
         Ok(EntryTimes {
-            create: modify,
+            create,
             modify,
             access,
         })
@@ -797,12 +809,13 @@ impl<'a> Builder<'a> {
         &mut self,
         meta: &Metadata,
         xattrs: &[crate::xattr::Xattr],
+        darwin: Option<&Darwin>,
         is_dir: bool,
         path: &[u8],
     ) -> Result<(), ModelError> {
         self.config
             .loss
-            .record_losses(&mut self.fidelity, meta, xattrs, is_dir, path)
+            .record_losses(&mut self.fidelity, meta, xattrs, darwin, is_dir, path)
             .map_err(|property| ModelError::LossNotAccepted {
                 path: path.to_vec(),
                 property,
@@ -1230,6 +1243,46 @@ mod tests {
         .expect("a tree the format holds");
         assert!(m.fidelity.is_faithful());
         assert_eq!(m.dirs[ROOT_DIR].entries[0].times.modify.tenth, 37);
+    }
+
+    #[test]
+    fn a_birth_time_is_held_to_the_exfat_creation_field() {
+        let born = Timestamp {
+            secs: TIME.secs + 1,
+            nanos: 230_000_000,
+        };
+        let file = |meta: Metadata| TreeBuilder::new().file(b"/f".to_vec(), b"x", meta);
+        let m = model(file(Metadata::new(0o644, TIME).with_birth_time(born))).expect("held");
+        assert!(m.fidelity.is_faithful());
+        let times = m.dirs[ROOT_DIR].entries[0].times;
+        assert_eq!(times.create, DosTimestamp::encode(born).expect("in range"));
+        assert_eq!(times.create.tenth, 123, "the odd second and the fraction");
+        assert_eq!(times.modify, DosTimestamp::encode(TIME).expect("in range"));
+
+        // A finer fraction is the precision it loses, recorded and never refused.
+        let finer = Timestamp { nanos: 1, ..born };
+        let m = model(file(Metadata::new(0o644, TIME).with_birth_time(finer))).expect("held");
+        assert_eq!(
+            m.fidelity
+                .count(Direction::Dropped, Property::TimePrecision),
+            1
+        );
+
+        // An instant outside the field is refused, and names the birth time.
+        let err = model(file(
+            Metadata::new(0o644, TIME).with_birth_time(Timestamp::from_secs(0)),
+        ))
+        .expect_err("outside the range");
+        assert!(
+            matches!(
+                err,
+                ModelError::TimeOutOfRange {
+                    field: TimeField::Birth,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

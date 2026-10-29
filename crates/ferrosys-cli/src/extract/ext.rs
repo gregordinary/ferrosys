@@ -10,7 +10,7 @@ use std::io::Write;
 
 use ferrosys::ext::ondisk::Inode;
 use ferrosys::ext::{Reader, WalkEntry};
-use ferrosys::{Attributes, Metadata, NodeKind, Synthesis};
+use ferrosys::{Attributes, NodeKind, Synthesis};
 
 use crate::extract::{Describe, Described};
 use crate::{Error, from_read};
@@ -96,17 +96,12 @@ fn describe(
         path,
         kind,
         size: inode.size,
-        attrs: Attributes::read(
-            Metadata::new(inode.mode & 0o7777, inode.mtime)
-                .owned_by(inode.uid, inode.gid)
-                .with_times(inode.atime, inode.ctime, inode.mtime),
-            xattrs,
-        ),
+        attrs: Attributes::read(reader.metadata(inode), xattrs),
         number: Some(u64::from(number)),
         links: Some(u32::from(inode.links_count)),
         target,
         blocks: Some(inode.blocks),
-        created: Some(inode.crtime),
+        flags: None,
     })
 }
 

@@ -178,6 +178,7 @@ fn a_closed_domain_serializes_as_the_word_this_crate_writes_it_as() {
         Property::ModificationTime,
         Property::TimePrecision,
         Property::Name,
+        Property::BsdFlags,
     ] {
         assert_eq!(json(&property), serde_json::json!(property.as_str()));
     }
@@ -245,6 +246,6 @@ fn the_crates_own_emitters_are_unaffected_by_the_derives() {
     // reads it sees the same document whether or not this feature is on.
     let report = ScanReport::default();
     let text = report.to_report().to_json();
-    assert!(text.contains("\"schema\":2"), "{text}");
+    assert!(text.contains("\"schema\":3"), "{text}");
     assert!(text.contains("\"findings\":[]"), "{text}");
 }

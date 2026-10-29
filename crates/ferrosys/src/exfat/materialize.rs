@@ -36,6 +36,7 @@ use std::borrow::Cow;
 use std::io::{Cursor, Seek, Write};
 
 use crate::fidelity::{AcceptedLoss, FidelityReport, LossPolicy, Synthesis};
+use crate::image_source::ImageFile;
 use crate::io::ByteSink;
 use crate::source::{FileContent, FileRange, Source};
 
@@ -681,6 +682,10 @@ impl FormatPlan {
                     Piece::Range { offset, range } => {
                         range.for_each_window(|at, window| sink.write_at(offset + at, window))?;
                     }
+                    Piece::Image { offset, file } => {
+                        FileContent::Image(file.clone())
+                            .for_each_window(|at, window| sink.write_at(offset + at, window))?;
+                    }
                     // Refused above, before the sink was touched; answered the same way here
                     // rather than assumed away.
                     Piece::Declared { key, .. } => {
@@ -1006,6 +1011,14 @@ pub enum Piece<'p> {
         /// The range they are read from.
         range: &'p FileRange,
     },
+    /// A file's contents, which are a file in an image this crate reads.
+    #[non_exhaustive]
+    Image {
+        /// Where the contents go, from the volume's start.
+        offset: u64,
+        /// The file they are read from.
+        file: &'p ImageFile,
+    },
     /// The contents of a file declared by its length alone, which the caller supplies.
     ///
     /// A hard link is written as a second copy of its file, so one key can name more than
@@ -1029,6 +1042,7 @@ impl Piece<'_> {
             Self::Bytes { offset, .. }
             | Self::Zeros { offset, .. }
             | Self::Range { offset, .. }
+            | Self::Image { offset, .. }
             | Self::Declared { offset, .. } => *offset,
         }
     }
@@ -1040,6 +1054,7 @@ impl Piece<'_> {
             Self::Bytes { bytes, .. } => bytes.len() as u64,
             Self::Zeros { len, .. } | Self::Declared { len, .. } => *len,
             Self::Range { range, .. } => range.len(),
+            Self::Image { file, .. } => file.len(),
         }
     }
 
@@ -1262,6 +1277,7 @@ fn body_runs(plan: &FormatPlan) -> Result<Vec<Run<'_>>, FormatError> {
                     bytes: Cow::Borrowed(bytes),
                 },
                 FileContent::Range(range) => Piece::Range { offset, range },
+                FileContent::Image(file) => Piece::Image { offset, file },
                 FileContent::Declared { len, key } => Piece::Declared {
                     offset,
                     len: *len,
@@ -2342,6 +2358,7 @@ mod tests {
                     Piece::Bytes { bytes, .. } => slot.copy_from_slice(&bytes),
                     Piece::Zeros { .. } => slot.fill(0),
                     Piece::Range { range, .. } => range.read_at(0, slot).expect("the range reads"),
+                    Piece::Image { file, .. } => file.read_at(0, slot).expect("the file reads"),
                     Piece::Declared { key, .. } => {
                         let len = slot.len();
                         slot.copy_from_slice(&declared_bytes(key, len));
@@ -2491,8 +2508,10 @@ mod tests {
                         0,
                         "{kind:?}: a piece at {at} is inside a sector"
                     );
-                    let contents = matches!(piece, Piece::Range { .. } | Piece::Declared { .. })
-                        || at + len == size;
+                    let contents = matches!(
+                        piece,
+                        Piece::Range { .. } | Piece::Image { .. } | Piece::Declared { .. }
+                    ) || at + len == size;
                     let file_bytes = matches!(
                         piece,
                         Piece::Bytes {

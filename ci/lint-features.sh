@@ -26,18 +26,23 @@ cd "$root" || exit 1
 # compile.
 CONFIGS=(
     "no family, no source, no sink|--no-default-features"
-    "the default: four families, three decoders|"
+    "the default: five families, six decoders|"
     "ext alone|--no-default-features --features ext"
     "FAT alone|--no-default-features --features fat"
     "a family with a classifier and a reader|--no-default-features --features exfat"
-    "the newest family, alone|--no-default-features --features btrfs"
-    "that family with every decoder it can use|--no-default-features --features btrfs,zlib,lzo,zstd"
+    "btrfs alone|--no-default-features --features btrfs"
+    "btrfs with every decoder it can use|--no-default-features --features btrfs,zlib,lzo,zstd"
     "one decoder of the three, so the other two are absent|--no-default-features --features btrfs,lzo"
+    "APFS alone, the source walk shared with no other family|--no-default-features --features apfs"
+    "that family with its decoders|--no-default-features --features apfs,zlib,lzvn,lzfse,lzbitmap"
+    "that family with LZFSE alone, which brings LZVN|--no-default-features --features apfs,lzfse"
+    "that family with LZBITMAP alone|--no-default-features --features apfs,lzbitmap"
     "the derives, no family to derive over|--no-default-features --features serde"
     "both ends of a tree, no family|--no-default-features --features tar,dir"
     "a family and a sink, no ext|--no-default-features --features fat,dir"
     "two families and no ext|--no-default-features --features fat,exfat"
-    "a family the root dispatches to, beside one it does not|--no-default-features --features fat,btrfs"
+    "two families that each write, no ext|--no-default-features --features fat,btrfs"
+    "APFS beside FAT, the two sharing the hard-link walk|--no-default-features --features fat,apfs"
     "ext and both ends of a tree|--no-default-features --features ext,tar,dir"
 )
 

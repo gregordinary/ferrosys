@@ -2,7 +2,8 @@
 
 This page is about one family. Growing a filesystem in place is an ext concern. FAT12,
 FAT16, FAT32, and exFAT each fix their allocation tables at format time, and a resize
-rewrites those tables. btrfs grows through its own chunk tree under a running kernel. This
+rewrites those tables. btrfs grows through its own chunk tree under a running kernel, and an
+APFS container shares one pool of blocks among its volumes. This
 page describes the geometry ferrosys writes into an ext2, ext3, or ext4 image so that
 growth is safe.
 

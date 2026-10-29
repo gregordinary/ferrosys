@@ -7,6 +7,420 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [Unreleased]
+
+### Added
+
+- **`OpenOptions::len` and `DetectOptions::len` hold a filesystem to its partition.** Every
+  family's reader, and detection, read through the region from `base` on for `len` bytes,
+  and a read past its end fails as one past a short source does. `ext::OpenOptions::len` and
+  `fat::OpenOptions::len` set it through the shared options. `inspect`, `detect`, `extract`
+  and `identity` take `--length` beside `--offset`.
+- **An ext scan reports a filesystem longer than its source**, as
+  `ext::ReadError::SourceTooShort` at `Severity::Structural`, and a btrfs scan reports a
+  device longer than its source at the same severity. `btrfs::Volume::source_bytes` is what
+  the second is measured against.
+- **`fat::ReadError::DotEntryTarget`, `fat::ReadError::ReservedCharacter` and
+  `fat::ReadError::IndistinguishableNames`.**
+- **`fat::ReadError::LargeCluster`, `DirectoryWithSize`, `LabelWithDirectoryAttribute`,
+  `SecondVolumeLabel`, `FreeCountStale`, `FreeCountOutOfRange` and `LongNamePadding`.**
+- **`exfat::ReadError::ReservedCharacter`, `IndistinguishableNames`, `DirectoryValidLength`,
+  `ChainPastLength` and `VolumeGuidWithSecondaries`.**
+- **`ScanReport::source_failures` and `FindingReport::source_failures`.** A read the source
+  failed for a reason other than ending is recorded there, under each family's
+  `Category::Source`, rather than as a finding. `Deviation::is_source_failure` says which
+  record is one, and `FindingReport::with_source_failures` builds a report holding them.
+- **The `apfs` feature, and with it the APFS family**: the filesystem of macOS, and of the
+  disk images a Mac makes. It reads one: a container and every volume in it, each as it is and
+  as its snapshots keep it. On by default, with no dependencies of its own.
+
+  An APFS partition holds a container rather than a filesystem. The container keeps its
+  checkpoints in a ring, an object map that turns a virtual object's identifier at a
+  transaction into a block, and up to a hundred volumes, each a filesystem with its own object
+  map and its own tree of records. Every object carries a checksum and records its type, its
+  identifier and the transaction that wrote it, and every read holds an object to what led to
+  it.
+
+  - **`apfs::Container`** opens the live checkpoint: the newest whole one in the descriptor
+    area, belonging to the container block zero names, with block zero held to it and
+    reported as a `BlockZero`. It lists the volumes, and `unreadable_volumes` the ones whose
+    superblock cannot be read, which a read refuses only where it chooses one.
+  - **`apfs::Reader`** reads one volume, chosen by `OpenOptions::volume` by slot, name or
+    identifier, or one of its snapshots by `OpenOptions::snapshot`: `lookup`,
+    `lookup_no_follow`, `walk`, `read_dir`, `xattrs`, `link_target`, `read_data`,
+    `read_data_to` and `read_into`. A name is found the way the volume compares names, its
+    case folded where the volume folds it and its normalization always, under Unicode 17.0's
+    tables. A compressed file reads through its compression header, its content kept as zlib,
+    LZVN, LZFSE, LZBITMAP or stored bytes, after the header or in its resource fork. Content
+    kept after the header as itself at another length than the header states is read to the
+    header's size by a lenient read, cut there or followed by zeros as macOS reads it, and
+    refused by a strict one; a scan reports it at `Severity::Conformance`.
+  - **`apfs::Reader::scan`** reads the whole volume and reports every deviation it meets, in
+    APFS's own categories. Every node of both object maps and of every tree is read and held
+    to its root's counts, every record to what a read of it refuses, the volume's and the
+    container's own counts to what they hold, and every block's reference count to the
+    streams using it.
+  - **`apfs::ondisk`** is the byte-exact layer: the object header and its checksum, the
+    container and volume superblocks, the object map, a B-tree node, and every record of a
+    volume's tree.
+  - **`apfs::plan_layout`** places every object of a newly formatted container, from its
+    size, its block size and how many volumes it begins with: the checkpoint areas, the space
+    manager and its internal pool, and each of the two checkpoints' objects. For one volume,
+    each is at the block `newfs_apfs` puts it when it formats a file of that size.
+  - **`apfs::format`, `apfs::format_to` and `apfs::FormatPlan`** write the container a plan
+    places, its first volume populated from a `Source` and every other volume holding its
+    root directory and its private directory. A volume holds every property a source states:
+    owners, modes, four times to the nanosecond, hard links, device nodes, pipes, sockets and
+    extended attributes. A name is held to what macOS creates under the release's Unicode
+    version, and two names a directory compares as one are refused (`ModelError`). An entry
+    naming one attribute twice is refused, as is an attribute name longer than the 127 bytes
+    `setxattr` sets on macOS (`MAX_XATTR_NAME`). Identifiers
+    are taken in a depth-first walk in record order, as `hdiutil create -srcfolder` takes them
+    on a volume of the same kind. Each node carries what macOS gives one of its kind: a pipe,
+    a socket or a device node its protection class, and an inode holding
+    `com.apple.system.Security` the flag saying so. With nothing in it, for one volume every
+    block is the one
+    `newfs_apfs` writes into a file of the same size, at the same block size, on macOS 14, 15,
+    26 or 27 as `ReleaseProfile` names, apart from the identifiers, the times, the program the
+    volume records as its formatter, and two values written as zero: the container's counters
+    and the newest version to have mounted it. The identifiers and the one instant are
+    `FormatOptions` inputs, and each volume's name, `NameKind` and root owner are
+    `VolumeRequest` options. `format_to` writes only the blocks the container occupies, a file
+    a window at a time.
+  - **A volume holds an entry's BSD flags, and a compressed file in the form a source gives
+    it.** Both arrive as the entry's `Darwin` part. A compressed file's header and resource
+    fork are written as given, under the flags macOS gives a compressed file, `UF_COMPRESSED`
+    set from the form whatever the part's flags say, and read back as its content; a form whose header contradicts the file is refused as
+    `ModelError::CompressedForm`, naming the `CompressedFault`. `apfs::Reader::darwin` reads
+    both back.
+  - **`apfs::FormatPlan::fit`** plans the smallest container that holds a source with the
+    room a `Slack` asks for. It plans candidate sizes and places every volume's content into
+    each, and the size it returns places where the block below it does not. The room is
+    `ApfsLayout::writable_blocks`: the free blocks less what macOS keeps free before a write of
+    up to a mebibyte by any user, and the room it gives a growing file ahead of it, so a slack
+    of 8 MiB is 8 MiB macOS takes written that way, however its files grow. A share past the limit is `FormatError::SlackShareTooLarge`, and room no
+    container leaves is `FormatError::DoesNotFit`.
+  - **`apfs::RootSnapshot`: a volume formatted with a snapshot of itself, which it roots
+    from.** `VolumeRequest::root_snapshot` gives a volume one, by name and identifier. The
+    snapshot keeps the whole tree as it is written, and the volume's root-to transaction names
+    it. Its records, its copy of the superblock, the object holding its identifier and the
+    object map's tree of snapshots are laid out as macOS lays out the ones it writes when it
+    takes a snapshot. The volume's extent-reference tree goes with the snapshot, and the
+    volume starts an empty one. `ondisk::SnapshotMeta::to_record`,
+    `ondisk::snapshot_name_record` and `ondisk::SnapshotExtension::write_to` write the layouts
+    the reader reads. A scan reports a volume whose root-to transaction names no snapshot it
+    holds, at `Severity::Conformance`.
+  - **`apfs::VolumeGroup`: a System volume and a Data volume joined as macOS joins the two it
+    boots from.** `FormatOptions::volume_group` names their slots. Each records its role, both
+    record the Data volume's identifier as the group's and the compatible feature bit 0x10,
+    and the System volume numbers the objects of its tree from `0x0FFF_FFFF_0000_0010` and
+    records 0 where every other volume records 16 past the superblock's laid-out fields. Every
+    object is where it is in the same container without the group, and a System volume's root
+    snapshot carries the group in its copy of the superblock. A group naming a slot that holds
+    no volume is `FormatError::GroupSlot`, and one naming one slot twice
+    `FormatError::GroupOneSlot`.
+  - **`VolumeRequest::contents`: a volume after the first holds a source of its own**, modelled
+    as the first volume's is. Contents given to the first volume, which holds the format's
+    source, are `FormatError::ContentsOnFirstVolume`.
+  - **`apfs::Firmlinks`: the directories of a group's System volume that macOS joins to a path
+    in its Data volume.** `Firmlinks::parse` reads a list of lines, each a directory's absolute
+    path, a tab and the target's relative path, ending in a newline, and refuses any other line
+    as a `FirmlinksError` naming it. `VolumeRequest::firmlinks` gives the list to the group's
+    System volume: each listed directory it holds gets `FIRMLINK_FLAG` beside its own flags and
+    the attribute `FIRMLINK_XATTR` holding its target and a NUL, and `FormatPlan::firmlinked`
+    counts them. A list given to any other volume is `FormatError::FirmlinksOutsideGroup`, a
+    line naming an entry that is not a directory `FormatError::FirmlinkNotDirectory`, and a
+    directory already holding the attribute with another value
+    `FormatError::FirmlinkAttributeHeld`.
+  - **`NameKind` and `ReleaseProfile` are named choices**, with `as_str`, `from_name` and
+    `NAMES`: `case-insensitive` and `case-sensitive`, and `macos14` to `macos27`.
+    `NameKind::of_volume` reads the kind a volume superblock records, and `BlockSize::new`
+    the block size of a byte count. A `FormatError` names an identifier by what it belongs to:
+    the container, the volume in a slot, or that volume's root snapshot.
+
+  A volume macOS encrypted and has since decrypted reads like any other. What it refuses, each
+  by name: an encrypted volume or one whose encryption is being changed, a sealed volume, a volume with a revert pending, a Fusion container, and an incompatible
+  feature it does not read. A compressed file of a type this build does not decode is refused
+  naming the type.
+- **`ImageSource`: a tree this crate reads, as a `Source`.** It walks any family's reader
+  and gives each entry as the `SourceEntry` that writes it again, so one image's tree formats
+  another family's image. A regular file's content is an `ImageFile`, read from the image when
+  a format places it, so a source holds its entries' records and none of their bytes. A second
+  name for a node is a hard link to the first, and each property the reader filled from a
+  `Synthesis` is a record of `ImageSource::fidelity`. `FileContent::Image` and
+  `exfat::Piece::Image` carry such a file.
+- **`SourceEntry::darwin`: what a Darwin filesystem records of an entry.** A `Darwin` holds
+  the entry's BSD flags and, for a compressed file, its stored form as a `CompressedFile`.
+  `FsTree::darwin` reads it back from an image, `ImageSource` carries it, and APFS writes it.
+  Every other family names the flags as `Property::BsdFlags`, which a FAT or exFAT volume
+  writes without under `accepted_loss` and an ext or btrfs volume refuses as
+  `ModelError::BsdFlagsNotHeld`; clearing the entry's `darwin` writes the tree without them.
+  A compressed form is how a file is stored, and every family writes the file's content.
+  `FsTree::bsd_flags` reads the flags alone. An extraction carries none: `ArchiveSink`
+  records each entry's as `Direction::Dropped` in its report, and `DirectorySink` refuses them
+  as `HostError::FlagsNotHeld` or, under `skip_unsupported`, records them the same way.
+  `extract --stat` shows them, and `--to-tar` and `--to-dir` count them as `Not kept:`.
+- **`Metadata::btime`: a birth time, on every family.** A source states when an entry was
+  created with `Metadata::with_birth_time`, and every family writes it: ext as `crtime`, FAT
+  and exFAT in the creation field to ten milliseconds, btrfs as `otime`, APFS as the inode's
+  creation time. Where a source states none, each writes the modification time there, and APFS
+  the format's instant where the modification time is before 1970 or after it. Every
+  family's `FsTree::stat` reports the one its format records, so `ImageSource` carries birth
+  times from one image to another. A birth time an ext inode of 128 bytes has no field for is
+  `ModelError::BirthTimeNotHeld`, one before 1970 on APFS is
+  `ModelError::BirthTimeBeforeEpoch`, and one outside FAT's or exFAT's range names
+  `TimeField::Birth`. `ext::Reader::metadata`, `btrfs::Node::metadata` and
+  `apfs::Node::metadata` give a node's metadata without its attributes. `ferrosys extract
+  --stat` reports the birth time `stat` reports.
+- **`LayeredSource::remove`: a path taken out of a composed source.** The path goes with
+  everything beneath it, and a later layer may place it again. A path nothing composed holds
+  is `RemovalError::NotHeld`, so a misspelled removal is an error rather than a step that did
+  nothing, and the root directory is `RemovalError::Root`.
+- **The `lzvn`, `lzfse` and `lzbitmap` features**: three of the encodings a Mac keeps a
+  compressed file's content in, each decoded in safe Rust with no dependency. `lzfse` carries
+  `lzvn`, whose blocks a stream of it holds.
+- **`apfs::ReadError::AmbiguousVolume`.** A name more than one volume of a container carries
+  selects none of them, and `VolumeSelector::Name` refuses it naming the slots, as `--volume`
+  does. A volume is then chosen by its slot or its identifier.
+- **`apfs::Category::Source`**, under which an APFS scan holds a read its source failed apart
+  from its findings, as every family's scan does.
+- **`Family::Apfs`, `Filesystem::Apfs` and `FsReader::Apfs`.** `detect` and `open` name an
+  APFS container, and `open` reads the volume in its first occupied slot.
+- **`ferrosys inspect` and `ferrosys extract` read APFS.** `--volume` chooses a volume by name
+  or by slot, and `--snapshot` one of its snapshots. Without `--volume` both read the first
+  volume the tool reads, passing over a Mac's sealed system volume and saying so on the
+  standard error. `ferrosys detect` prints `apfs`.
+- **`ferrosys format -t apfs` writes an APFS container.** `--container-uuid` is the
+  container's identifier, and each `--volume [KIND:]UUID:NAME` a volume in the next slot, the
+  first holding the contents. `KIND` is `case-insensitive` or `case-sensitive`, the words
+  `inspect` prints. `--block-size`, `--profile` and `--formatted-by` set the rest, and
+  `--size auto` finds the smallest container that holds the contents with `--slack` left for
+  any user to write, and the summary reports its writable blocks beside its free ones.
+  `--label` belongs to the four families that record one name for the whole filesystem, and
+  is refused for APFS. `--root-snapshot UUID:NAME` gives the first volume a root snapshot,
+  and `inspect` reports the transaction a volume roots from. `--volume-from-dir SLOT:DIR`
+  fills a later volume from a directory tree, `--volume-group SYSTEM:DATA` joins two volumes
+  as a group and `--firmlinks FILE` gives its System volume a firmlink list; the summary
+  reports the group and how many listed directories it marked, and `inspect` reports each
+  volume's group.
+- **`DirectorySink::skip_unsupported` and `ferrosys extract --skip-unsupported` write what
+  the destination will hold.** A name longer than the destination takes leaves out its entry,
+  a directory with everything under it, and names it in `ExtractReport::skipped`. An extended
+  attribute the destination will not hold is not set, and is named once in
+  `ExtractReport::dropped_xattrs`. Each limit is the destination's own, so an entry or an
+  attribute is left out only after the destination has refused it.
+- **`HostError::NameTooLong`.** A name longer than the destination takes stops an extraction
+  as this, naming the entry. A format storing a name as up to 255 UTF-16 units holds names of
+  as many as 765 bytes of UTF-8, and a Linux filesystem takes 255 bytes.
+- **`DirectorySink` reads every node's access and modification times back once set.** A time
+  the destination holds as another — before the earliest it keeps, past the latest, or finer
+  than its fraction — stops an extraction as `HostError::TimeNotHeld`, naming the entry, the
+  time recorded and the time held. Under `skip_unsupported` the entry keeps the time the
+  destination holds and is named in `ExtractReport::times_not_held`, and `extract
+  --skip-unsupported` names it as `Time not held:`.
+- **`DirectorySink` reads a device node back once made.** One the host made as another device,
+  from a number wider than its own, is removed and stops the extraction as
+  `HostError::UnrepresentableDevice`, or under `skip_unsupported` is left out and named in
+  `ExtractReport::skipped`.
+- **`ArchiveError::DeviceUnrepresentable`.** A device number past what eight octal digits hold
+  has no spelling in a tar header, and stops `ArchiveSink::write_tree` as this before anything
+  of its member is written.
+- **`ReadError::RepeatedDirectory` in every family's reader, APFS's included.** A directory
+  entry naming a directory the walk already reaches — one of its own ancestors, or a second
+  name for one directory — is integrity damage, which a strict read refuses.
+
+### Changed
+
+- **The LZO decoder ends a stream where an instruction of the 16 to 31 row carries a distance of
+  16384, whatever its length field holds**, the rule the format's documentation states. An end
+  spelled with a length field other than one was refused.
+- **The license expression is `(MIT OR Apache-2.0) AND Unicode-3.0 AND BSD-3-Clause`.** The
+  crates' own code is under MIT OR Apache-2.0. The `apfs` feature compiles the Unicode
+  character tables APFS names are held to, data from the Unicode Character Database under the
+  Unicode License v3, whose notice each crate carries as `LICENSE-UNICODE`. The `lzvn` and
+  `lzfse` features compile decoders derived from Apple's lzfse project, under BSD-3-Clause, and
+  the LZBITMAP decoder reads the layout libzbitmap decodes; each crate carries both notices as
+  `THIRD-PARTY-NOTICES`. A build without those three features compiles code under MIT OR
+  Apache-2.0 alone.
+- **A scan holds a read its source failed apart from its findings.** None counts towards
+  `worst_severity` or `has_fatal`, and a report holding one is not clean. The findings
+  document carries them as `source_failures`, and `FINDINGS_SCHEMA_VERSION` is 3; every
+  document `ferrosys` emits declares schema 3. A SARIF log carries each as an error-level
+  notification of an invocation that did not succeed. `inspect` exits 8 when its source
+  failed, whatever `--fail-on` says.
+- **`Deviation` has a required method, `is_source_failure`.**
+- **A FAT read holds a subdirectory's `.` and `..` to the format.** Each read holds the first
+  two slots to the two names, the directory attribute, and `.` to the directory's own cluster,
+  and reports a dot entry anywhere else as `fat::ReadError::BadDotEntry`. A walk and a scan
+  also hold `..` to the parent they came from, as `fat::ReadError::DotEntryTarget` at
+  integrity, FAT32's high half included. A strict walk refuses each.
+- **A FAT read reports a name carrying a character the format reserves**, as
+  `fat::ReadError::ReservedCharacter` at conformance: in a long name, the set the writer
+  refuses; in a short name, that set, `+ , . ; = [ ]` and 0x7F, or a leading space.
+- **A FAT read says more of what the format sets out.** A cluster past 32 KiB, a directory
+  entry recording a length, and a long name padded otherwise than the format pads one are
+  remarked on. A second volume label, and an entry carrying the volume-label and directory
+  attributes together, are conformance findings: a label is one entry, and the root's first.
+  A scan holds the information sector's free count to the clusters the table marks free, and
+  a stale count is a remark. A count past the volume's clusters is a conformance finding, as
+  exFAT grades an impossible fullness.
+- **The FAT writer refuses a long name holding U+FFFF**, the unit the format pads a name with.
+- **An exFAT read follows the generic template for a benign entry it does not interpret.** A
+  benign primary heads a set: its secondaries are its own rather than strays, and its
+  checksum is held to its bytes. A scan claims what a benign entry allocates, in its own set
+  or in a file's, so its clusters are neither lost nor free to another stream. A volume GUID
+  entry is held to the root and to having no secondaries.
+- **An exFAT read reports a name carrying a character the format reserves**, as
+  `exfat::ReadError::ReservedCharacter` at conformance, and a directory read whole reports
+  two names its up-case table folds to one, as `exfat::ReadError::IndistinguishableNames` at
+  integrity.
+- **An exFAT directory whose written length is not its length is reported** as
+  `exfat::ReadError::DirectoryValidLength` at conformance, and is read to its length.
+- **An exFAT scan holds a chained stream's table to its length**, claiming the clusters past it
+  and reporting `exfat::ReadError::ChainPastLength`.
+- **A FAT directory read whole reports two names a lookup cannot tell apart**, as
+  `fat::ReadError::IndistinguishableNames` at integrity: equal once case is folded, whether
+  two long names, two short names, or one entry's long name and another's short name.
+- **`ext::rewrite_identity_at` takes the region's length** as its fourth argument, `None`
+  for the rest of the image.
+- **`identity` exits 4 for a filesystem whose groups lie past the end of its image**, the
+  code `inspect` gives the same image.
+- **A file that loses one name in a `LayeredSource` keeps its others.** Where a hard link
+  names a file whose own name a removal, or a layer replacing a directory, takes away, the
+  first of its remaining names in path order holds the file whole and the rest link to that
+  one. A link to a file beneath a replaced directory named nothing before.
+- **The default features carry `apfs`, `lzvn`, `lzfse` and `lzbitmap`.** A default build reads
+  an APFS container and a Mac's compressed files, and `detect` and `open` name a container.
+- **A strict walk refuses a directory the tree reaches twice.** No ext, FAT, exFAT or btrfs
+  filesystem holds one when it is sound, and a strict walk, and so an extraction that names no
+  policy, stops at it as `ReadError::RepeatedDirectory`. A lenient walk passes it over and
+  does not descend into it again.
+- **`btrfs::Reader::read_data_to` is held to `Limits::max_file_bytes`**, as the ext, FAT and
+  exFAT readers' streams are, and `extract --cat` of a btrfs file refuses past the cap before
+  writing a byte.
+- **`/lost+found` is left out of an extraction on an ext filesystem alone.** It is the
+  directory the ext format makes for itself. On a FAT, exFAT or btrfs volume a directory of
+  that name is the volume's own, and `ArchiveSink` and `DirectorySink` write it out like any
+  other.
+- **`ExtractReport::dropped_xattrs` names each attribute an extraction left out, once.** It
+  replaces the `xattrs_dropped` flag, and `ExtractReport::more_dropped_xattrs` says when the
+  list stops at `ExtractReport::MAX_DROPPED_XATTRS` names.
+- **A `user` attribute on a symbolic link or a device node is left out under
+  `skip_unsupported`.** No privilege lets a destination hold one, so `skip_privileged` stops
+  at it as the destination's refusal. `HostError::UnsupportedAttribute` carries `why`, the
+  rule the destination applied.
+
+### Fixed
+
+- **A btrfs entry with an attribute named by nothing, or by a name holding a NUL, was
+  written.** A host and an archive take the name as a C string, so the second is another
+  attribute's name to them. Both are refused as `btrfs::ModelError::XattrName`, as ext and APFS
+  refuse them.
+- **A tar archive named an attribute by a keyword a reader could take as another's.** An
+  attribute name holding a NUL, which a reader taking the keyword as a C string ends at, and an
+  empty name, are refused as `ArchiveError::XattrNameUnrepresentable`, as a name holding `=` or
+  a newline is.
+- **A filesystem fitted with `Slack::Share` could be up to one allocation unit short of the
+  share.** The units a share asks for are rounded up, so `--slack 20%` leaves at least a fifth
+  free on every family that searches for its size.
+- **A strict exFAT read refused a volume carrying a vendor's benign entry set**, reading the
+  secondaries behind an unrecognized benign primary as strays.
+- **A vendor allocation entry's clusters were reported as lost by an exFAT scan.**
+- **An exFAT directory recording less written than its length passed a strict walk**, with the
+  remark a file draws for the same fields.
+- **An exFAT file whose chain ran on past its length scanned clean**, and the clusters past it
+  went unclaimed.
+- **A FAT long name padded with no terminator was read with U+FFFF characters at its end.**
+  Either value ends the name.
+- **The FAT writer kept 0x7F in the short name it derived**, which `fsck.fat` refuses. It
+  takes an underscore there, and the long name keeps it.
+- **A FAT subdirectory whose `..` named the wrong cluster scanned clean.** Only the names of
+  the dot entries were checked, and only by a scan.
+- **A filesystem inside a partition was read on into the partition after it.** A reader had
+  no end to hold it to but the end of the source, so a filesystem longer than its partition
+  scanned clean, and its file data past the partition was read from the next one. With
+  `OpenOptions::len` or `--length`, that filesystem is reported as truncated: FAT and exFAT
+  refuse its boot sector, and ext and btrfs report it from a scan. `identity` refuses one
+  whose groups begin past the partition, and writes nothing.
+- **`inspect` exited 4, "a filesystem was read and it is bad", for a disk that failed a
+  read.** An I/O failure other than the source ending was a structural finding. It is a
+  source failure, and the run exits 8, as `extract` does for the same failure.
+- **A FAT or exFAT scan whose source failed a read reported clusters nothing reaches.** The
+  clusters behind the failed read were not reached, and were counted as lost. A scan whose
+  source failed asks no question only the whole volume answers.
+- **`ferrosys extract --stat` reported an ext inode of 128 bytes as created in 1970.** Such
+  an inode records no creation time, and `--stat` reports none for it.
+- **A FAT entry whose creation field is zero reported a creation time.** The format records a
+  time not kept as a zero field, and `fat::Times::create` is `None` for one.
+- **A 128-byte ext inode was written times it does not hold.** Such an inode records a
+  signed 32-bit second and no fraction of one, and was held to a larger inode's range: a
+  second past 2038 was written as an instant before 1970, and a fraction of a second was
+  dropped. Each is refused, a second as `ModelError::TimestampOutOfRange` and a fraction as
+  `ModelError::FractionNotHeld`, the format's own instant among them. `ext::ondisk::time_is_representable` takes the inode size, and
+  `ext::ondisk::Inode::has_crtime` says whether an inode records a creation time.
+- **A btrfs entry naming one extended attribute twice was written with both.** An inode holds
+  one value under each name, and a read handed back two attributes of one name. It is refused
+  as `btrfs::ModelError::XattrRepeated`, as ext refuses it.
+- **A btrfs time whose fraction of a second was a second or more was written as given.** The
+  format's own instant, stamped on every root, is refused as
+  `btrfs::FormatError::TimeOutOfRange`, and an entry's time as
+  `btrfs::ModelError::TimeOutOfRange`.
+- **`FsTree::stat` on a btrfs node reported the mode with its file-type bits.** It reports the
+  twelve bits `Metadata::mode` holds, as every other family does, so a btrfs entry's metadata
+  writes another image unchanged.
+- **A zstd extent of a few kilobytes in a btrfs image could make the reader allocate
+  gigabytes, and then panic.** Zstandard bounds what one block expands to by the frame's
+  window, and the reader clamps that window to the size the record declares, but the decoder
+  held a block to neither: a frame of long matches expanded inside it before the declared size
+  was compared. The `ruzstd` floor is 0.9.1, above every release RUSTSEC-2026-0344 covers,
+  which holds each block to the window, and a block that expands past it is refused as a
+  stream that does not decode.
+- **An extended attribute in no namespace the host knows stopped `--to-dir` as an I/O
+  error.** It stops the run as `HostError::UnsupportedAttribute`, naming the entry and the
+  attribute, and `--skip-unsupported` leaves it out.
+- **A name longer than the destination takes stopped `--to-dir` as an I/O error.** It stops
+  the run as `HostError::NameTooLong`, naming the entry, and `--skip-unsupported` leaves it
+  out.
+- **An extended attribute larger than the destination holds stopped `--to-dir` as an I/O
+  error.** `setxattr` answering E2BIG, ENOSPC or ERANGE stops the run as
+  `HostError::UnsupportedAttribute`, and `--skip-unsupported` leaves the attribute out.
+- **An owner a user namespace maps to no id stopped `--to-dir` as an I/O error.** Root in
+  the namespace holds `CAP_CHOWN` and the kernel answers EINVAL. It stops the run as
+  `HostError::Unprivileged`, naming the entry, and `--skip-privileged` leaves the tree owned
+  by the process that wrote it.
+- **A device number past seven octal digits was written into a tar header as another
+  number.** The header's field keeps the low seven digits of a number set through it, so a
+  Mac's twenty-four-bit minor number named another device in the archive. `ArchiveSink`
+  writes such a number as eight digits filling the field, the form bsdtar writes and GNU tar
+  reads.
+- **`ArchiveSource` read a device number from the header past a `SCHILY.devmajor` or
+  `SCHILY.devminor` record.** The record is read over the header field it shadows, as every
+  other record is.
+- **A file the image could not yield stopped `ArchiveSink::write_tree` as
+  `ArchiveError::Io`.** It stops it as `ArchiveError::Read` with the reader's own error, and
+  `extract --to-tar` exits 4 for a damaged image, as `--to-dir` and `--cat` do, where it
+  exited 8.
+- **`FsTree::read_bytes` on an ext directory or slow symbolic link yielded its blocks.** It
+  yields nothing for a node that is not a regular file, as the trait states and every other
+  family answers.
+- **A btrfs lookup could answer from the block before the one that held the answer.** A node
+  key above the first item of the block it leads to steered `btrfs` `find_at_or_before` past
+  that block and answered with the last item of the block before. Such an answer is held to
+  the item after it, through every guard a descent applies, and the wrong key is refused.
+- **A btrfs range of exactly `Limits::max_walk_entries` items was refused** for the item read
+  to find its end. That item is not counted.
+- **`extract --cat` named a standard output that refused its bytes as the image.** A closed
+  pipe or a full device read as "reading the image". It is named as the standard output.
+- **The refusal of an option a family does not answer read "a exfat filesystem".** The
+  family's word takes the article its sound does.
+
+### Gates
+
+- **The LZVN, LZFSE and LZBITMAP decoders are held to their reference implementations.**
+  `ci/build-codec-reference.sh` builds Apple's lzfse project and libzbitmap, each pinned by its
+  tarball's SHA-256, into one command line. The optimized test run has both sides decode about
+  169,000 streams. Wherever a decoder here returns bytes, the reference returns the same bytes.
+
 ## [0.6.0] - 2026-10-05
 
 The ext reader reads what a used filesystem holds. It replays a journal left needing

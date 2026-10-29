@@ -33,7 +33,7 @@ pub enum Slack {
     /// At least this many bytes free, rounded up to whole allocation units.
     Bytes(u64),
     /// At least this share of the filesystem free, in hundredths of one percent — `2000`
-    /// for a fifth, `150` for 1.5%.
+    /// for a fifth, `150` for 1.5% — rounded up to whole allocation units.
     ///
     /// The share is of the whole filesystem rather than of the source, so it says what the
     /// finished image looks like rather than how far it was grown: at `2500` a quarter of
@@ -52,11 +52,12 @@ impl Slack {
     /// rather than to search for.
     pub const MAX_SHARE: u16 = 9000;
 
-    /// Hundredths of one percent of a whole, exactly: the product is carried in 128 bits so
-    /// it exists for every count, and narrowing back is lossless because the share is
-    /// bounded well below one.
+    /// The fewest of `total` units that are at least `hundredths` hundredths of one percent
+    /// of it: the share, rounded up. The product is carried in 128 bits so it exists for
+    /// every count, and narrowing back is lossless because the share is bounded well below
+    /// one.
     pub(crate) fn share_of(total: u64, hundredths: u16) -> u64 {
-        (u128::from(total) * u128::from(hundredths) / 10_000) as u64
+        (u128::from(total) * u128::from(hundredths)).div_ceil(10_000) as u64
     }
 
     /// The allocation units a filesystem of `total_units` must have free to satisfy this.
@@ -95,7 +96,10 @@ impl Slack {
 /// emit, so a build carrying no family at all constructs none of them. The allowance is
 /// scoped to exactly that build: with a family compiled in, an arm no search reaches is a
 /// dead arm and is reported as one.
-#[cfg_attr(not(any(feature = "ext", feature = "fat")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "ext", feature = "fat", feature = "apfs")),
+    allow(dead_code)
+)]
 pub(crate) enum Probe<T, E> {
     /// The tree was placed and the slack was met. Carries whatever the family wants to keep
     /// from the attempt, so the winning candidate needs no second search to rebuild it.
@@ -308,12 +312,28 @@ mod tests {
     }
 
     #[test]
-    fn a_share_is_exact_at_every_size() {
+    fn a_share_is_the_fewest_units_that_meet_it_at_every_size() {
         // The product is carried in 128 bits, so a count near the top of the range is a
-        // quarter of itself rather than an overflow.
-        assert_eq!(Slack::share_of(u64::MAX, 2500), u64::MAX / 4);
+        // quarter of itself, rounded up, rather than an overflow.
+        assert_eq!(Slack::share_of(u64::MAX, 2500), u64::MAX / 4 + 1);
         assert_eq!(Slack::share_of(1_000_000, 150), 15_000);
         assert_eq!(Slack::share_of(0, 9000), 0);
+        // A fifth of 1,151 is 230.2 units, which 230 free would fall short of.
+        assert_eq!(Slack::share_of(1_151, 2000), 231);
+        for total in (0..2_000).chain([u64::from(u32::MAX), u64::MAX - 1, u64::MAX]) {
+            for hundredths in [0, 1, 150, 2000, 2500, 3333, Slack::MAX_SHARE] {
+                let units = Slack::share_of(total, hundredths);
+                let asked = u128::from(total) * u128::from(hundredths);
+                assert!(
+                    u128::from(units) * 10_000 >= asked,
+                    "{units} of {total} is short of {hundredths}"
+                );
+                assert!(
+                    units == 0 || u128::from(units - 1) * 10_000 < asked,
+                    "{units} of {total} is more than {hundredths} needs"
+                );
+            }
+        }
     }
 
     #[test]

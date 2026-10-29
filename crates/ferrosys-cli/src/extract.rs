@@ -52,6 +52,7 @@
 //! filesystem otherwise. The library defaults to no cap, which is right for a caller that
 //! knows what it opened; this tool is most often pointed at an image someone else produced.
 
+mod apfs;
 mod btrfs;
 mod exfat;
 mod ext;
@@ -65,8 +66,8 @@ use ferrosys::ArchiveSink;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use ferrosys::DirectorySink;
 use ferrosys::{
-    Attributes, FsReader, FsTree, Limits, NodeKind, OpenOptions, Property, ReadPolicy, Synthesis,
-    Timestamp, Xattr,
+    Attributes, Direction, FidelityReport, FsReader, FsTree, Limits, NodeKind, OpenOptions,
+    Property, ReadPolicy, Synthesis, Timestamp, Xattr,
 };
 
 use ferrosys::Acl;
@@ -103,8 +104,8 @@ pub struct Described {
     pub target: Option<Vec<u8>>,
     /// The blocks the node occupies, for a family that records the count.
     pub blocks: Option<u64>,
-    /// The creation time, for a family that records one distinct from the others.
-    pub created: Option<Timestamp>,
+    /// The BSD flags the node records, for a Darwin filesystem's node with any set.
+    pub flags: Option<u32>,
 }
 
 /// How far past the filesystem's own length a file's declared size may reach before the
@@ -137,6 +138,8 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
                 .map_err(|e| Error::io(&args.image, e))?
                 .len()
                 .saturating_sub(args.offset);
+            // The filesystem's share of the file, which is the region's where one is named.
+            let len = args.length.map_or(len, |length| length.min(len));
             len.saturating_mul(SPARSE_HEADROOM)
         }
     };
@@ -151,34 +154,29 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
     // falls back to lenient — which is what lets a damaged or unfamiliar image be recovered
     // at all — and the refusal it fell back from is reported rather than dropped, so a run
     // that decided to interpret a deviation says which one.
+    // The volumes a read passes over are named once, though the lenient read passes over the
+    // same ones the strict read did.
+    let said = std::cell::Cell::new(false);
     let open = |file, policy| {
-        ferrosys::open_with(
-            file,
-            &OpenOptions::new()
-                .base(args.offset)
-                .policy(policy)
-                .limits(limits),
-        )
+        let mut options = OpenOptions::new()
+            .base(args.offset)
+            .policy(policy)
+            .limits(limits);
+        options.len = args.length;
+        crate::apfs::open_choosing(file, &image, &options, &args.choice, &said)
     };
     let reader = match open(file, ReadPolicy::Strict) {
         Ok(reader) => reader,
-        Err(source) if args.strict => {
-            return Err(Error::NotAFilesystem {
-                path: image,
-                source,
-            });
-        }
+        Err(refused) if args.strict || !refused.is_a_refusal() => return Err(refused),
         Err(refused) => {
             let file = File::open(&args.image).map_err(|e| Error::io(&args.image, e))?;
-            let reader =
-                open(file, ReadPolicy::Lenient).map_err(|source| Error::NotAFilesystem {
-                    path: image.clone(),
-                    source,
-                })?;
-            eprintln!(
-                "{}: reading {image} leniently: {refused}",
-                crate::args::TOOL
-            );
+            let reader = open(file, ReadPolicy::Lenient)?;
+            // The refusal as the family said it, without the path this line already names.
+            let reason = match &refused {
+                Error::NotAFilesystem { source, .. } => source.to_string(),
+                other => other.to_string(),
+            };
+            eprintln!("{}: reading {image} leniently: {reason}", crate::args::TOOL);
             eprintln!(
                 "{}: what it holds is interpreted best-effort; --strict refuses instead",
                 crate::args::TOOL
@@ -193,6 +191,7 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
         FsReader::Fat(mut reader) => dispatch(&mut reader, fat::Family, args),
         FsReader::ExFat(mut reader) => dispatch(&mut reader, exfat::Family, args),
         FsReader::Btrfs(mut reader) => dispatch(&mut reader, btrfs::Family, args),
+        FsReader::Apfs(mut reader) => dispatch(&mut reader, apfs::Family, args),
         // A family the library compiled in and this command cannot read back. The binary
         // compiles in every family the library has, so nothing in this workspace reaches it.
         _ => Err(Error::UnsupportedFamily),
@@ -206,14 +205,14 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
         && stopped_by_a_limit(error)
     {
         eprintln!(
-            "{}: no --max-file-bytes was given, so this run refused any file larger than \
-             {max_file_bytes} bytes — {SPARSE_HEADROOM} times the length of the filesystem \
-             being read",
+            "{}: no --max-file-bytes was given, so this run refused any file or attribute \
+             larger than {max_file_bytes} bytes — {SPARSE_HEADROOM} times the length of the \
+             filesystem being read",
             crate::args::TOOL
         );
         eprintln!(
-            "{}: a file may legitimately be that sparse — name a larger --max-file-bytes \
-             to read one that is",
+            "{}: a file may legitimately be that sparse, and an attribute that large — name \
+             a larger --max-file-bytes to read one",
             crate::args::TOOL
         );
     }
@@ -286,6 +285,40 @@ pub trait Describe<R: FsTree> {
 /// member's header and per few kilobytes of each body.
 const OUTPUT_BUFFER: usize = 1 << 20;
 
+/// A writer that keeps the first failure of the one it wraps, so a failure a reader reports
+/// while writing out is told apart from one reading the image.
+struct Watched<W> {
+    inner: W,
+    failed: Option<io::Error>,
+}
+
+impl<W> Watched<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            failed: None,
+        }
+    }
+
+    /// The failure, kept as a copy of its kind and words: the original travels on to the
+    /// caller that met it.
+    fn keep(&mut self, e: &io::Error) {
+        if self.failed.is_none() {
+            self.failed = Some(io::Error::new(e.kind(), e.to_string()));
+        }
+    }
+}
+
+impl<W: Write> Write for Watched<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf).inspect_err(|e| self.keep(e))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush().inspect_err(|e| self.keep(e))
+    }
+}
+
 /// Carry out the mode the arguments asked for against one family's open reader.
 fn dispatch<R, D>(reader: &mut R, family: D, args: ExtractArgs) -> Result<(), Error>
 where
@@ -295,9 +328,22 @@ where
     match args.mode {
         ExtractMode::Cat(path) => {
             let stdout = io::stdout();
-            let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock());
-            family.cat(reader, &path, &mut out)?;
-            out.flush().map_err(|source| Error::Io {
+            let mut out = Watched::new(io::BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock()));
+            let read = family.cat(reader, &path, &mut out);
+            let flushed = match read {
+                Ok(()) => out.flush(),
+                Err(_) => Ok(()),
+            };
+            // A reader reports a write its output refused as an I/O error of its own, which
+            // would read as the image failing. The output's own failure is the one named.
+            if let Some(source) = out.failed.take() {
+                return Err(Error::Io {
+                    what: "standard output".to_string(),
+                    source,
+                });
+            }
+            read?;
+            flushed.map_err(|source| Error::Io {
                 what: "standard output".to_string(),
                 source,
             })
@@ -322,16 +368,19 @@ where
         }
         ExtractMode::ToTar(Stream::Std) => {
             // The archive is the artifact, and it is the only thing on the standard
-            // output: no summary, no count, not even on the standard error.
+            // output: no summary and no count. The standard error names only what the
+            // archive does not carry.
             let stdout = io::stdout();
             let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock());
-            ArchiveSink::new(&mut out)
+            let fidelity = ArchiveSink::new(&mut out)
                 .synthesis(args.synthesis)
                 .write_tree(reader)?;
             out.flush().map_err(|source| Error::Io {
                 what: "standard output".to_string(),
                 source,
-            })
+            })?;
+            eprint!("{}", not_kept(&fidelity));
+            Ok(())
         }
         ExtractMode::ToTar(Stream::File(path)) => {
             // The archive is written while the image is still being read, so an archive
@@ -339,18 +388,47 @@ where
             let reads = Reads::file(&args.image)?;
             let mut dest = Destination::open(&path, args.atomic, &reads)?;
             let mut out = io::BufWriter::with_capacity(OUTPUT_BUFFER, dest.file());
-            ArchiveSink::new(&mut out)
+            let fidelity = ArchiveSink::new(&mut out)
                 .synthesis(args.synthesis)
                 .write_tree(reader)?;
             out.flush().map_err(|e| Error::io(&path, e))?;
             drop(out);
-            dest.commit()
+            dest.commit()?;
+            eprint!("{}", not_kept(&fidelity));
+            Ok(())
         }
         ExtractMode::ToDir {
             path,
             skip_privileged,
-        } => to_dir(reader, &path, skip_privileged, args.synthesis),
+            skip_unsupported,
+        } => to_dir(
+            reader,
+            &path,
+            skip_privileged,
+            skip_unsupported,
+            args.synthesis,
+        ),
     }
+}
+
+/// A property and how many entries it was, as a summary line gives it.
+fn counted(property: Property, entries: u64) -> String {
+    format!(
+        "{} ({entries} {})",
+        crate::parse::property_name(property),
+        if entries == 1 { "entry" } else { "entries" }
+    )
+}
+
+/// What an archive held that a tar member does not carry, one line per property, or nothing.
+fn not_kept(fidelity: &FidelityReport) -> String {
+    let mut rows = render::Rows::summary();
+    for (direction, property, entries) in fidelity.summary() {
+        if direction == Direction::Dropped {
+            rows.row("Not kept:", counted(property, entries));
+        }
+    }
+    rows.finish()
 }
 
 /// Write the whole tree into a directory on this host.
@@ -367,6 +445,7 @@ fn to_dir<R: FsTree>(
     reader: &mut R,
     path: &Path,
     skip_privileged: bool,
+    skip_unsupported: bool,
     synthesis: Synthesis,
 ) -> Result<(), Error> {
     if !path.exists() {
@@ -375,6 +454,9 @@ fn to_dir<R: FsTree>(
     let mut sink = DirectorySink::new(path)?.synthesis(synthesis);
     if skip_privileged {
         sink = sink.skip_privileged();
+    }
+    if skip_unsupported {
+        sink = sink.skip_unsupported();
     }
     let report = sink.write_tree(reader)?;
 
@@ -386,25 +468,40 @@ fn to_dir<R: FsTree>(
             "not applied — this process may not set another owner",
         );
     }
-    if report.xattrs_dropped {
+    for name in &report.dropped_xattrs {
+        rows.row("Attribute not set:", render::printable(name));
+    }
+    if report.more_dropped_xattrs {
         rows.row(
-            "Attributes:",
-            "not applied — this process may not set security or trusted attributes",
+            "Attribute not set:",
+            format!(
+                "and more, past the {} this report names",
+                ferrosys::ExtractReport::MAX_DROPPED_XATTRS
+            ),
         );
     }
     // What the image never held, as against what this host refused above. An ext filesystem
     // records every property a host file needs, so this says nothing about one; a FAT volume
     // records almost none of them, and this is where it says so.
+    // And what it held and the destination does not: a Darwin filesystem's BSD flags.
     for (direction, property, entries) in report.fidelity.summary() {
+        let label = match direction {
+            Direction::Dropped => "Not kept:",
+            _ => "Assumed:",
+        };
+        rows.row(label, counted(property, entries));
+    }
+    for path in &report.times_not_held {
+        rows.row("Time not held:", render::printable(path));
+    }
+    if report.more_times_not_held {
         rows.row(
-            "Assumed:",
+            "Time not held:",
             format!(
-                "{} ({entries} {})",
-                crate::parse::property_name(property),
-                if entries == 1 { "entry" } else { "entries" }
+                "and more, past the {} this report names",
+                ferrosys::ExtractReport::MAX_SKIPPED
             ),
         );
-        let _ = direction;
     }
     for skipped in &report.skipped {
         rows.row("Skipped:", render::printable(skipped));
@@ -432,7 +529,8 @@ fn to_dir<R: FsTree>(
 fn to_dir<R: FsTree>(
     _reader: &mut R,
     _path: &Path,
-    _skip: bool,
+    _skip_privileged: bool,
+    _skip_unsupported: bool,
     _synthesis: Synthesis,
 ) -> Result<(), Error> {
     Err(Error::NoDirectorySink)
@@ -474,12 +572,15 @@ fn stat_table(e: &Described) -> String {
     if let Some(target) = &e.target {
         line("Symlink target:", render::printable(target));
     }
+    if let Some(flags) = e.flags {
+        line("BSD flags:", format!("{flags:#010x}"));
+    }
     let mut times = vec![
         ("Accessed:", e.attrs.meta.atime),
         ("Modified:", e.attrs.meta.mtime),
         ("Changed:", e.attrs.meta.ctime),
     ];
-    if let Some(created) = e.created {
+    if let Some(created) = e.attrs.meta.btime {
         times.push(("Created:", created));
     }
     for (label, t) in times {
@@ -515,7 +616,10 @@ fn stat_json(e: &Described) -> String {
         if let Some(blocks) = e.blocks {
             j.u64("blocks", blocks);
         }
-        if let Some(created) = e.created {
+        if let Some(flags) = e.flags {
+            j.u64("bsd_flags", u64::from(flags));
+        }
+        if let Some(created) = e.attrs.meta.btime {
             time(&mut j, "crtime", created);
         }
         if let Some((major, minor)) = device_of(e.kind) {
@@ -720,7 +824,7 @@ mod tests {
             links: None,
             target: None,
             blocks: None,
-            created: None,
+            flags: None,
         }
     }
 
@@ -743,6 +847,34 @@ mod tests {
         let json = list_json(&[e]);
         assert!(json.contains("\"inode\":12"));
         assert!(json.contains("\"links\":2"));
+    }
+
+    #[test]
+    fn a_nodes_bsd_flags_are_reported_where_it_records_any() {
+        let mut e = described(NodeKind::Directory);
+        assert!(!stat_table(&e).contains("BSD flags:"));
+        assert!(!stat_json(&e).contains("bsd_flags"));
+        e.flags = Some(0x8000);
+        let table = stat_table(&e);
+        assert!(
+            table
+                .lines()
+                .any(|l| l.starts_with("BSD flags:") && l.ends_with(" 0x00008000")),
+            "{table}"
+        );
+        assert!(stat_json(&e).contains("\"bsd_flags\":32768"));
+    }
+
+    #[test]
+    fn an_archive_names_what_it_does_not_carry_and_nothing_else() {
+        let mut fidelity = FidelityReport::new();
+        fidelity.record(Direction::Synthesized, b"/a", Property::Ownership);
+        assert_eq!(not_kept(&fidelity), "");
+        fidelity.record(Direction::Dropped, b"/a", Property::BsdFlags);
+        assert_eq!(
+            not_kept(&fidelity),
+            "Not kept:               bsd-flags (1 entry)\n"
+        );
     }
 
     #[test]

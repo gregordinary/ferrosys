@@ -834,11 +834,12 @@ fn an_attribute_on_something_that_cannot_be_opened_reaches_the_entry_itself() {
                 b"by-name",
                 "the attribute landed on the link"
             );
-            assert!(!report.xattrs_dropped);
+            assert!(report.dropped_xattrs.is_empty());
         }
-        Err(_) => assert!(
-            report.xattrs_dropped,
-            "an attribute that is not there was not reported either"
+        Err(_) => assert_eq!(
+            report.dropped_xattrs,
+            [b"trusted.origin".to_vec()],
+            "an attribute that is not there is reported, by name"
         ),
     }
     // The link itself is the link, whatever happened to its attribute.
@@ -891,7 +892,7 @@ fn a_capability_attribute_outlives_the_ownership_change_that_would_strip_it() {
     // Unprivileged the attribute cannot be set at all and the report says so, which is the
     // other half of the contract and is gated above. What must never happen is the third
     // case: the report says nothing was dropped and the attribute is not there.
-    if !report.xattrs_dropped {
+    if report.dropped_xattrs.is_empty() {
         let mut buf = [0u8; 64];
         rustix::fs::lgetxattr(out.join("ping"), "security.capability", &mut buf)
             .expect("an extraction that reports no dropped attribute has the capability on disk");
@@ -1097,14 +1098,7 @@ fn an_attribute_this_host_will_not_hold_on_this_kind_is_named_as_that() {
     let time = Timestamp::from_secs(FAKE);
     // Owned by this process, so the ownership call before the attribute succeeds and what
     // the run meets is the attribute rule rather than a missing CAP_CHOWN.
-    // Read off a file this process just made, since the ids are not otherwise reachable
-    // without a dependency this test crate does not carry.
-    let probe = tempfile::NamedTempFile::new().expect("temp file");
-    let (uid, gid) = {
-        use std::os::unix::fs::MetadataExt as _;
-        let m = probe.as_file().metadata().expect("stat");
-        (m.uid(), m.gid())
-    };
+    let (uid, gid) = own_ids();
     let source = ferrosys::ext::TreeBuilder::new()
         .symlink(
             b"/link".to_vec(),
@@ -1117,23 +1111,41 @@ fn an_attribute_this_host_will_not_hold_on_this_kind_is_named_as_that() {
     let host = tempfile::tempdir().expect("temp dir");
     let out = destination(&host, "unpacked");
     let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
-    match DirectorySink::new(&out)
+    let held = match DirectorySink::new(&out)
         .expect("open the destination")
         .write_tree(&mut reader)
     {
-        Err(HostError::UnsupportedAttribute { name, .. }) => assert_eq!(name, b"user.note"),
+        Err(HostError::UnsupportedAttribute { name, .. }) => {
+            assert_eq!(name, b"user.note");
+            false
+        }
         // A host that does hold it is not what this is about; what must never happen is the
         // refusal claiming a privilege would help.
-        Ok(_) => {}
+        Ok(_) => true,
         Err(other) => panic!("expected a kind refusal, got {other:?}"),
+    };
+
+    // The privilege opt-in does not reach it, since no privilege would help.
+    let privileged = destination(&host, "privileged");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let outcome = DirectorySink::new(&privileged)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader);
+    if !held {
+        assert!(
+            matches!(outcome, Err(HostError::UnsupportedAttribute { .. })),
+            "a rule of the destination's is not a missing privilege: {outcome:?}"
+        );
     }
 
-    // And skipping records it as the loss it is rather than failing.
+    // Skipping what the destination will not hold records it as the loss it is.
     let lenient = destination(&host, "lenient");
     let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
     let report = DirectorySink::new(&lenient)
         .expect("open the destination")
         .skip_privileged()
+        .skip_unsupported()
         .write_tree(&mut reader)
         .expect("skipping what it cannot hold, an extraction succeeds");
     assert_eq!(
@@ -1141,7 +1153,168 @@ fn an_attribute_this_host_will_not_hold_on_this_kind_is_named_as_that() {
         Path::new("/etc/passwd"),
         "the link itself is the link, whatever happened to its attribute"
     );
-    let _ = report;
+    if !held {
+        assert_eq!(report.dropped_xattrs, [b"user.note".to_vec()]);
+    }
+}
+
+#[test]
+fn an_attribute_in_no_namespace_this_host_knows_is_refused_or_left_out_by_name() {
+    // Another operating system names its attributes without a Linux namespace —
+    // `com.apple.quarantine` is on nearly every file a Mac has downloaded — and a Linux
+    // destination answers every such name with `EOPNOTSUPP`, on every kind of node and for
+    // every process. ext stores a name in no namespace it knows whole, so an image carries
+    // one perfectly well; the destination simply has nowhere to put it.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    // Owned by this process throughout, so what each run meets is the attribute rule rather
+    // than a missing CAP_CHOWN.
+    let (uid, gid) = own_ids();
+    let mine = |mode| Metadata::new(mode, time).owned_by(uid, gid);
+    let source = TreeBuilder::new()
+        .root(mine(0o755))
+        .file(b"/download".to_vec(), b"payload\n".to_vec(), mine(0o644))
+        .xattr(
+            b"com.apple.quarantine".to_vec(),
+            b"0083;00000000;Safari;".to_vec(),
+        )
+        .file(b"/plain".to_vec(), b"plain\n".to_vec(), mine(0o644));
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+    let host = tempfile::tempdir().expect("temp dir");
+
+    // By default the refusal names the entry and the attribute, and it is the destination's
+    // rule, so the privilege opt-in does not reach it either.
+    for (dir, privileged) in [("strict", false), ("privileged", true)] {
+        let out = destination(&host, dir);
+        let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+        let mut sink = DirectorySink::new(&out).expect("open the destination");
+        if privileged {
+            sink = sink.skip_privileged();
+        }
+        match sink.write_tree(&mut reader) {
+            Err(HostError::UnsupportedAttribute { path, name, .. }) => {
+                assert_eq!(path, b"/download");
+                assert_eq!(name, b"com.apple.quarantine");
+            }
+            other => panic!("expected the destination's refusal, got {other:?}"),
+        }
+    }
+
+    let lenient = destination(&host, "lenient");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&lenient)
+        .expect("open the destination")
+        .skip_unsupported()
+        .write_tree(&mut reader)
+        .expect("skipping what the destination will not hold, an extraction succeeds");
+    assert_eq!(report.dropped_xattrs, [b"com.apple.quarantine".to_vec()]);
+    assert!(!report.more_dropped_xattrs);
+    // A dropped attribute is not a dropped file.
+    assert_eq!(
+        std::fs::read(lenient.join("download")).expect("read"),
+        b"payload\n"
+    );
+    assert_eq!(
+        std::fs::read(lenient.join("plain")).expect("read"),
+        b"plain\n"
+    );
+    assert!(report.skipped.is_empty(), "no name was left out");
+}
+
+#[cfg(feature = "exfat")]
+#[test]
+fn a_name_longer_than_the_destination_takes_is_refused_or_left_out_with_what_it_holds() {
+    // A format storing a name as up to 255 UTF-16 units holds names of as many as 765 bytes
+    // of UTF-8, and a Linux filesystem takes 255 bytes. exFAT is one: a hundred euro signs
+    // are a hundred units, and three hundred bytes. The destination answers
+    // `ENAMETOOLONG`, and a directory it refuses takes everything under it along.
+    use ferrosys::{Metadata, TreeBuilder};
+
+    let time = Timestamp::from_secs(FAKE);
+    let long = "\u{20ac}".repeat(100);
+    let long_file = format!("/{long}.txt").into_bytes();
+    let long_dir = format!("/{long}").into_bytes();
+    let inside = format!("/{long}/inside.txt").into_bytes();
+    let source = TreeBuilder::new()
+        .file(
+            b"/before.txt".to_vec(),
+            b"before\n".to_vec(),
+            Metadata::new(0o644, time),
+        )
+        .file(
+            long_file.clone(),
+            b"long\n".to_vec(),
+            Metadata::new(0o644, time),
+        )
+        .directory(long_dir.clone(), Metadata::new(0o755, time))
+        .file(inside, b"inside\n".to_vec(), Metadata::new(0o644, time))
+        .file(
+            b"/after.txt".to_vec(),
+            b"after\n".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let image = ferrosys::exfat::format(source, 8 * MIB, ferrosys::exfat::FormatOptions::new(7))
+        .expect("format the image");
+    let host = tempfile::tempdir().expect("temp dir");
+    // exFAT records no owner, so the tree is given this process's, and what each run meets
+    // is the name rule rather than a missing CAP_CHOWN.
+    let (uid, gid) = own_ids();
+    let synthesis = ferrosys::Synthesis::new().owner(uid, gid);
+
+    let strict = destination(&host, "strict");
+    let mut reader =
+        ferrosys::exfat::Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    match DirectorySink::new(&strict)
+        .expect("open the destination")
+        .synthesis(synthesis)
+        .write_tree(&mut reader)
+    {
+        Err(HostError::NameTooLong { path, .. }) => {
+            assert!(path == long_file || path == long_dir, "{path:?}");
+        }
+        other => panic!("expected the destination's refusal, got {other:?}"),
+    }
+
+    let lenient = destination(&host, "lenient");
+    let mut reader =
+        ferrosys::exfat::Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&lenient)
+        .expect("open the destination")
+        .synthesis(synthesis)
+        .skip_unsupported()
+        .write_tree(&mut reader)
+        .expect("skipping what the destination will not hold, an extraction succeeds");
+    // Both refused names are named, and the directory's path stands for what it holds.
+    let mut skipped = report.skipped.clone();
+    skipped.sort();
+    let mut expected = vec![long_file, long_dir];
+    expected.sort();
+    assert_eq!(skipped, expected);
+    assert_eq!(report.written, 2, "the two names the destination takes");
+    assert_eq!(
+        std::fs::read(lenient.join("before.txt")).expect("read"),
+        b"before\n"
+    );
+    assert_eq!(
+        std::fs::read(lenient.join("after.txt")).expect("read"),
+        b"after\n"
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&lenient)
+        .expect("list the destination")
+        .map(|e| e.expect("an entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["after.txt", "before.txt"]);
+}
+
+/// This process's user and group, read off a file it has just made, since the ids are not
+/// otherwise reachable without a dependency this test crate does not carry.
+fn own_ids() -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt as _;
+    let probe = tempfile::NamedTempFile::new().expect("temp file");
+    let m = probe.as_file().metadata().expect("stat");
+    (m.uid(), m.gid())
 }
 
 #[test]
@@ -1181,7 +1354,7 @@ fn a_directory_carries_its_extended_attributes_across() {
     let len = rustix::fs::lgetxattr(out.join("etc"), "user.origin", &mut value)
         .expect("the directory's attribute is on the directory");
     assert_eq!(&value[..len], b"on-the-directory");
-    assert!(!report.xattrs_dropped);
+    assert!(report.dropped_xattrs.is_empty());
 }
 
 #[test]
@@ -1227,7 +1400,7 @@ fn a_reserved_attribute_is_refused_or_recorded_rather_than_lost_in_silence() {
         // Unprivileged, which is how this gate usually runs.
         Err(HostError::Unprivileged { path, .. }) => assert_eq!(path, b"/ping"),
         // Privileged, in which case the attribute was set and nothing was dropped.
-        Ok(report) => assert!(!report.xattrs_dropped),
+        Ok(report) => assert!(report.dropped_xattrs.is_empty()),
         other => panic!("expected a refusal or a written attribute, got {other:?}"),
     }
 
@@ -1245,13 +1418,14 @@ fn a_reserved_attribute_is_refused_or_recorded_rather_than_lost_in_silence() {
         Ok(n) => {
             assert_eq!(&buf[..n], &cap[..]);
             assert!(
-                !report.xattrs_dropped,
+                report.dropped_xattrs.is_empty(),
                 "an attribute that landed is not dropped"
             );
         }
-        Err(_) => assert!(
-            report.xattrs_dropped,
-            "an attribute that did not land is reported"
+        Err(_) => assert_eq!(
+            report.dropped_xattrs,
+            [b"security.capability".to_vec()],
+            "an attribute that did not land is reported, by name"
         ),
     }
 

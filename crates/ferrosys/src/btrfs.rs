@@ -119,8 +119,8 @@ mod volume;
 
 // A filesystem assembled byte by byte, so the guards over a malformed tree are exercised in a
 // build with no host tools — and so the faults no tool has a switch for have a gate at all.
-// Reachable from the crate's own family-agnostic gates as well, which need a real image of
-// this family and have no formatter to build one with.
+// Reachable from the crate's own family-agnostic gates as well, which take its filesystem as
+// this family's image, built without the writer they may be checking.
 #[cfg(test)]
 pub(crate) mod forge;
 

@@ -22,11 +22,11 @@
 //! This module does I/O.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::cache::BlockCache;
-use crate::io::{io_error, offset_of, read_exact_at, read_exact_into};
+use crate::io::{Bounded, io_error, offset_of, read_exact_at, read_exact_into};
 use crate::{Limits, OpenOptions, ReadPolicy};
 
 use super::ChunkMap;
@@ -162,7 +162,8 @@ pub struct TreeRoot {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct Volume<R> {
-    src: R,
+    /// The source, ending where the caller's region does.
+    src: Bounded<R>,
     base: u64,
     policy: ReadPolicy,
     limits: Limits,
@@ -180,6 +181,9 @@ pub struct Volume<R> {
     /// Chunks the chunk tree maps differently from the bootstrap array, under a lenient read.
     /// See [`bootstrap_conflicts`](Self::bootstrap_conflicts).
     bootstrap_conflicts: Vec<u64>,
+    /// The bytes the source holds from `base` on, measured at open through the caller's
+    /// region. See [`source_bytes`](Self::source_bytes).
+    source_bytes: u64,
 }
 
 /// A tree block whose first copy failed its checks and which a lenient read took from a later
@@ -217,8 +221,9 @@ impl<R: Read + Seek> Volume<R> {
     /// being a copy of it is also a refusal.
     /// Under [`ReadPolicy::Lenient`] every one of those is recorded in
     /// [`mirrors`](Self::mirrors) and the filesystem opens.
-    pub fn open_with(mut src: R, options: OpenOptions) -> Result<Self, ReadError> {
+    pub fn open_with(src: R, options: OpenOptions) -> Result<Self, ReadError> {
         let base = options.base;
+        let mut src = Bounded::new(src, base, options.len);
         let mut found = [Mirror::Absent; MIRRORS.len()];
         let mut candidates: [Option<SuperBlock>; MIRRORS.len()] = [None, None, None];
         // Each candidate's bytes, so the copies that were not chosen can be held against the
@@ -361,6 +366,7 @@ impl<R: Read + Seek> Volume<R> {
         let chunks = ChunkMap::from_bootstrap(bootstrap, superblock.dev_item.devid, device_bytes)?;
 
         let cache = tree_cache(superblock.nodesize);
+        let source_bytes = src.seek(SeekFrom::End(0))?.saturating_sub(base);
         let mut volume = Self {
             src,
             base,
@@ -372,6 +378,7 @@ impl<R: Read + Seek> Volume<R> {
             cache,
             read_through: BTreeMap::new(),
             bootstrap_conflicts: Vec::new(),
+            source_bytes,
         };
         volume.load_chunk_tree()?;
         Ok(volume)
@@ -391,6 +398,17 @@ impl<R: Read + Seek> Volume<R> {
     #[must_use]
     pub fn mirrors(&self) -> &[Mirror; MIRRORS.len()] {
         &self.mirrors
+    }
+
+    /// The bytes the source holds from where the filesystem begins, measured at open, and
+    /// ending where the caller's region does.
+    ///
+    /// A device recording more bytes than this is longer than its source, which a
+    /// [`scan`](super::Reader::scan) reports. Opening does not refuse it unless a copy of the
+    /// superblock falls in the missing part, which [`Mirror::Truncated`] records.
+    #[must_use]
+    pub fn source_bytes(&self) -> u64 {
+        self.source_bytes
     }
 
     /// The map from logical addresses to places on the device, complete once the chunk tree
@@ -1370,6 +1388,21 @@ pub enum ReadError {
     HostileName {
         /// The offending name.
         name: Vec<u8>,
+    },
+    /// A directory entry names a directory the tree already reaches by another name, or one
+    /// of its own ancestors. A btrfs directory has one name and one parent, so the
+    /// filesystem contradicts itself. A walk never descends into such a directory twice; a
+    /// strict read refuses the filesystem for it, and a lenient one passes the repeat over.
+    #[error(
+        "a directory entry names directory inode {inode} of subvolume {tree}, which the tree \
+         reaches by another name as well"
+    )]
+    #[non_exhaustive]
+    RepeatedDirectory {
+        /// The subvolume the directory is in.
+        tree: u64,
+        /// The directory's inode.
+        inode: u64,
     },
     /// A directory entry names something that is neither an inode nor a subvolume.
     #[error("an entry of inode {inode} in subvolume {tree}: {fault} (item type {kind})")]

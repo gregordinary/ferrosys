@@ -133,12 +133,29 @@ pub enum ArchiveError {
         /// The offending entry's path.
         path: Vec<u8>,
     },
-    /// An extended-attribute name a PAX record's keyword cannot carry faithfully: it holds
-    /// an `=` or a newline — the record's own delimiters — or is not valid UTF-8. It is
-    /// refused rather than written as a differently-named attribute.
+    /// A device node whose numbers a tar header cannot hold. The header's field takes eight
+    /// octal digits at most, so a major or minor number past 16777215 has no spelling there,
+    /// and a reader that honours no PAX record for it would read another device. It is a
+    /// typed error rather than an archive naming the wrong node.
     #[error(
-        "{}: extended-attribute name {} cannot be written to a PAX record: it holds an '=' \
-         or a newline, or is not valid UTF-8",
+        "{} is device {major}:{minor}, a number a tar header cannot hold",
+        crate::escape::printable(path)
+    )]
+    #[non_exhaustive]
+    DeviceUnrepresentable {
+        /// The offending entry's path.
+        path: Vec<u8>,
+        /// The major number.
+        major: u32,
+        /// The minor number.
+        minor: u32,
+    },
+    /// An extended-attribute name a PAX record's keyword cannot carry faithfully: it holds
+    /// an `=` or a newline — the record's own delimiters — or a NUL, is empty, or is not valid
+    /// UTF-8. It is refused rather than written as a differently-named attribute.
+    #[error(
+        "{}: extended-attribute name {} cannot be written to a PAX record: it holds an '=', \
+         a newline or a NUL, is empty, or is not valid UTF-8",
         crate::escape::printable(path),
         crate::escape::printable(name)
     )]
@@ -152,11 +169,11 @@ pub enum ArchiveError {
 }
 
 impl ArchiveError {
-    /// Classify the failure of writing one member's body.
+    /// Classify the failure of writing one member's body that the filesystem did not raise.
     ///
-    /// `tar` copies a body out of a reader, so a failure there is either the destination's or
-    /// the *filesystem's*, arriving as the [`std::io::Error`] a `Read` is obliged to speak.
-    /// The reader's own message is preserved, and the path names the member it was reading —
+    /// `tar` copies a body out of a reader, so a failure there is the destination's or the
+    /// filesystem's. The filesystem's is handed back as [`ArchiveError::Read`] by the sink,
+    /// which kept it; this is the other kind, and the path names the member being written —
     /// which a bare i/o error would not.
     fn from_body_io(e: std::io::Error, path: &[u8]) -> Self {
         ArchiveError::Io(std::io::Error::new(
@@ -261,6 +278,11 @@ struct Pax {
     xattrs: Vec<Xattr>,
     acl_access: Option<Acl>,
     acl_default: Option<Acl>,
+    /// A device node's numbers from `SCHILY.devmajor` and `SCHILY.devminor`, which carry a
+    /// number past what the header's seven octal digits hold.
+    devmajor: Option<u32>,
+    /// The same for the minor number.
+    devminor: Option<u32>,
 }
 
 /// Parse one archive member into a [`SourceEntry`].
@@ -359,11 +381,11 @@ fn parse_entry(
             EntryKind::HardLink { target }
         }
         EntryType::Char => {
-            let (major, minor) = device(&header, &path)?;
+            let (major, minor) = device(&header, &pax, &path)?;
             EntryKind::CharDevice { major, minor }
         }
         EntryType::Block => {
-            let (major, minor) = device(&header, &path)?;
+            let (major, minor) = device(&header, &pax, &path)?;
             EntryKind::BlockDevice { major, minor }
         }
         EntryType::Fifo => EntryKind::Fifo,
@@ -399,6 +421,7 @@ fn parse_entry(
         kind,
         meta,
         xattrs,
+        darwin: None,
     })
 }
 
@@ -410,16 +433,24 @@ fn link_target(link: Option<Vec<u8>>, path: &[u8]) -> Result<Vec<u8>, ArchiveErr
     })
 }
 
-/// Read a device node's major/minor numbers.
-fn device(header: &tar::Header, path: &[u8]) -> Result<(u32, u32), ArchiveError> {
-    let major = header.device_major()?.ok_or(ArchiveError::Bad {
-        path: path.to_vec(),
-        reason: "device has no major number",
-    })?;
-    let minor = header.device_minor()?.ok_or(ArchiveError::Bad {
-        path: path.to_vec(),
-        reason: "device has no minor number",
-    })?;
+/// Read a device node's major/minor numbers: each from its PAX record where the member has
+/// one, which is authoritative over the header field it shadows, and from the header
+/// otherwise.
+fn device(header: &tar::Header, pax: &Pax, path: &[u8]) -> Result<(u32, u32), ArchiveError> {
+    let major = match pax.devmajor {
+        Some(major) => major,
+        None => header.device_major()?.ok_or(ArchiveError::Bad {
+            path: path.to_vec(),
+            reason: "device has no major number",
+        })?,
+    };
+    let minor = match pax.devminor {
+        Some(minor) => minor,
+        None => header.device_minor()?.ok_or(ArchiveError::Bad {
+            path: path.to_vec(),
+            reason: "device has no minor number",
+        })?,
+    };
     Ok((major, minor))
 }
 
@@ -479,6 +510,10 @@ fn collect_pax(records: &[PaxRecord], path: &[u8]) -> Result<Pax, ArchiveError> 
             pax.acl_access = Some(parse_acl_text(value, path)?);
         } else if key == b"SCHILY.acl.default" {
             pax.acl_default = Some(parse_acl_text(value, path)?);
+        } else if key == b"SCHILY.devmajor" {
+            pax.devmajor = Some(parse_pax_device(value, path)?);
+        } else if key == b"SCHILY.devminor" {
+            pax.devminor = Some(parse_pax_device(value, path)?);
         } else if key == b"uid" {
             pax.uid = Some(parse_pax_id(value, "invalid PAX uid", path)?);
         } else if key == b"gid" {
@@ -550,6 +585,18 @@ fn parse_pax_id(value: &[u8], reason: &'static str, path: &[u8]) -> Result<u64, 
         .ok_or_else(|| ArchiveError::Bad {
             path: path.to_vec(),
             reason,
+        })
+}
+
+/// Parse a `SCHILY.devmajor` or `SCHILY.devminor` record: a decimal number a device number's
+/// thirty-two bits hold.
+fn parse_pax_device(value: &[u8], path: &[u8]) -> Result<u32, ArchiveError> {
+    std::str::from_utf8(value)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or_else(|| ArchiveError::Bad {
+            path: path.to_vec(),
+            reason: "invalid PAX device number",
         })
 }
 

@@ -100,8 +100,9 @@ pub mod model {
 /// here is the split across the seconds and "extra" fields ext4 stores it in, and the range
 /// of instants those fields reach — [`encode_time`](ondisk::encode_time),
 /// [`decode_time`](ondisk::decode_time), and
-/// [`time_is_representable`](ondisk::time_is_representable) between
-/// [`TIME_SECS_MIN`](ondisk::TIME_SECS_MIN) and [`TIME_SECS_MAX`](ondisk::TIME_SECS_MAX).
+/// [`time_is_representable`](ondisk::time_is_representable), which on an inode with the
+/// extra fields lies between [`TIME_SECS_MIN`](ondisk::TIME_SECS_MIN) and
+/// [`TIME_SECS_MAX`](ondisk::TIME_SECS_MAX).
 ///
 /// An [`Acl`] divides the same way: the value is the crate's own, and the
 /// tighter form ext4 packs it into is [`encode_acl`](ondisk::encode_acl) and
@@ -173,7 +174,8 @@ pub use crate::acl::{Acl, AclEntry, AclError, AclQualifier};
 pub use crate::finding::{Coordinate, Family, Finding, FindingReport, Severity};
 pub use crate::policy::{Limits, ReadPolicy};
 pub use crate::source::{
-    EntryKind, FileContent, FileRange, LayeredSource, Metadata, Source, SourceEntry, TreeBuilder,
+    EntryKind, FileContent, FileRange, LayeredSource, Metadata, RemovalError, Source, SourceEntry,
+    TreeBuilder,
 };
 pub use crate::time::Timestamp;
 pub use crate::xattr::Xattr;

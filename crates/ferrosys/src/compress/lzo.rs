@@ -1,74 +1,81 @@
 //! LZO1X, decoded.
 //!
-//! Written here rather than taken as a dependency, which is what [`crc32c`](crate::crc32c()) and
-//! the directory hashes are and for the same reasons: the algorithm is small and fixed, the
-//! input is a filesystem's own bytes and therefore untrusted, and every bound it reads is one
-//! this crate's gates can hold it to.
+//! The algorithm is small and fixed, the input is a filesystem's own bytes and therefore
+//! untrusted, and every bound the decoder reads is one this crate's gates hold it to, as for
+//! [`crc32c`](crate::crc32c()) and the directory hashes.
 //!
 //! This module is pure — bytes in, bytes out, no I/O — and what it decodes is one *stream*.
 //! How a filesystem cuts a run of bytes into streams, and where each begins, is that format's
 //! framing and belongs to it.
 //!
+//! # Sources
+//!
+//! The format's one public description is the Linux kernel documentation's *LZO stream format
+//! as understood by Linux's LZO decompressor* (docs.kernel.org, `staging/lzo`), which says of
+//! itself that it describes what one decoder accepts, no specification being public. Every
+//! instruction here is read by that page's table of byte sequences, and every length by its
+//! variable-length rule. Where the page is silent the rule here is observed, and says so. Every
+//! stream is also held to a second implementation, `lzokay` (MIT), used here only to compress.
+//!
 //! # The encoding
 //!
-//! A stream is a sequence of instructions, each copying bytes into the output from one of two
-//! places:
+//! A stream is a run of instructions. Each one either copies the bytes that follow it in the
+//! stream (a **literal** run) or repeats bytes already produced, named by a distance back and a
+//! length (a **copy**). A copy also names, in two bits of its own, up to three literals that
+//! follow it with no instruction of their own.
 //!
-//! - a **literal run**, whose bytes follow the instruction in the stream; or
-//! - a **match**, which repeats bytes already produced, named by how far back they begin and
-//!   how many to take.
+//! What an instruction is depends on the range its first byte falls in and, in the lowest range
+//! only, on how many literals the instruction before it copied:
 //!
-//! The first byte of an instruction says which it is and, for a match, which of four encodings
-//! carries the pair. Each trades reach against length: the widest reach spends four bytes and
-//! keeps its length in three bits, and the narrowest spends two and reaches 2 KiB.
+//! | First byte | After | Instruction | Then |
+//! |---|---|---|---|
+//! | 0–15 | no literals | literal run, 4 bytes or more | the run |
+//! | 0–15 | 1 to 3 literals | copy of 2 bytes, 1 to 1024 back | one byte |
+//! | 0–15 | 4 literals or more | copy of 3 bytes, 2049 to 3072 back | one byte |
+//! | 16–31 | anything | copy of 3 bytes or more, 16385 to 49151 back, or the end | a 16-bit word |
+//! | 32–63 | anything | copy of 3 bytes or more, 1 to 16384 back | a 16-bit word |
+//! | 64–127 | anything | copy of 3 or 4 bytes, 1 to 2048 back | one byte |
+//! | 128–255 | anything | copy of 5 to 8 bytes, 1 to 2048 back | one byte |
 //!
-//! Three of the four also carry, in their low two bits, the length of a literal run that
-//! follows *with no instruction byte of its own*. That is what makes this a small state machine
-//! rather than a loop over independent instructions, and the state is exactly what the previous
-//! instruction left: `0` at the start, `4` after a literal run, and `1`–`3` after a match that
-//! carried a short run. A first byte under 16 means a literal run in the first state, a
-//! short-reach match in the middle three, and a match against the widest of the four reaches in
-//! the last — the same bits reading three ways.
+//! A 16-bit word is little-endian, and carries a distance in its upper fourteen bits and the
+//! literals that follow in its lower two.
 //!
-//! A length that does not fit its instruction's field is extended by a run of zero bytes, each
-//! worth 255, then one nonzero byte worth its own value. That run is the one place a malformed
-//! stream could ask for unbounded work, and what bounds it is the input ending.
+//! The rows whose length is open-ended hold it in a field of the first byte. A field of zero
+//! means the length did not fit: it is the field's largest value plus an extension, a run of
+//! zero bytes each worth 255 ended by one nonzero byte worth itself. That run is the one place a
+//! malformed stream could ask for unbounded work, and what bounds it is the input ending.
 //!
-//! A stream ends with a marker rather than at the end of its input: the widest match encoding
-//! spelling a distance of zero, which no real match can, at a length of exactly three. The
-//! bytes are `11 00 00`, and a stream that stops without them is a stream that was cut short.
+//! A stream's first byte has a form of its own. From 18 up it is a literal run of that byte
+//! less 17, and the instruction after it reads by how many that was, as after any other run.
+//! Below 18 it is an ordinary instruction, read as after no literals.
 //!
-//! # What a match may point at
+//! # How a stream ends
 //!
-//! Backwards into what has already been produced, and never before the start of it. A match may
-//! also overlap the run it is producing — a distance of one and a length of ten is how this
-//! format spells ten copies of one byte — so the copy is a byte at a time and the overlapping
-//! case is ordinary rather than an edge.
+//! At the 16–31 row's copy whose distance is exactly 16384, which no copy uses (the page). The
+//! distance alone ends it: what else that instruction holds, its length field and the low two
+//! bits of its word, changes nothing once the stream is over. Every encoder observed writes the
+//! end as the three bytes `11 00 00` — every stream in a btrfs extent a Linux kernel wrote, and
+//! every stream `lzokay` writes. A stream that stops before an end was cut short, and bytes
+//! after its end are bytes its framing should not have given it, which is what refuses an end
+//! read in the middle of a damaged stream.
 //!
-//! # What this decodes, and what it does not
+//! # What a copy may reach
 //!
-//! LZO1X as it is written by `lzo1x_1_compress`, which is what the filesystems reading through
-//! this module store. The run-length extension some other users of this algorithm negotiate
-//! through a two-byte header is not part of that, and a stream carrying one is refused as the
-//! ordinary instructions it would otherwise be read as.
+//! Backwards into what has already been produced, and never before the start of it. The table
+//! allows a copy longer than its distance — five to eight bytes from one back — so a copy may
+//! overlap the bytes it is producing, a distance of one repeating one byte. It runs a byte at a
+//! time, and the overlapping case is ordinary rather than an edge.
+//!
+//! # Which version
+//!
+//! The page describes two: the original, and one that adds a run of zeros as an instruction and
+//! announces itself with a first byte of 17 and a version byte. The filesystems reading through
+//! this module store the original — no stream observed from one opens with 17 — and it is the
+//! one decoded here. A stream announcing the other is refused: read as an ordinary instruction,
+//! its header copies from an output that is still empty, or ends the stream with bytes still to
+//! follow.
 
 use super::{Algorithm, Error};
-
-/// The reach of the two-byte match encodings, which the widest-of-the-short forms measures its
-/// distance from rather than from the output's end.
-const M2_MAX_OFFSET: usize = 0x0800;
-
-/// What the four-byte encoding subtracts from every distance it names, so that a distance of
-/// zero is free to mean the end of the stream.
-const M4_DISTANCE_BIAS: usize = 0x4000;
-
-/// The fewest bytes a stream can be: the end marker alone, which is what an empty run
-/// compresses to.
-const MIN_STREAM: usize = 3;
-
-/// The length the end marker carries. A marker with any other is a stream that ends in an
-/// instruction resembling one rather than in one.
-const END_MARKER_LENGTH: usize = 3;
 
 /// Undo one LZO1X stream into `out`, returning how many bytes it produced.
 ///
@@ -80,8 +87,8 @@ const END_MARKER_LENGTH: usize = 3;
 /// # Errors
 ///
 /// [`Error::Overrun`] where the stream expands past `out`, and [`Error::Malformed`] where an
-/// instruction reads past the end of the input, a match names bytes before the start of the
-/// output, the stream ends without its marker, or bytes follow the marker.
+/// instruction reads past the end of the input, a copy names bytes before the start of the
+/// output, the stream stops before its end, or bytes follow the end.
 pub(crate) fn decompress(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     Decoder {
         input,
@@ -100,6 +107,10 @@ const fn malformed(fault: &'static str) -> Error {
     }
 }
 
+/// A length too long to count, which only a stream of extension bytes as long as memory could
+/// spell.
+const LENGTH_OVERFLOWS: Error = malformed("a length extension overflows");
+
 /// One stream being decoded: how far reading has reached in it, and how far writing has reached
 /// in the output.
 struct Decoder<'a> {
@@ -109,116 +120,170 @@ struct Decoder<'a> {
     written: usize,
 }
 
-/// What state the previous instruction left, which decides how the next one reads.
-///
-/// The values are the format's own — a literal run leaves `4` and a match leaves the length of
-/// the short run it carried — so they are kept as the numbers rather than renamed.
-const STATE_AFTER_LITERAL_RUN: usize = 4;
+/// How many literals an instruction copied, which is all the next one needs to know of it: the
+/// lowest range of first bytes reads three ways by it, and every other range ignores it.
+#[derive(Clone, Copy)]
+enum Copied {
+    /// None: the start of a stream, or a copy that carried no literals.
+    None,
+    /// One to three: the literals a copy carried, or a short opening run.
+    Few,
+    /// Four or more: a literal run.
+    Many,
+}
+
+impl Copied {
+    /// What copying `count` literals leaves.
+    const fn after(count: usize) -> Self {
+        match count {
+            0 => Copied::None,
+            1..=3 => Copied::Few,
+            _ => Copied::Many,
+        }
+    }
+}
+
+/// One instruction, read and not yet carried out.
+enum Instruction {
+    /// Copy this many bytes from the stream.
+    Literals(usize),
+    /// Repeat `length` bytes from `distance` back, then copy `literals` bytes from the stream.
+    Copy {
+        distance: usize,
+        length: usize,
+        literals: usize,
+    },
+    /// The stream is over.
+    End,
+}
 
 impl Decoder<'_> {
-    /// Every instruction in the stream, until its end marker.
+    /// Every instruction in the stream, until its end.
     fn run(mut self) -> Result<usize, Error> {
-        if self.input.len() < MIN_STREAM {
-            return Err(malformed("a stream is at least an end marker"));
-        }
-        let mut state = 0usize;
-
-        // The opening instruction has a form no other has: any first byte over 17 is itself
-        // the length of a literal run, less 17, with no further instruction. It is what an
-        // encoder emits when a run's first bytes match nothing yet, which is every run that
-        // begins a file.
-        if self.input[0] > 17 {
-            let count = self.byte()? as usize - 17;
-            if count < STATE_AFTER_LITERAL_RUN {
-                // The short form, whose run is the one a match carries and whose next
-                // instruction is therefore read as a match rather than as a run.
-                state = count;
-                self.literals(count)?;
-            } else {
-                self.literals(count)?;
-                state = STATE_AFTER_LITERAL_RUN;
-            }
-        }
-
+        let mut copied = self.opening()?;
         loop {
-            let instruction = self.byte()? as usize;
-            let (distance, length, next) = if instruction < 16 {
-                match state {
-                    // A literal run, whose length is the instruction plus three and whose
-                    // field is extended where the instruction is zero.
-                    0 => {
-                        let count = if instruction == 0 {
-                            15 + self.extension()?
-                        } else {
-                            instruction
-                        } + 3;
-                        self.literals(count)?;
-                        state = STATE_AFTER_LITERAL_RUN;
-                        continue;
-                    }
-                    // The narrowest match: two bytes from within the last kibibyte, and the
-                    // short literal run its low bits carry.
-                    STATE_AFTER_LITERAL_RUN => {
-                        let next = instruction & 3;
-                        let far = self.byte()? as usize;
-                        let distance = 1 + M2_MAX_OFFSET + (instruction >> 2) + (far << 2);
-                        (distance, 3, next)
-                    }
-                    _ => {
-                        let next = instruction & 3;
-                        let far = self.byte()? as usize;
-                        let distance = 1 + (instruction >> 2) + (far << 2);
-                        (distance, 2, next)
-                    }
+            copied = match self.instruction(copied)? {
+                Instruction::Literals(count) => {
+                    self.literals(count)?;
+                    Copied::after(count)
                 }
-            } else if instruction >= 64 {
-                // Two bytes: a length of three to eight in the top three bits, and a reach of
-                // 2 KiB across the rest of the instruction and the byte after it.
-                let far = self.byte()? as usize;
-                (
-                    1 + ((instruction >> 2) & 7) + (far << 3),
-                    (instruction >> 5) + 1,
-                    instruction & 3,
-                )
-            } else if instruction >= 32 {
-                // Three bytes: a length of three upwards in the low five bits, extended where
-                // they are all zero, and a reach of 16 KiB in the pair that follows.
-                let mut length = (instruction & 31) + 2;
-                if length == 2 {
-                    length += 31 + self.extension()?;
+                Instruction::Copy {
+                    distance,
+                    length,
+                    literals,
+                } => {
+                    self.repeat(distance, length)?;
+                    self.literals(literals)?;
+                    Copied::after(literals)
                 }
-                let pair = self.pair()?;
-                (1 + (pair >> 2), length, pair & 3)
-            } else {
-                // Four bytes, and the only encoding that reaches past 16 KiB: one bit of the
-                // instruction is the distance's highest, its low three are the length, and the
-                // pair carries the rest of a distance every one of these is biased by.
-                let mut length = (instruction & 7) + 2;
-                if length == 2 {
-                    length += 7 + self.extension()?;
-                }
-                let pair = self.pair()?;
-                let distance = ((instruction & 8) << 11) + (pair >> 2);
-                if distance == 0 {
-                    // The end marker, which is the one distance the bias puts out of a real
-                    // match's reach. Its length is fixed, so an instruction that lands here
-                    // carrying any other is a stream that ends in something else.
-                    if length != END_MARKER_LENGTH {
-                        return Err(malformed("the end marker carries a length that is not its"));
-                    }
-                    if self.read != self.input.len() {
-                        return Err(malformed("bytes follow the end of the stream"));
-                    }
-                    return Ok(self.written);
-                }
-                (distance + M4_DISTANCE_BIAS, length, pair & 3)
+                Instruction::End if self.read == self.input.len() => return Ok(self.written),
+                Instruction::End => return Err(malformed("bytes follow the end of the stream")),
             };
-            self.copy_match(distance, length)?;
-            // Whichever encoding it was, its low two bits are a literal run that follows with
-            // no instruction of its own, and the count is also the state it leaves.
-            state = next;
-            self.literals(next)?;
         }
+    }
+
+    /// The first byte's own form: from 18 up, a literal run of that byte less 17 (the page's
+    /// first-byte encoding). A lower byte is left where it is, to be read as an ordinary
+    /// instruction after no literals.
+    fn opening(&mut self) -> Result<Copied, Error> {
+        match self.input.first() {
+            Some(&first) if first >= 18 => {
+                self.read += 1;
+                let count = usize::from(first - 17);
+                self.literals(count)?;
+                Ok(Copied::after(count))
+            }
+            _ => Ok(Copied::None),
+        }
+    }
+
+    /// One instruction, read by the row of the page's table its first byte falls in. Each
+    /// row's bit layout is written above it, most significant bit first, in the page's letters:
+    /// `L` a length field, `D` and `H` the low and high parts of a distance, `S` the literals
+    /// that follow a copy.
+    fn instruction(&mut self, copied: Copied) -> Result<Instruction, Error> {
+        let first = self.byte()?;
+        let bits = usize::from(first);
+        Ok(match first {
+            // 0000LLLL after no literals: a run of 3 + L, with L extended where it is zero.
+            0..=15 if matches!(copied, Copied::None) => {
+                Instruction::Literals(self.length(bits, 4, 3)?)
+            }
+            // 0000DDSS, then H: two bytes from (H << 2) + D + 1 back after one to three
+            // literals, and three bytes from (H << 2) + D + 2049 back after four or more.
+            0..=15 => {
+                let high = usize::from(self.byte()?);
+                let near = (high << 2) + ((bits >> 2) & 3);
+                let (distance, length) = if matches!(copied, Copied::Few) {
+                    (near + 1, 2)
+                } else {
+                    (near + 2049, 3)
+                };
+                Instruction::Copy {
+                    distance,
+                    length,
+                    literals: bits & 3,
+                }
+            }
+            // 0001HLLL, then a word: 2 + L bytes from 16384 + (H << 14) + D back. A distance of
+            // exactly 16384 is the end of the stream.
+            16..=31 => {
+                let length = self.length(bits, 3, 2)?;
+                let word = self.word()?;
+                let distance = 16384 + (((bits >> 3) & 1) << 14) + (word >> 2);
+                if distance == 16384 {
+                    return Ok(Instruction::End);
+                }
+                Instruction::Copy {
+                    distance,
+                    length,
+                    literals: word & 3,
+                }
+            }
+            // 001LLLLL, then a word: 2 + L bytes from D + 1 back.
+            32..=63 => {
+                let length = self.length(bits, 5, 2)?;
+                let word = self.word()?;
+                Instruction::Copy {
+                    distance: (word >> 2) + 1,
+                    length,
+                    literals: word & 3,
+                }
+            }
+            // 01LDDDSS, then H: 3 + L bytes from (H << 3) + D + 1 back.
+            64..=127 => Instruction::Copy {
+                distance: self.far(bits)?,
+                length: 3 + ((bits >> 5) & 1),
+                literals: bits & 3,
+            },
+            // 1LLDDDSS, then H: 5 + L bytes from (H << 3) + D + 1 back.
+            128..=255 => Instruction::Copy {
+                distance: self.far(bits)?,
+                length: 5 + ((bits >> 5) & 3),
+                literals: bits & 3,
+            },
+        })
+    }
+
+    /// The distance the two widest rows share: three bits `D` of the first byte, then a byte
+    /// `H`, making (H << 3) + D + 1.
+    fn far(&mut self, bits: usize) -> Result<usize, Error> {
+        let high = usize::from(self.byte()?);
+        Ok((high << 3) + ((bits >> 2) & 7) + 1)
+    }
+
+    /// A length by the page's variable-length rule: the low `width` bits of the first byte
+    /// where they are nonzero, and their largest value plus an extension where they are zero;
+    /// then the row's `base` on top.
+    fn length(&mut self, bits: usize, width: u32, base: usize) -> Result<usize, Error> {
+        let largest = (1usize << width) - 1;
+        let field = match bits & largest {
+            0 => largest
+                .checked_add(self.extension()?)
+                .ok_or(LENGTH_OVERFLOWS)?,
+            field => field,
+        };
+        field.checked_add(base).ok_or(LENGTH_OVERFLOWS)
     }
 
     /// One byte of the stream.
@@ -231,11 +296,11 @@ impl Decoder<'_> {
         Ok(byte)
     }
 
-    /// The little-endian pair carrying a distance in the two wider encodings.
-    fn pair(&mut self) -> Result<usize, Error> {
-        let low = self.byte()? as usize;
-        let high = self.byte()? as usize;
-        Ok(low | (high << 8))
+    /// The little-endian 16-bit word two of the copy rows carry.
+    fn word(&mut self) -> Result<usize, Error> {
+        let low = self.byte()?;
+        let high = self.byte()?;
+        Ok(usize::from(u16::from_le_bytes([low, high])))
     }
 
     /// A length's extension past the field that could not hold it: each zero byte is worth 255
@@ -249,9 +314,7 @@ impl Decoder<'_> {
         loop {
             let byte = self.byte()?;
             let step = if byte == 0 { 255 } else { byte as usize };
-            total = total
-                .checked_add(step)
-                .ok_or(malformed("a length extension overflows"))?;
+            total = total.checked_add(step).ok_or(LENGTH_OVERFLOWS)?;
             if byte != 0 {
                 return Ok(total);
             }
@@ -285,13 +348,13 @@ impl Decoder<'_> {
     /// Repeat `count` bytes of the output beginning `distance` back from where writing has
     /// reached.
     ///
-    /// A byte at a time, because a match may reach into the run it is producing: a distance of
-    /// one and a length of ten is how this format spells ten copies of one byte, and a block
-    /// move would read the bytes that are not there yet.
-    fn copy_match(&mut self, distance: usize, count: usize) -> Result<(), Error> {
-        if distance > self.written {
+    /// A byte at a time, because a copy may reach into the run it is producing: a distance of
+    /// one and a length of ten is ten copies of one byte, and a block move would read the bytes
+    /// that are not there yet.
+    fn repeat(&mut self, distance: usize, count: usize) -> Result<(), Error> {
+        if distance == 0 || distance > self.written {
             return Err(malformed(
-                "a match names bytes before the start of the output",
+                "a copy names bytes before the start of the output",
             ));
         }
         if count > self.out.len() - self.written {
@@ -300,10 +363,8 @@ impl Decoder<'_> {
                 expected: self.out.len(),
             });
         }
-        for from in (self.written - distance..).take(count) {
-            self.out[self.written] = self.out[from];
-            self.written += 1;
-        }
+        super::copy_back(self.out, self.written, distance, count);
+        self.written += count;
         Ok(())
     }
 }
@@ -318,8 +379,8 @@ mod tests {
     /// Compress with an implementation this crate shares no code with.
     ///
     /// The whole point of the round trips below: a decoder held against streams its own encoder
-    /// produced is a decoder checked against itself, and this algorithm has no specification
-    /// apart from an implementation.
+    /// produced is a decoder checked against itself, and the format's one description says of
+    /// itself that it is not a specification.
     fn foreign(data: &[u8]) -> Vec<u8> {
         lzokay::compress::compress(data).expect("a second implementation compresses it")
     }
@@ -346,10 +407,10 @@ mod tests {
 
         // The one input the two implementations disagree about, and the disagreement is
         // recorded rather than accommodated. The encoder used by the round trips below writes
-        // an opening literal run of *zero* as the byte 17, which the direct form's own rule
-        // excludes — it is every byte **over** 17 — so what it emits for no bytes at all is a
-        // stream neither this decoder nor the one in the kernel that defines this format can
-        // read. It is not a case any filesystem reaches: an empty run is not compressed.
+        // an opening literal run of *zero* as the byte 17, which the opening form excludes —
+        // it starts at 18 — and which in a stream under five bytes the page gives no version
+        // header either. Read as an ordinary instruction it is a copy from an output that is
+        // still empty. It is not a case any filesystem reaches: an empty run is not compressed.
         assert!(matches!(
             decompress(&[0x11, 0x11, 0x00, 0x00], &mut out),
             Err(Error::Malformed { .. })
@@ -416,13 +477,13 @@ mod tests {
     }
 
     #[test]
-    fn a_match_that_reaches_before_the_start_of_the_output_is_refused() {
-        // A three-byte match at a distance of one, as the first instruction: there is nothing
+    fn a_copy_that_reaches_before_the_start_of_the_output_is_refused() {
+        // A three-byte copy at a distance of two, as the first instruction: there is nothing
         // behind the output to copy from, and a decoder that wrapped the subtraction would
         // read whatever the buffer held.
         //
-        // `0x20 | 1` is the three-byte encoding at a length of three, and the pair that
-        // follows names a distance of one.
+        // `0x21` is the 32–63 row with a length field of one, so three bytes, and the word
+        // `04 00` names a distance of two: D + 1, with D the word's upper fourteen bits.
         let stream = [0x21, 0x04, 0x00];
         let mut out = [0u8; 16];
         assert!(matches!(
@@ -443,6 +504,125 @@ mod tests {
             decompress(&stream, &mut out),
             Err(Error::Malformed { .. })
         ));
+    }
+
+    /// A stream that opens with four literals, `abcd`, and leaves them to copy from.
+    const ABCD: [u8; 5] = [17 + 4, b'a', b'b', b'c', b'd'];
+
+    /// Decode `stream` into room for `room` bytes, wanting it to succeed.
+    fn decoded(stream: &[u8], room: usize) -> Vec<u8> {
+        let mut out = vec![0u8; room];
+        let produced = decompress(stream, &mut out).expect("the stream decodes");
+        out.truncate(produced);
+        out
+    }
+
+    /// A literal run of exactly `count` bytes after no literals: the 0–15 row with a zero field,
+    /// extended. `count` must be past what the field holds alone.
+    fn long_run(count: usize) -> Vec<u8> {
+        let mut extension = count - 3 - 15;
+        let mut stream = vec![0x00];
+        while extension > 255 {
+            stream.push(0);
+            extension -= 255;
+        }
+        stream.push(extension as u8);
+        stream.extend((0..count).map(|at| (at * 7 + 1) as u8));
+        stream
+    }
+
+    #[test]
+    fn every_row_of_the_table_reads_as_the_page_gives_it() {
+        // Each stream is built by hand from the page's table, so these hold the decoder to the
+        // description itself rather than to what one encoder happens to emit.
+        let end = [0x11, 0x00, 0x00];
+
+        // 1LLDDDSS: LL = 3, D = 0, so 5 + 3 = 8 bytes from one back.
+        let stream = [&ABCD[..], &[0b1110_0000, 0], &end].concat();
+        assert_eq!(decoded(&stream, 64), b"abcddddddddd");
+
+        // 01LDDDSS with S = 2: L = 1, D = 3, so 4 bytes from four back, then two literals; and
+        // those two make the next 0000DDSS a two-byte copy, here from one back.
+        let stream = [&ABCD[..], &[0b0110_1110, 0, b'x', b'y', 0x00, 0], &end].concat();
+        assert_eq!(decoded(&stream, 64), b"abcdabcdxyyy");
+
+        // 001LLLLL: L = 1, so 3 bytes; the word names D = 3, so four back.
+        let stream = [&ABCD[..], &[0x21, 3 << 2, 0], &end].concat();
+        assert_eq!(decoded(&stream, 64), b"abcdabc");
+
+        // 001LLLLL with L = 0: 2 + 31 + an extension of one, so 34 bytes from one back.
+        let stream = [&ABCD[..], &[0x20, 1, 0, 0], &end].concat();
+        let mut want = b"abcd".to_vec();
+        want.extend([b'd'; 34]);
+        assert_eq!(decoded(&stream, 64), want);
+
+        // An opening byte of 18 is one literal, which makes the 0000DDSS after it the
+        // two-byte copy: D = 0 and H = 0, one back.
+        assert_eq!(decoded(&[18, b'a', 0x00, 0, 0x11, 0, 0], 8), b"aaa");
+
+        // After a literal run 0000DDSS is the three-byte copy from (H << 2) + D + 2049 back:
+        // with D = 1 and H = 0, 2050 back, which after a run of 2051 is its second byte.
+        let run = long_run(2051);
+        let stream = [&run[..], &[0b0000_0100, 0], &end].concat();
+        let produced = decoded(&stream, 4096);
+        assert_eq!(produced.len(), 2054);
+        assert_eq!(produced[2051..], produced[1..4]);
+
+        // 0001HLLL: H = 0, L = 1, D = 1: three bytes from 16385 back. And H = 1, with D = 1
+        // again, reaches 32769 back. One byte more of run than the distance puts each copy at
+        // the run's second byte.
+        for (instruction, back) in [(0x11u8, 16_385usize), (0x19, 32_769)] {
+            let run = long_run(back + 1);
+            let stream = [&run[..], &[instruction, 1 << 2, 0], &end].concat();
+            let produced = decoded(&stream, back + 4);
+            assert_eq!(produced[back + 1..], produced[1..4], "{instruction:#04x}");
+        }
+    }
+
+    #[test]
+    fn the_stream_ends_at_the_distance_the_page_gives() {
+        // The page ends a stream at the 16–31 row's distance of 16384 and gives the rest of the
+        // instruction no say. `11 00 00` is what every encoder observed writes; the other
+        // spellings of that distance end the stream too: literals in the word's low bits, a
+        // longer length, an extended one.
+        for ending in [
+            &[0x11u8, 0x00, 0x00][..],
+            &[0x11, 0x01, 0x00],
+            &[0x11, 0x03, 0x00],
+            &[0x12, 0x00, 0x00],
+            &[0x17, 0x02, 0x00],
+            &[0x10, 0x01, 0x00, 0x00],
+        ] {
+            let stream = [&ABCD[..], ending].concat();
+            assert_eq!(decoded(&stream, 64), b"abcd", "{ending:02x?}");
+        }
+
+        let mut out = [0u8; 64];
+        // H set is 16384 further, a copy and not an end, and here one from before the start.
+        // An end followed by anything is refused, which is what catches an end read in the
+        // middle of a stream.
+        for stream in [
+            [&ABCD[..], &[0x19, 0x00, 0x00]].concat(),
+            [&ABCD[..], &[0x11, 0x00, 0x00, 0x00]].concat(),
+            [&ABCD[..], &[0x11, 0x00, 0x00], &ABCD[..]].concat(),
+        ] {
+            assert!(
+                matches!(decompress(&stream, &mut out), Err(Error::Malformed { .. })),
+                "{stream:02x?}"
+            );
+        }
+        // And the version header the page describes, which this decoder does not read: it is
+        // at least five bytes, so it either ends the stream with bytes to follow or copies from
+        // an output that is still empty.
+        for header in [
+            &[0x11u8, 0x01, 0x00, 0x00, 0x00][..],
+            &[0x11, 0x01, 0x04, 0x11, 0, 0],
+        ] {
+            assert!(matches!(
+                decompress(header, &mut out),
+                Err(Error::Malformed { .. })
+            ));
+        }
     }
 
     #[test]

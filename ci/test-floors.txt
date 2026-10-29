@@ -47,3 +47,10 @@ btrfs-only|300
 # the same with every decoder, which is where the compression paths run at all
 # cargo test -p ferrosys --no-default-features --features btrfs,zlib,lzo,zstd --lib  (321 today)
 btrfs-decoders|315
+
+# cargo test -p ferrosys --no-default-features --features apfs --lib  (173 today)
+apfs-only|165
+
+# the same with its decoders, where a compressed file is read rather than refused
+# cargo test -p ferrosys --no-default-features --features apfs,zlib,lzvn,lzfse,lzbitmap --lib  (277 today)
+apfs-decoders|268

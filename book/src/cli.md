@@ -32,7 +32,8 @@ has, and it is always on.
 That has one consequence worth stating plainly: an identity is required, and `--time` is
 required for every family whose format records an instant. Each family names its own
 identity. That is `--uuid` for ext, `--volume-id` for a FAT, `--volume-serial` for exFAT,
-and `--fsid` for btrfs. The tool mints neither an identity nor a time. Pipe an identity in
+`--fsid` for btrfs, and `--container-uuid` for APFS, beside each volume's own in `--volume`.
+The tool mints neither an identity nor a time. Pipe an identity in
 from a tool that does, and pass the time explicitly or set `SOURCE_DATE_EPOCH`:
 
 ```console
@@ -126,9 +127,10 @@ one allocation unit less does not. Nothing is written while it searches, so a si
 cannot be found leaves the destination untouched like any other planning failure. Pair it
 with `--dry-run` to learn the number without writing anything at all.
 
-It works for every family, and each measures itself in its own unit. An ext filesystem is
-searched a block at a time. A FAT volume is searched a sector at a time, because its
-cluster size is derived from its size rather than given.
+It works for ext, FAT and APFS, and each measures itself in its own unit. An ext filesystem
+and an APFS container are searched a block at a time. A FAT volume is searched a sector at a
+time, because its cluster size is derived from its size rather than given. exFAT and btrfs
+take the size they are given.
 
 The smallest filesystem holding something is one with nothing left in it. That is right
 for an image that will only be read, and useless for one that will be written to.
@@ -141,8 +143,9 @@ $ ferrosys format --size auto --slack 64M --from-dir staging \
       --uuid "$(uuidgen)" --time 1700000000 rootfs.img
 ```
 
-The share is of the finished filesystem, measured in whatever its own free counter counts:
-blocks for ext, clusters for FAT. So `--slack 20%` is what `df` reports as 80% used. On ext
+The share is of the finished filesystem, measured in whatever its own free counter counts.
+That is blocks for ext, clusters for FAT, and on APFS the blocks its space manager records
+free. So `--slack 20%` is what `df` reports as 80% used. On ext
 the super-user reservation (`--reserved-percent`) is separate accounting over the same
 blocks, so an unprivileged writer sees 15% of it at the 5% default. `--slack` belongs to
 `--size auto` and is a usage error over a size that was named outright, which has no room to
@@ -199,7 +202,7 @@ once everything has been read, so it carries out the same command.
 A family's layout can be decided by more than its size. Where it is, the choice is spelled
 out for the family that records it in its own superblock and reads it back as identity.
 btrfs takes `--sector-size`, `--node-size`, and the two replication profiles. ext takes
-`--block-size` and `--inode-size` for the same reason.
+`--block-size` and `--inode-size` for the same reason, and APFS takes `--block-size`.
 
 FAT and exFAT derive their cluster size, table count, reserved sectors, and root capacity
 from the volume's size, by the rules their reference formatters use. The command line does
@@ -210,16 +213,18 @@ through the crate. What comes out of either route is the same filesystem.
 ### Choosing a filesystem
 
 `-t` (or `--type`) selects which filesystem to write: `ext2`, `ext3`, `ext4` (the default),
-`fat12`, `fat16`, `fat32`, `exfat`, or `btrfs`. It names the family as well as the variant.
+`fat12`, `fat16`, `fat32`, `exfat`, `btrfs`, or `apfs`. It names the family as well as the
+variant.
 Each family takes its own identity and its own options, and an option belonging to another
 one is refused by name rather than passed over. A line that named two families has said two
 things that cannot both be honored, and is told so.
 
 `exfat` is one word where the others are three, because the format has one revision and
 every volume records it. The family is the finest answer there is, so there is no variant
-to choose between. `btrfs` is one word for a related reason spelled differently. What
-varies between two btrfs filesystems is a feature word and a geometry. Both are options
-rather than a variant a `-t` value could name.
+to choose between. `btrfs` is one word because what varies between two btrfs filesystems is a
+feature word and a geometry, and both are options. `apfs` is one word for the same kind of
+reason. What varies between two containers is a block size, a release profile and their
+volumes, and each is an option.
 
 Within the ext family it seeds the whole feature set from that profile's baseline. The `-O`
 list and the geometry options layer on top, exactly as they do for `mke2fs -t`:
@@ -298,8 +303,12 @@ reserves nothing.
 
 `--block-size` and `--inode-size` set the two sizes every other ext number is derived from.
 A block is 1024, 2048, or 4096 bytes, and 4096 by default. An inode is a power of two from
-128 up to the block size, and 256 bytes by default. A 128-byte inode holds no nanosecond
-field and no creation time, so it is the choice that decides which times an image can carry.
+128 up to the block size, and 256 bytes by default. A 128-byte inode holds a whole second
+from 1901 to 2038 and no creation time. A time outside that, or a fraction of a second, is
+refused. The inode size is therefore the choice that decides which times an image can carry.
+
+A host's times carry fractions, so a `--from-dir` tree takes `--fixed-time` to fit a 128-byte
+inode.
 
 #### `--journal`
 
@@ -371,7 +380,7 @@ reservation is reproducible to the block.
 
 ```console
 $ ferrosys format --size 64M --uuid "$(uuidgen)" --time 1 --json fs.img
-{"schema":2,"family":"ext","variant":"ext4","uuid":"f0e17055-...","volume_name":"",
+{"schema":3,"family":"ext","variant":"ext4","uuid":"f0e17055-...","volume_name":"",
  "created":1,"features":[...],...}
 ```
 
@@ -477,9 +486,8 @@ $ ferrosys format -t exfat --size 8G \
 
 `--volume-serial` is this family's identity. It is the `VolumeSerialNumber` both boot
 regions record, taken as eight hex digits in either the bare form or the dashed one every
-tool prints. It is a third option rather than a reuse of `--volume-id`, because it is a
-different field of a different format. The two being the same width is a coincidence of the
-lineage, not a shared value.
+tool prints. It is an option of its own, as FAT's `--volume-id` is, because each is a field
+of its own format. The two have one width and hold separate values.
 
 There is no `--time` here, and the absence is the format's. An exFAT volume records no
 instant of its own anywhere. Every time on it belongs to an entry, and comes from the
@@ -542,8 +550,8 @@ $ ferrosys format -t btrfs --size 8G --fsid "$(uuidgen)" --time 1700000000 \
 
 `--fsid` is this family's identity. It is the id `blkid` reports, and the id a `UUID=` line
 in `/etc/fstab` names. It is taken as 32 hex digits in either the bare form or the dashed
-one. It is a fourth option rather than a reuse of `--uuid`, because it is a different field
-of a different format. The two being the same width is a coincidence.
+one. It is an option of its own, as ext's `--uuid` is, because each is a field of its own
+format.
 
 **A btrfs records five identifiers**, and the other four have options of their own.
 `--metadata-uuid` is the id every tree block is stamped with, where it is to differ from the
@@ -631,6 +639,105 @@ staging tree `noatime` is another, and so is stamping the tree's times before ea
 Every other input is already fixed. `--time` and the five identifiers are values you state,
 and nothing else in the tool reads anything but the source.
 
+### Writing an APFS container
+
+APFS is the filesystem of every Mac, and of the RAM disk an Apple kernel roots on. A
+container is a pool of blocks shared by its volumes, each a filesystem with a name and an
+identifier of its own:
+
+```console
+$ ferrosys format -t apfs --size auto --slack 8M --time 1700000000 \
+      --container-uuid "$(uuidgen)" --volume "case-sensitive:$(uuidgen):ramdisk" \
+      --owner 0:0 --from-dir root-staging ramdisk.img
+```
+
+`--container-uuid` is this family's identity: the identifier the container superblock
+records. It is an option of its own, as each family's identity is, because it is a field of
+this format. Every volume in the container records an identifier of its own beside it.
+
+**A volume is one directive**, `--volume [KIND:]UUID:NAME`, carrying all three things a
+volume has: how it compares names, its identifier and its name. It is repeatable, and each
+volume takes the next slot. The first holds the contents, and every other one is empty but
+for its root directory. Each needs its own identifier, apart from the container's, and a line
+where two share one is refused. The identifier leads and the name is everything after it, so
+a name can contain a colon: UTF-8, up to 255 bytes.
+
+`KIND` is `case-insensitive`, the default and what macOS formats, or `case-sensitive`. Those
+are the words `inspect` prints for a volume. Either kind compares a name by its canonical
+decomposition, so two spellings of one accented letter are one name. A source holding two
+names its volume compares as one is refused, naming both. A Linux tree holding `Makefile` and
+`makefile` is written to a `case-sensitive` volume.
+
+A container has one volume slot for every 512 MiB of it or part of 512 MiB, fixed when it is
+formatted. Two volumes therefore need a container larger than 512 MiB, and `--size auto`
+finds one. The smallest container is 1,024 blocks, which is 4 MiB at the default block size.
+
+The geometry is three options. `--block-size` is a power of two from 4096, the default,
+to 65536. `--profile` names the macOS release whose shape the container is written in:
+`macos14`, `macos15`, `macos26` (the default) or `macos27`. It decides which Unicode version a
+name is held to, refusing a code point that version leaves unassigned. It also decides two
+words of each volume's superblock, and macOS 26's kernel mounts either shape.
+
+`--formatted-by` is the program every volume records as having formatted it, up to 31 bytes.
+It defaults to this tool's name and version. Name it to write the same bytes with two
+versions of the tool.
+
+**`--root-snapshot UUID:NAME` gives the first volume a snapshot of itself**, which the volume
+records as the one it roots from. The snapshot keeps the whole tree as it is written. Each
+object it adds is laid out as macOS lays out one it takes. Apple's tools list the snapshot,
+mount it, and keep it as the volume changes. Its identifier is apart from the container's and every
+volume's, and its name is UTF-8, up to 255 bytes. `inspect` reports the transaction a volume
+roots from, and lists the snapshot beside the volume's others.
+
+**`--volume-from-dir SLOT:DIR` fills a later volume from a directory tree**, as `--from-dir`
+fills the first. `SLOT` counts from 0 in `--volume` order and is 1 or more, once per volume,
+and `--owner` applies to each tree.
+
+**`--volume-group SYSTEM:DATA` joins two volumes as a volume group**, the System and Data
+volumes macOS boots from. Each records its role and the group's identifier, which is the Data
+volume's own. The System volume numbers its files from a range of its own. `inspect` reports
+each volume's group beside its role.
+
+**`--firmlinks FILE` marks the System volume's firmlinks**, the directories macOS joins to a
+path in the Data volume. Each line of `FILE` is a directory's absolute path, a tab, and the
+target's path relative to the Data volume, ending in a newline. A target is at most 1,023
+bytes, the longest path macOS resolves. Each listed directory the System volume holds gets the
+flag 0x800000 and the attribute `com.apple.fs.firmlink` holding its target. The summary counts
+the directories marked against the lines listed.
+
+```console
+$ ferrosys format -t apfs --size 1G --container-uuid "$(uuidgen)" \
+    --volume "$(uuidgen):System" --volume "$(uuidgen):Data" \
+    --root-snapshot "$(uuidgen):root" --volume-group 0:1 --firmlinks firmlinks.txt \
+    --owner 0:0 --from-dir system-tree --volume-from-dir 1:data-tree boot.img
+```
+
+**Nothing is lost on the way in**, as on btrfs. A volume has a field for every property a
+source states. That is owners, modes, four times to the nanosecond, hard links, device nodes,
+pipes, sockets and extended attributes. `--accept-loss` is therefore not an option this family takes,
+and the format summary says so in a line.
+
+`--size auto` searches a block at a time. A container fitted with no slack has no free block
+at all: macOS mounts it and takes no new file. That is right for a volume that will only be
+read, as a root RAM disk is.
+
+**`--slack` is room macOS lets you write.** Before a change, macOS asks for the blocks it needs
+and keeps a margin free beside them. It refuses the change where fewer are free. The margin is
+counted in blocks, whatever their size. It is 100 in a small container and a hundredth of the
+blocks from 10,000 on, at most 4,000. A process that is not root is kept a quarter more in a
+small container, and about twice as much in a large one.
+
+A file that grows is also given room ahead of it. Once the file is large, that is as much as
+4,095 blocks in one change. The write that draws it fails where they are not free. `--slack`
+counts all of this, so the room it leaves is room no write misses. What it keeps beside the room
+is at least 4,535 blocks, and a mebibyte's worth of blocks more. That is 4,791 blocks, 19 MiB,
+at 4 KiB, and 4,551 blocks, 284 MiB, at 64 KiB.
+
+With `--slack 64M`, any user can write 64 MiB into the container on macOS 15, 26 and 27, a
+mebibyte or less a write. Each file's records take room beside its data, about a block for
+every sixteen files. The format summary gives the container's `Free blocks` and its `Writable
+blocks`. The second is the first less what macOS keeps.
+
 ### A small partition
 
 A format's defaults are sized for a general-purpose filesystem, and on a small one they
@@ -688,7 +795,7 @@ applied, or says the journal was not replayed. The JSON report carries the same 
 which refuses one needing recovery.
 
 A filesystem a driver had mounted and did not unmount cleanly is reported the same way in
-every family. A scan gives one cosmetic finding, and its words are the same for all four:
+every family. A scan gives one cosmetic finding, and its words are the same for all five:
 `the filesystem was not cleanly unmounted, so its metadata may not describe its contents`.
 The record is the format working rather than failing. A strict read of a card pulled out of
 a reader therefore succeeds, and `--fail-on conformance` passes it.
@@ -823,6 +930,61 @@ damaged is what a person acts on. The format writes a copy at each of three fixe
 the device is long enough to hold all of. A filesystem smaller than 256 GiB therefore has
 two, and two is the whole count for it.
 
+An APFS report describes a container rather than a filesystem, because that is what an APFS
+partition holds. It gives the container's own fields, then one block per volume it lists,
+then the snapshots of the volume the scan read. That is the volume `--volume` names, by name,
+by the identifier a report prints, or by slot. `--snapshot` scans one of its snapshots instead:
+
+```console
+$ ferrosys inspect disk.img --volume Data
+Filesystem family:          apfs
+Filesystem variant:         apfs
+Filesystem size:            2147483648
+Allocation unit:            4096
+Filesystem identifier:      c5941820-3bf0-46f0-a201-6d4d3d9349c1
+
+Block count:                524288
+Block size:                 4096
+Transaction:                10
+Container state:            clean
+Block zero:                 block zero holds the live superblock
+Compatible features:        0x0
+Read-only compatible:       0x0
+Incompatible features:      0x2
+Volumes:                    2 of 4
+
+Volume 0:                   Macintosh HD
+  Role:                     system
+  ...
+  Read here:                no: unsupported volume features: a sealed volume (0x20)
+
+Volume 1:                   Data
+  Role:                     data
+  Identifier:               6428f854-0626-447e-99a9-1230723961ac
+  Names:                    case-insensitive
+  Features:                 0x2, read-only compatible 0x0, incompatible 0x1
+  Holds:                    2583 files, 39 directories, 7 symbolic links, 6 other
+  Snapshots:                1
+  Blocks allocated:         1636
+  Formatted by:             newfs_apfs (2332.140.13)
+  Read here:                yes, and reported on
+
+Snapshot before-upgrade:    transaction 8, taken 2026-10-09T20:25:20Z
+
+no findings
+```
+
+Without `--volume` the report reads the first volume this tool reads. On a Mac's own disk the
+first slot holds a sealed system volume, which is passed over, and the standard error says so.
+`extract` chooses the same way.
+
+A volume whose superblock cannot be read is listed as `<unreadable>`, with the reason. The
+other volumes of the container still read, and only a choice of that one is refused. A read
+naming no volume stops there rather than passing damage over.
+
+`--volume` and `--snapshot` belong to this family, and are refused for an image of any
+other. None of the others holds more than one filesystem.
+
 An option belonging to one family is refused for another rather than passed over.
 `--groups` reports the block-group descriptors of an ext filesystem. A FAT or exFAT volume
 has one flat cluster heap, and a btrfs is divided by a chunk tree instead. Asking for them
@@ -854,6 +1016,15 @@ under two names. `--fail-on structural` faults only an image whose structures ca
 followed at all. `--fail-on never` reports every finding and exits 0 regardless, which is
 what to use when you want the report and not the judgment.
 
+A read the image file fails during the scan is the host's failure, not the filesystem's.
+A disk returning an error is one, and a network share going away is another. Each is
+reported as a source failure, after the findings in the table and as `"source_failures"` in
+the JSON report.
+
+None counts towards the verdict. The scan did not look at what the failed read held, so the
+run exits 8 whatever `--fail-on` says. `extract` exits 8 on the same failure. A file that
+*ends* early is different: that is the image cut short, and a finding.
+
 `--groups` is bounded the same way and for the same reason. A superblock's group count is
 its own claim, and a crafted one reaches four billion. The listing stops at a million
 groups and says how many of the claimed total it showed. It does not grow to a count no
@@ -872,10 +1043,10 @@ thing whatever the image holds, then a body named for the family:
 
 ```console
 $ ferrosys inspect --json rootfs.img
-{"schema":2,"family":"ext","variant":"ext4","size":67108864,"allocation_unit":4096,
- "identifier":"f0e17055-...","offset":0,"findings":{"schema":2,"clean":true,"count":0,
- "truncated":false,"findings":[]},"ext":{"superblock":{...},"features":{...},
- "journal_recovery":{...}}}
+{"schema":3,"family":"ext","variant":"ext4","size":67108864,"allocation_unit":4096,
+ "identifier":"f0e17055-...","offset":0,"findings":{"schema":3,"clean":true,"count":0,
+ "truncated":false,"findings":[],"source_failures":[]},"ext":{"superblock":{...},
+ "features":{...},"journal_recovery":{...}}}
 ```
 
 The head is six fields and the findings. The body under `"ext"` carries the superblock,
@@ -930,6 +1101,16 @@ The JSON document carries that coordinate back as `offset`, the same field `dete
 carries. A caller that scanned a disk and then described what it found lines the two
 documents up by it.
 
+`--length` says where the partition ends. Nothing past that end is read, so a filesystem
+longer than its partition is reported as truncated. Without it, such a filesystem is read on
+into the next partition, and what is read there is taken as its own:
+
+```console
+$ ferrosys inspect --offset 1M --length 16M disk.img
+```
+
+`detect`, `extract` and `identity` take the same pair.
+
 ## `extract`
 
 Exactly one of five things comes out.
@@ -952,6 +1133,21 @@ Zstandard. A file stored that way comes out as the file rather than as a refusal
 checksums are checked either way. They cover the bytes the filesystem stored, so `inspect`
 verifies a compressed extent without expanding it.
 
+An APFS container is read one volume at a time, since each volume is a filesystem of its own
+and none is inside another. `--volume` names it, by name or by slot number, and without it
+the volume in the container's first slot is read. `--snapshot` reads that volume as one of
+its snapshots keeps it:
+
+```console
+$ ferrosys extract disk.img --volume Data --to-tar - | tar -tv
+$ ferrosys extract disk.img --volume Data --snapshot before-upgrade --cat /notes.txt
+```
+
+A file macOS compressed comes out as its content. This binary carries the zlib, LZVN, LZFSE
+and LZBITMAP decoders its chunks are stored with. It also reads the chunks macOS keeps as their
+content behind a marker. A compression type it does not decode is refused by its number,
+naming the file.
+
 ### A tar archive
 
 Ownership, modes, symlinks, hard links, and device and FIFO nodes travel in the header. The
@@ -964,13 +1160,23 @@ $ ferrosys extract rootfs.img --to-tar rootfs.tar
 $ ferrosys extract rootfs.img --to-tar - | tar -tv
 ```
 
-The archive opens with a `./` member describing the root directory and omits
-`/lost+found`, which every filesystem makes for itself. What comes out is what
+The archive opens with a `./` member describing the root directory and omits an ext
+filesystem's `/lost+found`, which the format makes for itself. On every other family a
+directory of that name is the volume's own and is written like any other. What comes out is what
 `format --from-tar` reads back in, so a filesystem survives a round trip through the
 archive unchanged.
 
-A socket is the one thing tar cannot express, because it has no entry type for one. An
+A socket is the one kind of node tar cannot express, because it has no entry type for one. An
 image holding a socket is a typed error rather than an archive quietly missing a file.
+
+A tar header has no field for the BSD flags a Darwin filesystem records, `UF_HIDDEN` and the
+rest. The archive is written without them, and the standard error counts the entries that had
+any, as `Not kept: bsd-flags`.
+
+A device number goes into the header exactly. Seven octal digits hold numbers to 2097151.
+Past that the field is filled with eight, as bsdtar writes it and GNU tar reads it. Eight
+digits hold a Mac's twenty-four-bit minor numbers. A number past 16777215 fits neither form.
+An image holding one is a typed error rather than an archive naming another device.
 
 That refusal comes part-way through the walk, as an inode that does not read does, and as an
 ACL that does not decode does. A named destination is created and truncated before the walk
@@ -1001,8 +1207,8 @@ The destination is made if it is not there, and it must be empty. An extraction 
 the filesystem holds. A name already present would be an entry that could not be created,
 found part-way through with the tree half written. The destination takes the filesystem
 root's own mode, ownership, times, and extended attributes. Everything the filesystem holds
-appears beneath it at the path it holds inside the image. `/lost+found` is not written, so
-the tree is one `format --from-dir` reads straight back.
+appears beneath it at the path it holds inside the image. An ext filesystem's `/lost+found`
+is not written, so the tree is one `format --from-dir` reads straight back.
 
 Everything the archive carries is carried here too, set on the files themselves. That is
 modes, ownership, symlinks, hard links, device and FIFO nodes, sockets, extended attributes,
@@ -1013,7 +1219,7 @@ Access and modification times are set exactly, to the nanosecond.
 Four parts of a tree need privileges:
 
 - A device node needs `CAP_MKNOD`.
-- Setting a recorded owner needs `CAP_CHOWN`.
+- Setting a recorded owner needs `CAP_CHOWN`, and in a user namespace an id the namespace maps.
 - An extended attribute in the `security` or `trusted` namespace is the host's to write.
 - A destination filesystem with no notion of a second name for a node refuses a hard link.
 
@@ -1029,14 +1235,48 @@ named on the standard error rather than assumed:
 $ ferrosys extract rootfs.img --to-dir unpacked --skip-privileged
 Names written:          1282
 Ownership:              not applied — this process may not set another owner
-Attributes:             not applied — this process may not set security or trusted attributes
+Attribute not set:      security.capability
 Skipped:                /dev/console
 Skipped:                /dev/null
 ```
 
 The reserved attributes are what an unprivileged extraction of a real root filesystem meets
 first. A Debian tree carries `security.capability` on the binaries that hold one, and a tree
-built under SELinux carries `security.selinux` on nearly every inode.
+built under SELinux carries `security.selinux` on nearly every inode. Each attribute is named
+once, however many entries carry it.
+
+Some of a tree has no place on the destination, whatever privilege the process holds. A name
+can be longer than the destination takes. A format storing up to 255 UTF-16 units holds names
+of up to 765 bytes of UTF-8, and a Linux filesystem takes 255 bytes.
+
+An extended attribute can be one the destination will not hold. Another operating system names
+its attributes in no namespace this host knows, such as `com.apple.quarantine`. The kernel
+holds a `user` attribute only on a regular file or a directory. It takes at most 64 KiB for
+one value. A destination also keeps a room of its own for a node's attributes, and a large
+value can be past it.
+
+A device node can record a number wider than this host's, as another operating system's can.
+The node is read back once made. One the host made as another device is taken out again
+rather than left naming it.
+
+A destination also keeps a time to a range and a fraction of its own. So every node's times
+are read back too, and one held as another time is refused like the rest. Each limit is the
+destination's own. By default the first refusal stops the run and names the entry.
+
+No destination holds the BSD flags a Darwin filesystem records, so an entry carrying any is
+refused like the rest.
+
+`--skip-unsupported` is the opt-in for a run that wants what the destination will hold. An
+entry whose name is refused is left out, and a directory takes everything under it along. Each
+is named as `Skipped:`. An attribute the destination refuses is not set, and is named once as
+`Attribute not set:`. A destination that holds more leaves out less. `--to-tar` keeps every
+name and attribute either opt-in leaves out.
+
+Under the same opt-in, BSD flags are not set. The entries that had any are counted as
+`Not kept: bsd-flags`.
+
+Under the same opt-in, a time the destination holds as another is kept as it holds it. The
+entry is named as `Time not held:`.
 
 A file's contents are written as the filesystem reports them, and a hole reads as zeros. A
 sparse file therefore lands in the destination fully allocated. A tree holding one occupies
@@ -1223,9 +1463,9 @@ JSON has no octal literal, so `509` is `0o775`. `mode_octal` beside it carries t
 spelling.
 
 `--stat` reports more of an entry than `--list` does. It adds a creation time, the extended
-attributes, a device node's numbers, and, where the family records it, how many blocks the
-entry occupies. A listing leaves those out on every family, including the families that
-record them. Reading them costs a read per entry, and a listing is the shape a caller uses
+attributes and a device node's numbers. Where the family records them, it adds how many blocks
+the entry occupies and its BSD flags. A listing leaves those out on every family, including the
+families that record them. Reading them costs a read per entry, and a listing is the shape a caller uses
 to walk a whole tree.
 
 So a field's absence from a listing entry means "a listing does not carry this". A field's
@@ -1276,13 +1516,12 @@ fat32
 ```
 
 One word goes to the standard output, so it reads well in a shell test. That word is
-`ext2`, `ext3`, `ext4`, `fat12`, `fat16`, `fat32`, `exfat`, `btrfs`, or `unrecognized`.
-`--json` produces a document instead.
+`ext2`, `ext3`, `ext4`, `fat12`, `fat16`, `fat32`, `exfat`, `btrfs`, `apfs`, or
+`unrecognized`. `--json` produces a document instead.
 
-For every family this tool writes it is the same word `format -t` takes. What `detect` says
-about such an image is therefore what you would type to write another like it. `btrfs` is
-the word for a family it reads. `--offset` points it at a partition inside a whole-disk
-image, or at a region a carver located.
+For every family it is the same word `format -t` takes. What `detect` says about an image is
+therefore what you would type to write another like it. `--offset` points it at a partition
+inside a whole-disk image, or at a region a carver located.
 
 One further answer, `unknown`, is what a tool prints when the library classifies a family
 that build has no name for. Something recognized the image, so `unrecognized` would be the
@@ -1344,8 +1583,8 @@ first.
 At least one of `--uuid`, `--label`, and `--set-checksum-seed` is required. A run that would
 write nothing is a command line that meant to say something.
 
-`--offset` points it at a filesystem inside a whole-disk image, as every image-reading verb
-takes one. This command rewrites ext identity fields. Pointed at a sound volume of another
+`--offset` and `--length` point it at a filesystem inside a whole-disk image, as every
+image-reading verb takes them. Nothing past the length is read or written. This command rewrites ext identity fields. Pointed at a sound volume of another
 family, it refuses with the word `detect` prints for what the image holds. The volume is
 fine and the request does not apply to it. That is a different verdict from a damaged
 filesystem, and it carries a different exit code.

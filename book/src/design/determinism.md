@@ -1,11 +1,12 @@
 # Deterministic output
 
-The default materialization is byte-reproducible in every family. The same source and the
-same inputs produce a byte-identical image on any machine.
+The default materialization is byte-reproducible in every family this crate writes: ext2,
+ext3, ext4, FAT12, FAT16, FAT32, exFAT, btrfs, and APFS. The same source and the same inputs
+produce a byte-identical image on any machine.
 
 Every value a filesystem would normally draw from its environment is an input instead.
 Which values those are is a property of the format, so each family names its own. The list
-is short in all four, because a format records only what it has a field for:
+is short in every written family, because a format records only what it has a field for:
 
 - **ext2, ext3, and ext4** take three: the **filesystem UUID**, a 16-byte value, the
   **directory-hash seed** that a hash-indexed directory orders its names by, and
@@ -23,6 +24,9 @@ is short in all four, because a format records only what it has a field for:
   id** and one **instant**. The format's own tooling draws all five from a random source
   and the clock. Making them inputs is what makes a filesystem's bytes a function of what
   it was asked for.
+- **APFS** takes an **identifier** for the container and one for each volume, and one
+  **instant**, which every time the container records is. `newfs_apfs` draws the identifiers
+  from a random source and each time from the clock as it goes.
 
 A caller that wants clock- or random-derived values computes them and passes
 them in explicitly, keeping that choice out of the default path.

@@ -633,6 +633,60 @@ fn checked(cmd: &mut Command, name: &str) -> Result<String, String> {
     ))
 }
 
+// A host's times carry fractions of a second, which a 128-byte ext inode has no words for: the
+// refusal names the fraction rather than a range, and the hint the two ways through.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_tree_with_fractional_times_names_what_a_small_inode_does_not_hold() {
+    let dir = scratch();
+    let tree = at(&dir, "staging");
+    std::fs::create_dir(&tree).expect("staging");
+    let file = tree.join("f");
+    std::fs::write(&file, b"x").expect("a file");
+    let fraction = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 5);
+    for path in [&file, &tree] {
+        std::fs::File::open(path)
+            .and_then(|f| {
+                f.set_times(
+                    std::fs::FileTimes::new()
+                        .set_accessed(fraction)
+                        .set_modified(fraction),
+                )
+            })
+            .expect("set the times");
+    }
+    let image = at(&dir, "fs.img");
+    let base = [
+        "format",
+        "--size",
+        "8M",
+        "--uuid",
+        UUID,
+        "--time",
+        TIME,
+        "--inode-size",
+        "128",
+        "--owner",
+        "0:0",
+        "--from-dir",
+        tree.to_str().expect("a text path"),
+    ];
+    let mut args = base.to_vec();
+    args.push(image.to_str().expect("a text path"));
+    let out = run(&args);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(code(&out), OPERATIONAL, "{said}");
+    assert!(said.contains("holds whole seconds alone"), "{said}");
+    assert!(
+        said.contains("hint:") && said.contains("--fixed-time"),
+        "{said}"
+    );
+    let mut args = base.to_vec();
+    args.extend_from_slice(&["--fixed-time", TIME, image.to_str().expect("a text path")]);
+    let out = run(&args);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 // Walking a tree records Linux inode metadata and Linux extended attributes, so the
 // library builds its directory source on Linux alone and `--from-dir` is carried out
 // there. The gate below this one is the other half of that contract.
@@ -1800,7 +1854,7 @@ import json, sys
 doc = json.load(sys.stdin)
 # Every document this tool emits names its shape with the same field, so a consumer
 # reads one key wherever it looks.
-assert doc["schema"] == 2, doc["schema"]
+assert doc["schema"] == 3, doc["schema"]
 assert "version" not in doc, "the envelope field is `schema` in every document"
 # The head means the same thing whatever family answered, so a consumer that reads only
 # these five fields and the findings never learns what a group descriptor is.
@@ -1811,7 +1865,8 @@ assert doc["allocation_unit"] == 4096, doc["allocation_unit"]
 assert doc["identifier"] == "f0e17055-0000-4000-8000-000000000000", doc["identifier"]
 assert doc["findings"]["clean"] is True, doc["findings"]
 assert doc["findings"]["findings"] == [], doc["findings"]
-assert doc["findings"]["schema"] == 2, doc["findings"]
+assert doc["findings"]["source_failures"] == [], doc["findings"]
+assert doc["findings"]["schema"] == 3, doc["findings"]
 # The body is entirely ext's own, and a later family adds one beside it.
 ext = doc["ext"]
 sb = ext["superblock"]
@@ -2180,6 +2235,51 @@ fn gnu_tar_reads_the_archive_we_write() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_standard_output_that_will_not_take_the_bytes_is_named_rather_than_the_image() {
+    use tar::{Builder, EntryType, Header};
+
+    // A file larger than the output's buffer, so the failure meets the read of the file rather
+    // than the flush after it. Every write to `/dev/full` fails as a full device would.
+    let dir = scratch();
+    let body = vec![b'x'; 3 << 20];
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Regular);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(1_700_000_000);
+    header.set_size(body.len() as u64);
+    header.set_path("big").expect("a path");
+    header.set_cksum();
+    let mut builder = Builder::new(Vec::new());
+    builder.append(&header, &body[..]).expect("a member");
+    let archive = at(&dir, "big.tar");
+    std::fs::write(&archive, builder.into_inner().expect("an archive")).expect("write");
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "64M", Some(&archive))), OK);
+
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full");
+    let out = Command::new(FERROSYS)
+        .args([
+            "extract",
+            image.to_str().expect("a text path"),
+            "--cat",
+            "/big",
+        ])
+        .stdout(full)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("standard output"), "{said}");
+    assert!(!said.contains("reading the image"), "{said}");
+}
+
 #[test]
 fn extract_writes_one_artifact_and_nothing_else() {
     let dir = scratch();
@@ -2302,7 +2402,7 @@ fn the_json_documents_carry_attributes_and_both_spellings_of_a_mode() {
     let judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["schema"] == 2, doc["schema"]
+assert doc["schema"] == 3, doc["schema"]
 by_path = {e["path"]: e for e in doc["entries"]}
 h = by_path["/etc/hostname"]
 assert h["mode"] == 0o644 and h["mode_octal"] == "0644", h
@@ -2327,7 +2427,7 @@ assert "xattrs" not in by_path["/etc"], by_path["/etc"]
     let stat_judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["schema"] == 2, doc["schema"]
+assert doc["schema"] == 3, doc["schema"]
 e = doc["entry"]
 assert e["path"] == "/etc/hostname" and e["mode_octal"] == "0644", e
 assert e["crtime"] == e["mtime"], e
@@ -2660,6 +2760,68 @@ fn a_filesystem_inside_a_larger_image_is_read_at_its_offset() {
         ok(&["extract", "--offset", "1M", path, "--cat", "/etc/hostname"]),
         b"ferrosys\n"
     );
+}
+
+#[test]
+fn a_filesystem_longer_than_the_length_it_is_given_is_reported_and_left_alone() {
+    // A disk whose first partition begins a mebibyte in and holds 64 MiB, carrying a 128 MiB
+    // filesystem, and whose second partition's bytes come after. The filesystem runs on into
+    // the second partition, which only `--length` can say. Its blocks are 1 KiB, so its
+    // groups begin every 8 MiB and half of them, with their copies of the superblock, begin
+    // past the partition.
+    let dir = scratch();
+    let image = at(&dir, "fs.img");
+    let image_path = image.to_str().expect("a text path");
+    #[rustfmt::skip]
+    let formatted = run(&[
+        "format", "--size", "128M", "--block-size", "1024", "--uuid", UUID, "--time", TIME,
+        image_path,
+    ]);
+    assert_eq!(code(&formatted), OK);
+    let mut bytes = vec![0x00; 1 << 20];
+    bytes.extend_from_slice(&std::fs::read(&image).expect("read"));
+    bytes.extend(vec![0xee; 1 << 20]);
+    let disk = at(&dir, "disk.img");
+    std::fs::write(&disk, &bytes).expect("write");
+    let path = disk.to_str().expect("a text path");
+
+    // Inside the partition, the filesystem records more blocks than it has: a finding the
+    // default verdict fails on.
+    let out = run(&["inspect", "--offset", "1M", "--length", "64M", path]);
+    assert_eq!(code(&out), IMAGE_BAD);
+    let report = String::from_utf8(out.stdout).expect("text");
+    assert!(report.contains("its source holds 65536"), "{report}");
+
+    // Detection reads the same region, and classifies the superblock it holds.
+    assert_eq!(
+        ok(&["detect", "--offset", "1M", "--length", "64M", path]),
+        b"ext4\n"
+    );
+
+    // The rewrite refuses a filesystem whose groups lie past the partition, and writes
+    // nothing: not into the filesystem, and not into the partition after it.
+    let out = run(&[
+        "identity",
+        "--offset",
+        "1M",
+        "--length",
+        "64M",
+        "--uuid",
+        "5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a",
+        path,
+    ]);
+    assert_eq!(code(&out), IMAGE_BAD);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("group 8's backup superblock lies past the end"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read(&disk).expect("read"), bytes);
+
+    // A length that holds the filesystem whole reads it as one with nothing wrong.
+    let report = String::from_utf8(ok(&["inspect", "--offset", "1M", "--length", "128M", path]))
+        .expect("text");
+    assert!(report.contains("no findings"), "{report}");
 }
 
 // ---------------------------------------------------------------------------
@@ -3731,7 +3893,7 @@ fn a_path_through_a_file_is_the_callers_error_whichever_family_answers() {
     .expect("the file's mode");
     let tree = tree.to_str().expect("a text path");
 
-    let families: [(&str, Vec<&str>); 4] = [
+    let families: [(&str, Vec<&str>); 5] = [
         ("ext4", vec!["--uuid", UUID, "--time", TIME]),
         (
             "fat32",
@@ -3757,6 +3919,17 @@ fn a_path_through_a_file_is_the_callers_error_whichever_family_answers() {
         (
             "btrfs",
             vec!["--fsid", FSID, "--time", TIME, "--size", "128M"],
+        ),
+        (
+            "apfs",
+            vec![
+                "--container-uuid",
+                CONTAINER_UUID,
+                "--volume",
+                APFS_VOLUME,
+                "--time",
+                TIME,
+            ],
         ),
     ];
     for (family, identity) in families {
@@ -3948,6 +4121,447 @@ fn a_btrfs_nothing_here_wrote_is_detected_described_and_read_back_by_the_binary(
         ok(&["extract", path, "--cat", "/home/../etc/hostname"]),
         b"hello\n"
     );
+}
+
+// -- the APFS family, read -----------------------------------------------------------
+//
+// The image is a committed fixture: a container of one volume, "Forged", holding a file of 5000
+// patterned bytes at `/hello`, a directory, a symbolic link to the file, one file under two
+// names, a named pipe, a character device, a sparse file, and a snapshot, "before", taken when
+// the volume did not yet hold `/hello`. The library assembles that container byte by byte for
+// its own gates, since this tool's writer makes neither a snapshot of an earlier state nor a
+// hole, and this is its bytes.
+
+/// The APFS fixture, written out as an image in `dir`.
+fn apfs_fixture(dir: &tempfile::TempDir) -> PathBuf {
+    sparse_fixture(dir, "apfs-forged.sparse", "forged-apfs.img")
+}
+
+/// The committed fixture `name`, kept sparse, written out whole as `out` in `dir`.
+fn sparse_fixture(dir: &tempfile::TempDir, name: &str, out: &str) -> PathBuf {
+    let sparse = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
+    .expect("the committed fixture");
+    assert_eq!(&sparse[..16], b"ferrosys-sparse\n", "a sparse fixture");
+    let len = u64::from_le_bytes(sparse[16..24].try_into().expect("eight bytes"));
+    let block = u32::from_le_bytes(sparse[24..28].try_into().expect("four bytes")) as usize;
+    let mut image = vec![0u8; len as usize];
+    for stored in sparse[28..].chunks(4 + block) {
+        let index = u32::from_le_bytes(stored[..4].try_into().expect("four bytes")) as usize;
+        image[index * block..(index + 1) * block].copy_from_slice(&stored[4..]);
+    }
+    let path = at(dir, out);
+    std::fs::write(&path, image).expect("write the image");
+    path
+}
+
+/// The bytes the fixture's `/hello` holds: the pattern the library's assembler writes.
+fn apfs_hello() -> Vec<u8> {
+    (0..5000u32)
+        .map(|i| i.wrapping_mul(31).wrapping_add(7) as u8)
+        .collect()
+}
+
+#[test]
+fn an_apfs_container_is_detected_described_and_read_back_by_the_binary() {
+    let dir = scratch();
+    let image = apfs_fixture(&dir);
+    let path = image.to_str().expect("a text path");
+
+    assert_eq!(ok(&["detect", path]), b"apfs\n");
+
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Filesystem family:          apfs"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Filesystem variant:         apfs"),
+        "{report}"
+    );
+    // The container and its volumes, which is what someone points this command at an APFS
+    // image to find out, and the snapshot the volume keeps.
+    assert!(
+        report.contains("Volume 0:                   Forged"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Read here:                yes, and reported on"),
+        "{report}"
+    );
+    assert!(report.contains("Snapshot before:"), "{report}");
+    assert!(report.contains("no findings"), "{report}");
+    // Each of the volume's three feature words, as the format names them.
+    assert!(
+        report
+            .contains("Features:                 0x2, read-only compatible 0x0, incompatible 0x1"),
+        "{report}"
+    );
+
+    let listing = String::from_utf8(ok(&["extract", path, "--list"])).expect("text");
+    for name in [
+        "/hello",
+        "/dir/nested",
+        "/dir/hard2",
+        "/hard1",
+        "/link -> hello",
+        "/sparse",
+    ] {
+        assert!(listing.contains(name), "{name} is missing from\n{listing}");
+    }
+    assert_eq!(ok(&["extract", path, "--cat", "/hello"]), apfs_hello());
+    assert_eq!(ok(&["extract", path, "--cat", "/link"]), apfs_hello());
+    let sparse = ok(&["extract", path, "--cat", "/sparse"]);
+    assert_eq!(sparse.len(), 3 * 4096);
+    assert!(sparse[..4096].iter().all(|b| *b == 0));
+    // A file over the cap is refused before a byte of it is written, as on every family.
+    let out = run(&["extract", path, "--max-file-bytes", "1K", "--cat", "/hello"]);
+    assert_ne!(code(&out), OK, "a file over the cap must not be written");
+    assert!(
+        out.stdout.is_empty(),
+        "no bytes are written before the refusal"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("5000") && stderr.contains("1024"),
+        "the message names the size and the cap: {stderr}"
+    );
+
+    // The volume by name and by slot, and the volume as its snapshot keeps it, which does not
+    // yet hold `/hello`.
+    assert_eq!(
+        ok(&["extract", path, "--volume", "Forged", "--cat", "/hello"]),
+        apfs_hello()
+    );
+    assert_eq!(
+        ok(&["extract", path, "--volume", "0", "--cat", "/hello"]),
+        apfs_hello()
+    );
+    let then =
+        String::from_utf8(ok(&["extract", path, "--snapshot", "before", "--list"])).expect("text");
+    assert!(!then.contains("/hello"), "{then}");
+    assert!(then.contains("/hard1"), "{then}");
+}
+
+#[test]
+fn a_volume_or_snapshot_the_container_does_not_hold_is_refused_by_name() {
+    let dir = scratch();
+    let image = apfs_fixture(&dir);
+    let path = image.to_str().expect("a text path");
+    let out = run(&["extract", path, "--volume", "Other", "--list"]);
+    assert_eq!(code(&out), 8);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("holds no volume Other"), "{err}");
+    assert!(err.contains("Forged (slot 0)"), "{err}");
+    let out = run(&["extract", path, "--snapshot", "after", "--list"]);
+    assert_eq!(code(&out), 8);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no snapshot after"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The APFS fixture with its volume listed in slot 1 as well as slot 0, where the volume's
+/// superblock records slot 0, so slot 1 is a superblock that cannot be read as its own.
+fn apfs_with_an_unreadable_slot(dir: &tempfile::TempDir) -> PathBuf {
+    let image = apfs_fixture(dir);
+    let mut bytes = std::fs::read(&image).expect("read the image");
+    // The container superblock is block zero and the newest block of the descriptor area.
+    for block in [0usize, 2] {
+        let at = block * 4096;
+        assert_eq!(&bytes[at + 32..at + 36], b"NXSB", "block {block}");
+        let first: [u8; 8] = bytes[at + 184..at + 192].try_into().expect("eight bytes");
+        bytes[at + 192..at + 200].copy_from_slice(&first);
+        ferrosys::apfs::ondisk::seal(&mut bytes[at..at + 4096]);
+    }
+    std::fs::write(&image, bytes).expect("write the image");
+    image
+}
+
+#[test]
+fn a_volume_whose_superblock_cannot_be_read_is_listed_and_refused_only_where_chosen() {
+    let dir = scratch();
+    let image = apfs_with_an_unreadable_slot(&dir);
+    let path = image.to_str().expect("a text path");
+    // The first slot reads, and the report lists the second with why it does not.
+    let out = run(&["inspect", path]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains("Volumes:                    2 of 1"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Volume 1:                   <unreadable>"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Read here:                no: the object at block 20 is a volume superblock recording another slot as its own"),
+        "{report}"
+    );
+    assert!(report.contains("the volume in slot 1"), "{report}");
+    let json = String::from_utf8_lossy(&run(&["inspect", path, "--json"]).stdout).to_string();
+    assert!(
+        json.contains(r#""unreadable_volumes":[{"slot":1,"oid":1026,"error":"#),
+        "{json}"
+    );
+    assert_eq!(ok(&["extract", path, "--cat", "/hello"]), apfs_hello());
+    let out = run(&["extract", path, "--volume", "1", "--list"]);
+    assert_ne!(code(&out), OK);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("recording another slot as its own"), "{err}");
+}
+
+/// Change `bytes` at `at` in the APFS fixture's block `block`, and seal the block again.
+fn apfs_resealed(image: &Path, block: usize, at: usize, bytes: &[u8]) {
+    let mut image_bytes = std::fs::read(image).expect("read the image");
+    let start = block * 4096;
+    image_bytes[start + at..start + at + bytes.len()].copy_from_slice(bytes);
+    ferrosys::apfs::ondisk::seal(&mut image_bytes[start..start + 4096]);
+    std::fs::write(image, image_bytes).expect("write the image");
+}
+
+#[test]
+fn a_choice_of_volume_or_snapshot_is_refused_as_the_same_damage_is_without_one() {
+    let dir = scratch();
+    // A volume refused at open says so in the same words, and exits the same way, whether a
+    // read named it or took it as the first: the volume's flags say it is encrypted.
+    let image = apfs_fixture(&dir);
+    apfs_resealed(&image, 20, 264, &0u64.to_le_bytes());
+    let path = image.to_str().expect("a text path");
+    for verb in ["inspect", "extract"] {
+        let plain = run(&[verb, path, "--list"][..if verb == "inspect" { 2 } else { 3 }]);
+        let chosen =
+            run(&[verb, path, "--volume", "Forged", "--list"]
+                [..if verb == "inspect" { 4 } else { 5 }]);
+        assert_eq!(code(&plain), 8, "{verb}");
+        assert_eq!(code(&chosen), code(&plain), "{verb}");
+        assert_eq!(
+            String::from_utf8_lossy(&chosen.stderr),
+            String::from_utf8_lossy(&plain.stderr),
+            "{verb}"
+        );
+    }
+    // A snapshot whose copy of the superblock does not verify is a structure of an opened
+    // volume that cannot be read, as a read past opening classes it.
+    let image = apfs_fixture(&dir);
+    let mut bytes = std::fs::read(&image).expect("read the image");
+    bytes[42 * 4096 + 300] ^= 1;
+    std::fs::write(&image, bytes).expect("write the image");
+    let path = image.to_str().expect("a text path");
+    let out = run(&["extract", path, "--snapshot", "before", "--list"]);
+    assert_eq!(code(&out), 4);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("malformed apfs filesystem"), "{err}");
+    // A snapshot the volume does not keep is named with the ones it does.
+    let image = apfs_fixture(&dir);
+    let path = image.to_str().expect("a text path");
+    let out = run(&["extract", path, "--snapshot", "after", "--list"]);
+    assert_eq!(code(&out), 8);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the volume holds no snapshot after; it holds before"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_report_says_how_block_zero_stands_and_when_the_snapshots_were_not_listed() {
+    let dir = scratch();
+    let image = apfs_fixture(&dir);
+    let path = image.to_str().expect("a text path");
+    let report = String::from_utf8(ok(&["inspect", path])).expect("text");
+    assert!(
+        report.contains("Container state:            clean"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Block zero:                 block zero holds the live superblock"),
+        "{report}"
+    );
+    let json = String::from_utf8(ok(&["inspect", "--json", path])).expect("text");
+    assert!(
+        json.contains(r#""block_zero":"block zero holds the live superblock""#),
+        "{json}"
+    );
+    // Block zero at an older transaction than the live checkpoint: a container a driver did
+    // not put down cleanly.
+    apfs_resealed(&image, 0, 16, &7u64.to_le_bytes());
+    let report = String::from_utf8_lossy(&run(&["inspect", path]).stdout).to_string();
+    assert!(
+        report.contains("Container state:            not cleanly unmounted"),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "Block zero:                 block zero holds the superblock of transaction 7"
+        ),
+        "{report}"
+    );
+    // A snapshot tree that does not verify, described without a scan to report it.
+    let image = apfs_fixture(&dir);
+    let mut bytes = std::fs::read(&image).expect("read the image");
+    bytes[41 * 4096 + 300] ^= 1;
+    std::fs::write(&image, bytes).expect("write the image");
+    let path = image.to_str().expect("a text path");
+    let report = String::from_utf8(ok(&["inspect", "--quick", path])).expect("text");
+    assert!(
+        report.contains("Snapshots:                  not listed: "),
+        "{report}"
+    );
+    let json = String::from_utf8(ok(&["inspect", "--quick", "--json", path])).expect("text");
+    assert!(json.contains(r#""snapshots_not_listed":"#), "{json}");
+}
+
+/// The two-volume fixture, written out as an image in `dir`: `Forged` in slot 0, and in slot 1
+/// `Second`, empty, whose identifier is every byte `0x44`.
+fn apfs_two(dir: &tempfile::TempDir) -> PathBuf {
+    sparse_fixture(dir, "apfs-two.sparse", "two-apfs.img")
+}
+
+#[test]
+fn a_read_naming_no_volume_passes_over_a_first_slot_it_refuses_and_says_so() {
+    // A Mac's own disk holds a volume this tool refuses in its first slot; here the first
+    // slot's volume records itself as encrypted.
+    let dir = scratch();
+    let image = apfs_two(&dir);
+    apfs_resealed(&image, 20, 264, &0u64.to_le_bytes());
+    let path = image.to_str().expect("a text path");
+    let out = run(&["inspect", path]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "Volume 0:                   Forged",
+        "Read here:                no: volume 0 is encrypted",
+        "Volume 1:                   Second",
+        "Read here:                yes, and reported on",
+    ] {
+        assert!(report.contains(line), "{line}\n{report}");
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("volume 0 (Forged) is not read here: volume 0 is encrypted"),
+        "{said}"
+    );
+    assert!(
+        said.contains("reading volume 1 (Second); --volume names another"),
+        "{said}"
+    );
+    // The same choice for an extraction, and a choice of the first slot refused by name.
+    let out = run(&["extract", path, "--list"]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&["extract", path, "--volume", "0", "--list"]);
+    assert_eq!(code(&out), 8);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("volume 0 is encrypted"));
+}
+
+#[test]
+fn a_volume_is_chosen_by_its_identifier_and_a_name_two_volumes_share_is_refused() {
+    let dir = scratch();
+    let image = apfs_two(&dir);
+    let path = image.to_str().expect("a text path");
+    for identifier in [
+        "44444444-4444-4444-4444-444444444444",
+        "44444444444444444444444444444444",
+    ] {
+        let report =
+            String::from_utf8(ok(&["inspect", path, "--volume", identifier])).expect("text");
+        assert!(
+            report.contains("Volume 1:                   Second"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Read here:                yes, and reported on"),
+            "{identifier}: {report}"
+        );
+    }
+    // Both volumes named `Forged`.
+    apfs_resealed(&image, 230, 704, b"Forged");
+    let out = run(&["extract", path, "--volume", "Forged", "--list"]);
+    assert_eq!(code(&out), 8);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("more than one volume named Forged, in slots 0, 1"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_read_naming_no_volume_reads_the_first_occupied_slot_and_says_when_there_is_none() {
+    let dir = scratch();
+    // The fixture's volume listed in slot 1 alone, its superblock recording slot 1.
+    let image = apfs_fixture(&dir);
+    for block in [0usize, 2] {
+        apfs_resealed(&image, block, 184, &[0u8; 8]);
+        apfs_resealed(&image, block, 192, &1026u64.to_le_bytes());
+    }
+    apfs_resealed(&image, 20, 36, &1u32.to_le_bytes());
+    let path = image.to_str().expect("a text path");
+    let report = String::from_utf8_lossy(&run(&["inspect", path]).stdout).to_string();
+    assert!(
+        report.contains("Volume 1:                   Forged"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Read here:                yes, and reported on"),
+        "{report}"
+    );
+    assert_eq!(ok(&["extract", path, "--cat", "/hello"]), apfs_hello());
+    // A container listing no volume at all.
+    let image = apfs_fixture(&dir);
+    for block in [0usize, 2] {
+        apfs_resealed(&image, block, 184, &[0u8; 8]);
+    }
+    let path = image.to_str().expect("a text path");
+    for verb in [&["inspect", path][..], &["extract", path, "--list"]] {
+        let out = run(verb);
+        assert_eq!(code(&out), 8);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("the container holds no volume at all"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_volume_selection_is_refused_for_a_family_that_holds_one_filesystem() {
+    // Choosing a volume or a snapshot is APFS's alone, and each family that holds one
+    // filesystem reaches the refusal through its own open, so it is checked on every one.
+    let dir = scratch();
+    for volume in one_volume_per_family(&dir)
+        .iter()
+        .filter(|v| v.family != "apfs")
+    {
+        let path = volume.image.to_str().expect("a text path");
+        let variant = volume.variant;
+        let article = if volume.family.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
+        for verb in [
+            &["inspect", path, "--volume", "Data"][..],
+            &["extract", path, "--snapshot", "s", "--list"],
+        ] {
+            let out = run(verb);
+            assert_eq!(code(&out), 8, "{variant}: `{}`", verb.join(" "));
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                err.contains(&format!(
+                    "does not apply to {article} {} filesystem",
+                    volume.family
+                )),
+                "{variant}: {err}"
+            );
+            // A btrfs keeps snapshots too, and is not told it has none.
+            if volume.family == "btrfs" && verb.contains(&"--snapshot") {
+                assert!(err.contains("a btrfs snapshot is a subvolume"), "{err}");
+            }
+        }
+    }
 }
 
 // -- the btrfs family, written --------------------------------------------------------
@@ -4467,6 +5081,678 @@ fn two_btrfs_formats_of_one_command_line_are_one_image() {
 }
 
 // ---------------------------------------------------------------------------
+// format -t apfs
+// ---------------------------------------------------------------------------
+
+/// The container's identifier every APFS format here is given.
+const CONTAINER_UUID: &str = "a9f5c0de-0000-4000-8000-000000000001";
+
+/// One volume as `--volume` takes it: case-sensitive, its identifier, and its name.
+const APFS_VOLUME: &str = "case-sensitive:a9f5c0de-0000-4000-8000-000000000002:Data";
+
+/// A second volume, folding case, with a colon in its name.
+const APFS_SECOND: &str = "a9f5c0de-0000-4000-8000-000000000003:Second: empty";
+
+#[test]
+fn an_apfs_container_this_tool_wrote_reads_back_as_it_went_in() {
+    let dir = scratch();
+    let source = btrfs_source(&dir);
+    let image = at(&dir, "written.img");
+    let path = image.to_str().expect("a text path");
+
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--volume",
+        APFS_SECOND,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    // A container of 64 MiB has one slot, and two volumes were asked for: refused before the
+    // destination is opened, naming both numbers.
+    assert_eq!(code(&out), OPERATIONAL);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("at most 1 volumes, not 2"), "{said}");
+    assert!(!image.exists(), "a refused line wrote nothing");
+
+    let out = run(&[
+        "format",
+        "--size",
+        "1G",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--volume",
+        APFS_SECOND,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let summary = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        summary.contains("Volumes:                2 of 2"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("nothing dropped or synthesized"),
+        "{summary}"
+    );
+
+    // This tool's own reader over the image, in the words `inspect` prints: the container by
+    // its identifier, each volume in the slot it was given, by its name and how it compares
+    // names, and a scan with nothing to say.
+    assert_eq!(ok(&["detect", path]), b"apfs\n");
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    assert!(
+        report.contains(&format!("Filesystem identifier:      {CONTAINER_UUID}")),
+        "{report}"
+    );
+    assert!(
+        report.contains("Volume 0:                   Data"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Volume 1:                   Second: empty"),
+        "{report}"
+    );
+    let names: Vec<&str> = report
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Names:"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(names, ["case-sensitive", "case-insensitive"], "{report}");
+    assert!(report.contains("no findings"), "{report}");
+
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname"]),
+        b"ferrosys\n"
+    );
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/name"]),
+        b"ferrosys\n"
+    );
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname.also"]),
+        b"ferrosys\n"
+    );
+    let large: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/people/user/blob.bin"]),
+        large
+    );
+    // And the second volume, by its name, holds nothing but its root.
+    let listing = ok(&["extract", "--volume", "Second: empty", "--list", path]);
+    assert!(listing.is_empty(), "{}", String::from_utf8_lossy(&listing));
+}
+
+#[test]
+fn every_apfs_knob_reaches_the_container() {
+    let dir = scratch();
+    let image = at(&dir, "knobs.img");
+    let path = image.to_str().expect("a text path");
+
+    // Each a value other than its default, so a knob that was read and dropped is a
+    // difference rather than a match.
+    let out = run(&[
+        "format",
+        "--size",
+        "1G",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--volume",
+        APFS_SECOND,
+        "--block-size",
+        "16384",
+        "--profile",
+        "macos15",
+        "--formatted-by",
+        "mkimage (1.0)",
+        "--time",
+        TIME,
+        "--json",
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let receipt = String::from_utf8_lossy(&out.stdout).into_owned();
+    for field in [
+        "\"family\":\"apfs\"",
+        "\"profile\":\"macos15\"",
+        "\"formatted_by\":\"mkimage (1.0)\"",
+        "\"block_size\":16384",
+        "\"block_count\":65536",
+        "\"max_volumes\":2",
+        "\"names\":\"case-sensitive\"",
+        "\"names\":\"case-insensitive\"",
+        "\"name\":\"Second: empty\"",
+        "\"written\":true",
+    ] {
+        assert!(receipt.contains(field), "{field} is not in {receipt}");
+    }
+    assert!(receipt.contains(CONTAINER_UUID), "{receipt}");
+
+    // What the receipt states, the image holds, read back by a report that had no hand in it.
+    let report = String::from_utf8_lossy(&ok(&["inspect", "--json", path])).into_owned();
+    for field in [
+        "\"block_size\":16384",
+        "\"formatted_by\":\"mkimage (1.0)\"",
+        "\"names\":\"case-sensitive\"",
+        "\"names\":\"case-insensitive\"",
+        "\"uuid\":\"a9f5c0de-0000-4000-8000-000000000003\"",
+    ] {
+        assert!(report.contains(field), "{field} is not in {report}");
+    }
+}
+
+#[test]
+fn an_apfs_auto_size_fits_the_contents_and_slack_leaves_room_in_it() {
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let receipt_of = |name: &str, slack: Option<&str>| {
+        let image = at(&dir, name);
+        let mut args = vec![
+            "format",
+            "-t",
+            "apfs",
+            "--size",
+            "auto",
+            "--container-uuid",
+            CONTAINER_UUID,
+            "--volume",
+            APFS_VOLUME,
+            "--time",
+            TIME,
+            "--from-tar",
+            archive.to_str().expect("a text path"),
+            "--json",
+        ];
+        if let Some(slack) = slack {
+            args.extend_from_slice(&["--slack", slack]);
+        }
+        args.push(image.to_str().expect("a text path"));
+        let receipt = String::from_utf8(ok(&args)).expect("text");
+        let number = |key: &str| -> u64 {
+            receipt
+                .split(&format!("\"{key}\":"))
+                .nth(1)
+                .and_then(|tail| tail.split([',', '}']).next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {receipt}"))
+        };
+        let (bytes, blocks, free, writable) = (
+            number("bytes"),
+            number("block_count"),
+            number("free_blocks"),
+            number("writable_blocks"),
+        );
+        assert!(writable <= free, "{writable} writable of {free} free");
+        // The destination is the size the search settled on, a whole number of blocks.
+        assert_eq!(
+            std::fs::metadata(&image).expect("the image exists").len(),
+            bytes
+        );
+        assert_eq!(bytes, blocks * 4096);
+        let report =
+            String::from_utf8_lossy(&ok(&["inspect", image.to_str().unwrap()])).into_owned();
+        assert!(report.contains("no findings"), "{report}");
+        (blocks, free, writable)
+    };
+
+    let (blocks, free, _) = receipt_of("fitted.img", None);
+    let (roomy_blocks, roomy_free, roomy_writable) = receipt_of("roomy.img", Some("20%"));
+    assert!(
+        roomy_blocks > blocks,
+        "{roomy_blocks} blocks with slack is not larger than {blocks} without"
+    );
+    assert!(
+        roomy_writable >= roomy_blocks / 5,
+        "{roomy_writable} of {roomy_blocks} blocks writable is under the fifth asked for"
+    );
+    assert!(free < roomy_free);
+
+    // A dry run reports the same size and writes nothing.
+    let never = at(&dir, "never.img");
+    let out = run(&[
+        "format",
+        "-t",
+        "apfs",
+        "--size",
+        "auto",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--time",
+        TIME,
+        "--from-tar",
+        archive.to_str().expect("a text path"),
+        "--json",
+        "--dry-run",
+        never.to_str().expect("a text path"),
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let receipt = String::from_utf8_lossy(&out.stdout);
+    assert!(receipt.contains("\"written\":false"), "{receipt}");
+    assert!(
+        receipt.contains(&format!("\"block_count\":{blocks},")),
+        "{receipt}"
+    );
+    assert!(!never.exists(), "a dry run wrote nothing");
+}
+
+#[test]
+fn an_apfs_format_this_tool_refuses_says_which_word_it_refused_and_writes_nothing() {
+    let dir = scratch();
+    let image = at(&dir, "refused.img");
+    let path = image.to_str().expect("a text path");
+    let base = ["format", "-t", "apfs", "--size", "64M", "--time", TIME];
+    let refused = |extra: &[&str], code_wanted: i32, says: &[&str]| {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        args.push(path);
+        let out = run(&args);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(code(&out), code_wanted, "{extra:?}: {said}");
+        for word in says {
+            assert!(said.contains(word), "{extra:?}: {word} is not in {said}");
+        }
+        assert!(!image.exists(), "{extra:?}: a refused line wrote nothing");
+    };
+
+    // An identity is required, as every family's is, and a volume: a container without one
+    // has nothing a mount can open.
+    refused(&["--volume", APFS_VOLUME], USAGE, &["--container-uuid"]);
+    refused(&["--container-uuid", CONTAINER_UUID], USAGE, &["--volume"]);
+    // Another family's identity, and the name a container does not record, are refused by
+    // name rather than passed over.
+    let both = ["--container-uuid", CONTAINER_UUID, "--volume", APFS_VOLUME];
+    for (flag, value) in [("--uuid", UUID), ("--label", "Data"), ("-O", "none")] {
+        let mut extra = both.to_vec();
+        extra.extend_from_slice(&[flag, value]);
+        refused(&extra, USAGE, &[flag, "this format writes apfs"]);
+    }
+    // A directive with no name after its identifier, a kind no volume has, a block size no
+    // container has, a release with no profile.
+    for (flag, value, says) in [
+        (
+            "--volume",
+            "a9f5c0de-0000-4000-8000-000000000002",
+            "UUID:NAME",
+        ),
+        (
+            "--volume",
+            "case-blind:a9f5c0de-0000-4000-8000-000000000002:Data",
+            "16 bytes of hex",
+        ),
+        ("--block-size", "2048", "4096, 8192, 16384, 32768, 65536"),
+        ("--profile", "macos13", "macos14, macos15, macos26, macos27"),
+    ] {
+        let mut extra = vec!["--container-uuid", CONTAINER_UUID];
+        if flag != "--volume" {
+            extra.extend_from_slice(&["--volume", APFS_VOLUME]);
+        }
+        extra.extend_from_slice(&[flag, value]);
+        refused(&extra, USAGE, &[flag, says]);
+    }
+    // An identifier the line repeats is the line's mistake, named by the flags that repeat it;
+    // one the library refuses on its own is named by what it belongs to.
+    refused(
+        &[
+            "--container-uuid",
+            "a9f5c0de-0000-4000-8000-000000000002",
+            "--volume",
+            APFS_VOLUME,
+        ],
+        USAGE,
+        &["--container-uuid and --volume Data both name a9f5c0de-0000-4000-8000-000000000002"],
+    );
+    refused(
+        &[
+            "--container-uuid",
+            "00000000-0000-0000-0000-000000000000",
+            "--volume",
+            APFS_VOLUME,
+        ],
+        OPERATIONAL,
+        &["the identifier of the container is zero"],
+    );
+    // A root snapshot with no name after its identifier, and one sharing its volume's.
+    refused(
+        &[
+            "--container-uuid",
+            CONTAINER_UUID,
+            "--volume",
+            APFS_VOLUME,
+            "--root-snapshot",
+            "a9f5c0de-0000-4000-8000-000000000004",
+        ],
+        USAGE,
+        &["--root-snapshot", "UUID:NAME"],
+    );
+    refused(
+        &[
+            "--container-uuid",
+            CONTAINER_UUID,
+            "--volume",
+            APFS_VOLUME,
+            "--root-snapshot",
+            "a9f5c0de-0000-4000-8000-000000000002:root",
+        ],
+        USAGE,
+        &["--volume Data and --root-snapshot root both name"],
+    );
+}
+
+/// The root snapshot every APFS format below is given: its identifier and its name.
+const APFS_ROOT_SNAPSHOT: &str = "a9f5c0de-0000-4000-8000-000000000004:root";
+
+#[test]
+fn an_apfs_root_snapshot_is_written_by_the_binary_and_read_back_beside_the_volume() {
+    let dir = scratch();
+    let source = btrfs_source(&dir);
+    let image = at(&dir, "rooted.img");
+    let path = image.to_str().expect("a text path");
+    let out = run(&[
+        "format",
+        "--size",
+        "64M",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--root-snapshot",
+        APFS_ROOT_SNAPSHOT,
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        source.to_str().expect("a text path"),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let summary = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        summary.contains("Root snapshot 0:        a9f5c0de-0000-4000-8000-000000000004 root"),
+        "{summary}"
+    );
+
+    // The volume roots from the snapshot, which is listed by its name and transaction, and
+    // the snapshot reads as the volume does.
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    assert!(
+        report.contains("Roots from:               the snapshot of transaction 2"),
+        "{report}"
+    );
+    assert!(report.contains("Snapshot root:"), "{report}");
+    assert!(report.contains("no findings"), "{report}");
+    let report =
+        String::from_utf8_lossy(&ok(&["inspect", path, "--snapshot", "root"])).into_owned();
+    assert!(report.contains("no findings"), "{report}");
+    assert_eq!(
+        ok(&[
+            "extract",
+            path,
+            "--snapshot",
+            "root",
+            "--cat",
+            "/system/name"
+        ]),
+        ok(&["extract", path, "--cat", "/system/name"])
+    );
+    assert_eq!(
+        ok(&["extract", path, "--snapshot", "root", "--list"]),
+        ok(&["extract", path, "--list"])
+    );
+}
+
+/// The Data volume every APFS group below is given, in the slot after the System volume.
+const APFS_DATA_VOLUME: &str = "a9f5c0de-0000-4000-8000-000000000005:Data";
+
+#[test]
+fn an_apfs_volume_group_is_written_by_the_binary_with_each_volume_from_its_own_tree() {
+    let dir = scratch();
+    let system = btrfs_source(&dir);
+    std::fs::create_dir_all(system.join("linked")).expect("make the tree");
+    let data = dir.path().join("data-source");
+    std::fs::create_dir_all(data.join("people/user")).expect("make the tree");
+    std::fs::write(data.join("people/user/note"), b"kept\n").expect("write the file");
+    let links = at(&dir, "firmlinks");
+    std::fs::write(&links, b"/linked\tpeople\n/absent\tabsent\n").expect("write the list");
+    let image = at(&dir, "group.img");
+    let path = image.to_str().expect("a text path");
+    let out = run(&[
+        "format",
+        "--size",
+        "1G",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        "a9f5c0de-0000-4000-8000-000000000002:System",
+        "--volume",
+        APFS_DATA_VOLUME,
+        "--root-snapshot",
+        APFS_ROOT_SNAPSHOT,
+        "--volume-group",
+        "0:1",
+        "--firmlinks",
+        links.to_str().expect("a text path"),
+        "--time",
+        TIME,
+        "--owner",
+        "0:0",
+        "--from-dir",
+        system.to_str().expect("a text path"),
+        "--volume-from-dir",
+        &format!("1:{}", data.to_str().expect("a text path")),
+        path,
+    ]);
+    assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+    let summary = String::from_utf8_lossy(&out.stderr).into_owned();
+    for line in [
+        "Volume group:           System in slot 0, Data in slot 1, identified as \
+         a9f5c0de-0000-4000-8000-000000000005",
+        "Firmlinks:              1 of 2 listed directories",
+    ] {
+        assert!(summary.contains(line), "{line} is not in {summary}");
+    }
+
+    // Both volumes report their roles and the group, and scan clean.
+    let report = String::from_utf8_lossy(&ok(&["inspect", path])).into_owned();
+    for line in [
+        "  Role:                     system",
+        "  Role:                     data",
+        "  Volume group:             a9f5c0de-0000-4000-8000-000000000005",
+    ] {
+        assert!(report.contains(line), "{line} is not in {report}");
+    }
+    assert!(report.contains("no findings"), "{report}");
+    let report = String::from_utf8_lossy(&ok(&["inspect", path, "--volume", "Data"])).into_owned();
+    assert!(report.contains("no findings"), "{report}");
+    // Each volume holds its own tree, and the firmlinked directory its target.
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/system/etc/hostname"]),
+        b"ferrosys\n"
+    );
+    assert_eq!(
+        ok(&[
+            "extract",
+            path,
+            "--volume",
+            "Data",
+            "--cat",
+            "/people/user/note"
+        ]),
+        b"kept\n"
+    );
+    let listing = String::from_utf8_lossy(&ok(&["extract", path, "--list", "--json"])).into_owned();
+    assert!(
+        listing.contains(r#""name":"com.apple.fs.firmlink","value":"people\u0000""#),
+        "{listing}"
+    );
+    let receipt = ok(&[
+        "format",
+        "--dry-run",
+        "--json",
+        "--size",
+        "1G",
+        "-t",
+        "apfs",
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        "a9f5c0de-0000-4000-8000-000000000002:System",
+        "--volume",
+        APFS_DATA_VOLUME,
+        "--volume-group",
+        "0:1",
+        "--time",
+        TIME,
+        "unwritten.img",
+    ]);
+    let receipt = String::from_utf8_lossy(&receipt).into_owned();
+    assert!(receipt.contains(r#""volume_group""#), "{receipt}");
+}
+
+#[test]
+fn an_apfs_group_line_this_tool_cannot_carry_out_is_refused_by_name_and_writes_nothing() {
+    let dir = scratch();
+    let image = at(&dir, "refused.img");
+    let path = image.to_str().expect("a text path");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).expect("make the tree");
+    let tree = tree.to_str().expect("a text path");
+    let bad_list = at(&dir, "bad-list");
+    std::fs::write(&bad_list, b"linked\tpeople\n").expect("write the list");
+    let bad_list = bad_list.to_str().expect("a text path");
+    let base = [
+        "format",
+        "-t",
+        "apfs",
+        "--size",
+        "1G",
+        "--time",
+        TIME,
+        "--container-uuid",
+        CONTAINER_UUID,
+        "--volume",
+        APFS_VOLUME,
+        "--volume",
+        APFS_DATA_VOLUME,
+    ];
+    let refused = |extra: &[&str], code_wanted: i32, says: &[&str]| {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        args.push(path);
+        let out = run(&args);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(code(&out), code_wanted, "{extra:?}: {said}");
+        for word in says {
+            assert!(said.contains(word), "{extra:?}: {word} is not in {said}");
+        }
+        assert!(!image.exists(), "{extra:?}: a refused line wrote nothing");
+    };
+    refused(
+        &["--volume-group", "0"],
+        USAGE,
+        &["--volume-group", "SYSTEM:DATA"],
+    );
+    refused(&["--volume-group", "0:2"], USAGE, &["slot 2", "2 volumes"]);
+    refused(&["--volume-group", "1:1"], USAGE, &["slot 1 for both"]);
+    // Two volumes of one identifier are refused as the line's, as two subvolumes are.
+    let same = APFS_VOLUME.replace("Data", "Again");
+    refused(
+        &["--volume", &same],
+        USAGE,
+        &["--volume Data and --volume Again both name"],
+    );
+    refused(&["--volume-from-dir", "1"], USAGE, &["SLOT:DIR"]);
+    let first = format!("0:{tree}");
+    refused(
+        &["--volume-from-dir", &first],
+        USAGE,
+        &["--volume-from-dir 0"],
+    );
+    let past = format!("2:{tree}");
+    refused(&["--volume-from-dir", &past], USAGE, &["slot 2"]);
+    let once = format!("1:{tree}");
+    refused(
+        &["--volume-from-dir", &once, "--volume-from-dir", &once],
+        USAGE,
+        &["slot 1 twice"],
+    );
+    refused(&["--firmlinks", bad_list], USAGE, &["--volume-group"]);
+    refused(
+        &["--volume-group", "0:1", "--firmlinks", bad_list],
+        OPERATIONAL,
+        &["not a firmlink list", "line 1"],
+    );
+}
+
+#[test]
+fn two_apfs_formats_of_one_command_line_are_one_image() {
+    // From an archive, for the reason the btrfs case says: a host tree's access times move when
+    // it is walked, and APFS records them to the nanosecond.
+    let dir = scratch();
+    let archive = write_archive(&dir);
+    let mut written = Vec::new();
+    for name in ["first.img", "second.img"] {
+        let image = at(&dir, name);
+        let out = run(&[
+            "format",
+            "--size",
+            "1G",
+            "-t",
+            "apfs",
+            "--container-uuid",
+            CONTAINER_UUID,
+            "--volume",
+            APFS_VOLUME,
+            "--volume",
+            APFS_SECOND,
+            "--time",
+            TIME,
+            "--from-tar",
+            archive.to_str().expect("a text path"),
+            image.to_str().expect("a text path"),
+        ]);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        written.push(std::fs::read(&image).expect("read the image back"));
+    }
+    assert!(
+        written[0] == written[1],
+        "the same inputs wrote different bytes"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the matrix: one question, every family
 // ---------------------------------------------------------------------------
 
@@ -4482,10 +5768,10 @@ struct Volume {
 /// Write one volume per family from a single tree, so a case can ask each of them the same
 /// question and compare the answers.
 ///
-/// What differs between the four calls is only what a family must be told: an identifier of
-/// its own kind, a size its minimum fits inside, and — for the two formats with no field for
-/// an owner, a mode, or a change time — permission to lose the properties a host tree always
-/// carries. Everything a question below could pick up on is the same in all four.
+/// What differs between the calls is only what a family must be told: an identifier of its
+/// own kind, a size its minimum fits inside, and — for the two formats with no field for an
+/// owner, a mode, or a change time — permission to lose the properties a host tree always
+/// carries. Everything a question below could pick up on is the same in every family.
 fn one_volume_per_family(dir: &tempfile::TempDir) -> Vec<Volume> {
     let tree = esp_tree(dir);
     let tree = tree.to_str().expect("a text path");
@@ -4550,6 +5836,23 @@ fn one_volume_per_family(dir: &tempfile::TempDir) -> Vec<Volume> {
                 TIME,
             ],
         ),
+        (
+            "apfs",
+            "apfs",
+            "apfs.img",
+            vec![
+                "-t",
+                "apfs",
+                "--size",
+                "64M",
+                "--container-uuid",
+                CONTAINER_UUID,
+                "--volume",
+                APFS_VOLUME,
+                "--time",
+                TIME,
+            ],
+        ),
     ] {
         let image = at(dir, name);
         let path = image.to_str().expect("a text path");
@@ -4576,7 +5879,7 @@ fn one_volume_per_family(dir: &tempfile::TempDir) -> Vec<Volume> {
 fn every_family_answers_every_read_command_the_matrix_pairs_it_with() {
     // Per-family drift lives where a command is exercised on one family and assumed for the
     // rest, so the cells are filled rather than sampled: every read verb, every output
-    // dialect, and the base offset, against each of the four. What each answer *says* is a
+    // dialect, and the base offset, against each family. What each answer *says* is a
     // family's own business; that it answers at all, in the shape the shared surface
     // promises, is this crate's.
     let dir = scratch();
@@ -4635,6 +5938,20 @@ fn every_family_answers_every_read_command_the_matrix_pairs_it_with() {
             ok(&["extract", "--cat", "/readme.txt", path]),
             b"hello\n",
             "{variant} --cat"
+        );
+        // And held to a cap below the file's size, before a byte of it is written.
+        let out = run(&[
+            "extract",
+            "--max-file-bytes",
+            "3",
+            "--cat",
+            "/readme.txt",
+            path,
+        ]);
+        assert_ne!(code(&out), OK, "{variant}: a file over the cap was written");
+        assert!(
+            out.stdout.is_empty(),
+            "{variant}: bytes were written before the refusal"
         );
 
         // Out to an archive, and out to a tree. The destination is named rather than
@@ -4711,13 +6028,13 @@ import json, sys
 doc = json.load(sys.stdin)
 # The five head fields mean the same thing whatever family answered, so a consumer that
 # reads only these never learns which one did.
-assert doc["schema"] == 2, doc
+assert doc["schema"] == 3, doc
 assert isinstance(doc["size"], int) and doc["size"] > 0, doc
 assert isinstance(doc["allocation_unit"], int) and doc["allocation_unit"] > 0, doc
 assert doc["identifier"], doc
 assert doc["findings"]["clean"] is True, doc["findings"]
 # And the body is the family's own, under its own name and no other's.
-for name in ("ext", "fat", "exfat", "btrfs"):
+for name in ("ext", "fat", "exfat", "btrfs", "apfs"):
     assert (name in doc) == (name == doc["family"]), (name, doc["family"])
 print(doc["family"], doc["variant"])
 "#;
@@ -4779,6 +6096,19 @@ fn an_option_only_one_family_can_answer_is_refused_by_name_on_each_of_the_others
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(said.contains("--groups"), "{variant}: {said}");
         assert!(said.contains(volume.family), "{variant}: {said}");
+        // The family's word takes the article its sound does: an exfat filesystem, a btrfs.
+        let article = if volume.family.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
+        assert!(
+            said.contains(&format!(
+                "does not apply to {article} {} filesystem",
+                volume.family
+            )),
+            "{variant}: {said}"
+        );
 
         // The verdict a request the tool cannot carry out gets, and never the corruption
         // verdict: the volume is sound and a gate keyed on 4 must not hear otherwise.
@@ -4961,6 +6291,23 @@ fn every_family_writes_a_receipt_a_consumer_reads_the_same_way() {
                 TIME,
             ],
         ),
+        (
+            "apfs",
+            "apfs",
+            "apfs.img",
+            vec![
+                "-t",
+                "apfs",
+                "--size",
+                "64M",
+                "--container-uuid",
+                CONTAINER_UUID,
+                "--volume",
+                APFS_VOLUME,
+                "--time",
+                TIME,
+            ],
+        ),
     ] {
         let image = at(&dir, name);
         let mut args = vec!["format", "--json"];
@@ -4971,7 +6318,7 @@ fn every_family_writes_a_receipt_a_consumer_reads_the_same_way() {
         let judge = r#"
 import json, sys
 doc = json.load(sys.stdin)
-assert doc["schema"] == 2, doc
+assert doc["schema"] == 3, doc
 # How much of the destination the filesystem occupies -- what a step after this one acts on.
 assert doc["written"] > 0, doc
 # And what the build cost the source, from the families that can cost it anything. ext holds

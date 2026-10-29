@@ -31,6 +31,7 @@
 //! rendering its own body. A later family is a module and a `match` arm, and reshapes
 //! nothing.
 
+mod apfs;
 mod btrfs;
 mod exfat;
 mod ext;
@@ -38,7 +39,7 @@ mod fat;
 
 use std::fs::File;
 
-use ferrosys::{FindingReport, FsReader, OpenOptions, ReadPolicy};
+use ferrosys::{FindingReport, FsReader, OpenOptions, ReadPolicy, Severity};
 
 use crate::args::InspectArgs;
 use crate::{Error, emit, render};
@@ -106,16 +107,12 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
     //
     // Opening goes through the root rather than through one family's reader, which is what
     // makes the envelope's family field an answer rather than a constant.
-    let reader = ferrosys::open_with(
-        file,
-        &OpenOptions::new()
-            .base(args.offset)
-            .policy(ReadPolicy::Lenient),
-    )
-    .map_err(|source| Error::NotAFilesystem {
-        path: path.clone(),
-        source,
-    })?;
+    let mut options = OpenOptions::new()
+        .base(args.offset)
+        .policy(ReadPolicy::Lenient);
+    options.len = args.length;
+    let said = std::cell::Cell::new(false);
+    let reader = crate::apfs::open_choosing(file, &path, &options, &args.choice, &said)?;
 
     // SARIF is a findings dialect: it projects the scan alone, not the description the table
     // and JSON reports lead with, so no family is asked to render a body for it.
@@ -130,6 +127,7 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
         FsReader::Fat(reader) => fat::report(reader, &args, dialect)?,
         FsReader::ExFat(reader) => exfat::report(reader, &args, dialect)?,
         FsReader::Btrfs(reader) => btrfs::report(reader, &args, dialect)?,
+        FsReader::Apfs(reader) => apfs::report(reader, &args, dialect)?,
         // A family the library compiled in and this command has no body for. The binary
         // compiles every family the library has, so nothing in this workspace reaches it;
         // it is here because the enum is `#[non_exhaustive]` and a newer library linked
@@ -159,7 +157,27 @@ pub fn run(args: InspectArgs) -> Result<(), Error> {
     // The verdict. A scan that was not run reaches none, and the parser refuses the one way
     // a caller could ask for both — `--quick` with `--fail-on` — so a threshold that arrives
     // here always has a scan to judge.
-    if let (Some(findings), Some(threshold)) = (&report.findings, args.fail_on)
+    match &report.findings {
+        Some(findings) => verdict(findings, args.fail_on),
+        None => Ok(()),
+    }
+}
+
+/// What a scan's report makes of the run, under `threshold`.
+///
+/// A source that failed a read is the first question, and it is asked whatever the threshold:
+/// the scan did not look at what the failed read held, so its findings are not an account of
+/// the filesystem, and the run could not form the opinion it was asked for. `extract` answers
+/// the same failure the same way. Otherwise a finding at or above the threshold makes the
+/// filesystem bad.
+fn verdict(findings: &FindingReport, threshold: Option<Severity>) -> Result<(), Error> {
+    if let Some(first) = findings.source_failures().first() {
+        return Err(Error::SourceFailed {
+            failures: findings.source_failures().len(),
+            first: first.detail.clone(),
+        });
+    }
+    if let Some(threshold) = threshold
         && let Some(worst) = findings.worst_severity()
         && worst >= threshold
     {
@@ -236,4 +254,71 @@ fn json(report: &Report, offset: u64) -> String {
         // a key of its own beside it rather than reshaping anything above.
         o.raw(report.head.family, &report.body);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verdict;
+    use crate::Error;
+    use ferrosys::{FsReader, OpenOptions, ReadPolicy, Severity};
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    /// A source that fails every read once `failing` is set, as a disk returning an error does.
+    struct Failing {
+        inner: Cursor<Vec<u8>>,
+        failing: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.failing.get() {
+                return Err(std::io::Error::other("the medium failed"));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for Failing {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// What a lenient scan of a sound ext image reports, its source failing once open when
+    /// `fail` is set.
+    fn scanned(fail: bool) -> ferrosys::FindingReport {
+        use ferrosys::ext::{FormatOptions, Timestamp, TreeBuilder, format};
+        let options = FormatOptions::new([7; 16], Timestamp::from_secs(1_700_000_000), [0; 16]);
+        let image = format(TreeBuilder::new(), 8 << 20, options).expect("format");
+        let failing = std::rc::Rc::new(std::cell::Cell::new(false));
+        let source = Failing {
+            inner: Cursor::new(image.into_bytes()),
+            failing: std::rc::Rc::clone(&failing),
+        };
+        let reader = ferrosys::open_with(source, &OpenOptions::new().policy(ReadPolicy::Lenient))
+            .expect("open");
+        failing.set(fail);
+        let FsReader::Ext(mut reader) = reader else {
+            panic!("the ext family claimed the image")
+        };
+        reader.scan().to_report()
+    }
+
+    #[test]
+    fn a_source_that_failed_under_the_scan_is_a_run_that_failed_whatever_the_threshold() {
+        // The same failure `extract` exits 8 on: it says nothing about the filesystem, and
+        // the scan did not look at what the failed reads held.
+        let report = scanned(true);
+        for threshold in [None, Some(Severity::Cosmetic), Some(Severity::Integrity)] {
+            let err = verdict(&report, threshold).expect_err("the run failed");
+            assert!(matches!(err, Error::SourceFailed { .. }), "{err}");
+            assert_eq!(err.exit_code(), crate::exit::OPERATIONAL);
+            assert!(err.to_string().contains("the medium failed"), "{err}");
+        }
+        // And the same image read whole is sound under every threshold.
+        let report = scanned(false);
+        for threshold in [None, Some(Severity::Cosmetic)] {
+            verdict(&report, threshold).expect("a sound filesystem");
+        }
+    }
 }

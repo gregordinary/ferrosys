@@ -11,8 +11,8 @@ There is no `unsafe` block anywhere in the crate.
 
 ## On-disk types serialize through explicit byte accessors
 
-All four families fix their byte order in the format, not in the host. ext2, ext3, and
-ext4, FAT12 through FAT32, exFAT, and btrfs all store their structures little-endian.
+All five families fix their byte order in the format, not in the host. ext2, ext3, and
+ext4, FAT12 through FAT32, exFAT, btrfs, and APFS all store their structures little-endian.
 The jbd2 journal an ext filesystem carries is big-endian: its superblock and every
 descriptor, commit, and revoke block in its log.
 

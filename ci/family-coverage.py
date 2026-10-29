@@ -62,6 +62,7 @@ SPELLINGS = {
     # The one family whose name carries no format number and needs none: nothing else is
     # spelled this way, where `ext` is the first three letters of `extract`.
     "btrfs": r"\bbtrfs\b",
+    "apfs": r"\bapfs\b",
 }
 
 # And the one spelling a search is actually typed as, for the fields a search reads.
@@ -77,6 +78,7 @@ SEARCHED = {
     "fat": r"\bfat32\b",
     "exfat": r"\bexfat\b",
     "btrfs": r"\bbtrfs\b",
+    "apfs": r"\bapfs\b",
 }
 
 # Each surface, and how much of the file is prose a stranger reads. `None` is the whole

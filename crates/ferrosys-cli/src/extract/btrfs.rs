@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::Write;
 
 use ferrosys::btrfs::{Node, Reader};
-use ferrosys::{Attributes, FsTree, Metadata, NodeKind, Synthesis};
+use ferrosys::{Attributes, FsTree, NodeKind, Synthesis};
 
 use crate::extract::{Describe, Described};
 use crate::{Error, from_btrfs_read};
@@ -100,12 +100,7 @@ fn describe(
         path,
         kind: kind_of(&node),
         size: node.item.size,
-        attrs: Attributes::read(
-            Metadata::new(mode_bits(node.item.mode), node.item.mtime)
-                .owned_by(node.item.uid, node.item.gid)
-                .with_times(node.item.atime, node.item.ctime, node.item.mtime),
-            attributes,
-        ),
+        attrs: Attributes::read(node.metadata(), attributes),
         number: Some(node.inode),
         links: Some(node.item.nlink),
         target,
@@ -114,16 +109,8 @@ fn describe(
         // does not state. Reported as absent rather than divided by a block size this filesystem
         // does not allocate in.
         blocks: None,
-        created: Some(node.item.otime),
+        flags: None,
     })
-}
-
-/// The permission bits of a mode, as the shared metadata carries them.
-///
-/// The field is thirty-two bits wide here where a host's mode is sixteen; the type and
-/// permission bits are all in the low half, so the mask is what makes the two one value.
-fn mode_bits(mode: u32) -> u16 {
-    (mode & 0o7777) as u16
 }
 
 /// The file-type bits of a mode, and the types they name.
@@ -159,23 +146,4 @@ fn kind_of(node: &Node) -> Option<NodeKind> {
         IFSOCK => NodeKind::Socket,
         _ => return None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_mode_wider_than_a_hosts_narrows_to_its_permission_bits() {
-        // The field is thirty-two bits and a host's is sixteen, so what crosses is the low
-        // twelve. A cast without the mask would carry the file-type bits into a permission
-        // value and give a directory the set-user-id bit.
-        assert_eq!(mode_bits(0o040_755), 0o755);
-        assert_eq!(mode_bits(0o100_644), 0o644);
-        assert_eq!(mode_bits(0o120_777), 0o777);
-        // And the high half is not permission bits either. Every filesystem in circulation
-        // carries zero there, and a reader that trusted that rather than masking would hand a
-        // sink a mode out of an image that had not.
-        assert_eq!(mode_bits(0xFFFF_0000 | 0o644), 0o644);
-    }
 }

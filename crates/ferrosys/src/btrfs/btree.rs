@@ -204,14 +204,47 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
                 let Some(index) = at.checked_sub(1) else {
                     return Ok(None);
                 };
-                return Ok(Some(Located {
+                let found = Located {
                     key: block.item(index)?.key,
                     data: block.item_data(index)?.to_vec(),
-                }));
+                };
+                if index + 1 == block.count()? && below.is_some() {
+                    self.confirm_last(&found.key, &key)?;
+                }
+                return Ok(Some(found));
             }
             let index = start_index(&block, &key)?;
             (block, below) = self.child_of(&block, below, index, &mut visited)?;
         }
+    }
+
+    /// Hold an answer that is the last item of its leaf, where the tree goes on past that leaf,
+    /// to the item after it.
+    ///
+    /// A descent steers by the keys a node records for its children and checks only the
+    /// children it enters. A key for the block after the one entered that sits above that
+    /// block's own first item steers a search for a key between the two into the block before,
+    /// and the answer is that block's last item — a real item, verified, and not the last at
+    /// or before the key. Stepping on to the next item enters the block after through every
+    /// guard a descent applies, which is what holds its first key to the key its parent
+    /// records for it. Only an answer that is the last item of its leaf can have been steered
+    /// that way, so only that answer pays for the step.
+    fn confirm_last(&mut self, answer: &DiskKey, key: &DiskKey) -> Result<(), ReadError> {
+        let mut next = None;
+        self.for_each_item_from(*answer, |item, _| {
+            if item == answer {
+                return true;
+            }
+            next = Some(*item);
+            false
+        })?;
+        if next.is_some_and(|next| next <= *key) {
+            return Err(ReadError::BadTreeBlock {
+                logical: self.root.bytenr,
+                fault: "a search for a key passed over an item at or before it",
+            });
+        }
+        Ok(())
     }
 
     /// The child at `index` of `parent`, with every guard a descent applies to one, and the
@@ -337,17 +370,20 @@ impl<'a, R: Read + Seek> Tree<'a, R> {
             stack[top].1 += 1;
 
             if stack[top].0.header().is_leaf() {
+                let key = stack[top].0.item(index)?.key;
+                let data = stack[top].0.item_data(index)?;
+                if !on_item(&key, data) {
+                    return Ok(());
+                }
+                // Counted once taken: the item that ends a range — the first record past a
+                // directory, to a listing of it — is read to find the end and is not one the
+                // range holds, so a range of exactly the cap is inside it.
                 visits += 1;
                 if visits > limit {
                     return Err(ReadError::TooManyEntries {
                         objectid: self.root.objectid,
                         limit,
                     });
-                }
-                let key = stack[top].0.item(index)?.key;
-                let data = stack[top].0.item_data(index)?;
-                if !on_item(&key, data) {
-                    return Ok(());
                 }
                 continue;
             }
@@ -816,6 +852,7 @@ mod tests {
             ),
         ];
         for (what, left_items, [first, second], reaches) in shapes {
+            let held: Vec<u64> = left_items.clone().chain(10..20).collect();
             let mut forge = Forge::new();
             forge
                 .block(left, &leaf(left, objectid::ROOT_TREE, &items(left_items)))
@@ -826,16 +863,38 @@ mod tests {
             assert!(refused(walk(&forge).map(|_| ())), "{what}: the walk");
             let mut volume = Volume::open(forge.source()).expect("the filesystem opens");
             let root = volume.root_tree();
-            for probe in [key(5), key(10), key(15)] {
-                let first = volume.tree(root).find_first(probe).map(|_| ());
-                let before = volume.tree(root).find_at_or_before(probe).map(|_| ());
+            for probe in [5, 10, 15] {
                 // A lookup that steers clear of the faulty child is a lookup the fault does
-                // not affect; one that reaches it must refuse it, never answer from it.
-                for (form, answer) in [("find_first", first), ("find_at_or_before", before)] {
-                    assert!(
-                        answer.is_ok() || refused(answer),
-                        "{what}: {form} {probe:?} failed some other way"
-                    );
+                // not affect, and answers what the tree holds; one that reaches it must refuse
+                // it, never answer from it. An answer is held to the items the blocks hold, so
+                // a lookup the wrong key steers past an item answers wrongly and fails here.
+                let truths = [
+                    (
+                        "find_first",
+                        held.iter().copied().filter(|n| *n >= probe).min(),
+                    ),
+                    (
+                        "find_at_or_before",
+                        held.iter().copied().filter(|n| *n <= probe).max(),
+                    ),
+                ];
+                for (form, truth) in truths {
+                    let answer = if form == "find_first" {
+                        volume.tree(root).find_first(key(probe))
+                    } else {
+                        volume.tree(root).find_at_or_before(key(probe))
+                    };
+                    match answer {
+                        Ok(found) => assert_eq!(
+                            found.map(|located| located.key),
+                            truth.map(key),
+                            "{what}: {form} {probe} answered other than the tree holds"
+                        ),
+                        Err(e) => assert!(
+                            refused(Err(e)),
+                            "{what}: {form} {probe} failed some other way"
+                        ),
+                    }
                 }
             }
             assert!(
@@ -932,6 +991,33 @@ mod tests {
             Volume::open_with(forge.source(), options).expect("a well-formed filesystem");
         let root = volume.root_tree();
         assert_eq!(volume.tree(root).count_items().expect("within the cap"), 39);
+        // The item that ends a range is not one the range takes: a visit that takes exactly
+        // the cap's worth and declines the next — a directory listing meeting the first record
+        // past the directory — is inside the cap, and one that takes the next is past it.
+        let options = OpenOptions::new().limits(Limits::new().max_walk_entries(10));
+        let mut volume =
+            Volume::open_with(forge.source(), options).expect("a well-formed filesystem");
+        let root = volume.root_tree();
+        let mut taken = 0;
+        volume
+            .tree(root)
+            .for_each_item(|_, _| {
+                if taken == 10 {
+                    return false;
+                }
+                taken += 1;
+                true
+            })
+            .expect("ten taken, and the eleventh declined");
+        assert_eq!(taken, 10);
+        let mut taken = 0;
+        assert!(matches!(
+            volume.tree(root).for_each_item(|_, _| {
+                taken += 1;
+                taken <= 11
+            }),
+            Err(ReadError::TooManyEntries { limit: 10, .. })
+        ));
     }
 
     #[test]

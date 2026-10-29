@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::fidelity::FidelityReport;
 use crate::path::canonical_key;
 use crate::source::{
-    ClassifyError, EntryKind, FileContent, MODE_TYPE_MASK, Metadata, PathFault, SourceEntry,
-    classify_paths,
+    ClassifyError, Darwin, EntryKind, FileContent, MODE_TYPE_MASK, Metadata, PathFault,
+    SourceEntry, classify_paths,
 };
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
@@ -195,6 +195,22 @@ pub enum ModelError {
         /// The mode as given.
         mode: u16,
     },
+    /// An entry carries BSD flags, which a Darwin filesystem records and this one does not.
+    ///
+    /// Refused rather than dropped. A caller who accepts the loss for an entry clears its
+    /// [`darwin`](crate::SourceEntry::darwin) part; a compressed file's stored form is not a
+    /// loss, since its content arrives decoded.
+    #[error(
+        "{}: BSD flags {flags:#x} are a Darwin filesystem's, and this one holds none",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    BsdFlagsNotHeld {
+        /// The offending path.
+        path: Vec<u8>,
+        /// The flags it carries, but the one saying it is compressed.
+        flags: u32,
+    },
     /// A hard link's target does not exist.
     #[error(
         "hard link {} targets {}, which does not exist",
@@ -207,6 +223,49 @@ pub enum ModelError {
         path: Vec<u8>,
         /// The target it names.
         target: Vec<u8>,
+    },
+    /// An attribute's name is empty or holds a NUL: a host and an archive take a name as a C
+    /// string, which ends at its first NUL.
+    #[error(
+        "{}: the attribute name {} cannot be stored",
+        crate::escape::printable(.path),
+        crate::escape::printable(.name)
+    )]
+    #[non_exhaustive]
+    XattrName {
+        /// The entry's path.
+        path: Vec<u8>,
+        /// The attribute's name.
+        name: Vec<u8>,
+    },
+    /// An entry states one attribute name twice, and an inode holds one value under each name.
+    #[error(
+        "{}: the attribute {} is stated more than once",
+        crate::escape::printable(.path),
+        crate::escape::printable(.name)
+    )]
+    #[non_exhaustive]
+    XattrRepeated {
+        /// The entry's path.
+        path: Vec<u8>,
+        /// The attribute's name.
+        name: Vec<u8>,
+    },
+    /// An entry states a time whose fraction of a second is a second or more, which no time
+    /// an inode records has.
+    #[error(
+        "{}: a time of {secs} seconds and {nanos} nanoseconds, a fraction of a second of a \
+         second or more",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    TimeOutOfRange {
+        /// The entry's path.
+        path: Vec<u8>,
+        /// The time's seconds since 1970.
+        secs: i64,
+        /// Its nanoseconds.
+        nanos: u32,
     },
     /// A hard link states extended attributes other than its target's, which no filesystem
     /// holds: a link is a name for an object, and attributes belong to the object. A member
@@ -806,7 +865,16 @@ impl Builder {
             kind,
             meta,
             xattrs,
+            darwin,
         } = entry;
+        // BSD flags are a Darwin filesystem's, which btrfs holds none of.
+        if let Some(flags) = darwin
+            .as_ref()
+            .map(Darwin::stated_flags)
+            .filter(|flags| *flags != 0)
+        {
+            return Err(ModelError::BsdFlagsNotHeld { path, flags });
+        }
         // The kind supplies the file-type bits, so a mode arriving with its own — a raw
         // `st_mode` passed through whole is the natural way — would put a second type on
         // the inode, and the write would succeed while every checker and driver reads the
@@ -815,6 +883,34 @@ impl Builder {
             return Err(ModelError::ModeCarriesFileType {
                 path,
                 mode: meta.mode,
+            });
+        }
+        let times = [meta.atime, meta.ctime, meta.mtime];
+        if let Some(time) = times
+            .into_iter()
+            .chain(meta.btime)
+            .find(|t| !t.has_proper_fraction())
+        {
+            return Err(ModelError::TimeOutOfRange {
+                path,
+                secs: time.secs,
+                nanos: time.nanos,
+            });
+        }
+        if let Some(x) = xattrs
+            .iter()
+            .find(|x| x.name.is_empty() || x.name.contains(&0))
+        {
+            return Err(ModelError::XattrName {
+                name: x.name.clone(),
+                path,
+            });
+        }
+        // An inode holds one value under each attribute name.
+        if let Some(name) = crate::xattr::repeated_name(&xattrs) {
+            return Err(ModelError::XattrRepeated {
+                name: name.to_vec(),
+                path,
             });
         }
         let key = canonical_key(&path);
@@ -1226,6 +1322,72 @@ mod tests {
 
     fn dir_meta() -> Metadata {
         Metadata::new(0o755, crate::Timestamp::from_secs(1_700_000_000))
+    }
+
+    #[test]
+    fn an_attribute_name_empty_or_holding_a_nul_is_refused() {
+        for name in [&b""[..], b"user.a\0b"] {
+            let err = error_of(
+                TreeBuilder::new()
+                    .file("/f", b"hello", meta())
+                    .xattr(name.to_vec(), "value"),
+            );
+            assert!(
+                matches!(&err, ModelError::XattrName { path, name: n } if path == b"/f" && n == name),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attribute_named_twice_is_refused_whatever_its_values() {
+        for path in ["/f", "/"] {
+            for second in ["first", "second"] {
+                let source = if path == "/" {
+                    TreeBuilder::new().directory(path, dir_meta())
+                } else {
+                    TreeBuilder::new().file(path, b"hello", meta())
+                };
+                let err = error_of(
+                    source
+                        .xattr("user.a", "first")
+                        .xattr("user.b", "other")
+                        .xattr("user.a", second),
+                );
+                assert!(
+                    matches!(&err, ModelError::XattrRepeated { path: p, name }
+                        if p == path.as_bytes() && name == b"user.a"),
+                    "{err:?}"
+                );
+            }
+        }
+        model_of(
+            TreeBuilder::new()
+                .file("/f", b"hello", meta())
+                .xattr("user.a", "first")
+                .xattr("user.b", "first"),
+        );
+    }
+
+    #[test]
+    fn a_time_with_a_fraction_of_a_second_or_more_is_refused() {
+        let at = |nanos| crate::Timestamp {
+            secs: 1_700_000_000,
+            nanos,
+        };
+        model_of(TreeBuilder::new().file("/f", b"x", Metadata::new(0o644, at(999_999_999))));
+        for meta in [
+            Metadata::new(0o644, at(1_000_000_000)),
+            meta().with_times(at(1_500_000_000), at(0), at(0)),
+            meta().with_birth_time(at(u32::MAX)),
+        ] {
+            let err = error_of(TreeBuilder::new().file("/f", b"x", meta));
+            assert!(
+                matches!(&err, ModelError::TimeOutOfRange { path, nanos, .. }
+                    if path == b"/f" && *nanos >= crate::Timestamp::NANOS_PER_SEC),
+                "{err:?}"
+            );
+        }
     }
 
     fn model_of(source: impl Source) -> BtrfsModel {

@@ -83,9 +83,15 @@ pub(crate) fn decode(
     sector_size: u32,
 ) -> Result<usize, compress::Error> {
     match algorithm {
-        // One stream, and the extent's bytes are all of it.
-        Algorithm::Zlib | Algorithm::Zstd => compress::decompress(algorithm, input, out),
         Algorithm::Lzo => lzo_segments(input, out, sector_size),
+        // One stream, and the extent's bytes are all of it. LZVN, LZFSE and LZBITMAP are never
+        // a btrfs extent's encoding, and were one named it would be undone as the single stream
+        // it is.
+        Algorithm::Zlib
+        | Algorithm::Zstd
+        | Algorithm::Lzvn
+        | Algorithm::Lzfse
+        | Algorithm::Lzbitmap => compress::decompress(algorithm, input, out),
     }
 }
 

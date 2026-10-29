@@ -13,13 +13,13 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 # `tar` for the archive target: the parser reads untrusted input, so it is fuzzed
-# alongside the readers rather than left to the crate's own tests. `fat`, `exfat`, and
-# `btrfs` for those families' reader targets, and the three compression features so the
-# btrfs target reaches the decoders — without them `read_data` answers
-# `UnsupportedCompression` before a decoder runs, and the fuzzer exercises the refusal
-# instead of the code the contract is about. Each is named here rather than taken from the
+# alongside the readers rather than left to the crate's own tests. `fat`, `exfat`, `btrfs` and
+# `apfs` for those families' reader targets, and the compression features so the btrfs and
+# APFS targets can reach the decoders from a seed holding compressed files — without them
+# `read_data` answers `UnsupportedCompression` before a decoder runs, and the fuzzer exercises
+# the refusal instead of the code the contract is about. Each is named here rather than taken from the
 # default feature set, so what the targets reach does not move with it.
-ferrosys = { path = "..", features = ["tar", "fat", "exfat", "btrfs", "lzo", "zlib", "zstd"] }
+ferrosys = { path = "..", features = ["tar", "fat", "exfat", "btrfs", "apfs", "lzo", "zlib", "zstd", "lzvn", "lzfse", "lzbitmap"] }
 
 [[bin]]
 name = "reader_scan"
@@ -52,6 +52,13 @@ bench = false
 [[bin]]
 name = "btrfs_reader"
 path = "fuzz_targets/btrfs_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apfs_reader"
+path = "fuzz_targets/apfs_reader.rs"
 test = false
 doc = false
 bench = false

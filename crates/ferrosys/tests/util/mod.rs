@@ -1,4 +1,5 @@
-//! Helpers shared by every test target that shells out to a foreign implementation.
+//! Helpers shared by every test target that shells out to a foreign implementation, and the
+//! one source every target that needs a failing disk reads through.
 //!
 //! Each file under `tests/` compiles as its own crate, so shared code has to live in
 //! a module they all include — without one, every target grows its own copy of these
@@ -14,6 +15,10 @@
 //! what an image it must read looks like, so every one is held to an exact version — an
 //! upstream that changed its mind between releases would otherwise turn a distribution
 //! upgrade into a phantom regression here.
+//!
+//! APFS's oracle is macOS, which none of these runs, so its gate reads a corpus instead: the
+//! containers macOS made and its listings of them, one hashed release that
+//! `ci/fetch-apfs-corpus.sh` fetches and [`apfs_corpus`] finds.
 //!
 //! `ferrosys-cli/tests/cli.rs` carries its own aligned versions of these helpers,
 //! because a crate's packaged tests cannot include a file from a sibling crate's
@@ -286,7 +291,7 @@ pub fn mtools_config() -> PathBuf {
     ci_dir().join("mtools.conf")
 }
 
-fn ci_dir() -> PathBuf {
+pub fn ci_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ci")
 }
 
@@ -354,6 +359,48 @@ fn check_version(name: &str, suite: Suite, banner: &str) {
         "note: `{name}` is not the {version} the gates are written against — a \
          divergence may not reproduce under CI's pinned oracle"
     );
+}
+
+/// The APFS corpus `ci/fetch-apfs-corpus.sh` unpacks, or `None`, with a loud banner, where it
+/// is absent and absence is allowed.
+///
+/// The script is asked where the corpus is and which release it pins, so the pin is written
+/// once. A cache unpacked from another release is not this corpus, and reads as absent. Under
+/// `FERROSYS_REQUIRE_HOST_TOOLS` an absent corpus fails the run, as a missing tool does: a gate
+/// that read nothing verified nothing.
+pub fn apfs_corpus() -> Option<PathBuf> {
+    let ask = |flag: &str| {
+        let out = Command::new("bash")
+            .arg(ci_dir().join("fetch-apfs-corpus.sh"))
+            .arg(flag)
+            .output()
+            .expect("run ci/fetch-apfs-corpus.sh");
+        assert!(
+            out.status.success(),
+            "ci/fetch-apfs-corpus.sh {flag} failed"
+        );
+        String::from_utf8(out.stdout)
+            .expect("the script answers in text")
+            .trim()
+            .to_string()
+    };
+    let dir = PathBuf::from(ask("--print-prefix"));
+    let pinned = ask("--print-sha256");
+    let marker = std::fs::read_to_string(dir.join(".complete")).unwrap_or_default();
+    if marker.trim() == pinned {
+        return Some(dir);
+    }
+    assert!(
+        std::env::var_os("FERROSYS_REQUIRE_HOST_TOOLS").is_none(),
+        "the APFS gate requires its corpus at {}, which ci/fetch-apfs-corpus.sh unpacks",
+        dir.display()
+    );
+    eprintln!(
+        "\n!!! SKIPPING the APFS corpus gate: no corpus at {} — run \
+         ci/fetch-apfs-corpus.sh — correctness was NOT verified against macOS !!!\n",
+        dir.display()
+    );
+    None
 }
 
 /// Run `e2fsck -fn`: the ground truth that a filesystem is healthy, so that anything
@@ -551,5 +598,43 @@ pub fn exfat_populate(image: &Path, script: &str) -> Result<(), String> {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ))
+    }
+}
+
+/// A source that fails every read once its switch is thrown, the way a disk returning an
+/// error does: with a kind other than `UnexpectedEof`, which is how a source says it ended
+/// rather than failed. A seek still succeeds, as it does on such a disk.
+///
+/// The switch is shared, so a test opens a reader over a sound source, throws it, and then
+/// asks the reader for something.
+pub struct Failing<R> {
+    inner: R,
+    failing: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl<R> Failing<R> {
+    /// A source reading `inner` until the switch handed back with it is set.
+    pub fn new(inner: R) -> (Self, std::rc::Rc<std::cell::Cell<bool>>) {
+        let failing = std::rc::Rc::new(std::cell::Cell::new(false));
+        let source = Self {
+            inner,
+            failing: std::rc::Rc::clone(&failing),
+        };
+        (source, failing)
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Failing<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.failing.get() {
+            return Err(std::io::Error::other("the medium failed"));
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl<R: std::io::Seek> std::io::Seek for Failing<R> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
     }
 }

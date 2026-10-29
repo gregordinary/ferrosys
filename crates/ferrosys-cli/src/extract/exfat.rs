@@ -93,11 +93,6 @@ fn describe(
     synthesis: &Synthesis,
 ) -> Result<Described, Error> {
     let attrs = FsTree::stat(reader, &node, synthesis)?;
-    // The format records a creation time of its own, distinct from the modification time and
-    // from the access time, and to ten milliseconds where the other two families record two
-    // seconds. The root is reached through the boot sector rather than through an entry set,
-    // so it has none of the three — which is what the library's `stat` reports as synthesized.
-    let created = node.times.map(|t| t.create);
     Ok(Described {
         path,
         kind: Some(kind_of(&node)),
@@ -107,7 +102,7 @@ fn describe(
         links: None,
         target: None,
         blocks: None,
-        created,
+        flags: None,
     })
 }
 

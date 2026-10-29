@@ -62,10 +62,10 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 
-use crate::bytes::{get_u16, get_u32};
+use crate::bytes::{get_u16, get_u32, get_u64};
 use crate::fidelity::Synthesis;
 use crate::finding::{Family, Finding, Findings, Severity};
-use crate::io::{offset_of, read_exact_at};
+use crate::io::{Bounded, offset_of, read_exact_at};
 use crate::path::{is_hostile_component, is_reserved_name_char};
 use crate::policy::{Limits, MAX_PATH, OpenOptions, ReadPolicy};
 use crate::time::Timestamp;
@@ -79,10 +79,10 @@ use super::ondisk::{
     EntryType, FAT_ENTRY_MEDIA, FAT_ENTRY_RESERVED, FILE_SYSTEM_MINOR_REVISION, FileAttributes,
     FileEntry, FileNameEntry, MAIN_BOOT_REGION_SECTOR, MAX_LABEL_UNITS, MainBootSector,
     NAME_UNITS_PER_ENTRY, PERCENT_IN_USE_MAX, PERCENT_IN_USE_UNKNOWN, ParseError,
-    SECONDARY_ALLOCATION_POSSIBLE, StreamExtensionEntry, UpcaseTable, UpcaseTableEntry,
-    VOLUME_FLAG_MEDIA_FAILURE, VOLUME_FLAG_VOLUME_DIRTY, VolumeLabelEntry, boot_checksum,
-    checksum_sector_value, entry_set_checksum, extended_boot_signature, name_hash, percent_in_use,
-    unpack_timestamp, upcase_checksum, utc_offset_minutes,
+    SECONDARY_ALLOCATION_POSSIBLE, SECONDARY_NO_FAT_CHAIN, StreamExtensionEntry, UpcaseTable,
+    UpcaseTableEntry, VOLUME_FLAG_MEDIA_FAILURE, VOLUME_FLAG_VOLUME_DIRTY, VolumeLabelEntry,
+    boot_checksum, checksum_sector_value, entry_set_checksum, extended_boot_signature, name_hash,
+    percent_in_use, unpack_timestamp, upcase_checksum, utc_offset_minutes,
 };
 
 /// The most bytes of an up-case table this reader loads.
@@ -112,6 +112,10 @@ pub enum Category {
     UpcaseTable,
     /// A directory, an entry set in it, or a name one carries.
     Directory,
+    /// The source the filesystem is read from, rather than the filesystem: a read the
+    /// source failed for a reason other than ending. A scan holds these apart from its
+    /// findings, as [`source_failures`](crate::ScanReport::source_failures).
+    Source,
 }
 
 impl Category {
@@ -124,6 +128,7 @@ impl Category {
             Category::AllocationBitmap => "allocation bitmap",
             Category::UpcaseTable => "up-case table",
             Category::Directory => "directory",
+            Category::Source => "source",
         }
     }
 }
@@ -217,6 +222,10 @@ pub struct Anomaly {
 impl crate::Deviation for Anomaly {
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn is_source_failure(&self) -> bool {
+        self.category == Category::Source
     }
 
     /// The sector size is the addressing unit an exFAT location is stated in.
@@ -594,13 +603,100 @@ pub enum ReadError {
         /// The hash the stream extension records.
         stored: u16,
     },
+    /// An entry's name carries a character the format reserves in a name: a control code or
+    /// one of `" * / : < > ? \ |` (documented) — the set this crate's writer refuses in a name
+    /// and in a label.
+    ///
+    /// The name is still read and, where the policy allows, handed back as it is stored.
+    #[error("the name at entry {index} carries {code:#06x}, a character the format reserves in it")]
+    #[non_exhaustive]
+    ReservedCharacter {
+        /// The entry set's index within its directory.
+        index: u32,
+        /// The character, as a UTF-16 code point.
+        code: u32,
+    },
+    /// Two entry sets of one directory carry names the volume compares as one: equal once
+    /// folded through its own up-case table, which is how every driver compares a name.
+    ///
+    /// A lookup reaches the first of the two, and the second cannot be reached by its own
+    /// name. This crate's writer refuses such a pair.
+    #[error(
+        "entry {index} carries a name entry {first} carries too, once folded through the \
+         volume's up-case table, so a lookup reaches only the first"
+    )]
+    #[non_exhaustive]
+    IndistinguishableNames {
+        /// The entry set's index within its directory.
+        index: u32,
+        /// The index of the earlier set it cannot be told from.
+        first: u32,
+    },
+    /// A directory's written length is not its length, where the format makes the two one
+    /// number for a directory (documented).
+    ///
+    /// A directory is read to its length, which is its allocation: every slot it holds is an
+    /// entry or free, and none is a region nothing was written to. The pinned `fsck.exfat`
+    /// accepts the pair and reads the directory to its length (observed), so a scan's default
+    /// verdict agrees with it, and a strict read, which holds the volume to the format,
+    /// refuses it.
+    #[error(
+        "the directory at entry {index} records {valid} bytes written of its {declared}, \
+         where a directory's two lengths are one"
+    )]
+    #[non_exhaustive]
+    DirectoryValidLength {
+        /// The entry set's index within its directory.
+        index: u32,
+        /// The written length the stream extension records.
+        valid: u64,
+        /// The length the stream extension records.
+        declared: u64,
+    },
+    /// A chain the allocation table records runs on past the length of the stream it holds.
+    ///
+    /// The clusters past the length are allocated and hold nothing the stream reads, and
+    /// another implementation following the bitmap could hand them out while the chain still
+    /// runs through them. Each is claimed by the scan all the same, so one another stream
+    /// also claims is named as cross-linked. FAT's reader holds a chain to its length the
+    /// same way.
+    #[error(
+        "the chain from cluster {start} holds {held} bytes of clusters and its stream records \
+         {declared}"
+    )]
+    #[non_exhaustive]
+    ChainPastLength {
+        /// The chain's first cluster.
+        start: u32,
+        /// The length the stream records.
+        declared: u64,
+        /// The bytes the chain's clusters hold.
+        held: u64,
+    },
+    /// A volume GUID entry carries secondary entries, where the format gives it none
+    /// (documented).
+    ///
+    /// They are read as its set all the same, as the generic template for a primary entry
+    /// says, so none of them is a stray.
+    #[error(
+        "the volume GUID entry at entry {index} declares {count} secondary entries, and it has none"
+    )]
+    #[non_exhaustive]
+    VolumeGuidWithSecondaries {
+        /// The entry's index within the root directory.
+        index: u32,
+        /// The secondary count it records.
+        count: u8,
+    },
     /// An entry's name is one no directory can hold: `.` or `..`, empty, or a name carrying a
     /// path separator or a NUL.
     ///
     /// The first two name a directory rather than something inside it, an empty name names
     /// nothing, a separator would traverse out of the tree, and a NUL would truncate the path
-    /// a consumer forms from the name. Nothing about the field a name arrives in rules any of
-    /// them out: an exFAT name is UTF-16 and may spell anything.
+    /// a consumer forms from the name. The field a name arrives in can encode any of them, being
+    /// UTF-16 of any content; the format reserves a wider set, which
+    /// [`ReservedCharacter`](Self::ReservedCharacter) reports, and these are the ones no
+    /// directory can hold whatever its format says, and so the ones never handed back.
     ///
     /// The name itself is not repeated in the message. It is the image's, an image is
     /// untrusted input, and a name built to be one a directory cannot hold is equally free to
@@ -610,6 +706,20 @@ pub enum ReadError {
     HostileName {
         /// The set's first entry index within its directory.
         index: u32,
+    },
+    /// A directory entry set names a directory the tree already reaches by another name, or
+    /// one of its own ancestors: two sets share the cluster a directory begins at. An exFAT
+    /// directory has one name, so the volume contradicts itself. A walk never descends into
+    /// such a directory twice; a strict read refuses the volume for it, and a lenient one
+    /// passes the repeat over.
+    #[error(
+        "a directory entry names the directory at cluster {cluster}, which the tree reaches \
+         by another name as well"
+    )]
+    #[non_exhaustive]
+    RepeatedDirectory {
+        /// The first cluster both names lead to.
+        cluster: u32,
     },
     /// An entry set carries more name entries than its name needs.
     ///
@@ -860,10 +970,11 @@ pub enum ReadError {
         /// Which of the three times, in the format's own words.
         field: &'static str,
     },
-    /// A stream records more written bytes than it has bytes.
+    /// A file records more written bytes than it has bytes.
     ///
     /// The two lengths are a claim about the same allocation, and the written one being the
-    /// larger is not a state any sequence of writes reaches.
+    /// larger is not a state any sequence of writes reaches. A directory is
+    /// [`DirectoryValidLength`](Self::DirectoryValidLength) for either direction.
     #[error("a stream records {valid} bytes written of a length of {declared}")]
     #[non_exhaustive]
     ValidLengthPastEnd {
@@ -872,13 +983,14 @@ pub enum ReadError {
         /// The length the stream extension records.
         declared: u64,
     },
-    /// A stream's written length trails its length, so the bytes between them were allocated
+    /// A file's written length trails its length, so the bytes between them were allocated
     /// and never written.
     ///
     /// This is a state a driver leaves behind and this crate's writer never produces, since a
     /// format writes every byte it allocates. The volume is conformant and the region is
     /// defined: a read yields zeros there, as every driver does, rather than whatever the
-    /// medium last held.
+    /// medium last held. A directory's two lengths are one number, and a directory recording
+    /// them differently is [`DirectoryValidLength`](Self::DirectoryValidLength) instead.
     #[error("a stream of {declared} bytes has {valid} of them written; the rest reads as zeros")]
     #[non_exhaustive]
     ValidLengthTrails {
@@ -1011,17 +1123,23 @@ impl ReadError {
     /// How this failure classifies as a deviation from what this crate emits.
     ///
     /// Every variant answers, so a scan describes a fault exactly as a strict read would have.
-    /// The two that are not the image's — a source that could not be read, and a caller's own
-    /// bound — classify as [`Severity::Structural`] all the same: from a scan's point of view
-    /// the volume could not be followed past that point, whatever the reason.
+    /// A source that failed a read for a reason other than ending is not the image's, and
+    /// files under [`Category::Source`], which a scan holds apart from its findings. A
+    /// caller's own bound is not the image's either, and classifies as
+    /// [`Severity::Structural`] all the same: from a scan's point of view the volume could not
+    /// be followed past that point.
     #[must_use]
     pub fn anomaly(&self) -> Anomaly {
         let (severity, category, location) = match self {
-            ReadError::Io { .. } => (
+            ReadError::Io {
+                kind: std::io::ErrorKind::UnexpectedEof,
+                ..
+            } => (
                 Severity::Structural,
                 Category::BootRegion,
                 Location::default(),
             ),
+            ReadError::Io { .. } => (Severity::Structural, Category::Source, Location::default()),
             ReadError::Parse(_) | ReadError::BadBootSector { .. } => (
                 Severity::Structural,
                 Category::BootRegion,
@@ -1110,7 +1228,10 @@ impl ReadError {
                 Location::default(),
             ),
             ReadError::SetChecksumMismatch { index, .. }
-            | ReadError::NameHashMismatch { index, .. } => (
+            | ReadError::NameHashMismatch { index, .. }
+            // Two names a lookup cannot tell apart: every set parses, and the directory answers
+            // one name with two sets.
+            | ReadError::IndistinguishableNames { index, .. } => (
                 Severity::Integrity,
                 Category::Directory,
                 Location::at_entry(*index),
@@ -1146,10 +1267,20 @@ impl ReadError {
             // back whole and the space is spent — a conformance fault rather than a structural
             // one, which is the call FAT makes for the same shape.
             | ReadError::AllocationWithoutLength { index, .. }
-            | ReadError::MalformedTimestamp { index, .. } => (
+            | ReadError::MalformedTimestamp { index, .. }
+            | ReadError::ReservedCharacter { index, .. }
+            | ReadError::DirectoryValidLength { index, .. }
+            | ReadError::VolumeGuidWithSecondaries { index, .. } => (
                 Severity::Conformance,
                 Category::Directory,
                 Location::at_entry(*index),
+            ),
+            // Clusters allocated past what the stream reads: the space is spent and the volume
+            // reads back whole, the call FAT makes for the same shape.
+            ReadError::ChainPastLength { start, .. } => (
+                Severity::Conformance,
+                Category::AllocationTable,
+                Location::at_cluster(*start),
             ),
             ReadError::ValidLengthPastEnd { .. } | ReadError::StreamPastHeap { .. } => (
                 Severity::Structural,
@@ -1175,6 +1306,13 @@ impl ReadError {
             | ReadError::CrossLinkedCluster { cluster } => (
                 Severity::Integrity,
                 Category::AllocationBitmap,
+                Location::at_cluster(*cluster),
+            ),
+            // Two names for one directory: every set parses, and the sets disagree about the
+            // tree they make.
+            ReadError::RepeatedDirectory { cluster } => (
+                Severity::Integrity,
+                Category::Directory,
                 Location::at_cluster(*cluster),
             ),
             ReadError::LostClusters { first, .. } => (
@@ -1395,7 +1533,8 @@ pub struct WalkEntry {
 /// allocate, and nothing else. A knob it does not have would be a knob to keep in step for
 /// nothing.
 pub struct Reader<R> {
-    src: R,
+    /// The source, ending where the caller's region does.
+    src: Bounded<R>,
     base: u64,
     /// The Main Boot Sector as it was parsed.
     ///
@@ -1465,8 +1604,25 @@ struct Resident {
 enum OnDeviation<'a> {
     /// An ordinary read: fatal under the policy, and otherwise passed over.
     Policy(ReadPolicy),
-    /// A scan: every deviation collected, none fatal.
-    Collect(&'a mut Findings<Anomaly>),
+    /// A scan: every deviation collected, none fatal, and every allocation an entry this
+    /// reader does not interpret describes gathered for the scan to claim.
+    Collect {
+        findings: &'a mut Findings<Anomaly>,
+        allocations: &'a mut Vec<BenignAllocation>,
+    },
+}
+
+/// The allocation a benign entry describes: a primary or secondary entry this reader does not
+/// interpret, carrying `AllocationPossible` in the generic template's flags (documented). A
+/// scan claims its clusters as it claims a stream's, so they are neither lost nor free to
+/// another stream.
+struct BenignAllocation {
+    /// The index, within its directory, of the set the entry belongs to.
+    index: u32,
+    /// Where its clusters are.
+    storage: Storage,
+    /// The length it records.
+    bytes: u64,
 }
 
 impl OnDeviation<'_> {
@@ -1481,7 +1637,7 @@ impl OnDeviation<'_> {
                     Ok(())
                 }
             }
-            OnDeviation::Collect(findings) => {
+            OnDeviation::Collect { findings, .. } => {
                 let mut anomaly = err.anomaly();
                 anomaly.location = anomaly.location.or(at);
                 findings.push(anomaly);
@@ -1489,6 +1645,48 @@ impl OnDeviation<'_> {
             }
         }
     }
+
+    /// Hand the scan an allocation a benign entry describes. An ordinary read claims nothing.
+    fn claim(&mut self, allocation: BenignAllocation) {
+        if let OnDeviation::Collect { allocations, .. } = self {
+            allocations.push(allocation);
+        }
+    }
+}
+
+/// `anomaly` with its detail led by `path`, where there is one: what a finding about a
+/// stream's clusters names the stream by.
+fn named(mut anomaly: Anomaly, path: &[u8]) -> Anomaly {
+    if !path.is_empty() {
+        anomaly.detail = format!("{}: {}", crate::escape::printable(path), anomaly.detail);
+    }
+    anomaly
+}
+
+/// The allocation one entry in the generic template describes, where its flags say it may
+/// address clusters: `AllocationPossible` and `NoFatChain` are bits 0 and 1 of a 16-bit field at
+/// byte 4 of a primary entry and of an 8-bit one at byte 1 of a secondary, and both keep
+/// `FirstCluster` at byte 20 and `DataLength` at byte 24 (documented).
+fn generic_allocation(slot: &[u8], primary: bool) -> Option<(Storage, u64)> {
+    let flags = if primary {
+        get_u16(slot, 4).to_le_bytes()[0]
+    } else {
+        *slot.get(1)?
+    };
+    if flags & SECONDARY_ALLOCATION_POSSIBLE == 0 {
+        return None;
+    }
+    let first = get_u32(slot, 20);
+    let bytes = get_u64(slot, 24);
+    if first == 0 || bytes == 0 {
+        return None;
+    }
+    let storage = if flags & SECONDARY_NO_FAT_CHAIN != 0 {
+        Storage::Contiguous(first)
+    } else {
+        Storage::Chain(first)
+    };
+    Some((storage, bytes))
 }
 
 /// One 32-byte slot of a directory, as it sits on disk.
@@ -1547,7 +1745,8 @@ impl<R: Read + Seek> Reader<R> {
     /// # Errors
     ///
     /// As [`open`](Self::open).
-    pub fn open_with(mut src: R, options: &OpenOptions) -> Result<Self, ReadError> {
+    pub fn open_with(src: R, options: &OpenOptions) -> Result<Self, ReadError> {
+        let mut src = Bounded::new(src, options.base, options.len);
         let end = src.seek(SeekFrom::End(0))?;
         let available = end.saturating_sub(options.base);
         let sector = read_exact_at(&mut src, options.base, MainBootSector::SIZE)?;
@@ -2373,7 +2572,10 @@ impl<R: Read + Seek> Reader<R> {
         let bytes_per_cluster = u64::from(self.layout.bytes_per_cluster);
         let slots_per_sector = u64::from(self.layout.bytes_per_sector) / DIR_ENTRY_SIZE as u64;
         // How many clusters the directory's length covers. The root's length was measured from
-        // its chain at open, so every directory here has one.
+        // its chain at open, so every directory here has one. It is the length and not the
+        // written length that bounds the slots: the format makes them one for a directory, and
+        // where an image records them differently the allocation is what holds the entries,
+        // as the pinned `fsck.exfat` reads it (observed).
         let clusters = node.data_length.div_ceil(bytes_per_cluster.max(1));
 
         let mut index = 0u32;
@@ -2489,13 +2691,36 @@ impl<R: Read + Seek> Reader<R> {
         // which a well-formed directory can never reach.
         let cap = self.limits.max_walk_entries.min(self.max_names());
         let mut out: Vec<Entry> = Vec::new();
-        self.parse_entries(node, deviations, |_, entry| {
+        // Every name the directory answers to, folded through the volume's up-case table as a
+        // lookup compares it, beside the set that first carried it. A second set carrying one
+        // is reported once the whole directory is read, since `deviations` is the parser's
+        // while it runs.
+        let mut names: std::collections::HashMap<Vec<u16>, u32> = std::collections::HashMap::new();
+        let mut repeats = Vec::new();
+        self.parse_entries(node, deviations, |reader, entry, index| {
             if out.len() >= cap {
                 return Err(ReadError::WalkTooLarge { limit: cap });
+            }
+            match names.entry(reader.fold_name(&entry.name)) {
+                std::collections::hash_map::Entry::Occupied(first) => {
+                    repeats.push((
+                        index,
+                        ReadError::IndistinguishableNames {
+                            index,
+                            first: *first.get(),
+                        },
+                    ));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(index);
+                }
             }
             out.push(entry);
             Ok(ControlFlow::Continue(()))
         })?;
+        for (index, repeat) in repeats {
+            deviations.record(Location::at_entry(index), repeat)?;
+        }
         Ok(out)
     }
 
@@ -2508,7 +2733,7 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         node: &Node,
         deviations: &mut OnDeviation<'_>,
-        mut each: impl FnMut(&mut Self, Entry) -> Result<ControlFlow<()>, ReadError>,
+        mut each: impl FnMut(&mut Self, Entry, u32) -> Result<ControlFlow<()>, ReadError>,
     ) -> Result<(), ReadError> {
         if !node.is_dir() {
             return Err(ReadError::NotADirectory { path: Vec::new() });
@@ -2559,8 +2784,11 @@ impl<R: Read + Seek> Reader<R> {
                     pending.push(&slot.bytes);
                     if pending.is_complete() {
                         let finished = set.take().expect("just checked");
-                        if let Some(entry) = reader.finish_set(finished, deviations)? {
-                            return each(reader, entry);
+                        let index = finished.index;
+                        if finished.benign {
+                            reader.finish_benign_set(&finished, deviations)?;
+                        } else if let Some(entry) = reader.finish_set(finished, deviations)? {
+                            return each(reader, entry, index);
                         }
                     }
                     return Ok(ControlFlow::Continue(()));
@@ -2613,6 +2841,7 @@ impl<R: Read + Seek> Reader<R> {
                         slot.index,
                         file.secondary_count,
                         &slot.bytes,
+                        false,
                     ));
                 }
                 // The three the root directory owns. Each is answered by its own accessor, so
@@ -2636,9 +2865,39 @@ impl<R: Read + Seek> Reader<R> {
                         )?;
                     }
                 }
+                // A benign primary heads a set as every primary does, through the generic template:
+                // the format lets an implementation pass over one it does not recognize together
+                // with the set behind it (documented), so its secondaries are its own rather than
+                // strays, and what it allocates is claimed by a scan. The two the format defines
+                // carry no secondaries, and the volume GUID's place is the root.
                 other if other.is_benign() => {
-                    // The format says an implementation that does not recognize a benign entry
-                    // may carry on. Carrying on is exactly what this does.
+                    let count = slot.bytes[1];
+                    if other == EntryType::VOLUME_GUID {
+                        if !is_root {
+                            deviations.record(
+                                at,
+                                ReadError::MisplacedRootEntry {
+                                    index: slot.index,
+                                    entry_type: "volume GUID",
+                                },
+                            )?;
+                        }
+                        if count != 0 {
+                            deviations.record(
+                                at,
+                                ReadError::VolumeGuidWithSecondaries {
+                                    index: slot.index,
+                                    count,
+                                },
+                            )?;
+                        }
+                    }
+                    let pending = PendingSet::new(slot.index, count, &slot.bytes, true);
+                    if pending.is_complete() {
+                        reader.finish_benign_set(&pending, deviations)?;
+                    } else {
+                        set = Some(pending);
+                    }
                 }
                 other => {
                     deviations.record(
@@ -2666,6 +2925,49 @@ impl<R: Read + Seek> Reader<R> {
                     ),
                 },
             )?;
+        }
+        Ok(())
+    }
+
+    /// Read a complete set headed by a benign primary entry this reader does not interpret,
+    /// through the generic template (documented): its checksum is held to its bytes, and
+    /// what it and its benign secondaries allocate is handed to the scan.
+    fn finish_benign_set(
+        &mut self,
+        set: &PendingSet,
+        deviations: &mut OnDeviation<'_>,
+    ) -> Result<(), ReadError> {
+        let index = set.index;
+        let stored = get_u16(&set.bytes, 2);
+        let computed = entry_set_checksum(&set.bytes);
+        if computed != stored {
+            deviations.record(
+                Location::at_entry(index),
+                ReadError::SetChecksumMismatch {
+                    index,
+                    computed,
+                    stored,
+                },
+            )?;
+        }
+        let (primary, secondaries) = set.bytes.split_at(DIR_ENTRY_SIZE);
+        if let Some((storage, bytes)) = generic_allocation(primary, true) {
+            deviations.claim(BenignAllocation {
+                index,
+                storage,
+                bytes,
+            });
+        }
+        for slot in secondaries.as_chunks::<DIR_ENTRY_SIZE>().0 {
+            if EntryType(slot[0]).is_benign()
+                && let Some((storage, bytes)) = generic_allocation(slot, false)
+            {
+                deviations.claim(BenignAllocation {
+                    index,
+                    storage,
+                    bytes,
+                });
+            }
         }
         Ok(())
     }
@@ -2735,6 +3037,12 @@ impl<R: Read + Seek> Reader<R> {
                         entry_type: entry_type.0,
                     },
                 )?;
+            } else if let Some((storage, bytes)) = generic_allocation(slot, false) {
+                deviations.claim(BenignAllocation {
+                    index,
+                    storage,
+                    bytes,
+                });
             }
         }
         // Both directions of one comparison. The secondary count is defined as one plus the
@@ -2796,6 +3104,19 @@ impl<R: Read + Seek> Reader<R> {
             // Never handed back, whatever the policy: a path built by joining this onto its
             // directory's would leave the tree.
             return Ok(None);
+        }
+        // What the format reserves in a name, which the writer refuses in one.
+        if let Some(ch) = String::from_utf8_lossy(&name)
+            .chars()
+            .find(|&ch| is_reserved_name_char(ch))
+        {
+            deviations.record(
+                at,
+                ReadError::ReservedCharacter {
+                    index,
+                    code: u32::from(ch),
+                },
+            )?;
         }
 
         let node = self.node_of(&file, &stream, index, deviations)?;
@@ -2888,10 +3209,21 @@ impl<R: Read + Seek> Reader<R> {
         let declared = self.bound_length(stream.data_length, is_dir, index, deviations)?;
 
         // The two lengths are one number on a volume this crate wrote and routinely differ on
-        // one a driver wrote. Which way they differ is what decides whether the pair is a state
-        // or a contradiction.
+        // a file a driver wrote. Which way a file's differ is what decides whether the pair is
+        // a state or a contradiction. A directory's are one number by the format's own rule,
+        // so either direction is a deviation, and the directory is read to its length.
         let mut valid = stream.valid_data_length;
-        if valid > declared {
+        if is_dir && valid != declared {
+            deviations.record(
+                at,
+                ReadError::DirectoryValidLength {
+                    index,
+                    valid,
+                    declared,
+                },
+            )?;
+            valid = declared;
+        } else if valid > declared {
             deviations.record(at, ReadError::ValidLengthPastEnd { valid, declared })?;
             valid = declared;
         } else if valid < declared {
@@ -3177,8 +3509,10 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// # Errors
     ///
-    /// [`ReadError`] variants if any directory along the walk cannot be read, and
-    /// [`ReadError::WalkTooLarge`] if the tree holds more names than the bounds allow.
+    /// [`ReadError`] variants if any directory along the walk cannot be read,
+    /// [`ReadError::RepeatedDirectory`] under [`ReadPolicy::Strict`] if an entry names a
+    /// directory the tree already reaches, and [`ReadError::WalkTooLarge`] if the tree holds
+    /// more names than the bounds allow.
     pub fn walk(&mut self) -> Result<Vec<WalkEntry>, ReadError> {
         let mut out = Vec::new();
         self.walk_with::<ReadError>(|_, entry| {
@@ -3250,7 +3584,11 @@ impl<R: Read + Seek> Reader<R> {
         findings.extend_from(&self.open_anomalies);
         self.scan_table_head(&mut findings);
         let reached = self.scan_tree(&mut findings);
-        if let Some(reached) = reached {
+        // A scan its source failed did not look at what the failed reads held, so it cannot
+        // say what nothing reaches, as a walk cut short cannot.
+        if let Some(reached) = reached
+            && !findings.met_source_failure()
+        {
             self.scan_allocation(&mut findings, &reached);
         }
         findings.into_report(self.layout.bytes_per_sector)
@@ -3324,8 +3662,28 @@ impl<R: Read + Seek> Reader<R> {
                         findings,
                     );
                 }
-                let mut deviations = OnDeviation::Collect(findings);
-                let entries = match self.parse_dir(&node, &mut deviations) {
+                let mut allocations = Vec::new();
+                let mut deviations = OnDeviation::Collect {
+                    findings,
+                    allocations: &mut allocations,
+                };
+                let parsed = self.parse_dir(&node, &mut deviations);
+                // What the directory's benign entries allocate is the directory's to account
+                // for, whether or not the rest of it parsed.
+                for allocation in allocations {
+                    let mut owner = path.clone();
+                    owner.extend_from_slice(
+                        format!(" (the allocation of entry {})", allocation.index).as_bytes(),
+                    );
+                    self.claim_stream(
+                        allocation.storage,
+                        allocation.bytes,
+                        &owner,
+                        &mut reached,
+                        findings,
+                    );
+                }
+                let entries = match parsed {
                     Ok(entries) => entries,
                     Err(e @ ReadError::WalkTooLarge { .. }) => {
                         findings.push(e.anomaly());
@@ -3370,6 +3728,10 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Claim every cluster one stream occupies, reporting a cluster two streams both claim and
     /// one the bitmap says is free.
+    ///
+    /// A chained stream's table is held to its length besides. A chain running on past the
+    /// length is reported, and the clusters past it are claimed as well, so one another stream
+    /// also claims is named as cross-linked and none of them reads as lost.
     fn claim_stream(
         &mut self,
         storage: Storage,
@@ -3384,6 +3746,7 @@ impl<R: Read + Seek> Reader<R> {
         let bytes_per_cluster = u64::from(self.layout.bytes_per_cluster);
         let clusters = bytes.div_ceil(bytes_per_cluster.max(1));
         let mut own = std::collections::HashSet::new();
+        let mut last = None;
         for index in 0..clusters {
             let cluster = match self.stream_cluster(storage, index) {
                 Ok(Some(cluster)) => cluster,
@@ -3399,48 +3762,93 @@ impl<R: Read + Seek> Reader<R> {
                     return;
                 }
                 Err(e) => {
-                    let mut anomaly = e.anomaly();
-                    if !path.is_empty() {
-                        anomaly.detail =
-                            format!("{}: {}", crate::escape::printable(path), anomaly.detail);
-                    }
-                    findings.push(anomaly);
+                    findings.push(named(e.anomaly(), path));
                     return;
                 }
             };
-            if !reached.insert(cluster) {
-                // Whose claim is repeated decides what the finding says: a cluster this
-                // stream already stepped through is its own chain looping onto itself, and
-                // one another stream claimed is two streams sharing storage. Blaming
-                // "another stream" for a loop would send a reader hunting for a second file
-                // that does not exist.
-                let mut anomaly = ReadError::CrossLinkedCluster { cluster }.anomaly();
-                if own.contains(&cluster) {
-                    anomaly.detail = format!(
-                        "the chain from cluster {start} returns to cluster {cluster}, and a \
-                         chain that loops never ends"
-                    );
-                }
-                if !path.is_empty() {
-                    anomaly.detail =
-                        format!("{}: {}", crate::escape::printable(path), anomaly.detail);
-                }
-                findings.push(anomaly);
+            if !self.claim_cluster(cluster, start, path, &mut own, reached, findings) {
                 return;
             }
-            own.insert(cluster);
-            match self.is_allocated(cluster) {
-                Ok(true) => {}
-                Ok(false) => findings.push(ReadError::ClusterNotAllocated { cluster }.anomaly()),
+            last = Some(cluster);
+        }
+
+        // Where the length ends, the table ends the chain. A `NoFatChain` stream has no chain
+        // in the table to end, and its run is exactly its length.
+        let (Storage::Chain(_), Some(mut cluster)) = (storage, last) else {
+            return;
+        };
+        let mut held = clusters;
+        loop {
+            let next = match self.next_cluster(cluster) {
+                Ok(Some(next)) => next,
+                Ok(None) => break,
                 Err(e) => {
-                    findings.push(e.anomaly());
-                    return;
+                    findings.push(named(e.anomaly(), path));
+                    break;
                 }
+            };
+            held += 1;
+            // A chain longer than the volume has clusters repeats one, which the claim below
+            // names; this bounds the walk if the report is too full to hold that.
+            if held > u64::from(self.layout.cluster_count) {
+                break;
             }
-            if findings.is_full() {
-                return;
+            if !self.claim_cluster(next, start, path, &mut own, reached, findings) {
+                break;
+            }
+            cluster = next;
+        }
+        if held > clusters {
+            findings.push(named(
+                ReadError::ChainPastLength {
+                    start,
+                    declared: bytes,
+                    held: held.saturating_mul(bytes_per_cluster),
+                }
+                .anomaly(),
+                path,
+            ));
+        }
+    }
+
+    /// Claim one cluster of the stream beginning at `start`, answering whether to go on: a
+    /// cluster already claimed, a bitmap that cannot be read, and a report that is full each
+    /// stop the stream's claim.
+    fn claim_cluster(
+        &mut self,
+        cluster: u32,
+        start: u32,
+        path: &[u8],
+        own: &mut std::collections::HashSet<u32>,
+        reached: &mut ClusterSet,
+        findings: &mut Findings<Anomaly>,
+    ) -> bool {
+        if !reached.insert(cluster) {
+            // Whose claim is repeated decides what the finding says: a cluster this
+            // stream already stepped through is its own chain looping onto itself, and
+            // one another stream claimed is two streams sharing storage. Blaming
+            // "another stream" for a loop would send a reader hunting for a second file
+            // that does not exist.
+            let mut anomaly = ReadError::CrossLinkedCluster { cluster }.anomaly();
+            if own.contains(&cluster) {
+                anomaly.detail = format!(
+                    "the chain from cluster {start} returns to cluster {cluster}, and a \
+                     chain that loops never ends"
+                );
+            }
+            findings.push(named(anomaly, path));
+            return false;
+        }
+        own.insert(cluster);
+        match self.is_allocated(cluster) {
+            Ok(true) => {}
+            Ok(false) => findings.push(ReadError::ClusterNotAllocated { cluster }.anomaly()),
+            Err(e) => {
+                findings.push(e.anomaly());
+                return false;
             }
         }
+        !findings.is_full()
     }
 
     /// Hold the allocation bitmap against what the walk reached, and how full the volume says
@@ -3538,7 +3946,7 @@ impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
         let policy = self.policy;
         let mut exact = None;
         let mut fallback = None;
-        self.parse_entries(dir, &mut OnDeviation::Policy(policy), |reader, e| {
+        self.parse_entries(dir, &mut OnDeviation::Policy(policy), |reader, e, _| {
             if e.name == name {
                 exact = Some(e.node);
                 return Ok(ControlFlow::Break(()));
@@ -3600,6 +4008,17 @@ impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
         self.walk_children(&entry.node, &entry.path)
     }
 
+    fn repeated(&mut self, entry: &WalkEntry) -> Result<(), ReadError> {
+        let Some(cluster) = entry.node.storage.first_cluster() else {
+            return Ok(());
+        };
+        let err = ReadError::RepeatedDirectory { cluster };
+        if self.policy.is_fatal(err.anomaly().severity) {
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn too_large(limit: usize) -> ReadError {
         ReadError::WalkTooLarge { limit }
     }
@@ -3659,7 +4078,7 @@ impl<R: Read + Seek> FsTree for Reader<R> {
             synthesis,
             node.is_dir(),
             node.attributes.contains(FileAttributes::READ_ONLY),
-            node.times.map(|t| (t.access, t.modify)),
+            node.times.map(|t| (t.access, t.modify, Some(t.create))),
         ))
     }
 
@@ -3694,21 +4113,28 @@ impl<E> From<ReadError> for WalkFail<E> {
 /// spans as many clusters as it needs — so the assembler is what carries a set across a cluster
 /// boundary rather than the reader holding two clusters at once.
 struct PendingSet {
-    /// The file entry's index within its directory.
+    /// The primary entry's index within its directory.
     index: u32,
-    /// Entries the file entry says follow it.
+    /// Entries the primary entry says follow it.
     want: usize,
-    /// The set's bytes so far, the file entry included.
+    /// The set's bytes so far, the primary entry included.
     bytes: Vec<u8>,
+    /// Whether the primary is a benign one this reader does not interpret, rather than a file.
+    benign: bool,
 }
 
 impl PendingSet {
-    /// A set opened by the file entry `file`, expecting `secondary` entries behind it.
-    fn new(index: u32, secondary: u8, file: &[u8; DIR_ENTRY_SIZE]) -> Self {
+    /// A set opened by the primary entry `primary`, expecting `secondary` entries behind it.
+    fn new(index: u32, secondary: u8, primary: &[u8; DIR_ENTRY_SIZE], benign: bool) -> Self {
         let want = usize::from(secondary);
         let mut bytes = Vec::with_capacity((want + 1) * DIR_ENTRY_SIZE);
-        bytes.extend_from_slice(file);
-        Self { index, want, bytes }
+        bytes.extend_from_slice(primary);
+        Self {
+            index,
+            want,
+            bytes,
+            benign,
+        }
     }
 
     /// Take one more entry.
@@ -3941,6 +4367,16 @@ mod tests {
             .collect()
     }
 
+    /// Every path a lenient walk reaches, for a case whose image a strict one refuses.
+    fn lenient_paths(bytes: &[u8]) -> Vec<Vec<u8>> {
+        lenient(bytes)
+            .walk()
+            .expect("a lenient walk")
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
+    }
+
     /// The byte offset of cluster `n`, for a case that patches an image.
     fn cluster_at(bytes: &[u8], n: u32) -> usize {
         reader(bytes)
@@ -4022,6 +4458,44 @@ mod tests {
             tree = tree.file(format!("/d/n{i}.txt").into_bytes(), b"x", meta(0o644));
         }
         image_of(tree)
+    }
+
+    #[test]
+    fn a_volume_is_read_inside_its_region_and_refused_where_it_runs_past_the_end() {
+        // A volume a mebibyte into a disk, and a neighbour's bytes after it.
+        const BASE: u64 = 1 << 20;
+        let image = image();
+        let len = image.len() as u64;
+        let mut disk = vec![0u8; BASE as usize];
+        disk.extend_from_slice(&image);
+        disk.extend(vec![0xee; 1 << 20]);
+        // In a partition a sector short of the volume, the volume records more sectors than
+        // its source holds, which is a boot sector describing no volume here, however leniently
+        // it is read. Without the partition's end, the neighbour's bytes would make up the
+        // difference.
+        for policy in [ReadPolicy::Strict, ReadPolicy::Lenient] {
+            match Reader::open_with(
+                Cursor::new(disk.as_slice()),
+                &OpenOptions::new().base(BASE).len(len - 512).policy(policy),
+            ) {
+                Err(ReadError::BadBootSector { detail }) => {
+                    assert!(detail.contains("the source does not hold"), "{detail}");
+                }
+                Err(e) => panic!("expected the volume's length refused, got {e}"),
+                Ok(_) => panic!("a volume longer than its region opened"),
+            }
+        }
+        // The partition that holds it whole, and the disk with no partition named, both read
+        // the volume as it was written.
+        for options in [
+            OpenOptions::new().base(BASE).len(len),
+            OpenOptions::new().base(BASE),
+        ] {
+            let mut r = Reader::open_with(Cursor::new(disk.as_slice()), &options).expect("open");
+            assert!(r.scan().is_clean());
+            let file = r.lookup(b"/DCIM/READY.TXT").expect("the file");
+            assert_eq!(r.read_data(&file).expect("its bytes"), b"hello\n");
+        }
     }
 
     #[test]
@@ -5651,10 +6125,503 @@ mod tests {
 
         let mut bytes = image_of(TreeBuilder::new());
         bytes[at + 4 * DIR_ENTRY_SIZE] = 0xBF; // in use, primary, benign, code 31
+        refresh_set_checksum(&mut bytes, at + 4 * DIR_ENTRY_SIZE);
         assert!(
             root_entries(&bytes).is_ok(),
             "a benign entry is carried through rather than refused",
         );
+    }
+
+    /// The byte offset of `cluster`'s entry in the allocation table.
+    fn table_at(bytes: &[u8], cluster: u32) -> usize {
+        let layout = *reader(bytes).layout();
+        layout.fat_offset as usize * layout.bytes_per_sector as usize + cluster as usize * 4
+    }
+
+    /// Set or clear `cluster`'s bit in the allocation bitmap.
+    fn mark(bytes: &mut [u8], cluster: u32, in_use: bool) {
+        let bitmap = cluster_at(bytes, reader(bytes).layout().bitmap_cluster);
+        let bit = (cluster - FIRST_CLUSTER) as usize;
+        if in_use {
+            bytes[bitmap + bit / 8] |= 1 << (bit % 8);
+        } else {
+            bytes[bitmap + bit / 8] &= !(1 << (bit % 8));
+        }
+    }
+
+    /// A cluster nothing on a small volume this crate wrote holds: the heap's last.
+    fn spare_cluster(bytes: &[u8]) -> u32 {
+        let mut r = reader(bytes);
+        let last = FIRST_CLUSTER + r.layout().cluster_count - 1;
+        assert!(
+            !r.is_allocated(last).expect("the bitmap"),
+            "the fixture's last cluster is free"
+        );
+        last
+    }
+
+    /// A vendor allocation entry: benign and secondary, addressing `cluster` alone as a
+    /// consecutive run, under a vendor's GUID.
+    fn vendor_allocation(cluster: u32, bytes_per_cluster: u32) -> [u8; DIR_ENTRY_SIZE] {
+        let mut slot = [0u8; DIR_ENTRY_SIZE];
+        slot[0] = EntryType::VENDOR_ALLOCATION.0;
+        slot[1] = SECONDARY_ALLOCATION_POSSIBLE | SECONDARY_NO_FAT_CHAIN;
+        slot[2..18].copy_from_slice(&[0x5a; 16]);
+        slot[20..24].copy_from_slice(&cluster.to_le_bytes());
+        slot[24..32].copy_from_slice(&u64::from(bytes_per_cluster).to_le_bytes());
+        slot
+    }
+
+    #[test]
+    fn a_benign_entry_this_reader_does_not_know_heads_a_set_it_passes_over_whole() {
+        // The generic template: a primary records how many secondaries follow it and a
+        // checksum over all of them, and a benign one an implementation does not recognize is
+        // passed over together with its set (documented). Here an unassigned benign primary
+        // with a vendor extension behind it, the shape a vendor writes.
+        let mut bytes = image_of(TreeBuilder::new());
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let at = cluster_at(&bytes, root) + 4 * DIR_ENTRY_SIZE;
+        assert_eq!(bytes[at], 0, "the root ends at its fifth slot");
+        bytes[at] = 0xA5; // in use, primary, benign, code 5
+        bytes[at + 1] = 1;
+        bytes[at + DIR_ENTRY_SIZE] = EntryType::VENDOR_EXTENSION.0;
+        bytes[at + DIR_ENTRY_SIZE + 2..at + DIR_ENTRY_SIZE + 18].copy_from_slice(&[0x5a; 16]);
+        refresh_set_checksum(&mut bytes, at);
+        assert!(
+            root_entries(&bytes).is_ok(),
+            "its secondary is its own, not a stray"
+        );
+        assert!(scan_of(&bytes).is_empty(), "{:#?}", scan_of(&bytes));
+
+        // Its checksum is held to its bytes, as every set's is.
+        bytes[at + DIR_ENTRY_SIZE + 20] ^= 1;
+        assert!(matches!(
+            root_entries(&bytes),
+            Err(ReadError::SetChecksumMismatch { index: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn a_volume_guid_entry_has_no_secondaries_and_sits_in_the_root() {
+        // Documented: the volume GUID entry's secondary count is zero, and it is one of the
+        // root's own entries.
+        let bytes = image_of(TreeBuilder::new().directory(b"/D".to_vec(), meta(0o755)));
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let d = cluster_at(&bytes, {
+            let mut r = reader(&bytes);
+            r.lookup(b"/D")
+                .expect("the directory")
+                .storage
+                .first_cluster()
+                .expect("a cluster")
+        });
+        let at = (0..)
+            .map(|n| cluster_at(&bytes, root) + n * DIR_ENTRY_SIZE)
+            .find(|&at| bytes[at] == 0)
+            .expect("a free slot");
+        let mut guid = bytes.clone();
+        guid[at] = EntryType::VOLUME_GUID.0;
+        guid[at + 1] = 1;
+        guid[at + DIR_ENTRY_SIZE] = EntryType::VENDOR_EXTENSION.0;
+        refresh_set_checksum(&mut guid, at);
+        let found = scan_of(&guid);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.detail.contains("declares 1 secondary entries")
+                    && f.severity == Severity::Conformance),
+            "{found:#?}"
+        );
+        assert!(
+            !found.iter().any(|f| f.detail.contains("stray")),
+            "{found:#?}"
+        );
+
+        let mut misplaced = bytes.clone();
+        misplaced[d] = EntryType::VOLUME_GUID.0;
+        refresh_set_checksum(&mut misplaced, d);
+        let found = scan_of(&misplaced);
+        assert!(
+            found.iter().any(|f| f.detail.contains("volume GUID")),
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn what_a_benign_entry_allocates_is_claimed_by_the_scan() {
+        // A vendor allocation entry owns the clusters it addresses (documented), so they are
+        // neither lost nor free to another stream, whether it sits behind a benign primary
+        // or in a file's set.
+        let fixture =
+            image_of(TreeBuilder::new().file(b"/F.BIN".to_vec(), vec![1; 300], meta(0o644)));
+        let (root, bytes_per_cluster) = {
+            let r = reader(&fixture);
+            (
+                r.layout().first_cluster_of_root,
+                r.layout().bytes_per_cluster,
+            )
+        };
+        let spare = spare_cluster(&fixture);
+        let file = set_at(&fixture, root, "F.BIN");
+        let first = u32::from_le_bytes(
+            fixture[file + DIR_ENTRY_SIZE + 20..file + DIR_ENTRY_SIZE + 24]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let after_file = file + 3 * DIR_ENTRY_SIZE;
+        assert_eq!(
+            fixture[after_file], 0,
+            "the root ends behind the file's set"
+        );
+
+        // Behind a benign primary.
+        let under_primary = |cluster: u32| {
+            let mut bytes = fixture.clone();
+            bytes[after_file] = 0xA5;
+            bytes[after_file + 1] = 1;
+            let slot = vendor_allocation(cluster, bytes_per_cluster);
+            bytes[after_file + DIR_ENTRY_SIZE..after_file + 2 * DIR_ENTRY_SIZE]
+                .copy_from_slice(&slot);
+            refresh_set_checksum(&mut bytes, after_file);
+            bytes
+        };
+        // In the file's own set, behind its name.
+        let in_file = |cluster: u32| {
+            let mut bytes = fixture.clone();
+            let slot = vendor_allocation(cluster, bytes_per_cluster);
+            bytes[after_file..after_file + DIR_ENTRY_SIZE].copy_from_slice(&slot);
+            bytes[file + 1] += 1;
+            refresh_set_checksum(&mut bytes, file);
+            bytes
+        };
+        for (what, place) in [
+            (
+                "behind a benign primary",
+                &under_primary as &dyn Fn(u32) -> Vec<u8>,
+            ),
+            ("in a file's set", &in_file),
+        ] {
+            // Its cluster in use: nothing to say.
+            let mut bytes = place(spare);
+            mark(&mut bytes, spare, true);
+            assert!(scan_of(&bytes).is_empty(), "{what}: {:#?}", scan_of(&bytes));
+            assert!(root_entries(&bytes).is_ok(), "{what}");
+            // Free in the bitmap: the allocation is held to it, as a stream's is.
+            let found = scan_of(&place(spare));
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.detail.contains("the allocation bitmap says it is free")),
+                "{what}: {found:#?}"
+            );
+            // The file's own cluster: two owners.
+            let found = scan_of(&place(first));
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.detail.contains("occupied by more than one stream")),
+                "{what}: {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_whose_two_lengths_differ_is_named_and_read_to_its_length() {
+        // Documented: a directory's written length is its length. The pinned `fsck.exfat`
+        // accepts the pair and reads the directory to its length (observed), and so does this.
+        let mut bytes = image_of(
+            TreeBuilder::new()
+                .directory(b"/D".to_vec(), meta(0o755))
+                .file(b"/D/F.TXT".to_vec(), b"f", meta(0o644)),
+        );
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let d = set_at(&bytes, root, "D");
+        let stream = d + DIR_ENTRY_SIZE;
+        bytes[stream + 8..stream + 16].copy_from_slice(&0u64.to_le_bytes());
+        refresh_set_checksum(&mut bytes, d);
+
+        let found = scan_of(&bytes);
+        let named: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.detail.contains("where a directory's two lengths are one"))
+            .collect();
+        assert_eq!(named.len(), 1, "{found:#?}");
+        assert_eq!(named[0].severity, Severity::Conformance);
+        assert!(
+            !found.iter().any(|f| f.detail.contains("reads as zeros")),
+            "a directory's slots are not a region read as zeros: {found:#?}"
+        );
+        assert!(
+            lenient_paths(&bytes).contains(&b"/D/F.TXT".to_vec()),
+            "the entry inside is read"
+        );
+        assert!(
+            Reader::open(Cursor::new(bytes.as_slice()))
+                .expect("open")
+                .walk()
+                .is_err(),
+            "a strict walk refuses it"
+        );
+    }
+
+    #[test]
+    fn a_chain_running_past_its_stream_s_length_is_named_and_claimed() {
+        // A one-cluster file, chained through the table rather than declared consecutive, whose
+        // chain runs on through two clusters more.
+        let fixture =
+            image_of(TreeBuilder::new().file(b"/F.BIN".to_vec(), vec![1; 300], meta(0o644)));
+        let root = reader(&fixture).layout().first_cluster_of_root;
+        let file = set_at(&fixture, root, "F.BIN");
+        let stream = file + DIR_ENTRY_SIZE;
+        let first = u32::from_le_bytes(fixture[stream + 20..stream + 24].try_into().expect("four"));
+        let spare = spare_cluster(&fixture);
+        let (one, two) = (spare - 1, spare);
+        let chained = |marked: bool| {
+            let mut bytes = fixture.clone();
+            bytes[stream + 1] &= !SECONDARY_NO_FAT_CHAIN;
+            refresh_set_checksum(&mut bytes, file);
+            for (from, to) in [
+                (first, one),
+                (one, two),
+                (two, super::super::ondisk::END_OF_CHAIN),
+            ] {
+                let at = table_at(&bytes, from);
+                bytes[at..at + 4].copy_from_slice(&to.to_le_bytes());
+            }
+            mark(&mut bytes, one, marked);
+            mark(&mut bytes, two, marked);
+            bytes
+        };
+        // The file still reads its own byte count, whatever the chain holds past it.
+        let marked = chained(true);
+        let mut r = lenient(&marked);
+        let node = r.lookup(b"/F.BIN").expect("look up");
+        assert_eq!(r.read_data(&node).expect("read").len(), 300);
+
+        let found = scan_of(&chained(true));
+        let past: Vec<&Finding> = found
+            .iter()
+            .filter(|f| {
+                f.detail
+                    .contains("bytes of clusters and its stream records 300")
+            })
+            .collect();
+        assert_eq!(past.len(), 1, "{found:#?}");
+        assert_eq!(past[0].severity, Severity::Conformance);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.detail.contains("reached by nothing")),
+            "{found:#?}"
+        );
+        // Claimed, so a bitmap calling them free is held to it as well.
+        let found = scan_of(&chained(false));
+        assert_eq!(
+            found
+                .iter()
+                .filter(|f| f.detail.contains("the allocation bitmap says it is free"))
+                .count(),
+            2,
+            "{found:#?}"
+        );
+    }
+
+    /// The cluster at `index` of the chain beginning at `first`, read from the table.
+    fn chain_at(bytes: &[u8], first: u32, index: u32) -> u32 {
+        let mut cluster = first;
+        for _ in 0..index {
+            let at = table_at(bytes, cluster);
+            cluster = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four"));
+        }
+        cluster
+    }
+
+    /// Move cluster `index` of the chain beginning at `first` to the free cluster `to`: its
+    /// bytes, the link to it and its own link, and the bitmap's account of both — written to
+    /// the bitmap before the move, so a chain that is the bitmap's own carries them along. The
+    /// cluster it leaves is zeroed.
+    fn relocate(bytes: &mut [u8], first: u32, index: u32, to: u32) {
+        // Every offset is taken before anything moves: the volume does not open between the
+        // edits below.
+        let before = chain_at(bytes, first, index - 1);
+        let moved = chain_at(bytes, first, index);
+        let links = [
+            table_at(bytes, before),
+            table_at(bytes, to),
+            table_at(bytes, moved),
+        ];
+        let after = u32::from_le_bytes(bytes[links[2]..links[2] + 4].try_into().expect("four"));
+        let size = reader(bytes).layout().bytes_per_cluster as usize;
+        let (from, into) = (cluster_at(bytes, moved), cluster_at(bytes, to));
+        mark(bytes, to, true);
+        mark(bytes, moved, false);
+        let held = bytes[from..from + size].to_vec();
+        bytes[into..into + size].copy_from_slice(&held);
+        // Emptied, so a reader that took the old place for granted reads nothing it wants.
+        bytes[from..from + size].fill(0);
+        for (at, link) in links.into_iter().zip([to, after, 0]) {
+            bytes[at..at + 4].copy_from_slice(&link.to_le_bytes());
+        }
+    }
+
+    /// A volume of six mebibytes, which convention formats at 512-byte clusters: sixteen slots
+    /// a cluster, an up-case table of twelve clusters, and a bitmap of three.
+    fn small_clusters(source: TreeBuilder) -> Vec<u8> {
+        format(source, 6 << 20, FormatOptions::new(0x1234_5678))
+            .expect("format")
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_resident_whose_chain_is_not_consecutive_is_read_through_the_table() {
+        // The up-case table and the bitmap are found by their chains (documented), and a
+        // driver may have placed either anywhere. Each is given a second cluster that is not
+        // the one after its first, and read whole.
+        let fixture = small_clusters(TreeBuilder::new().file(
+            b"/Mixed Case.TXT".to_vec(),
+            b"folded",
+            meta(0o644),
+        ));
+        let layout = *reader(&fixture).layout();
+        assert_eq!(layout.bytes_per_cluster, 512);
+        assert!(
+            layout.upcase_bytes > 512 && layout.bitmap_bytes > 512,
+            "{layout:?}"
+        );
+        let spare = spare_cluster(&fixture);
+        for (what, first) in [
+            ("the up-case table", layout.upcase_cluster),
+            ("the allocation bitmap", layout.bitmap_cluster),
+        ] {
+            let mut bytes = fixture.clone();
+            relocate(&mut bytes, first, 1, spare);
+            assert_eq!(
+                chain_at(&bytes, first, 1),
+                spare,
+                "{what}: the fixture's chain"
+            );
+            assert_ne!(spare, first + 1, "{what}: not consecutive");
+            // A strict open reads the table's checksum through the chain, and the folding the
+            // table holds is what finds the name in another case.
+            let mut r = Reader::open(Cursor::new(bytes.as_slice()))
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert!(r.lookup(b"/mixed case.txt").is_ok(), "{what}");
+            assert!(scan_of(&bytes).is_empty(), "{what}: {:#?}", scan_of(&bytes));
+        }
+    }
+
+    #[test]
+    fn an_entry_set_crossing_from_one_cluster_to_the_next_is_read_whole() {
+        // Sixteen slots a cluster, and sets of three and four slots behind the root's own
+        // entries, so some set begins in one cluster and ends in the next.
+        let mut source = TreeBuilder::new();
+        let mut want = Vec::new();
+        for n in 0..12u8 {
+            let name = if n % 2 == 0 {
+                format!("/F{n}.TXT")
+            } else {
+                format!("/a name of twenty units {n:02}.txt")
+            };
+            source = source.file(name.clone().into_bytes(), vec![n; 40], meta(0o644));
+            want.push((name, vec![n; 40]));
+        }
+        let bytes = small_clusters(source);
+        let mut r = reader(&bytes);
+        let root = r.root();
+        let mut slots: Vec<(EntryType, u32, u32)> = Vec::new();
+        r.for_each_slot::<ReadError>(&root, |_, slot| {
+            slots.push((slot.entry_type(), slot.bytes[1].into(), slot.cluster));
+            Ok(ControlFlow::Continue(()))
+        })
+        .expect("the root's slots");
+        let crossing = slots
+            .iter()
+            .enumerate()
+            .any(|(at, &(kind, count, cluster))| {
+                kind == EntryType::FILE
+                    && slots
+                        .get(at + count as usize)
+                        .is_some_and(|&(_, _, last)| last != cluster)
+            });
+        assert!(crossing, "no set crosses a cluster: {slots:?}");
+        for (name, contents) in want {
+            let node = r.lookup(name.as_bytes()).expect("look up");
+            assert_eq!(r.read_data(&node).expect("read"), contents, "{name}");
+        }
+        assert!(scan_of(&bytes).is_empty(), "{:#?}", scan_of(&bytes));
+    }
+
+    #[test]
+    fn a_name_carrying_a_character_the_format_reserves_is_named_and_handed_back() {
+        let mut bytes = image_of(TreeBuilder::new().file(b"/AB.TXT".to_vec(), b"x", meta(0o644)));
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let set = set_at(&bytes, root, "AB.TXT");
+        // The second unit of the name, `B`, becomes `:`, and the hash follows it so the case is
+        // the character alone.
+        let name = set + 2 * DIR_ENTRY_SIZE + 2;
+        bytes[name + 2..name + 4].copy_from_slice(&u16::from(b':').to_le_bytes());
+        let units: Vec<u16> = "A:.TXT".encode_utf16().collect();
+        let hash = name_hash(&reader(&bytes).upcase.fold(&units));
+        bytes[set + DIR_ENTRY_SIZE + 4..set + DIR_ENTRY_SIZE + 6]
+            .copy_from_slice(&hash.to_le_bytes());
+        refresh_set_checksum(&mut bytes, set);
+
+        assert!(matches!(
+            root_entries(&bytes),
+            Err(ReadError::ReservedCharacter { code: 0x3a, .. })
+        ));
+        assert!(
+            lenient_paths(&bytes).contains(&b"/A:.TXT".to_vec()),
+            "handed back as stored"
+        );
+        let found = scan_of(&bytes);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.detail.contains("0x003a") && f.severity == Severity::Conformance),
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn two_names_the_volume_folds_to_one_are_integrity_damage() {
+        // `ab.txt` beside `AB.TXT`: one name to the volume's up-case table, which the writer
+        // refuses and a lookup cannot choose between.
+        let mut bytes = image_of(
+            TreeBuilder::new()
+                .file(b"/AB.TXT".to_vec(), b"1", meta(0o644))
+                .file(b"/AC.TXT".to_vec(), b"2", meta(0o644)),
+        );
+        let root = reader(&bytes).layout().first_cluster_of_root;
+        let set = set_at(&bytes, root, "AC.TXT");
+        let name = set + 2 * DIR_ENTRY_SIZE + 2;
+        bytes[name + 2..name + 4].copy_from_slice(&u16::from(b'b').to_le_bytes());
+        bytes[name..name + 2].copy_from_slice(&u16::from(b'a').to_le_bytes());
+        let units: Vec<u16> = "ab.TXT".encode_utf16().collect();
+        let hash = name_hash(&reader(&bytes).upcase.fold(&units));
+        bytes[set + DIR_ENTRY_SIZE + 4..set + DIR_ENTRY_SIZE + 6]
+            .copy_from_slice(&hash.to_le_bytes());
+        refresh_set_checksum(&mut bytes, set);
+
+        let found = scan_of(&bytes);
+        let named: Vec<&Finding> = found
+            .iter()
+            .filter(|f| {
+                f.detail
+                    .contains("once folded through the volume's up-case table")
+            })
+            .collect();
+        assert_eq!(named.len(), 1, "{found:#?}");
+        assert_eq!(named[0].severity, Severity::Integrity);
+        assert!(
+            Reader::open(Cursor::new(bytes.as_slice()))
+                .expect("open")
+                .walk()
+                .is_err(),
+            "a strict walk refuses it"
+        );
+        let listed = lenient_paths(&bytes);
+        assert!(listed.contains(&b"/AB.TXT".to_vec()) && listed.contains(&b"/ab.TXT".to_vec()));
     }
 
     #[test]
@@ -5801,10 +6768,11 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_that_points_at_itself_terminates_a_walk() {
+    fn a_directory_that_points_at_itself_is_refused_strictly_and_bounded_leniently() {
         // Nothing in a directory entry says it does not point back up the tree. Descending
         // into a directory only the first time its first cluster is reached is what bounds
-        // the walk, and the set checksum is refreshed so the cycle is what stops it.
+        // the walk, and the set checksum is refreshed so the cycle is what stops it. An exFAT
+        // directory has one name, so a strict walk refuses the volume for the repeat.
         let mut bytes = image_of(
             TreeBuilder::new()
                 .directory(b"/a".to_vec(), meta(0o755))
@@ -5822,7 +6790,17 @@ mod tests {
         refresh_set_checksum(&mut bytes, set);
         assert_ne!(a_cluster, root);
 
-        let names = paths(&bytes);
+        let err = reader(&bytes).walk().expect_err("a strict walk refuses it");
+        assert!(
+            matches!(err, ReadError::RepeatedDirectory { cluster } if cluster == a_cluster),
+            "{err}"
+        );
+        let names: Vec<Vec<u8>> = lenient(&bytes)
+            .walk()
+            .expect("a lenient walk is bounded")
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
         assert_eq!(names, vec![b"/a".to_vec(), b"/a/b".to_vec()]);
     }
 
@@ -6093,6 +7071,22 @@ mod tests {
                 stored: 2,
             },
             ReadError::HostileName { index: 0 },
+            ReadError::ReservedCharacter {
+                index: 0,
+                code: 0x3a,
+            },
+            ReadError::IndistinguishableNames { index: 7, first: 4 },
+            ReadError::DirectoryValidLength {
+                index: 0,
+                valid: 0,
+                declared: 4096,
+            },
+            ReadError::ChainPastLength {
+                start: 5,
+                declared: 300,
+                held: 12_288,
+            },
+            ReadError::VolumeGuidWithSecondaries { index: 0, count: 1 },
             ReadError::ExcessNameEntries {
                 want: 1,
                 have: 2,
@@ -6201,6 +7195,7 @@ mod tests {
             Category::AllocationBitmap,
             Category::UpcaseTable,
             Category::Directory,
+            Category::Source,
         ] {
             assert!(!category.as_str().is_empty());
         }

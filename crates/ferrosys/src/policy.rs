@@ -19,7 +19,13 @@ use crate::finding::Severity;
 /// of either family reaches neither.
 ///
 /// Compiled where there is a reader to hold to it.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) const MAX_PATH: usize = 4096;
 
 /// The most symbolic links a path resolution follows before calling it a loop, matching the
@@ -38,7 +44,13 @@ pub(crate) const MAX_PATH: usize = 4096;
 /// crate root beside the resolver's other bounds, and only there — one concept, one path. A
 /// build carrying no family has no reader for it to bound, so the constant arrives with the
 /// first family compiled in.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub const MAX_SYMLINK_HOPS: u32 = 40;
 
 /// The conformance-strictness policy a read applies: a threshold over [`Severity`].
@@ -176,21 +188,24 @@ impl Default for Limits {
     }
 }
 
-/// How an image is opened without naming its family: where it begins, how strictly it is
-/// read, and what it may allocate.
+/// How an image is opened without naming its family: where it begins and ends, how strictly
+/// it is read, and what it may allocate.
 ///
 /// Every input to opening an image is a field here rather than a parameter, so a knob one
 /// grows arrives as a field a caller may ignore.
 ///
-/// These are the three inputs every family's reader takes. A knob only one family has — a
+/// These are the inputs every family's reader takes. A knob only one family has — a
 /// checksum seed to verify against, say — is on that family's own open, which is reached by
 /// opening its reader directly rather than through here.
 ///
 /// ```
 /// # use ferrosys::{OpenOptions, ReadPolicy};
-/// // A filesystem inside a partition, read leniently so a scan can describe what is wrong
+/// // A filesystem in a 16 MiB partition, read leniently so a scan can describe what is wrong
 /// // with it rather than the open refusing it.
-/// let options = OpenOptions::new().base(1 << 20).policy(ReadPolicy::Lenient);
+/// let options = OpenOptions::new()
+///     .base(1 << 20)
+///     .len(16 << 20)
+///     .policy(ReadPolicy::Lenient);
 /// # let _ = options;
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -200,6 +215,16 @@ pub struct OpenOptions {
     /// image, the partition's start for one inside a disk image. Every read is relative to
     /// it.
     pub base: u64,
+    /// How many bytes from [`base`](Self::base) on are the filesystem's to hold — the
+    /// partition's length, for one inside a disk image — or `None` for every byte to the
+    /// source's end.
+    ///
+    /// The source ends there for the reader: each bound it derives from the source's length
+    /// is derived from this region's, and a read past the region's end fails as a read past
+    /// a short source does. A filesystem longer than its partition is therefore reported as
+    /// truncated, rather than read on into whatever follows it on the disk. A region longer
+    /// than the source ends where the source does.
+    pub len: Option<u64>,
     /// How strictly the image is held to its format. Defaults to [`ReadPolicy::Strict`].
     pub policy: ReadPolicy,
     /// Caps on what one read may allocate, over and above the structural bounds a reader
@@ -213,6 +238,7 @@ impl OpenOptions {
     pub const fn new() -> Self {
         Self {
             base: 0,
+            len: None,
             policy: ReadPolicy::Strict,
             limits: Limits::new(),
         }
@@ -222,6 +248,13 @@ impl OpenOptions {
     #[must_use]
     pub const fn base(mut self, base: u64) -> Self {
         self.base = base;
+        self
+    }
+
+    /// Hold the filesystem to the `len` bytes from its [`base`](Self::base) on.
+    #[must_use]
+    pub const fn len(mut self, len: u64) -> Self {
+        self.len = Some(len);
         self
     }
 
@@ -276,9 +309,16 @@ mod tests {
     fn open_options_carry_what_they_were_given() {
         let options = OpenOptions::new()
             .base(1 << 20)
+            .len(16 << 20)
             .policy(ReadPolicy::Lenient)
             .limits(Limits::new().max_file_bytes(4096));
         assert_eq!(options.base, 1 << 20);
+        assert_eq!(options.len, Some(16 << 20));
+        assert_eq!(
+            OpenOptions::new().len,
+            None,
+            "the source's own end by default"
+        );
         assert_eq!(options.policy, ReadPolicy::Lenient);
         assert_eq!(options.limits.max_file_bytes, 4096);
         assert_eq!(OpenOptions::default(), OpenOptions::new());

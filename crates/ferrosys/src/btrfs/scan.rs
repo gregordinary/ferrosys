@@ -47,6 +47,10 @@ pub enum Category {
     Item,
     /// A file's bytes, held against the checksums recorded for them.
     Data,
+    /// The source the filesystem is read from, rather than the filesystem: a read the
+    /// source failed for a reason other than ending. A scan holds these apart from its
+    /// findings, as [`source_failures`](crate::ScanReport::source_failures).
+    Source,
 }
 
 impl Category {
@@ -59,6 +63,7 @@ impl Category {
             Category::Tree => "tree",
             Category::Item => "item",
             Category::Data => "data",
+            Category::Source => "source",
         }
     }
 }
@@ -87,6 +92,10 @@ pub struct Anomaly {
 impl Deviation for Anomaly {
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn is_source_failure(&self) -> bool {
+        self.category == Category::Source
     }
 
     fn to_finding(&self, _unit: u32) -> Finding {
@@ -218,6 +227,11 @@ pub(super) fn mirror_anomaly(state: Mirror, live: u64) -> Option<(Severity, &'st
 /// makes, kept here because a scan reports rather than converts.
 pub(super) fn walk_anomaly(err: &ReadError) -> (Category, Severity) {
     match err {
+        // A read the source failed for a reason other than ending says nothing about the
+        // filesystem. A short read is the image's, and falls to the default below.
+        ReadError::Io { kind, .. } if *kind != std::io::ErrorKind::UnexpectedEof => {
+            (Category::Source, Severity::Structural)
+        }
         ReadError::BadChecksum { .. } | ReadError::DataChecksum { .. } => {
             (Category::Tree, Severity::Integrity)
         }

@@ -1,19 +1,18 @@
 [package]
 name = "ferrosys-cli"
-description = "Command-line formatter, inspector, and extractor for ext4, ext3, ext2, FAT32, FAT16, FAT12, exFAT, and btrfs images, built on ferrosys"
+description = "Command-line formatter, inspector, and extractor for ext4, ext3, ext2, FAT32, FAT16, FAT12, exFAT, btrfs, and APFS images, built on ferrosys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Five is the registry's limit, so each family gets the one name someone searches for rather
-# than one entry per format; the lineages they cover are in the description, which the
-# registry's own search reads. `mkfs` leads because this is the artifact that answers to it:
-# someone looking for the command they would otherwise reach for is looking for a binary, and
-# the library one crate over spends that slot on `disk-image` instead. `filesystem` is absent,
-# being in `categories` already.
-keywords = ["mkfs", "ext4", "btrfs", "exfat", "fat32"]
+# Five is the registry's limit, and the description, which the registry's search reads, spells
+# every format. `mkfs` leads because this is the artifact that answers to it: someone looking
+# for the command they would otherwise reach for is looking for a binary, and the library one
+# crate over spends that slot on `disk-image`. The other four are the families fewest other
+# crates write: ext4, APFS, btrfs and exFAT. `filesystem` is in `categories`.
+keywords = ["mkfs", "ext4", "apfs", "btrfs", "exfat"]
 categories = ["command-line-utilities", "filesystem"]
 # The package's front page on a registry.
 readme = "README.md"
@@ -43,7 +42,7 @@ doc = false
 # identified whatever it turns out to be. A family missing here is not a smaller build; it
 # is a wrong answer from a shipping command.
 #
-# The three decoders are on for the same reason every family is. A btrfs someone points this
+# The decoders are on for the same reason every family is. A btrfs someone points this
 # binary at is one somebody else's kernel wrote, and every btrfs in use writes compressed
 # extents where a mount was given `compress=`; a binary without the decoders would answer
 # `extract` on an ordinary root filesystem with a refusal naming an algorithm. Reading a real
@@ -53,11 +52,15 @@ ferrosys = { workspace = true, features = [
     "fat",
     "exfat",
     "btrfs",
+    "apfs",
     "tar",
     "dir",
     "zlib",
     "lzo",
     "zstd",
+    "lzvn",
+    "lzfse",
+    "lzbitmap",
 ] }
 # Typed error enums. Build-time proc-macro only; no runtime footprint. Argument
 # parsing is hand-written and takes no dependency.

@@ -22,7 +22,9 @@ use crate::ondisk::{
     FileType, Inode, has_empty_name, longest_stored_name, split_for_storage, xattr_block_len,
 };
 use crate::path::canonical_parts;
-use crate::source::{EntryKind, FileContent, MODE_TYPE_MASK, Metadata, Source, SourceEntry};
+use crate::source::{
+    Darwin, EntryKind, FileContent, MODE_TYPE_MASK, Metadata, Source, SourceEntry,
+};
 use crate::time::Timestamp;
 use crate::xattr::Xattr;
 
@@ -51,6 +53,17 @@ const FAST_SYMLINK_MAX: usize = 60;
 /// sentinel meaning the count is not tracked — and a file cannot hold more
 /// hard links than this.
 const EXT4_LINK_MAX: u16 = 65000;
+
+/// Refuse an entry carrying BSD flags, which ext holds none of.
+fn validate_darwin(path: &[u8], darwin: Option<&Darwin>) -> Result<(), ModelError> {
+    match darwin.map(Darwin::stated_flags) {
+        Some(flags) if flags != 0 => Err(ModelError::BsdFlagsNotHeld {
+            path: path.to_vec(),
+            flags,
+        }),
+        _ => Ok(()),
+    }
+}
 
 /// Refuse a stated mode that carries file-type bits.
 ///
@@ -192,6 +205,34 @@ pub enum ModelError {
         path: Vec<u8>,
         /// The mode as given.
         mode: u16,
+    },
+    /// An entry carries BSD flags, which a Darwin filesystem records and this one does not.
+    ///
+    /// Refused rather than dropped. A caller who accepts the loss for an entry clears its
+    /// [`darwin`](crate::SourceEntry::darwin) part; a compressed file's stored form is not a
+    /// loss, since its content arrives decoded.
+    #[error(
+        "{}: BSD flags {flags:#x} are a Darwin filesystem's, and this one holds none",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    BsdFlagsNotHeld {
+        /// The offending path.
+        path: Vec<u8>,
+        /// The flags it carries, but the one saying it is compressed.
+        flags: u32,
+    },
+    /// An entry states a birth time and its inode has no field for one: a 128-byte inode
+    /// ends before the creation time. Refused rather than dropped. A caller who accepts the
+    /// loss for an entry clears its [`btime`](Metadata::btime).
+    #[error(
+        "{}: a 128-byte inode has no field for the birth time the entry states",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    BirthTimeNotHeld {
+        /// The offending path.
+        path: Vec<u8>,
     },
     /// A hard link's target does not exist.
     #[error(
@@ -398,10 +439,12 @@ pub enum ModelError {
         /// The size a regular file must stay under without the feature.
         limit: u64,
     },
-    /// An entry carries a timestamp the on-disk format cannot represent: its seconds
-    /// lie outside the range an ext4 inode holds, or its nanoseconds are not a valid
-    /// sub-second fraction. It is rejected rather than silently wrapped to a different
-    /// instant.
+    /// An entry carries a timestamp its inode cannot represent: its seconds lie outside the
+    /// range the inode holds, or its nanoseconds are not a fraction of a second. An inode
+    /// larger than 128 bytes holds 1901 to 2446 to the nanosecond; a 128-byte inode holds a
+    /// signed 32-bit second, 1901 to 2038, and no fraction, which is
+    /// [`FractionNotHeld`](Self::FractionNotHeld). It is rejected rather than wrapped to a
+    /// different instant or rounded.
     #[error(
         "entry {} has a timestamp of {secs}s + {nanos}ns outside the representable range",
         crate::escape::printable(.path)
@@ -413,6 +456,23 @@ pub enum ModelError {
         /// The out-of-range seconds value.
         secs: i64,
         /// The nanosecond fraction.
+        nanos: u32,
+    },
+    /// An entry carries a time with a fraction of a second, whose seconds a 128-byte inode
+    /// holds and whose fraction it does not: such an inode ends before the words a fraction
+    /// is stored in. It is rejected rather than rounded to the second.
+    #[error(
+        "entry {} has a time of {secs}s + {nanos}ns, and a 128-byte inode holds whole seconds \
+         alone",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    FractionNotHeld {
+        /// The entry's path.
+        path: Vec<u8>,
+        /// The seconds, which the inode holds.
+        secs: i64,
+        /// The nanosecond fraction it does not.
         nanos: u32,
     },
 }
@@ -473,8 +533,8 @@ pub struct ModelInode {
     pub ctime: Timestamp,
     /// Modification time.
     pub mtime: Timestamp,
-    /// Creation time (derived from the modification time; no source records a birth
-    /// time).
+    /// Creation time: the entry's birth time, or its modification time where the source
+    /// states none.
     pub crtime: Timestamp,
     /// Extended attributes attached to this inode.
     pub xattrs: Vec<Xattr>,
@@ -589,17 +649,33 @@ struct Times {
 }
 
 impl Times {
-    /// Reject any of the four times the on-disk format cannot represent, naming `path`
-    /// in the error. Checked once per entry, before the times reach an inode.
-    fn validate(&self, path: &[u8]) -> Result<(), ModelError> {
-        for t in [self.atime, self.ctime, self.mtime, self.crtime] {
-            if !crate::ondisk::time_is_representable(t) {
-                return Err(ModelError::TimestampOutOfRange {
+    /// Reject any of the times an inode of `inode_size` stores that it cannot represent,
+    /// naming `path` in the error. Checked once per entry, before the times reach an inode.
+    /// A 128-byte inode stores no creation time, so only the other three are asked of it.
+    fn validate(&self, path: &[u8], inode_size: u16) -> Result<(), ModelError> {
+        let extra = crate::ondisk::extra_isize_for(inode_size);
+        let stored = if crate::ondisk::Inode::has_crtime(inode_size, extra) {
+            &[self.atime, self.ctime, self.mtime, self.crtime][..]
+        } else {
+            &[self.atime, self.ctime, self.mtime][..]
+        };
+        for &t in stored {
+            if crate::ondisk::time_is_representable(t, inode_size) {
+                continue;
+            }
+            let whole = Timestamp::from_secs(t.secs);
+            if t.nanos != 0 && crate::ondisk::time_is_representable(whole, inode_size) {
+                return Err(ModelError::FractionNotHeld {
                     path: path.to_vec(),
                     secs: t.secs,
                     nanos: t.nanos,
                 });
             }
+            return Err(ModelError::TimestampOutOfRange {
+                path: path.to_vec(),
+                secs: t.secs,
+                nanos: t.nanos,
+            });
         }
         Ok(())
     }
@@ -632,24 +708,37 @@ impl ModelConfig {
         }
     }
 
-    /// Resolve an entry's four timestamps: the fixed time on every field when set,
-    /// otherwise the entry's access/change/modification times with the creation time
-    /// derived from the modification time.
-    fn times(&self, meta: &Metadata) -> Times {
-        match self.fixed_time {
+    /// Resolve an entry's four timestamps, refusing any its inode cannot hold and naming
+    /// `path`: the fixed time on every field when set, otherwise the entry's access, change
+    /// and modification times, with its birth time as the creation time, or the modification
+    /// time where it states none. A 128-byte inode has no creation field, so a birth time
+    /// stated for one is refused rather than dropped.
+    fn times(&self, meta: &Metadata, path: &[u8]) -> Result<Times, ModelError> {
+        let times = match self.fixed_time {
             Some(t) => Times {
                 atime: t,
                 ctime: t,
                 mtime: t,
                 crtime: t,
             },
-            None => Times {
-                atime: meta.atime,
-                ctime: meta.ctime,
-                mtime: meta.mtime,
-                crtime: meta.mtime,
-            },
-        }
+            None => {
+                let extra = crate::ondisk::extra_isize_for(self.inode_size);
+                if meta.btime.is_some() && !crate::ondisk::Inode::has_crtime(self.inode_size, extra)
+                {
+                    return Err(ModelError::BirthTimeNotHeld {
+                        path: path.to_vec(),
+                    });
+                }
+                Times {
+                    atime: meta.atime,
+                    ctime: meta.ctime,
+                    mtime: meta.mtime,
+                    crtime: meta.btime.unwrap_or(meta.mtime),
+                }
+            }
+        };
+        times.validate(path, self.inode_size)?;
+        Ok(times)
     }
 
     /// The timestamp for the always-present directories: the fixed time when set,
@@ -711,15 +800,13 @@ fn validate_xattrs(path: &[u8], xattrs: &[Xattr], config: &ModelConfig) -> Resul
             path: path.to_vec(),
         });
     }
-    for (i, x) in xattrs.iter().enumerate() {
+    for x in xattrs {
         let reason = if has_empty_name(&x.name) {
             // An empty name is the end-of-list terminator under index 0 and an
             // unaddressable entry under any other index.
             Some("empty")
         } else if x.name.contains(&0) {
             Some("embedded NUL")
-        } else if xattrs[..i].iter().any(|y| y.name == x.name) {
-            Some("duplicate")
         } else {
             None
         };
@@ -730,6 +817,13 @@ fn validate_xattrs(path: &[u8], xattrs: &[Xattr], config: &ModelConfig) -> Resul
                 reason,
             });
         }
+    }
+    if let Some(name) = crate::xattr::repeated_name(xattrs) {
+        return Err(ModelError::InvalidXattrName {
+            path: path.to_vec(),
+            name: name.to_vec(),
+            reason: "duplicate",
+        });
     }
     if longest_stored_name(xattrs) > 255 {
         return Err(ModelError::XattrNameTooLong {
@@ -847,7 +941,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
 
     // The format-wide default and fixed times reach the always-present directories, so
     // an unrepresentable one is caught once here rather than per inode.
-    config.base_time().validate(b"/")?;
+    config.base_time().validate(b"/", config.inode_size)?;
 
     // Split the source: an entry naming the root describes inode 2, which already
     // exists, while every other entry creates one. The rest are processed in sorted
@@ -875,9 +969,9 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
     // has one, and the standard 0755 root-owned directory otherwise.
     let root = match &root_entry {
         Some(entry) => {
-            let times = config.times(&entry.meta);
-            times.validate(&entry.path)?;
+            let times = config.times(&entry.meta, &entry.path)?;
             validate_mode(&entry.path, entry.meta.mode)?;
+            validate_darwin(&entry.path, entry.darwin.as_ref())?;
             let xattrs = stored_xattrs(&entry.path, &entry.xattrs)?;
             validate_xattrs(&entry.path, &xattrs, &config)?;
             let mut root = dir_inode(ROOT_INO, 0o040000 | entry.meta.mode, times, xattrs);
@@ -943,9 +1037,9 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         let ino = next_ino;
         next_ino += 1;
         let meta = &n.entry.meta;
-        let times = config.times(meta);
-        times.validate(&n.entry.path)?;
+        let times = config.times(meta, &n.entry.path)?;
         validate_mode(&n.entry.path, meta.mode)?;
+        validate_darwin(&n.entry.path, n.entry.darwin.as_ref())?;
         let xattrs = stored_xattrs(&n.entry.path, &n.entry.xattrs)?;
         validate_xattrs(&n.entry.path, &xattrs, &config)?;
         // Every kind but a directory shares this leaf construction; a directory's
@@ -1477,6 +1571,93 @@ mod tests {
             matches!(err, ModelError::TimestampOutOfRange { secs, .. } if secs == crate::ondisk::TIME_SECS_MAX + 1),
             "expected TimestampOutOfRange, got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_birth_time_a_small_inode_has_no_field_for_is_refused() {
+        let born = Metadata::new(0o644, Timestamp::from_secs(1_700_000_000))
+            .with_birth_time(Timestamp::from_secs(1_600_000_000));
+        let file = || TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), born);
+        let small = ModelConfig {
+            inode_size: 128,
+            ..config()
+        };
+        assert!(matches!(
+            build_model(file(), small),
+            Err(ModelError::BirthTimeNotHeld { path }) if path == b"/f"
+        ));
+        // The fixed time states every time of every inode, the creation time among them, so
+        // nothing the source stated is lost by its having no field.
+        let fixed = ModelConfig {
+            fixed_time: Some(Timestamp::from_secs(1_500_000_000)),
+            ..small
+        };
+        build_model(file(), fixed).expect("the fixed time over it");
+        // A larger inode holds it, as the creation time.
+        let m = build_model(file(), config()).expect("held");
+        let crtime = m
+            .inodes
+            .values()
+            .find(|i| matches!(i.content, Content::File(_)))
+            .expect("the file")
+            .crtime;
+        assert_eq!(crtime, Timestamp::from_secs(1_600_000_000));
+    }
+
+    #[test]
+    fn a_time_a_small_inode_holds_no_field_for_is_rejected() {
+        // A 128-byte inode ends before each time's extra word: a second past 2038, or a
+        // fraction of one, has nowhere to go and would be written as another instant.
+        let small = ModelConfig {
+            inode_size: 128,
+            ..config()
+        };
+        let at = |mtime: Timestamp| {
+            let m = Metadata::new(0o644, Timestamp::from_secs(1_700_000_000));
+            let m = m.with_times(m.atime, m.ctime, mtime);
+            build_model(
+                TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), m),
+                small,
+            )
+        };
+        let past = Timestamp::from_secs(i64::from(i32::MAX) + 1);
+        assert!(matches!(
+            at(past),
+            Err(ModelError::TimestampOutOfRange { secs, .. }) if secs == past.secs
+        ));
+        let fraction = Timestamp {
+            secs: 1_700_000_000,
+            nanos: 1,
+        };
+        assert!(matches!(
+            at(fraction),
+            Err(ModelError::FractionNotHeld {
+                secs: 1_700_000_000,
+                nanos: 1,
+                ..
+            })
+        ));
+        at(Timestamp::from_secs(i64::from(i32::MAX))).expect("the field's last second");
+        // A larger inode holds both.
+        let large = ModelConfig {
+            inode_size: 256,
+            ..config()
+        };
+        let m = Metadata::new(0o644, past).with_times(fraction, fraction, past);
+        build_model(
+            TreeBuilder::new().file(b"/f".to_vec(), b"x".to_vec(), m),
+            large,
+        )
+        .expect("held");
+        // The format's own instant reaches the root, and is held to the same rule.
+        let cfg = ModelConfig {
+            default_time: fraction,
+            ..small
+        };
+        assert!(matches!(
+            build_model(TreeBuilder::new(), cfg),
+            Err(ModelError::FractionNotHeld { path, .. }) if path == b"/"
+        ));
     }
 
     #[test]

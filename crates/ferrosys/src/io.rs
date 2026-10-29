@@ -46,20 +46,30 @@
 //! by the change that gives that family a materializer or a reader, which is what keeps an
 //! unused item here reported rather than quietly allowed.
 //!
-//! All four families have both directions, so today every gate names the same four. The
-//! gates stay separate all the same, because they are widened by different events — a family
-//! arrives one direction at a time, and each direction's gate is the record of which
-//! families have earned it.
+//! The gates are widened by different events — a family arrives one direction at a time — and
+//! each direction's gate is the record of which families have earned it. All five families
+//! have both directions, so both gates name all five.
 //!
 //! Nothing in this paragraph is a doc link, and deliberately: a link naming an item that is
 //! absent from some configuration resolves in the deepest build and is a hard error in every
 //! other, which is the class `ci/lint-features.sh` exists to catch.
 
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 use std::io::{Read, Result, Seek, SeekFrom};
-// The write half alone: `ByteSink` is what a materializer takes, so a family that has a
-// reader and no writer yet reaches everything above and none of this.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+// The write half: `ByteSink` is what a materializer takes.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 use std::io::Write;
 
 /// A seekable destination, and how far into it the writing has reached.
@@ -67,14 +77,26 @@ use std::io::Write;
 /// The high-water mark is what [`extend_to`](Self::extend_to) needs: a filesystem whose last
 /// blocks hold nothing never writes them, so the destination would otherwise end short of
 /// the size the metadata claims.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) struct ByteSink<W> {
     sink: W,
     /// One past the highest byte offset written.
     written_end: u64,
 }
 
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 impl<W: Write + Seek> ByteSink<W> {
     /// A sink over `sink`, with nothing written yet.
     pub(crate) fn new(sink: W) -> Self {
@@ -140,7 +162,13 @@ impl<W: Write + Seek> ByteSink<W> {
 /// past the end as an out-of-range reference to whatever named it, a rewrite answers it as
 /// the i/o failure it is — so this hands back [`std::io::ErrorKind::UnexpectedEof`] and lets
 /// each one say what it is about.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn read_exact_at<R: Read + Seek>(
     src: &mut R,
     offset: u64,
@@ -155,7 +183,13 @@ pub(crate) fn read_exact_at<R: Read + Seek>(
 ///
 /// The form for a loop over many runs of one size — a data pass verifying a file sector by
 /// sector — where the allocating form would cost one fresh buffer per read.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn read_exact_into<R: Read + Seek>(
     src: &mut R,
     offset: u64,
@@ -163,6 +197,142 @@ pub(crate) fn read_exact_into<R: Read + Seek>(
 ) -> Result<()> {
     src.seek(SeekFrom::Start(offset))?;
     src.read_exact(buf)
+}
+
+/// A source that ends where the filesystem's region does: the end a caller named, or the
+/// source's own, whichever comes first.
+///
+/// Every family's reader holds its source through one, and detection reads through one, so the
+/// region is applied once rather than at each place a reader measures or reads. A read that
+/// reaches the region's end comes back short, which [`read_exact_at`] reports as
+/// [`std::io::ErrorKind::UnexpectedEof`] as it does for a short source. A seek from the end
+/// counts from the region's end, so a reader measuring its source measures the region. A
+/// filesystem inside a partition is therefore held to the partition, and the bytes of the
+/// partition after it are never read as its own.
+///
+/// Offsets are the source's own, not the region's: the region begins at the `base` every
+/// reader already adds, and only its end is applied here.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+pub(crate) struct Bounded<R> {
+    inner: R,
+    /// One past the region's last byte, as an offset into `inner`, or `None` where the region
+    /// runs to the source's end.
+    end: Option<u64>,
+    /// Where `inner` stands, or `None` until a seek or a query has said.
+    at: Option<u64>,
+}
+
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+impl<R> Bounded<R> {
+    /// `inner`, ending `len` bytes past `base`, or at its own end where `len` is `None`.
+    ///
+    /// A region whose end leaves the 64-bit range ends at the top of it, which no source
+    /// reaches: such a region is bounded by the source alone.
+    pub(crate) fn new(inner: R, base: u64, len: Option<u64>) -> Self {
+        Self {
+            inner,
+            end: len.map(|len| base.saturating_add(len)),
+            at: None,
+        }
+    }
+
+    /// How many of `wanted` bytes at the current position lie inside the region.
+    fn room(&mut self, wanted: usize) -> Result<usize>
+    where
+        R: Seek,
+    {
+        let Some(end) = self.end else {
+            return Ok(wanted);
+        };
+        let at = match self.at {
+            Some(at) => at,
+            None => {
+                let at = self.inner.stream_position()?;
+                self.at = Some(at);
+                at
+            }
+        };
+        let room = end.saturating_sub(at);
+        Ok(usize::try_from(room).map_or(wanted, |room| room.min(wanted)))
+    }
+}
+
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+impl<R: Read + Seek> Read for Bounded<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let take = self.room(buf.len())?;
+        let n = self.inner.read(&mut buf[..take])?;
+        if let Some(at) = self.at.as_mut() {
+            *at += n as u64;
+        }
+        Ok(n)
+    }
+}
+
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+impl<R: Seek> Seek for Bounded<R> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        // Unknown until the seek has answered, so a seek that fails partway leaves nothing
+        // stale behind it.
+        self.at = None;
+        let to = match (pos, self.end) {
+            (SeekFrom::End(delta), Some(end)) => {
+                let stop = self.inner.seek(SeekFrom::End(0))?.min(end);
+                let to = stop.checked_add_signed(delta).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "a seek from the region's end leaves the offset space",
+                    )
+                })?;
+                self.inner.seek(SeekFrom::Start(to))?
+            }
+            _ => self.inner.seek(pos)?,
+        };
+        self.at = Some(to);
+        Ok(to)
+    }
+}
+
+/// The write half, for the one verb that writes into an image it did not make: a rewrite of
+/// a filesystem inside a partition stops at the partition's end as a read does.
+#[cfg(feature = "ext")]
+impl<W: Write + Seek> Write for Bounded<W> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        let take = self.room(buf.len())?;
+        let n = self.inner.write(&buf[..take])?;
+        if let Some(at) = self.at.as_mut() {
+            *at += n as u64;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// The byte offset `index` units of `unit` bytes past `base`, or [`None`] where it leaves the
@@ -176,7 +346,13 @@ pub(crate) fn read_exact_into<R: Read + Seek>(
 /// `unit` of 1 addresses bytes and `base` of 0 counts from the start of whatever the caller
 /// is addressing within — a filesystem's own first byte, say, with the source's base added
 /// afterwards by whatever places it.
-#[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) const fn offset_of(base: u64, index: u64, unit: u64) -> Option<u64> {
     match index.checked_mul(unit) {
         Some(within) => base.checked_add(within),
@@ -260,7 +436,13 @@ impl Seek for Counting {
 
 #[cfg(all(
     test,
-    any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs")
+    any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    )
 ))]
 mod tests {
     use super::*;
@@ -328,6 +510,70 @@ mod tests {
     }
 
     #[test]
+    fn a_bounded_source_ends_at_its_region_and_measures_to_it() {
+        // Sixty-four bytes, of which a region of sixteen begins at eight.
+        let bytes: Vec<u8> = (0u8..64).collect();
+        let mut src = Bounded::new(Cursor::new(bytes.clone()), 8, Some(16));
+        // Measured from the end, the source is as long as the region's end.
+        assert_eq!(src.seek(SeekFrom::End(0)).expect("seek"), 24);
+        assert_eq!(src.seek(SeekFrom::End(-4)).expect("seek"), 20);
+        // A read inside the region is the source's own bytes, at the source's own offsets.
+        assert_eq!(read_exact_at(&mut src, 8, 16).expect("read"), &bytes[8..24]);
+        // One reaching past the region's end is a short source, as one past a file's end is.
+        let err = read_exact_at(&mut src, 20, 8).expect_err("past the region");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        // And one beginning past it reads nothing.
+        let err = read_exact_at(&mut src, 40, 1).expect_err("past the region");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_bounded_source_is_no_longer_than_the_source_under_it() {
+        // A region the source does not wholly hold ends where the source does, so a reader
+        // measuring it learns what is there rather than what was named.
+        let mut src = Bounded::new(Cursor::new(vec![0u8; 32]), 8, Some(1 << 20));
+        assert_eq!(src.seek(SeekFrom::End(0)).expect("seek"), 32);
+        // No length is the source's own end, and a length whose end leaves the range is too.
+        let mut src = Bounded::new(Cursor::new(vec![0u8; 32]), 8, None);
+        assert_eq!(src.seek(SeekFrom::End(0)).expect("seek"), 32);
+        assert_eq!(read_exact_at(&mut src, 0, 32).expect("read").len(), 32);
+        let mut src = Bounded::new(Cursor::new(vec![0u8; 32]), u64::MAX - 1, Some(8));
+        assert_eq!(src.seek(SeekFrom::End(0)).expect("seek"), 32);
+    }
+
+    #[test]
+    fn a_bounded_source_bounds_a_read_from_wherever_the_source_stood() {
+        // Nothing has sought yet, so the position is asked of the source under it.
+        let mut inner = Cursor::new((0u8..32).collect::<Vec<_>>());
+        inner.set_position(12);
+        let mut src = Bounded::new(inner, 0, Some(16));
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            src.read(&mut buf).expect("read"),
+            4,
+            "four bytes remain in the region"
+        );
+        assert_eq!(&buf[..4], &[12, 13, 14, 15]);
+        assert_eq!(src.read(&mut buf).expect("read"), 0);
+    }
+
+    #[cfg(feature = "ext")]
+    #[test]
+    fn a_bounded_destination_takes_no_byte_past_its_region() {
+        let mut dest = Bounded::new(Cursor::new(vec![0u8; 32]), 4, Some(8));
+        dest.seek(SeekFrom::Start(10)).expect("seek");
+        let err = dest.write_all(&[0xff; 4]).expect_err("past the region");
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+        let bytes = dest.inner.into_inner();
+        assert_eq!(
+            &bytes[10..12],
+            &[0xff, 0xff],
+            "the two bytes inside the region"
+        );
+        assert_eq!(&bytes[12..14], &[0, 0], "nothing past it");
+    }
+
+    #[test]
     fn a_read_running_past_the_end_is_the_end_of_the_source_saying_so() {
         // The kind is what each caller relabels: an out-of-range reference to whatever
         // named the bytes, or the plain i/o failure it is. Handing back anything else here
@@ -340,7 +586,13 @@ mod tests {
     // The unit addressing is reached by a reader rather than by a materializer, whose offsets
     // come from a layout it planned rather than from a number an image supplied. So these two
     // are compiled where a reader is, which today is every family and need not stay so.
-    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+    #[cfg(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ))]
     #[test]
     fn an_offset_is_the_base_plus_as_many_units_as_asked_for() {
         assert_eq!(offset_of(1024, 3, 4096), Some(1024 + 3 * 4096));
@@ -350,7 +602,13 @@ mod tests {
         assert_eq!(offset_of(0, 5, 512), Some(2560));
     }
 
-    #[cfg(any(feature = "ext", feature = "fat", feature = "exfat", feature = "btrfs"))]
+    #[cfg(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    ))]
     #[test]
     fn an_offset_that_leaves_the_range_is_no_offset_rather_than_a_small_one() {
         // Both halves are computed from numbers an image supplies, so both are checked. A

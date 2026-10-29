@@ -14,7 +14,9 @@
 //!
 //! - **A cycle.** Nothing in a directory entry says it does not point back up the tree, and a
 //!   crafted image can say a directory is its own ancestor. Descending into a directory only
-//!   the first time its identity is reached terminates that.
+//!   the first time its identity is reached terminates that. Reaching one again is a tree no
+//!   family here holds when it is sound, so the family judges it under its read policy as
+//!   well: a strict read refuses the tree, and a lenient one passes the repeat over, bounded.
 //! - **The frontier.** Each iteration may push a whole directory's worth of children, and
 //!   distinct directories may map the same storage — so bounding only the names *popped*
 //!   would leave the stack bounded by the cap times a directory's fan-out rather than by the
@@ -70,6 +72,11 @@ pub(crate) trait Walk {
     /// The names below `entry`, in reverse name order so a stack pops them in order.
     fn children(&mut self, entry: &Self::Entry) -> Result<Vec<Self::Pending>, Self::Error>;
 
+    /// Judge `entry`, a directory whose identity the walk has already reached: a cycle, or a
+    /// second name for one directory. The walk does not descend into it again whatever this
+    /// answers; the answer is whether the reader's policy refuses the tree for it.
+    fn repeated(&mut self, entry: &Self::Entry) -> Result<(), Self::Error>;
+
     /// The failure this family reports for a walk past `limit` names.
     fn too_large(limit: usize) -> Self::Error;
 }
@@ -100,8 +107,8 @@ where
     let mut seen = 0usize;
 
     // Track the directories descended into: a well-formed tree reaches each exactly once, so
-    // declining to re-descend a repeat bounds the walk against a cycle or a hard-linked
-    // directory rather than fanning out.
+    // declining to re-descend a repeat bounds the walk against a cycle or a second name for
+    // a directory rather than fanning out, and the family says whether the repeat is fatal.
     let mut visited: HashSet<W::Key> = HashSet::new();
     let (mut stack, seeded) = walk.seed().map_err(E::from)?;
     visited.extend(seeded);
@@ -120,22 +127,23 @@ where
         let entry = walk.resolve(pending).map_err(E::from)?;
         // Descend into a subdirectory only the first time its identity is reached; a repeat
         // is a cycle or a second name for one directory, so re-descending would not
-        // terminate.
-        if walk
-            .descend_key(&entry)
-            .is_some_and(|key| visited.insert(key))
-        {
-            let children = walk.children(&entry).map_err(E::from)?;
-            // The cap bounds the names *pushed*, not only the names popped — see the module
-            // documentation for why the difference matters.
-            if seen
-                .saturating_add(stack.len())
-                .saturating_add(children.len())
-                > cap
-            {
-                return Err(E::from(W::too_large(cap)));
+        // terminate, and the family judges it rather than this passing it over unasked.
+        if let Some(key) = walk.descend_key(&entry) {
+            if visited.insert(key) {
+                let children = walk.children(&entry).map_err(E::from)?;
+                // The cap bounds the names *pushed*, not only the names popped — see the
+                // module documentation for why the difference matters.
+                if seen
+                    .saturating_add(stack.len())
+                    .saturating_add(children.len())
+                    > cap
+                {
+                    return Err(E::from(W::too_large(cap)));
+                }
+                stack.extend(children);
+            } else {
+                walk.repeated(&entry).map_err(E::from)?;
             }
-            stack.extend(children);
         }
         visit(walk, entry)?;
     }
@@ -156,10 +164,123 @@ pub(crate) fn child_path(prefix: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     (path.len() <= MAX_PATH).then_some(path)
 }
 
+/// The frontier the names `entries` make below `path`: each joined to it, with what the
+/// family keeps to visit it later, in reverse order so a stack pops them in the order the
+/// directory stores them.
+///
+/// A name no directory can hold stops the walk here rather than becoming a path, as `hostile`
+/// says: a name carrying a separator would traverse out of its own directory in every path
+/// built from it, which is what an extraction would then write. A path past the longest one
+/// this crate builds is `too_long`, given the path as far as it went.
+#[cfg(any(feature = "btrfs", feature = "apfs"))]
+pub(crate) fn frontier<T, E>(
+    path: &[u8],
+    entries: impl IntoIterator<Item = (Vec<u8>, T)>,
+    hostile: impl Fn(Vec<u8>) -> E,
+    too_long: impl Fn(Vec<u8>) -> E,
+) -> Result<Vec<(Vec<u8>, T)>, E> {
+    let mut out = Vec::new();
+    for (name, keep) in entries {
+        if crate::path::is_hostile_component(&name) {
+            return Err(hostile(name));
+        }
+        let Some(child) = child_path(path, &name) else {
+            let mut long = path.to_vec();
+            long.push(b'/');
+            long.extend_from_slice(&name);
+            return Err(too_long(long));
+        };
+        out.push((child, keep));
+    }
+    out.reverse();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::child_path;
+    use super::{Seed, Walk, child_path, drive};
     use crate::policy::MAX_PATH;
+
+    /// A tree of named directories by number, with the root as 0, and a refusal to give for
+    /// a repeat or not.
+    struct Graph {
+        children: Vec<Vec<(&'static str, u32)>>,
+        refuse: bool,
+        repeats: Vec<Vec<u8>>,
+    }
+
+    impl Walk for Graph {
+        type Pending = (Vec<u8>, u32);
+        type Entry = (Vec<u8>, u32);
+        type Key = u32;
+        type Error = Vec<u8>;
+
+        fn cap(&mut self) -> usize {
+            100
+        }
+
+        fn seed(&mut self) -> Result<Seed<Self>, Vec<u8>> {
+            let root = (Vec::new(), 0);
+            Ok((self.children(&root)?, vec![0]))
+        }
+
+        fn resolve(&mut self, pending: (Vec<u8>, u32)) -> Result<(Vec<u8>, u32), Vec<u8>> {
+            Ok(pending)
+        }
+
+        fn descend_key(&self, entry: &(Vec<u8>, u32)) -> Option<u32> {
+            Some(entry.1)
+        }
+
+        fn children(&mut self, entry: &(Vec<u8>, u32)) -> Result<Vec<(Vec<u8>, u32)>, Vec<u8>> {
+            Ok(self.children[entry.1 as usize]
+                .iter()
+                .rev()
+                .map(|(name, number)| (child_path(&entry.0, name.as_bytes()).unwrap(), *number))
+                .collect())
+        }
+
+        fn repeated(&mut self, entry: &(Vec<u8>, u32)) -> Result<(), Vec<u8>> {
+            if self.refuse {
+                return Err(entry.0.clone());
+            }
+            self.repeats.push(entry.0.clone());
+            Ok(())
+        }
+
+        fn too_large(_: usize) -> Vec<u8> {
+            b"too large".to_vec()
+        }
+    }
+
+    #[test]
+    fn a_directory_reached_again_is_judged_by_the_family_and_never_descended_twice() {
+        // /a/b names the root: a cycle. A walk that passes it over yields every name once and
+        // reports the repeat; one whose family refuses it stops there.
+        let graph = |refuse| Graph {
+            children: vec![vec![("a", 1)], vec![("b", 0)]],
+            refuse,
+            repeats: Vec::new(),
+        };
+        let mut lenient = graph(false);
+        let mut seen = Vec::new();
+        drive(
+            &mut lenient,
+            |_, entry: (Vec<u8>, u32)| -> Result<(), Vec<u8>> {
+                seen.push(entry.0);
+                Ok(())
+            },
+        )
+        .expect("a lenient walk passes the repeat over");
+        assert_eq!(seen, vec![b"/a".to_vec(), b"/a/b".to_vec()]);
+        assert_eq!(lenient.repeats, vec![b"/a/b".to_vec()]);
+
+        let mut strict = graph(true);
+        let refused = drive(&mut strict, |_, _: (Vec<u8>, u32)| -> Result<(), Vec<u8>> {
+            Ok(())
+        });
+        assert_eq!(refused, Err(b"/a/b".to_vec()));
+    }
 
     #[test]
     fn a_child_path_joins_with_one_separator_and_stops_at_the_bound() {
