@@ -7,7 +7,44 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [Unreleased]
+## [0.7.0] - 2026-10-29
+
+A fifth family: APFS, read and written. ferrosys reads an APFS container and every volume in
+it, each as it is and as its snapshots keep it. It writes one laid out as `newfs_apfs` lays one
+out on macOS 14, 15, 26 and 27, its volumes filled from any source with what a Mac records of a
+file, BSD flags and compressed forms included; a volume can root from a snapshot of itself, and
+a System and a Data volume can form a group with firmlinks. `ImageSource` gives any image's
+tree as a source, so one family's image formats another's, and every family writes a birth
+time. Every reader holds a filesystem to its partition, and a scan holds a read its source
+failed apart from its findings.
+
+A breaking release, and these are the changes a caller can see:
+
+- The default features add `apfs`, `lzvn`, `lzfse` and `lzbitmap`. In a default build `detect`
+  and `open` name an APFS container.
+- The license expression is `(MIT OR Apache-2.0) AND Unicode-3.0 AND BSD-3-Clause`. A build
+  without `apfs`, `lzvn` and `lzfse` compiles code under MIT OR Apache-2.0 alone.
+- `Deviation` has a required method, `is_source_failure`.
+- A scan holds a read its source failed in `source_failures`, apart from its findings: it
+  counts towards neither `worst_severity` nor `has_fatal`, and a report holding one is not
+  clean. The findings document is schema 3, and `inspect` exits 8 for a source that failed.
+- `ext::rewrite_identity_at` takes the region's length, and
+  `ext::ondisk::time_is_representable` the inode size.
+- `ExtractReport::dropped_xattrs` names each attribute an extraction left out, in place of the
+  `xattrs_dropped` flag.
+- `fat::Times::create` is an `Option`, `None` for a creation field the format leaves zero.
+- A strict walk refuses a directory the tree reaches twice, and strict FAT and exFAT reads
+  refuse more of what each format fixes. `identity` exits 4 for a filesystem whose groups lie
+  past its image, and `extract --to-tar` exits 4 for a damaged image, as `inspect` does.
+- An extraction writes a FAT, exFAT or btrfs volume's `/lost+found` like any other directory.
+
+To migrate: a type implementing `Deviation` answers `is_source_failure` with whether it
+records a read the source failed for a reason other than ending. `rewrite_identity_at` takes
+`None` as its fourth argument for the rest of the image, and `time_is_representable` the inode
+size. A test of `xattrs_dropped` reads `!dropped_xattrs.is_empty()`. A reader of the findings
+document reads schema 3 and its `source_failures`. A build that wants the 0.6 default names it,
+with `default-features = false, features = ["ext", "fat", "exfat", "btrfs", "zlib", "lzo",
+"zstd"]`.
 
 ### Added
 
@@ -2785,6 +2822,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.7.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.7.0
 [0.6.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.6.0
 [0.5.2]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.2
 [0.5.1]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.1
