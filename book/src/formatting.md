@@ -327,20 +327,16 @@ sources are extended attributes without `ext_attr`, and a regular file of
 `LARGE_FILE_MIN_SIZE` or more without `large_file`. Nothing is silently dropped and no
 feature is silently added.
 
-### Pinning the bytes across versions
+### Pinning a feature set across versions
 
 Images are byte-reproducible. The UUID, the timestamps, and the hash seed are inputs, so
 the same source and the same options write the same bytes within a release.
 
-`FeatureSet::DEFAULT`, `EXT2`, and `EXT3` are fixed and stay fixed, so pinning to one of
-them pins the feature words across releases. `FeatureSet::LATEST` deliberately does not. It
-tracks what a current `mke2fs` writes for ext4, so it can gain a feature in any release. The
-bytes under it change with it. Name `LATEST` when parity with the current tool is what you
-want, and `DEFAULT` when reproducible bytes are.
-
-A release can still correct a formula under a fixed feature set to match `mke2fs`, which
-moves the bytes that formula governs. The changelog names each such correction, and
-[a reference geometry pin](#pinning-what-a-name-means-not-just-the-name) catches one.
+`FeatureSet::DEFAULT`, `EXT2`, and `EXT3` name the same feature words in every release.
+`FeatureSet::LATEST` tracks what a current `mke2fs` writes for ext4, so it can gain a
+feature in any release. Name `LATEST` when parity with the current tool is what you want,
+and `DEFAULT` when a fixed set of features is. The bytes written under any of them can
+differ from one release to the next.
 
 To record exactly what a build resolved to, `FeatureSet::pin` emits the whole set as one
 canonical document. It carries every feature word twice over, as exact bits and as readable
@@ -435,7 +431,8 @@ default changes. It does not move when the formula behind one changes underneath
 unchanged name. `grow max` reads the same before and after a change to how much `Max`
 reserves, while every block after the descriptor table moves.
 
-Planning at a **fixed reference size** and pinning the result is what closes that:
+Planning at a **fixed reference size** and pinning the result records what the formula
+gives at that size:
 
 ```rust
 # extern crate ferrosys;
@@ -475,7 +472,8 @@ journal_blocks 4096
 `reserved_gdt_blocks` is the line to notice. It is the descriptor headroom the grow
 reservation sized, and every block after the descriptor table sits where it does because of
 it. Pin the two documents together, the policy for the contract and one reference geometry
-for what the contract resolves to. That catches both a renamed option and a re-computed one.
+for what the contract resolves to. That catches a renamed option, and a re-computed one
+that changes what the reference size resolves to.
 
 The per-group placements are one line rather than one per group. That line is the count,
 and a `crc32c` over every field of every group. A filesystem has as many groups as it has

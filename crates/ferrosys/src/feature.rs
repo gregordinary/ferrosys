@@ -179,9 +179,9 @@ named_flags! {
 ///
 /// # Pinning an on-disk contract
 ///
-/// A caller who needs the same bytes from a future release of this crate pins the whole
-/// set, not a list of feature names: [`pin`](Self::pin) emits every field as one
-/// canonical document to record and compare. See its documentation for why the feature
+/// A caller pinning the features a format writes pins the whole set, not a list of feature
+/// names: [`pin`](Self::pin) emits every field as one canonical document to record and
+/// compare. See its documentation for why the feature
 /// names alone are not enough.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
@@ -350,13 +350,10 @@ impl FeatureSet {
     /// `metadata_csum` (ro_compat). Inode size 256, and group descriptors take the
     /// 64-byte form. The block size is the default 4096; 1024 and 2048 are also valid.
     ///
-    /// **This value is fixed.** It names one exact set of feature words and sizes, and it
-    /// keeps naming them at every version of this crate. That is what makes it safe to pin an
-    /// on-disk contract to. A release can still correct a formula under it to match
-    /// `mke2fs`, which moves the bytes that formula governs: the changelog names each such
-    /// correction, and a geometry pin planned at a fixed reference size catches one. Callers
-    /// who want the features a current `mke2fs` writes, whatever those become, name
-    /// [`LATEST`](Self::LATEST) instead.
+    /// **This value is fixed.** It names one exact set of feature words and sizes at every
+    /// version of this crate. The bytes a format writes under it can differ from one version
+    /// to the next. Callers who want the features a current `mke2fs` writes, whatever those
+    /// become, name [`LATEST`](Self::LATEST) instead.
     pub const DEFAULT: Self = Self {
         compat: Compat(
             Compat::HAS_JOURNAL.0
@@ -387,10 +384,9 @@ impl FeatureSet {
     /// The features a current `mke2fs` writes for ext4 — **a moving target, by design.**
     ///
     /// Equal to [`DEFAULT`](Self::DEFAULT) today. It tracks upstream `e2fsprogs`, so it
-    /// may gain a feature in any release of this crate, and a filesystem formatted from it
-    /// may therefore differ byte for byte between two versions of this crate. That is the
-    /// point of it: a caller who wants parity with whatever `mke2fs` currently produces
-    /// names this, and accepts that the answer changes when `mke2fs` does.
+    /// may gain a feature in any release of this crate. That is the point of it: a caller
+    /// who wants parity with whatever `mke2fs` currently produces names this, and accepts
+    /// that the answer changes when `mke2fs` does.
     ///
     /// It is **unsuitable for pinning an on-disk contract.** A caller who needs one names
     /// [`DEFAULT`](Self::DEFAULT), which is fixed, and records the resolved set with
@@ -599,8 +595,8 @@ impl FeatureSet {
         out
     }
 
-    /// Every field of this set as one canonical document, for a caller pinning the bytes
-    /// a format produces.
+    /// Every field of this set as one canonical document, for a caller pinning the features
+    /// a format writes.
     ///
     /// The document is the contract. A caller records what this emits — verbatim, as a
     /// blob — and compares it string-for-string on a later build; a difference is drift in

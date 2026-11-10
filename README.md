@@ -68,10 +68,9 @@ reservation. The image grows in place, and its descriptor table stays where it i
 The identifiers and timestamps an image carries are inputs. The writer produces the same
 image from the same inputs, every time, and puts only those inputs into it.
 
-The guarantee holds for one ferrosys version. Across versions, a pinned feature set keeps
-its feature words, and the changelog names each correction to a formula under one.
-`ext::FeatureSet::DEFAULT` is frozen, and `ext::FeatureSet::LATEST` tracks current `mke2fs`
-and moves between releases by design.
+The guarantee holds for one ferrosys version. `ext::FeatureSet::DEFAULT` names the same
+feature words in every version, and `ext::FeatureSet::LATEST` tracks current `mke2fs`. The
+bytes written under either can differ from one version to the next.
 
 ### Fidelity and accepted loss
 

@@ -124,13 +124,16 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
 - **An ext attribute's hash reads its name's bytes as unsigned under either directory-hash
   signedness,** as `mke2fs` writes it on every host. A name with a byte at or above `0x80`
   hashed sign-extended where `hash_signedness` was `Signed`.
-- **An ext journal is the size `mke2fs` gives it at every size.** Between 2^22 and 2^25
-  blocks the size doubles at each power of two rather than growing with the block count, so
-  a 10 GiB filesystem of 4 KiB blocks has a 16,384-block journal where it had 20,480.
+- **An ext journal is the size `mke2fs` gives it at every size.** `mke2fs` holds it at 16,384
+  blocks from 2^19 blocks to 2^22 and doubles it at each power of two to 2^25. Between 2^21
+  and 2^25 blocks the writer grew it with the block count instead, matching only at each
+  power of two, so a 10 GiB filesystem of 4 KiB blocks has a 16,384-block journal where it
+  had 20,480.
 - **An ext backup superblock past group 65,535 records 65,535 as its group,** as `mke2fs`
   writes it, where it recorded the group's low sixteen bits.
 - **Smaller ext fixes.** One inode per block at a 1 KiB block fills each group's bitmap rather
-  than overflowing it. `s_overhead_clusters` matches `mke2fs` at every block size and on ext3.
+  than overflowing it. `s_overhead_clusters` matches `mke2fs` at every block size, on ext3,
+  and where the journal takes more than four extents.
   A fit stops at a refusal no size changes. A hard link named under `/lost+found` is refused.
   A filesystem needing recovery with no journal is malformed. An inline file is held to the
   read cap by a streamed read, and an inline link to `PATH_MAX`. A directory's size takes its
@@ -199,6 +202,14 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
 ### Changed
 
+- **An image can differ from the one 0.7.0 wrote from the same inputs, under a fixed feature
+  set as well.** For ext: the journal's size between 2^21 and 2^25 blocks, everywhere but at
+  each power of two; the overhead the superblock records at a 1 KiB block size, with a
+  block-mapped journal, and from 2^25 blocks, where the journal takes more than four extents;
+  a backup superblock's group past group 65,535; and an attribute block's entry hash for a
+  name with a byte at or above `0x80` under `Signed` hash signedness. For btrfs: the device
+  size recorded for a size that is not a whole number of sectors, which is rounded down to
+  one. Each is described under Fixed.
 - **APFS is a feature a build names, and the library's default build compiles this project's
   code under MIT OR Apache-2.0 alone.** The default carries `ext`, `fat`, `exfat` and `btrfs`
   with `zlib`, `lzo` and `zstd`, and a build reading APFS names `apfs`, `lzvn`, `lzfse` and

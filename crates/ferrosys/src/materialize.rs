@@ -846,9 +846,9 @@ impl FormatPlan {
     /// when an option is renamed or re-defaulted — and not when the formula behind one
     /// changes underneath an unchanged name. `grow max` reads the same before and after a
     /// change to what `Max` reserves; `reserved_gdt_blocks` does not. Planning at one
-    /// reference size and pinning the result is what turns that class of change into a
-    /// diff, and the reference size makes the pin independent of what any particular build
-    /// is sized to.
+    /// reference size and pinning the result turns such a change into a diff wherever it
+    /// moves what that size resolves to, and the reference size makes the pin independent
+    /// of what any particular build is sized to.
     ///
     /// The per-group placements are one line rather than one per group — the count, and a
     /// `crc32c` over every field of every group in order. A filesystem has as many groups

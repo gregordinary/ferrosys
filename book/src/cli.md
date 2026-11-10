@@ -687,8 +687,7 @@ name is held to, refusing a code point that version leaves unassigned. It also d
 words of each volume's superblock, and macOS 26's kernel mounts either shape.
 
 `--formatted-by` is the program every volume records as having formatted it, up to 31 bytes.
-It defaults to this tool's name and version. Name it to write the same bytes with two
-versions of the tool.
+It defaults to this tool's name and version.
 
 **`--root-snapshot UUID:NAME` gives the first volume a snapshot of itself**, which the volume
 records as the one it roots from. The snapshot keeps the whole tree as it is written. Each

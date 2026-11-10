@@ -851,6 +851,16 @@ required:
                        records no time of its own, so for that family the flag is refused
                        rather than accepted and ignored
 
+sizing (with --size auto):
+  --slack PCT%|SIZE    how much of the filesystem must still be free once the contents are
+                       written: `20%` of it, or `64M` of it. Without this, `auto` leaves
+                       nothing — the right answer for an image that will only be read, and
+                       useless for one that will be written to. The share is of the
+                       finished filesystem, so `--slack 20%` is what `df` reports as 80%
+                       used. Up to 90%. For APFS it is room any user can write on macOS, a
+                       MiB or less a call, past what macOS keeps free before a write and
+                       the room it gives a growing file
+
 contents (at most one):
   --from-tar FILE|-    populate the filesystem from a tar archive. A named FILE is left on
                        disk and each member read as its file is placed, so memory holds a
@@ -981,8 +991,7 @@ geometry (apfs):
                        point that version leaves unassigned being refused, and two words of
                        each volume's superblock. macOS 26's kernel mounts either shape
   --formatted-by TEXT  the program every volume records as having formatted it: up to 31
-                       bytes. Defaults to this tool's name and version, so name it to write
-                       the same bytes with two versions of this tool
+                       bytes. Defaults to this tool's name and version
 
 fidelity (fat, exfat):
   --accept-loss LIST   which properties of the source this build may lose: `all`, or a
@@ -1013,15 +1022,6 @@ fidelity (fat, exfat):
   --assume-modes F:D   the modes a read will report, for a file and for a directory, in
                        octal. Defaults to 644:755. Set these to whatever the extraction
                        will use, so the two ends agree about what survived
-
-  --slack PCT%|SIZE    with --size auto, how much of the filesystem must still be free
-                       once the contents are written: `20%` of it, or `64M` of it. Without
-                       this, `auto` leaves nothing — the right answer for an image that
-                       will only be read, and useless for one that will be written to.
-                       The share is of the finished filesystem, so `--slack 20%` is what
-                       `df` reports as 80% used. Up to 90%. For APFS it is room any user
-                       can write on macOS, a MiB or less a call, past what macOS keeps
-                       free before a write and the room it gives a growing file
 
 geometry (ext):
   --block-size N       1024, 2048, or 4096 (the default). An APFS container takes this too,
