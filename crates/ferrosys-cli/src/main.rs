@@ -44,6 +44,26 @@
 // The tool inherits the library's bar: there is no `unsafe` here, ever.
 #![forbid(unsafe_code)]
 
+/// Write to the standard error as `eprint!` does, and go on whatever becomes of the write.
+///
+/// A standard error that is closed — a pipe whose reader has gone — holds nothing a run could
+/// report, so the run carries on and ends with the status its work earned. `eprint!` panics
+/// there, which ends a command part-way with a status that names no outcome of it.
+macro_rules! note {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr(), $($arg)*);
+    }};
+}
+
+/// The same, ending the line, as `eprintln!` does.
+macro_rules! noteln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod apfs;
 mod args;
 mod dest;
@@ -328,6 +348,16 @@ pub enum Error {
     /// read. The family's own message rides along inside it.
     #[error("the filesystem is malformed: {0}")]
     Tree(#[source] TreeError),
+    /// A filesystem was read, and what was asked for is beyond this build: a feature its
+    /// reader does not follow, an encoding it carries no decoder for, or content it holds no
+    /// key to. The filesystem may be entirely sound, so this is no verdict about it.
+    #[error("{0}")]
+    Unsupported(#[source] TreeError),
+    /// A read stopped at a bound: the cap the caller set on a file, a walk, or a path, or
+    /// the tool's own default cap. A sparse file may legitimately be that large, so this is
+    /// no verdict about the filesystem either.
+    #[error("{0}")]
+    Limit(#[source] TreeError),
     /// The scan found what the caller asked to be told about.
     #[error(
         "the filesystem holds {}{count} {}, the worst of them {}",
@@ -415,6 +445,10 @@ impl Error {
             // is a verdict about the filesystem, and what it says about reading them is not.
             Error::Tree(TreeError::Io { .. }) => exit::OPERATIONAL,
             Error::Tree(_) => exit::IMAGE_BAD,
+            // What this build cannot read is a command it cannot carry out, as `e2fsck`
+            // reports a filesystem whose features it does not support. So is a read a cap
+            // stopped: the cap is the caller's, and a file may be that large and sound.
+            Error::Unsupported(_) | Error::Limit(_) => exit::OPERATIONAL,
             // Writing an archive out of an image reads that image, so some of what an
             // archive failure carries is a verdict about the filesystem: a structure that
             // cannot be read, and a stored ACL that does not decode, are the image's faults.
@@ -422,10 +456,16 @@ impl Error {
             // written are not — the filesystem is sound and the request cannot be carried
             // out.
             Error::Archive(ArchiveError::Read(e)) => match e {
-                TreeError::Io { .. } => exit::OPERATIONAL,
+                TreeError::Io { .. }
+                | TreeError::Unsupported { .. }
+                | TreeError::LimitExceeded { .. } => exit::OPERATIONAL,
                 _ => exit::IMAGE_BAD,
             },
-            Error::Archive(ArchiveError::Acl { .. }) => exit::IMAGE_BAD,
+            // A file whose storage yields less than its length is the image's fault, under
+            // either sink.
+            Error::Archive(ArchiveError::Acl { .. } | ArchiveError::ShortRead { .. }) => {
+                exit::IMAGE_BAD
+            }
             // Re-identifying splits the same way. A superblock that does not check, a
             // backup copy that is not one, and a filesystem longer than its image are
             // verdicts about the image, the last the one `inspect` fails the same image on; a
@@ -452,11 +492,15 @@ impl Error {
             // destination that is not empty, an owner this platform cannot name.
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Error::Host(HostError::Read { source, .. }) => match source {
-                TreeError::Io { .. } => exit::OPERATIONAL,
+                TreeError::Io { .. }
+                | TreeError::Unsupported { .. }
+                | TreeError::LimitExceeded { .. } => exit::OPERATIONAL,
                 _ => exit::IMAGE_BAD,
             },
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            Error::Host(HostError::HostileName { .. }) => exit::IMAGE_BAD,
+            Error::Host(HostError::HostileName { .. } | HostError::ShortRead { .. }) => {
+                exit::IMAGE_BAD
+            }
             // A tree that cannot be walked and a platform with no walk to run are both
             // failures to carry the command out, so both land here; only one of them
             // exists in any one build.
@@ -528,9 +572,19 @@ fn article(word: &str) -> &'static str {
 fn from_read(e: ReadError) -> Error {
     match e {
         ReadError::Io { message, .. } => Error::ImageIo(message),
-        ReadError::NotFound { path, .. } | ReadError::NotADirectory { path, .. } => {
-            Error::NoSuchPath(path)
-        }
+        ReadError::NotFound { path, .. }
+        | ReadError::NotADirectory { path, .. }
+        | ReadError::SymlinkLoop { path, .. } => Error::NoSuchPath(path),
+        // A read this build cannot make — a feature or a layout it does not follow, content it
+        // holds no key to — is classified as the shared surface classifies it, which is no
+        // verdict.
+        unsupported @ (ReadError::UnsupportedIncompat { .. }
+        | ReadError::UnsupportedLayout { .. }
+        | ReadError::Encrypted { .. }) => Error::from(TreeError::from(unsupported)),
+        // So is a read a bound stopped, which is the caller's and no fault of the image.
+        limit @ (ReadError::FileTooLarge { .. }
+        | ReadError::PathTooLong { .. }
+        | ReadError::WalkTooLarge { .. }) => Error::from(TreeError::from(limit)),
         other => Error::Image(other),
     }
 }
@@ -609,6 +663,10 @@ impl From<TreeError> for Error {
             // The host could not read the source, which says nothing about whether the
             // filesystem is sound.
             TreeError::Io { message, .. } => Error::ImageIo(message),
+            // A path that names nothing says nothing about the filesystem.
+            TreeError::NotFound { path, .. } => Error::NoSuchPath(path),
+            other @ TreeError::Unsupported { .. } => Error::Unsupported(other),
+            other @ TreeError::LimitExceeded { .. } => Error::Limit(other),
             other => Error::Tree(other),
         }
     }
@@ -623,12 +681,12 @@ fn main() -> ExitCode {
     match run(argv, source_date_epoch) {
         Ok(()) => ExitCode::from(exit::OK),
         Err(e) => {
-            eprintln!("{}: {e}", args::TOOL);
+            noteln!("{}: {e}", args::TOOL);
             if let Some(hint) = e.hint() {
-                eprintln!("hint: {hint}");
+                noteln!("hint: {hint}");
             }
             if matches!(e, Error::Usage(_)) {
-                eprintln!("try `{} --help`", args::TOOL);
+                noteln!("try `{} --help`", args::TOOL);
             }
             ExitCode::from(e.exit_code())
         }
@@ -834,19 +892,17 @@ filesystem:
                        FAT it is what the cluster count must derive to — nothing in a FAT
                        volume records its type, so a size that cannot reach the named one
                        is refused rather than written as something else. exFAT names no
-                       variant, and takes the size it is given: --size auto is refused for
-                       it, because the search behind `auto` is a family's own and this one
-                       has none. btrfs names no variant either and has no search either,
-                       and what would have been a variant is `geometry (btrfs)` below.
-                       apfs names no variant and has a search, and its volumes and its
-                       geometry are `volumes (apfs)` and `geometry (apfs)` below
+                       variant. btrfs names no variant either, and what would have been a
+                       variant is `geometry (btrfs)` below. apfs names no variant, and its
+                       volumes and its geometry are `volumes (apfs)` and `geometry (apfs)`
+                       below
 
 identity (btrfs):
-  A btrfs records five identifiers where the other three record one, and a filesystem whose
-  bytes you can reproduce is one that states all of them. Only --fsid is required; the rest
-  are zero unless named, which is a legitimate value and an obviously unset one. Nothing
-  here is derived from anything else: a value this tool invented would be a value you could
-  not state.
+  A btrfs records five identifiers where ext, FAT and exFAT record one, and a filesystem
+  whose bytes you can reproduce is one that states all of them. Only --fsid is required; the
+  rest are zero unless named, which is a legitimate value and an obviously unset one.
+  Nothing here is derived from anything else: a value this tool invented would be a value
+  you could not state.
 
   --metadata-uuid HEX  the id every tree block is stamped with, where it is to differ from
                        --fsid. Setting it is what lets the id a person sees be changed
@@ -1188,7 +1244,9 @@ options:
   --skip-privileged    with --to-dir, write what this process may rather than failing on
                        what it may not: a device node it cannot create is left out, the
                        tree is owned by this process, and a security or trusted extended
-                       attribute it may not set is not set. What was left out is named on
+                       attribute it may not set is not set. A file whose recorded owner
+                       is not set loses its set-user-ID and set-group-ID bits, which
+                       would make it run as this process. What was left out is named on
                        the standard error, so an incomplete tree says so
   --skip-unsupported   with --to-dir, write what DIR will hold rather than failing on what
                        it will not: an entry whose name is longer than DIR takes is left

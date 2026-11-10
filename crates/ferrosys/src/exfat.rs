@@ -1,5 +1,5 @@
-//! The exFAT family: the formatter, the geometry planner, the byte-exact on-disk structures,
-//! and the classifier [`detect`](fn@crate::detect) answers
+//! The exFAT family: the formatter, the reader, the geometry planner, the byte-exact on-disk
+//! structures, and the classifier [`detect`](fn@crate::detect) answers
 //! [`Filesystem::ExFat`](crate::Filesystem) with.
 //!
 //! exFAT is the interchange filesystem for large removable media. SDXC cards specify it, and
@@ -140,6 +140,7 @@
 //! ```
 
 mod detect;
+mod fit;
 mod geometry;
 mod materialize;
 mod model;
@@ -152,7 +153,7 @@ pub(crate) use detect::claim;
 
 pub use geometry::{
     BootDefect, BoundaryAlign, ClusterSize, DEFAULT_BOUNDARY_ALIGN, ExfatLayout, FIRST_CLUSTER,
-    GeometryError, MAX_BYTES_PER_CLUSTER, MAX_CLUSTER_COUNT, MIN_VOLUME_SECTORS, PlanRequest,
+    GeometryError, MAX_BYTES_PER_CLUSTER, MAX_CLUSTER_COUNT, MIN_VOLUME_BYTES, PlanRequest,
     conventional_cluster_size, plan_layout,
 };
 pub use materialize::{

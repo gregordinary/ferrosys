@@ -386,7 +386,7 @@ impl ProgramName {
     /// The most bytes the name may have.
     pub const MAX_BYTES: usize = PROGRAM_NAME_FIELD - 1;
 
-    /// This crate's name and version, as `ferrosys (0.7.0)`.
+    /// This crate's name and version, as `ferrosys (0.8.0)`.
     pub const THIS_CRATE: Self = {
         let text = concat!("ferrosys (", env!("CARGO_PKG_VERSION"), ")").as_bytes();
         assert!(
@@ -722,7 +722,7 @@ pub enum FormatError {
     /// A firmlink names an entry that is not a directory.
     #[error(
         "the firmlink {} names an entry that is not a directory",
-        String::from_utf8_lossy(path)
+        crate::escape::printable(path)
     )]
     #[non_exhaustive]
     FirmlinkNotDirectory {
@@ -732,7 +732,7 @@ pub enum FormatError {
     /// A firmlink names a directory whose source gives the firmlink attribute another value.
     #[error(
         "the firmlink {} names a directory already holding the firmlink attribute with another value",
-        String::from_utf8_lossy(path)
+        crate::escape::printable(path)
     )]
     #[non_exhaustive]
     FirmlinkAttributeHeld {
@@ -740,7 +740,7 @@ pub enum FormatError {
         path: Vec<u8>,
     },
     /// The time is before 1970, past what a time in nanoseconds since 1970 holds, or has a
-    /// fraction of a second of a second or more.
+    /// nanosecond part of one second or more.
     #[error(
         "{} seconds and {} nanoseconds since 1970 is outside the times a container records",
         time.secs,
@@ -1052,11 +1052,11 @@ pub fn format(
     // Planned before the buffer is allocated, so a container that cannot be formatted fails
     // without first asking for its size in memory.
     let plan = FormatPlan::new(source, container_bytes, options)?;
-    let size =
-        usize::try_from(container_bytes).map_err(|_| FormatError::ImageTooLargeInMemory {
+    let buffer =
+        crate::io::image_buffer(container_bytes).ok_or(FormatError::ImageTooLargeInMemory {
             bytes: container_bytes,
         })?;
-    let mut image = Cursor::new(vec![0u8; size]);
+    let mut image = Cursor::new(buffer);
     plan.write_to(&mut image)?;
     let fidelity = plan.fidelity().clone();
     Ok(Image {
@@ -3995,14 +3995,15 @@ mod tests {
     const ACCEPT: &str = include_str!("fixtures/accept-images.txt");
 
     /// The images the fixture holds: a fixture that lost a line sends less.
-    const SENT: usize = 70;
+    const SENT: usize = 77;
 
     /// The offset in a volume superblock of the name's first byte, which `neg-checksum`
     /// changes.
     const VOLUME_NAME_AT: usize = 704;
 
     /// What an image's first volume holds: nothing, a tree [`super::populated::tree_up_to`]
-    /// generates, as `tree:N:DIRS:SEED:MAX`, or a corpus volume taken through the steps
+    /// generates, as `tree:N:DIRS:SEED:MAX`, the root of one-byte files
+    /// [`super::populated::flat`] gives, as `flat:N`, or a corpus volume taken through the steps
     /// [`super::from_corpus::built`] names, as `corpus:RELEASE:ROW:VOLUME:SHA256`.
     #[derive(Clone, PartialEq, Eq, Debug)]
     enum Filled {
@@ -4012,6 +4013,9 @@ mod tests {
             dirs: usize,
             seed: u64,
             max: u64,
+        },
+        Flat {
+            n: usize,
         },
         Corpus(CorpusVolume),
     }
@@ -4043,6 +4047,11 @@ mod tests {
                     sha256: w[3].to_string(),
                 });
             }
+            if let Some(n) = token.strip_prefix("flat:") {
+                return Self::Flat {
+                    n: n.parse().expect("a count of files"),
+                };
+            }
             let w: Vec<&str> = token
                 .strip_prefix("tree:")
                 .expect("tree:N:DIRS:SEED:MAX")
@@ -4061,6 +4070,7 @@ mod tests {
             match self {
                 Self::Nothing => "-".to_string(),
                 Self::Tree { n, dirs, seed, max } => format!("tree:{n}:{dirs}:{seed}:{max}"),
+                Self::Flat { n } => format!("flat:{n}"),
                 Self::Corpus(v) => {
                     format!("corpus:{}:{}:{}:{}", v.release, v.row, v.volume, v.sha256)
                 }
@@ -4466,6 +4476,7 @@ mod tests {
                 Filled::Tree { n, dirs, seed, max } => {
                     super::populated::tree_up_to(*n, *dirs, *seed, *max)
                 }
+                Filled::Flat { n } => super::populated::flat(*n),
                 Filled::Corpus(volume) => super::from_corpus::built(volume).entries.clone(),
             }
         }
@@ -5199,6 +5210,38 @@ mod tests {
     }
 
     #[test]
+    fn each_child_row_holds_a_root_of_the_children_its_name_gives() {
+        let rows: Vec<Sent> = sent_images()
+            .into_iter()
+            .filter(|image| image.name.starts_with("child-"))
+            .collect();
+        assert_eq!(rows.len(), 7);
+        for image in rows {
+            let plan = image.planned();
+            let volume = &plan.volumes[0];
+            let fs: Vec<usize> = volume.fs.shape.level_sizes().collect();
+            let map: Vec<usize> = volume.map.shape.level_sizes().collect();
+            // The tree the row names, and how many levels it has: a root over leaves, or over
+            // one level of index nodes.
+            let (tree, levels) = if image.name.contains("-map-") {
+                (&map, 2)
+            } else if image.name.contains("-index-") {
+                (&fs, 3)
+            } else {
+                (&fs, 2)
+            };
+            let children = if image.name.ends_with("-one") { 1 } else { 2 };
+            assert_eq!(tree.len(), levels, "{}: {fs:?}, {map:?}", image.name);
+            assert_eq!(
+                tree[levels - 2],
+                children,
+                "{}: {fs:?}, {map:?}",
+                image.name
+            );
+        }
+    }
+
+    #[test]
     fn the_images_sent_to_macos_pair_every_two_of_their_inputs() {
         let min = super::super::geometry::MIN_BLOCK_COUNT;
         let limit = super::super::geometry::LAST_CONTIGUOUS_BLOCK_COUNT;
@@ -5206,7 +5249,7 @@ mod tests {
         let mut rows: Vec<[String; 5]> = Vec::new();
         for image in sent_images() {
             if [
-                "edge-", "neg-", "limit-", "tree-", "corpus-", "fit-", "root-", "group-",
+                "edge-", "neg-", "limit-", "tree-", "corpus-", "fit-", "root-", "group-", "child-",
             ]
             .iter()
             .any(|prefix| image.name.starts_with(prefix))
@@ -5450,6 +5493,25 @@ mod populated {
             entries.push(entry);
         }
         entries
+    }
+
+    /// A root holding `n` files of one byte each, `/f00000` onwards, every one owned by root
+    /// and stamped at [`FORMATTED`].
+    pub(super) fn flat(n: usize) -> Vec<SourceEntry> {
+        let at = Timestamp::from_secs(FORMATTED / 1_000_000_000);
+        std::iter::once(SourceEntry::new(
+            "/",
+            EntryKind::Directory,
+            Metadata::new(0o755, at),
+        ))
+        .chain((0..n).map(|i| {
+            SourceEntry::new(
+                format!("/f{i:05}"),
+                EntryKind::File(vec![b'x'].into()),
+                Metadata::new(0o644, at),
+            )
+        }))
+        .collect()
     }
 
     /// The instant every populated gate formats at, in nanoseconds since 1970.

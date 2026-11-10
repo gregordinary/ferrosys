@@ -255,9 +255,8 @@ fn a_layered_source_formats_into_an_image_that_holds_the_composition() {
         .file(b"/opt".to_vec(), b"now a file\n".to_vec(), m(0o644))
         // And adds something no layer had.
         .file(b"/etc/issue".to_vec(), b"welcome\n".to_vec(), m(0o644))
-        // Replaces the target of a hard link the base placed. The link names a path, so
-        // under later-wins it is the new content that both names reach — and they are
-        // still one file.
+        // Replaces one name of a file the base gave two. A name is what a layer replaces,
+        // so the file keeps its other name and the new content is a file of its own.
         .file(
             b"/bin/sh".to_vec(),
             b"the overlay's shell\n".to_vec(),
@@ -287,18 +286,17 @@ fn a_layered_source_formats_into_an_image_that_holds_the_composition() {
         r.lookup(b"/opt/pkg/data").is_err(),
         "the replaced directory's contents are gone"
     );
-    // A hard link names a path, so replacing its target replaces what both names hold —
-    // and leaves them one file rather than two.
+    // The replaced name holds the new content, and the file it named keeps its other name.
     assert_eq!(read_path(&mut r, b"/bin/sh"), b"the overlay's shell\n");
     assert_eq!(
         read_path(&mut r, b"/bin/dash"),
-        b"the overlay's shell\n",
-        "the link followed the new content"
+        vec![0x7f; 5000],
+        "the other name keeps the file it named"
     );
-    let (sh, inode) = r.lookup(b"/bin/sh").expect("lookup");
-    let (dash, _) = r.lookup(b"/bin/dash").expect("lookup");
-    assert_eq!(sh, dash, "the two names are still one inode");
-    assert_eq!(inode.links_count, 2);
+    let (sh, sh_inode) = r.lookup(b"/bin/sh").expect("lookup");
+    let (dash, dash_inode) = r.lookup(b"/bin/dash").expect("lookup");
+    assert_ne!(sh, dash, "two files now");
+    assert_eq!((sh_inode.links_count, dash_inode.links_count), (1, 1));
 
     if available("e2fsck") {
         e2fsck_clean(file.path()).expect("a layered image checks clean");
@@ -1030,6 +1028,39 @@ fn debugfs_confirms_fidelity() {
         "/dev/sda is not a block device:\n{sda}"
     );
 
+    // The wide form, at its extremes and at a number with every field distinct, read back by
+    // the same foreign reader.
+    let at = Timestamp::from_secs(FAKE_TIME as i64);
+    let wide = TreeBuilder::new()
+        .directory(b"/dev".to_vec(), Metadata::new(0o755, at))
+        .char_device(
+            b"/dev/widest".to_vec(),
+            4095,
+            1_048_575,
+            Metadata::new(0o600, at),
+        )
+        .char_device(
+            b"/dev/mixed".to_vec(),
+            0x123,
+            0x4_5678,
+            Metadata::new(0o600, at),
+        )
+        .block_device(b"/dev/major".to_vec(), 256, 255, Metadata::new(0o600, at));
+    let wide = write_image(&format(wide, 16 * MIB, options()).expect("format"));
+    for (path, hex) in [
+        ("/dev/widest", "hex fff:fffff"),
+        ("/dev/mixed", "hex 123:45678"),
+        ("/dev/major", "hex 100:ff"),
+    ] {
+        let out = tool("debugfs")
+            .args(["-R", &format!("stat {path}")])
+            .arg(wide.path())
+            .output()
+            .expect("spawn debugfs");
+        let stat = String::from_utf8_lossy(&out.stdout);
+        assert!(stat.contains(hex), "{path} should read as {hex}:\n{stat}");
+    }
+
     // The inline capability attribute and the external-block attribute both appear.
     let sh = stat("/bin/sh");
     assert!(
@@ -1282,6 +1313,137 @@ fn header_field_opt(path: &Path, field: &str) -> Option<u64> {
                 .parse()
                 .expect("a numeric header field")
         })
+}
+
+/// A directory's record length at 64 KiB blocks, where a whole-block record does not fit the
+/// field: what the pinned tools write, what `e2fsck` accepts, and that this crate reads each.
+#[test]
+fn a_whole_block_record_at_sixty_four_kibibytes_reads_as_the_tools_read_it() {
+    if !available("mke2fs") || !available("debugfs") || !available("e2fsck") {
+        return;
+    }
+    use ferrosys::ext::ondisk::{rec_len_from_disk, rec_len_to_disk};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    const BLOCK: u64 = 65_536;
+    let file = tempfile::NamedTempFile::new().expect("create a temporary image");
+    file.as_file().set_len(256 * MIB).expect("size it");
+    let status = tool("mke2fs")
+        .args([
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-b",
+            "65536",
+            "-O",
+            "^metadata_csum",
+        ])
+        .arg(file.path())
+        .status()
+        .expect("spawn mke2fs");
+    assert!(status.success());
+    for command in ["mkdir d", "expand_dir d"] {
+        let status = tool("debugfs")
+            .args(["-w", "-R", command])
+            .arg(file.path())
+            .status()
+            .expect("spawn debugfs");
+        assert!(status.success(), "debugfs {command}");
+    }
+    let out = tool("debugfs")
+        .args(["-R", "blocks d"])
+        .arg(file.path())
+        .output()
+        .expect("spawn debugfs");
+    let blocks: Vec<u64> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(|b| b.parse().expect("a block number"))
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the directory and the block expand_dir added"
+    );
+    let field_at = blocks[1] * BLOCK + 4;
+    let mut field = [0u8; 2];
+    let mut f = std::fs::File::open(file.path()).expect("open");
+    f.seek(SeekFrom::Start(field_at)).expect("seek");
+    f.read_exact(&mut field).expect("read the field");
+    let written = u16::from_le_bytes(field);
+    assert_eq!(
+        written, 0xFFFF,
+        "the tools store an empty whole-block record so"
+    );
+    assert_eq!(rec_len_to_disk(BLOCK as usize, BLOCK as usize), written);
+
+    for (stored, clean) in [(0xFFFFu16, true), (0, true), (1, true), (0xFFFD, false)] {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.path())
+            .expect("open for writing");
+        f.seek(SeekFrom::Start(field_at)).expect("seek");
+        f.write_all(&stored.to_le_bytes()).expect("write the field");
+        drop(f);
+        assert_eq!(
+            e2fsck_clean(file.path()).is_ok(),
+            clean,
+            "e2fsck on a whole-block record stored as {stored:#06x}"
+        );
+        if clean {
+            assert_eq!(rec_len_from_disk(stored, BLOCK as usize), BLOCK as usize);
+            let mut r = Reader::open(std::fs::File::open(file.path()).expect("open"))
+                .expect("this crate opens it");
+            let (_, dir) = r.lookup(b"/d").expect("the directory");
+            let names: Vec<Vec<u8>> = r
+                .read_dir(&dir)
+                .expect("this crate reads the directory")
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert_eq!(
+                names,
+                vec![b".".to_vec(), b"..".to_vec()],
+                "stored {stored:#06x}"
+            );
+        }
+    }
+}
+
+/// The journal size steps where the pinned `mke2fs` steps it: at every edge of the table
+/// `default_journal_blocks` gives, a block either side, and a size inside each interval.
+#[test]
+fn the_journal_size_steps_where_mke2fs_steps_it() {
+    if !available("mke2fs") || !available("dumpe2fs") {
+        return;
+    }
+    use ferrosys::ext::journal::default_journal_blocks;
+
+    let edges = [
+        2048u64, 32_768, 262_144, 524_288, 4_194_304, 8_388_608, 16_777_216, 33_554_432,
+    ];
+    let mut counts: Vec<u64> = Vec::new();
+    for pair in edges.windows(2) {
+        counts.extend([pair[0] - 1, pair[0], pair[0] + (pair[1] - pair[0]) / 2]);
+    }
+    counts.extend([33_554_431, 33_554_432, 1 << 28]);
+    for blocks in counts {
+        let file = tempfile::NamedTempFile::new().expect("create a temporary image");
+        file.as_file()
+            .set_len(blocks * 4096)
+            .expect("size the temporary image");
+        let status = tool("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-b", "4096"])
+            .args(["-E", "lazy_itable_init=1,lazy_journal_init=1"])
+            .arg(file.path())
+            .arg(blocks.to_string())
+            .status()
+            .expect("spawn mke2fs");
+        assert!(status.success(), "mke2fs refused {blocks} blocks");
+        let theirs = header_field_opt(file.path(), "Total journal blocks");
+        let ours = default_journal_blocks(blocks).map(u64::from);
+        assert_eq!(ours, theirs, "journal blocks at {blocks} filesystem blocks");
+    }
 }
 
 #[test]
@@ -2694,6 +2856,34 @@ fn every_block_size_passes_e2fsck_and_matches_mke2fs_geometry() {
 }
 
 #[test]
+fn the_overhead_a_superblock_records_matches_mke2fs_for_every_profile_and_block_size() {
+    // `s_overhead_clusters` is what `df` subtracts from the size, so a count one block off
+    // moves every total a filesystem reports. The full-dump gate compares it at 4 KiB on
+    // ext4; this holds it at every block size and on the block-mapped family, whose journal
+    // is mapped through indirect blocks.
+    if !available("mke2fs") || !available("dumpe2fs") {
+        return;
+    }
+    for profile in [Profile::Ext2, Profile::Ext3, Profile::Ext4] {
+        for bs in [1024u32, 2048, 4096] {
+            for mib in [64u64, 512] {
+                let options = match profile {
+                    Profile::Ext4 => options_at(bs),
+                    _ => block_mapped_options(profile, bs),
+                };
+                let ours = format_file(TreeBuilder::new(), mib * MIB, options);
+                let baseline = mke2fs_baseline_of(profile, bs, mib * MIB);
+                assert_eq!(
+                    header_field(ours.path(), "Overhead clusters"),
+                    header_field(baseline.path(), "Overhead clusters"),
+                    "{profile} at {bs}-byte blocks, {mib} MiB"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_final_group_too_small_for_mke2fs_is_still_used() {
     if !available("e2fsck") || !available("dumpe2fs") || !available("mke2fs") {
         return;
@@ -2759,6 +2949,52 @@ fn every_block_size_survives_an_offline_grow() {
     }
 }
 
+/// The group number a backup superblock past group 65535 records is 65535, on the pinned
+/// `mke2fs`: the observation this crate's backups are held to.
+#[test]
+fn a_backup_past_group_65535_records_65535() {
+    if !available("mke2fs") {
+        return;
+    }
+    use std::io::{Read, Seek, SeekFrom};
+
+    // 1000 GiB of 1 KiB blocks is 128,000 groups of 8,192 blocks, with backups at the
+    // powers of 3, 5 and 7 on either side of 65535.
+    let file =
+        tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp in target/");
+    file.as_file()
+        .set_len(1000 * 1024 * MIB)
+        .expect("size the temporary image");
+    let status = tool("mke2fs")
+        .args(["-q", "-F", "-t", "ext4", "-b", "1024"])
+        .args(["-O", "^has_journal,^orphan_file"])
+        .args(["-E", "lazy_itable_init=1"])
+        .arg(file.path())
+        .status()
+        .expect("spawn mke2fs");
+    assert!(status.success(), "mke2fs refused the volume");
+    let mut f = std::fs::File::open(file.path()).expect("open");
+    for group in [59_049u64, 78_125, 117_649] {
+        // At 1 KiB blocks the first data block is 1, and a group's backup is its first block.
+        let at = (group * 8192 + 1) * 1024;
+        let mut field = [0u8; 2];
+        f.seek(SeekFrom::Start(at + 56)).expect("seek");
+        f.read_exact(&mut field).expect("read the backup's magic");
+        assert_eq!(
+            u16::from_le_bytes(field),
+            0xEF53,
+            "a backup at group {group}"
+        );
+        f.seek(SeekFrom::Start(at + 90)).expect("seek");
+        f.read_exact(&mut field).expect("read the backup's group");
+        assert_eq!(
+            u64::from(u16::from_le_bytes(field)),
+            group.min(65_535),
+            "the group the backup at group {group} records"
+        );
+    }
+}
+
 #[test]
 fn a_filesystem_past_thirty_two_bits_streams_and_passes_e2fsck() {
     if !available("e2fsck") || !available("dumpe2fs") {
@@ -2819,6 +3055,27 @@ fn a_filesystem_past_thirty_two_bits_streams_and_passes_e2fsck() {
         "the last group's inode table at {} does not exercise the high half",
         desc.inode_table
     );
+
+    // A backup superblock past group 65535 records 65535 as its group, as the pinned
+    // `mke2fs` writes it (`a_backup_past_group_65535_records_65535`); below, its own number.
+    for group in [59_049u64, 78_125, 117_649, 177_147] {
+        let at = group * u64::from(layout.blocks_per_group) * u64::from(layout.block_size);
+        let mut field = [0u8; 2];
+        f.seek(SeekFrom::Start(at + 56)).expect("seek");
+        f.read_exact(&mut field).expect("read the backup's magic");
+        assert_eq!(
+            u16::from_le_bytes(field),
+            0xEF53,
+            "a backup at group {group}"
+        );
+        f.seek(SeekFrom::Start(at + 90)).expect("seek");
+        f.read_exact(&mut field).expect("read the backup's group");
+        assert_eq!(
+            u64::from(u16::from_le_bytes(field)),
+            group.min(65_535),
+            "the group the backup at group {group} records"
+        );
+    }
 
     // The foreign judge: e2fsck walks every one of the 294912 group descriptors.
     e2fsck_clean(file.path())

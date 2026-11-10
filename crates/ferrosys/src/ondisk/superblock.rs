@@ -1,4 +1,5 @@
-//! The superblock (`struct ext2_super_block`), in its 1024-byte form.
+//! The superblock, in its 1024-byte form, as the ext4 documentation's Super Block page lays
+//! it out.
 //!
 //! The superblock is the filesystem's root record: block and inode counts, the
 //! block and group geometry, the three feature words, the UUID, and the long tail
@@ -13,7 +14,9 @@
 //! not a different type.
 
 use super::{ParseError, split64};
-use super::{get_arr, get_u8, get_u16, get_u32, join64, put_arr, put_u8, put_u16, put_u32};
+use super::{
+    get_arr, get_u8, get_u16, get_u32, get_u64, join64, put_arr, put_u8, put_u16, put_u32, put_u64,
+};
 
 /// The ext4 superblock magic (`s_magic`): `0xEF53`.
 pub const SUPERBLOCK_MAGIC: u16 = 0xef53;
@@ -215,6 +218,12 @@ pub struct SuperBlock {
     /// signed bytes, bit 1 that they hash as unsigned; exactly one is set, and it
     /// tells a reader how to reproduce a name's hash.
     pub flags: u32,
+    /// Seconds a host with the filesystem open waits between updates of the
+    /// multiple-mount protection block (`s_mmp_update_interval`), zero without `mmp`.
+    pub mmp_update_interval: u16,
+    /// The block holding the multiple-mount protection record (`s_mmp_block`), zero without
+    /// `mmp`.
+    pub mmp_block: u64,
     /// `log2` of groups per flex block group (`s_log_groups_per_flex`): 4, i.e. 16
     /// groups.
     pub log_groups_per_flex: u8,
@@ -320,6 +329,8 @@ impl SuperBlock {
             min_extra_isize: 0,
             want_extra_isize: 0,
             flags: 0,
+            mmp_update_interval: 0,
+            mmp_block: 0,
             log_groups_per_flex: 0,
             checksum_type: 0,
             kbytes_written: 0,
@@ -391,6 +402,8 @@ impl SuperBlock {
         put_u16(&mut b, 0x15c, self.min_extra_isize);
         put_u16(&mut b, 0x15e, self.want_extra_isize);
         put_u32(&mut b, 0x160, self.flags);
+        put_u16(&mut b, 0x166, self.mmp_update_interval);
+        put_u64(&mut b, 0x168, self.mmp_block);
         put_u8(&mut b, 0x174, self.log_groups_per_flex);
         put_u8(&mut b, 0x175, self.checksum_type);
         let (kb_lo, kb_hi) = split64(self.kbytes_written);
@@ -493,6 +506,8 @@ impl SuperBlock {
             min_extra_isize: get_u16(buf, 0x15c),
             want_extra_isize: get_u16(buf, 0x15e),
             flags: get_u32(buf, 0x160),
+            mmp_update_interval: get_u16(buf, 0x166),
+            mmp_block: get_u64(buf, 0x168),
             log_groups_per_flex: get_u8(buf, 0x174),
             checksum_type: get_u8(buf, 0x175),
             kbytes_written: join64(get_u32(buf, 0x178), get_u32(buf, 0x17c)),

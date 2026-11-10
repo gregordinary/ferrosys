@@ -13,7 +13,7 @@
 //! # The order families are tried in
 //!
 //! The list is hardcoded and short, but the *rule* that orders it is written down so a
-//! family added later inserts itself mechanically rather than by argument:
+//! family inserts itself mechanically rather than by argument:
 //!
 //! - **Tier 1** is a family whose images carry a distinctive multi-byte magic at a fixed
 //!   offset. Two such magics do not collide, so at most one tier-1 family claims any image
@@ -145,8 +145,38 @@ pub enum DetectError {
         message: String,
     },
     /// The source is not a filesystem any family this build compiles in recognizes.
-    #[error("unrecognized filesystem: no compiled-in family claims this image")]
+    ///
+    /// The message names each family the build leaves out with the Cargo feature that compiles
+    /// it, so a build that recognizes no image of a family it was never given says how to get
+    /// one that does.
+    #[error(
+        "unrecognized filesystem: no compiled-in family claims this image{}",
+        FamiliesLeftOut
+    )]
     Unrecognized,
+}
+
+/// Every family's Cargo feature, the name a person knows the family by, and whether this build
+/// compiles it.
+const FAMILY_FEATURES: [(&str, &str, bool); 5] = [
+    ("ext", "ext2, ext3 and ext4", cfg!(feature = "ext")),
+    ("fat", "FAT12, FAT16 and FAT32", cfg!(feature = "fat")),
+    ("exfat", "exFAT", cfg!(feature = "exfat")),
+    ("btrfs", "btrfs", cfg!(feature = "btrfs")),
+    ("apfs", "APFS", cfg!(feature = "apfs")),
+];
+
+/// The clause [`DetectError::Unrecognized`] ends with: each family this build leaves out, and
+/// the feature that compiles it. It writes nothing in a build carrying every family.
+struct FamiliesLeftOut;
+
+impl std::fmt::Display for FamiliesLeftOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (feature, family, _) in FAMILY_FEATURES.iter().filter(|(_, _, compiled)| !compiled) {
+            write!(f, "; the `{feature}` feature compiles {family}")?;
+        }
+        Ok(())
+    }
 }
 
 crate::io::io_error!(DetectError);
@@ -293,6 +323,11 @@ fn ext_claim<R: Read + Seek>(
     open.common.len = options.len;
     match Reader::open_with(src, &open) {
         Ok(reader) => Ok(Some(Filesystem::Ext(reader.profile()))),
+        // A layout only ext4 writes, which the reader names rather than reads: the superblock
+        // read, so the image is ext4 all the same.
+        Err(ReadError::UnsupportedLayout { .. }) => {
+            Ok(Some(Filesystem::Ext(crate::feature::Profile::Ext4)))
+        }
         Err(ReadError::Io {
             kind: std::io::ErrorKind::UnexpectedEof,
             ..
@@ -310,7 +345,30 @@ fn ext_claim<R: Read + Seek>(
 /// cases need no image, which is what lets them run in both builds.
 #[cfg(test)]
 mod agnostic_tests {
-    use super::DetectOptions;
+    use super::{DetectError, DetectOptions, FAMILY_FEATURES};
+
+    #[test]
+    fn an_unrecognized_image_names_each_family_the_build_leaves_out() {
+        let message = DetectError::Unrecognized.to_string();
+        assert!(
+            message.starts_with("unrecognized filesystem: no compiled-in family claims this image"),
+            "{message}"
+        );
+        for (feature, family, compiled) in FAMILY_FEATURES {
+            assert_eq!(
+                message.contains(&format!("`{feature}` feature")),
+                !compiled,
+                "{message}"
+            );
+            assert_eq!(message.contains(family), !compiled, "{message}");
+        }
+        if FAMILY_FEATURES.iter().all(|(_, _, compiled)| *compiled) {
+            assert_eq!(
+                message,
+                "unrecognized filesystem: no compiled-in family claims this image"
+            );
+        }
+    }
 
     #[test]
     fn options_carry_the_region_they_were_given() {
@@ -337,7 +395,7 @@ mod agnostic_tests {
     )))]
     #[test]
     fn a_build_with_no_family_recognizes_nothing() {
-        use super::{DetectError, detect, detect_with};
+        use super::{detect, detect_with};
         use std::io::Cursor;
 
         for bytes in [vec![0u8; 4096], b"not a filesystem".to_vec(), Vec::new()] {

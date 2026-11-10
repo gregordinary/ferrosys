@@ -732,16 +732,16 @@ fn every_feature_word_this_crate_reads_selects_the_bit_the_baseline_selects() {
     );
 }
 
-/// The default geometry is a 4 KiB sector and a 16 KiB node, and the sector is the page
-/// size of the machine `mkfs.btrfs` ran on.
+/// The default geometry is a 4 KiB sector and a 16 KiB node, the defaults mkfs.btrfs(8)
+/// documents.
 ///
-/// The second half is what makes this a gate rather than a note. This project's two
-/// runners are a self-hosted aarch64 machine and a hosted x86_64 one, and an aarch64
-/// kernel is built at 4, 16, or 64 KiB pages — so a baseline built with no `-s` argument
-/// can be a *different filesystem* on the two runners. Every gate below names the sector
-/// size explicitly for that reason, and this is the one that says why.
+/// This project's two runners are a self-hosted aarch64 machine and a hosted x86_64 one, and
+/// both have 4 KiB pages, as the development host does. So no run has told a fixed default
+/// apart from one that follows the page size, and an aarch64 kernel is built at 4, 16, or 64
+/// KiB pages. Every gate below names the sector size explicitly for that reason, and this is
+/// the one that says why.
 #[test]
-fn the_baselines_default_geometry_follows_the_page_size_of_the_machine_it_ran_on() {
+fn the_baselines_default_geometry_is_the_one_its_documentation_gives() {
     if !suite_ready() {
         return;
     }
@@ -749,16 +749,16 @@ fn the_baselines_default_geometry_follows_the_page_size_of_the_machine_it_ran_on
     let image = lab.formatted("geometry.img", ORDINARY, &[]);
     let sb = primary(&image);
 
-    let page = page_size();
     assert_eq!(
-        u64::from(u32_at(&sb, sb::SECTORSIZE)),
-        page,
-        "the default sector size is this machine's page size, and this machine's is {page}"
+        u32_at(&sb, sb::SECTORSIZE),
+        ferrosys::btrfs::DEFAULT_SECTOR_SIZE,
+        "the default sector size mkfs.btrfs(8) documents, on a host of {} byte pages",
+        page_size()
     );
     assert_eq!(
         u32_at(&sb, sb::NODESIZE),
         16384,
-        "the default node size, where the page size does not exceed it"
+        "the default node size mkfs.btrfs(8) documents"
     );
     assert_eq!(u64_at(&sb, sb::NUM_DEVICES), 1, "one device");
     assert_eq!(
@@ -2570,10 +2570,7 @@ fn a_mapping_or_a_superblock_copy_that_contradicts_the_live_one_is_refused() {
     ));
     let mut reader =
         Reader::open_with(File::open(&foreign).expect("open"), &lenient).expect("it opens");
-    assert!(matches!(
-        reader.volume().mirrors()[1],
-        Mirror::Diverged { .. }
-    ));
+    assert!(matches!(reader.volume().mirrors()[1], Mirror::Foreign));
     assert!(
         reader
             .scan()
@@ -2582,6 +2579,37 @@ fn a_mapping_or_a_superblock_copy_that_contradicts_the_live_one_is_refused() {
             .any(|a| a.category == Category::Superblock),
         "a lenient scan names the copy"
     );
+
+    // The same copy at a later generation, as a filesystem formatted over a device that held
+    // another leaves that one's copies. The primary verifies and names the filesystem, so the
+    // later copy of another one is not chosen over it.
+    let stale = copy_of(&lab, &healthy, "stale.img");
+    let mut copy = read_super(&stale, at).expect("the second copy");
+    copy[32] ^= 1;
+    let generation = u64_at(&copy, 72) + 8;
+    copy[72..80].copy_from_slice(&generation.to_le_bytes());
+    let digest = checksum(&copy);
+    copy[..4].copy_from_slice(&digest.to_le_bytes());
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .expect("open for writing");
+    file.seek(SeekFrom::Start(at)).expect("seek");
+    file.write_all(&copy).expect("write the copy");
+    drop(file);
+    let mut reader =
+        Reader::open_with(File::open(&stale).expect("open"), &lenient).expect("it opens");
+    assert!(matches!(reader.volume().mirrors()[1], Mirror::Foreign));
+    assert_eq!(
+        reader.volume().superblock().generation,
+        u64_at(&primary(&stale), 72),
+        "the primary is the live copy"
+    );
+    assert!(
+        read_back(&stale).is_err(),
+        "a strict open names the foreign copy"
+    );
+    reader.walk().expect("the primary's trees read");
 }
 
 /// A damaged copy of the superblock is read through, and said so about.
@@ -2894,6 +2922,41 @@ struct ForeignRow {
     /// Whether part of the tree is a subvolume — a second filesystem tree, whose inode numbers
     /// start again from the same value the first one's do.
     subvolume: bool,
+    /// Which algorithm every checksum on the volume is in, metadata and data alike.
+    csum: Csum,
+}
+
+/// The four checksum algorithms the format defines, by the words the baseline takes them by.
+#[cfg(feature = "btrfs")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Csum {
+    Crc32c,
+    Xxhash,
+    Sha256,
+    Blake2,
+}
+
+#[cfg(feature = "btrfs")]
+impl Csum {
+    /// The word `mkfs.btrfs --csum` takes.
+    fn as_str(self) -> &'static str {
+        match self {
+            Csum::Crc32c => "crc32c",
+            Csum::Xxhash => "xxhash",
+            Csum::Sha256 => "sha256",
+            Csum::Blake2 => "blake2",
+        }
+    }
+
+    /// The superblock's `csum_type` for it, as the baseline records it.
+    fn value(self) -> u16 {
+        match self {
+            Csum::Crc32c => 0,
+            Csum::Xxhash => 1,
+            Csum::Sha256 => 2,
+            Csum::Blake2 => 3,
+        }
+    }
 }
 
 #[cfg(feature = "btrfs")]
@@ -2931,6 +2994,8 @@ impl ForeignRow {
             self.metadata.as_str().to_string(),
             "-d".to_string(),
             "single".to_string(),
+            "--csum".to_string(),
+            self.csum.as_str().to_string(),
         ];
         if !off.is_empty() {
             args.push("-O".to_string());
@@ -3042,8 +3107,10 @@ const SUBVOLUME_DIR: &str = "home";
 /// node sits in the band the format allows it, how many copies of a metadata block there are,
 /// whether there is a free-space tree, whether block groups have a tree of their own, whether
 /// holes are recorded as extents, whether one file has more names than a single record holds,
-/// and whether part of the tree is a second subvolume. That is three hundred and eighty-four
-/// combinations, of which these eight carry every *pair* the format permits.
+/// whether part of the tree is a second subvolume, and which of the four checksum algorithms
+/// the volume is in. That is one thousand five hundred and thirty-six combinations, of which
+/// these twelve carry every *pair* the format permits. Twelve is the fewest that can, since
+/// the three sector sizes and the four algorithms make twelve pairs on their own.
 ///
 /// The pair is the unit worth covering because what a reader gets wrong here is one thing
 /// read through another: an item's position is an offset inside a node whose size is the
@@ -3071,6 +3138,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: true,
         dense_links: true,
         subvolume: false,
+        csum: Csum::Crc32c,
     },
     ForeignRow {
         what: "holes as extents and block groups in the extent tree, over the largest block",
@@ -3082,6 +3150,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: false,
         dense_links: false,
         subvolume: true,
+        csum: Csum::Blake2,
     },
     ForeignRow {
         what: "a free-space tree without a block-group tree, at sixteen-kilobyte sectors",
@@ -3093,6 +3162,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: false,
         dense_links: false,
         subvolume: true,
+        csum: Csum::Crc32c,
     },
     ForeignRow {
         what: "one copy of every metadata block, at sixteen-kilobyte sectors",
@@ -3104,6 +3174,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: true,
         dense_links: false,
         subvolume: false,
+        csum: Csum::Blake2,
     },
     ForeignRow {
         what: "neither extra tree, at sixteen-kilobyte sectors",
@@ -3115,6 +3186,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: false,
         dense_links: true,
         subvolume: false,
+        csum: Csum::Sha256,
     },
     ForeignRow {
         what: "sixty-four-kilobyte sectors, where the smallest node is also the largest",
@@ -3126,6 +3198,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: false,
         dense_links: true,
         subvolume: true,
+        csum: Csum::Blake2,
     },
     ForeignRow {
         what: "sixty-four-kilobyte sectors carrying this pin's own feature set",
@@ -3137,6 +3210,7 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: true,
         dense_links: false,
         subvolume: true,
+        csum: Csum::Xxhash,
     },
     ForeignRow {
         what: "holes as extents at the largest sector and the largest node",
@@ -3148,6 +3222,55 @@ const FOREIGN_MATRIX: &[ForeignRow] = &[
         no_holes: true,
         dense_links: true,
         subvolume: false,
+        csum: Csum::Sha256,
+    },
+    ForeignRow {
+        what: "xxhash64 over neither extra tree, at sixteen-kilobyte sectors",
+        sector: 16384,
+        node: NodeSize::Ceiling,
+        metadata: Profile::Dup,
+        free_space_tree: false,
+        block_group_tree: false,
+        no_holes: false,
+        dense_links: true,
+        subvolume: false,
+        csum: Csum::Xxhash,
+    },
+    ForeignRow {
+        what: "SHA-256 over this pin's own feature set at the smallest block, with a subvolume",
+        sector: 4096,
+        node: NodeSize::Floor,
+        metadata: Profile::Dup,
+        free_space_tree: true,
+        block_group_tree: true,
+        no_holes: true,
+        dense_links: false,
+        subvolume: true,
+        csum: Csum::Sha256,
+    },
+    ForeignRow {
+        what: "a subvolume at the largest sector and node, holes as extents",
+        sector: 65536,
+        node: NodeSize::Ceiling,
+        metadata: Profile::Single,
+        free_space_tree: false,
+        block_group_tree: false,
+        no_holes: false,
+        dense_links: false,
+        subvolume: true,
+        csum: Csum::Crc32c,
+    },
+    ForeignRow {
+        what: "xxhash64 over the largest tree block at four-kilobyte sectors, both trees off",
+        sector: 4096,
+        node: NodeSize::Ceiling,
+        metadata: Profile::Dup,
+        free_space_tree: false,
+        block_group_tree: false,
+        no_holes: false,
+        dense_links: false,
+        subvolume: false,
+        csum: Csum::Xxhash,
     },
 ];
 
@@ -3399,6 +3522,7 @@ fn dimensions(row: &ForeignRow) -> Vec<(&'static str, String)> {
         ("no-holes", row.no_holes.to_string()),
         ("dense-links", row.dense_links.to_string()),
         ("subvolume", row.subvolume.to_string()),
+        ("csum", row.csum.as_str().to_string()),
     ]
 }
 
@@ -3553,6 +3677,11 @@ fn every_row_of_the_foreign_matrix_is_the_filesystem_it_claims_to_be() {
             u64_at(&sb, sb::INCOMPAT_FLAGS),
             row.incompat(),
             "{what}: the incompatible features the row asked for"
+        );
+        assert_eq!(
+            u16_at(&sb, sb::CSUM_TYPE),
+            row.csum.value(),
+            "{what}: the checksum algorithm the row asked for"
         );
 
         // How many copies of a metadata block there are is a property of the chunk that holds
@@ -3975,6 +4104,233 @@ fn altered_bytes_under_a_foreign_image_are_caught_by_verifying_and_not_by_scanni
     );
 }
 
+/// Altered bytes are caught under every checksum algorithm the format defines, not only under
+/// the one the representative row is in.
+///
+/// The control above, once per algorithm: the image is a row of the matrix in that algorithm,
+/// the healthy one verifies, and a byte changed under one file's data is refused. A data check
+/// that answered "holds" for whatever digest it did not compute would pass the matrix and
+/// fail here.
+#[test]
+#[cfg(feature = "btrfs")]
+fn altered_bytes_are_caught_under_every_checksum_algorithm() {
+    use ferrosys::btrfs::{ReadError, Reader};
+
+    if !suite_ready() || !available("setfattr") {
+        return;
+    }
+    let lab = Lab::new();
+    for csum in [Csum::Crc32c, Csum::Xxhash, Csum::Sha256, Csum::Blake2] {
+        let name = csum.as_str();
+        let row = FOREIGN_MATRIX
+            .iter()
+            .find(|row| row.csum == csum)
+            .expect("the matrix has a row in every algorithm");
+        let healthy = foreign_image(&lab, row, &format!("csum-{name}-healthy.img"));
+        let mut reader =
+            Reader::open(File::open(&healthy).expect("open the image")).expect("open it");
+        let node = reader
+            .lookup(b"/many-extents.bin")
+            .expect("the multi-extent file");
+        reader
+            .verify_data(&node)
+            .unwrap_or_else(|e| panic!("{name}: the healthy file verifies: {e}"));
+
+        let damaged = copy_of(&lab, &healthy, &format!("csum-{name}-altered.img"));
+        let marker = contents(seed::MANY_EXTENTS, DEEP_READ_AT, 32);
+        let image_bytes = fs::read(&damaged).expect("read the image");
+        let at = image_bytes
+            .windows(marker.len())
+            .position(|window| window == marker.as_slice())
+            .expect("the multi-extent file's own bytes are somewhere in the image");
+        flip_byte(&damaged, at as u64);
+        let mut reader =
+            Reader::open(File::open(&damaged).expect("open the image")).expect("open it");
+        let node = reader
+            .lookup(b"/many-extents.bin")
+            .expect("the multi-extent file");
+        let refusal = reader.verify_data(&node);
+        assert!(
+            matches!(refusal, Err(ReadError::DataChecksum { .. })),
+            "{name}: verifying a file with a byte changed under it: {refusal:?}"
+        );
+    }
+}
+
+/// Files a Linux 7.1 kernel compressed and stored inline, read back.
+///
+/// The pinned `mkfs.btrfs` formatted a 128 MiB volume at 4 KiB nodes with one copy of its
+/// metadata, and the board kernel's btrfs driver (Linux 7.1.1, arm64) mounted it three times,
+/// with `compress=zlib`, `compress=lzo` and `compress=zstd`, writing one directory each: files of
+/// 1 to 4095 bytes, which it compressed and stored inline, and one of 200 000 bytes, which it
+/// stored in regular compressed extents. Every inline stream it wrote expands to the whole
+/// 4 KiB sector the file was compressed from, and the record's `ram_bytes` is the file's share
+/// of it. The pinned `btrfs check --check-data-csum` passes the volume, and the digests are the
+/// ones the guest read back while it was mounted.
+///
+/// Stored without its zero blocks, as `util::unsparse_to` reads it.
+#[cfg(feature = "btrfs")]
+const KERNEL_INLINE: &[u8] = include_bytes!("fixtures/btrfs-kernel-inline.sparse");
+
+/// Every file on [`KERNEL_INLINE`], its length, and the SHA-256 of its bytes.
+#[cfg(feature = "btrfs")]
+const KERNEL_INLINE_FILES: &[(&str, u64, &str)] = &[
+    (
+        "/lzo/pattern-3000",
+        3000,
+        "c2fbc48341b3380d896f38e36dc55f89da5c915d4fdebca8fb41a4dddca345cb",
+    ),
+    (
+        "/lzo/regular-200000",
+        200000,
+        "b136fee6f76c5322f0aa94b33396f14fc37ceaf7d93b4d6ff3a670c464f9ef1f",
+    ),
+    (
+        "/lzo/text-1",
+        1,
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+    ),
+    (
+        "/lzo/text-18",
+        18,
+        "936eea827890c70e36949fcfade82486902e8eb8cbef3803d9a63770bcf5470b",
+    ),
+    (
+        "/lzo/text-2048",
+        2048,
+        "2c6c8e51e9fa08104262a9c498b72d996cd68149b422a7ba6c9e356af267975c",
+    ),
+    (
+        "/lzo/text-4095",
+        4095,
+        "f7e2d3df505a086f2828cca45d78bc0f679c8845c1732ba75b8084734ddda81a",
+    ),
+    (
+        "/lzo/text-600",
+        600,
+        "f66d4c6ba7af954a7ade149e94cd84954979fccd03d51f1542f9cc806549eb59",
+    ),
+    (
+        "/zlib/pattern-3000",
+        3000,
+        "c2fbc48341b3380d896f38e36dc55f89da5c915d4fdebca8fb41a4dddca345cb",
+    ),
+    (
+        "/zlib/regular-200000",
+        200000,
+        "4dcb5d6dff619eb1537e50f22deed640c828712fbb3fe29a1af0952f257247c9",
+    ),
+    (
+        "/zlib/text-1",
+        1,
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+    ),
+    (
+        "/zlib/text-18",
+        18,
+        "c2314832ea1cd7be6fcaeb698f2cef11c7d9f8abc2339e30e5d1c2d2d523dd47",
+    ),
+    (
+        "/zlib/text-2048",
+        2048,
+        "74938dc4eab6c80687db31f69f219739e8863c5d13404352e1edeef899b45f6d",
+    ),
+    (
+        "/zlib/text-4095",
+        4095,
+        "2be107a80ce1850589b1aeb4dc4c315287cbb283399193f6d65599f144ca245b",
+    ),
+    (
+        "/zlib/text-600",
+        600,
+        "da7f8b1a13620f24ab9f20a6e3dadc20281f3e809a652945e5587230ace24626",
+    ),
+    (
+        "/zstd/pattern-3000",
+        3000,
+        "c2fbc48341b3380d896f38e36dc55f89da5c915d4fdebca8fb41a4dddca345cb",
+    ),
+    (
+        "/zstd/regular-200000",
+        200000,
+        "400aa5bc88be885415a9e1d52b9c0797a32b34e3029198efba9e02a0860b96cf",
+    ),
+    (
+        "/zstd/text-1",
+        1,
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+    ),
+    (
+        "/zstd/text-18",
+        18,
+        "b1acdedc0367a5f861547483978477d5bbb5f497f43a8495fab969a7c1be91c4",
+    ),
+    (
+        "/zstd/text-2048",
+        2048,
+        "16bfba406ba14d1c773e46e7e53a4582a6b6c3ec34c8c2f3dccc8dcd25ac0859",
+    ),
+    (
+        "/zstd/text-4095",
+        4095,
+        "2f0ce73777a9a2b6290fbb707a89ecf45036ced3f1ec7e49412e0b217a163d7c",
+    ),
+    (
+        "/zstd/text-600",
+        600,
+        "e3d8f72a00134e02fc952767d97f1e463215b71784e04f365307c7003733589d",
+    ),
+];
+
+#[test]
+#[cfg(feature = "btrfs")]
+fn a_file_a_kernel_compressed_inline_reads_back_from_the_sector_it_was_compressed_from() {
+    use ferrosys::btrfs::Reader;
+    use sha2::Digest as _;
+
+    if !suite_ready() {
+        return;
+    }
+    let lab = Lab::new();
+    let image = lab.path().join("kernel-inline.img");
+    util::unsparse_to(KERNEL_INLINE, &image);
+
+    // The fixture holds what the test is about, by the baseline's own reading of it: inline
+    // extents compressed in each of the three algorithms.
+    let fs_tree = inspect(&image, &["dump-tree", "-t", "fs"]);
+    for (code, name) in [(1, "zlib"), (2, "lzo"), (3, "zstd")] {
+        let marker = format!("compression {code} ({name})");
+        assert!(
+            fs_tree
+                .lines()
+                .any(|line| line.contains("inline extent") && line.contains(&marker)),
+            "the volume holds an inline extent compressed with {name}"
+        );
+    }
+
+    let mut reader =
+        Reader::open(File::open(&image).expect("open the image")).expect("it opens strictly");
+    let report = reader.scan();
+    assert!(report.is_clean(), "{:?}", report.anomalies());
+    for (path, len, digest) in KERNEL_INLINE_FILES {
+        let node = reader
+            .lookup(path.as_bytes())
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let bytes = reader
+            .read_data(&node)
+            .unwrap_or_else(|e| panic!("{path} reads: {e}"));
+        assert_eq!(bytes.len() as u64, *len, "{path}");
+        let got: String = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(&got, digest, "{path}: the bytes the kernel wrote");
+        reader
+            .verify_data(&node)
+            .unwrap_or_else(|e| panic!("{path} verifies: {e}"));
+    }
+}
+
 /// A file extent pointed at another file's bytes is caught by reading the file, and by no
 /// checksum at all.
 ///
@@ -4223,6 +4579,16 @@ const PLANNER_MATRIX: &[(&str, u64, &[&str])] = &[
         &["-s", "4096", "-m", "single", "-d", "dup"],
     ),
     (
+        "replicated data, where a tenth of the volume is shorter than its preferred length",
+        4 << 30,
+        &["-s", "4096", "-m", "dup", "-d", "dup"],
+    ),
+    (
+        "replicated data at its preferred length",
+        32 << 30,
+        &["-s", "4096", "-d", "dup"],
+    ),
+    (
         "four kilobyte blocks throughout",
         1 << 30,
         &["-s", "4096", "-n", "4096"],
@@ -4372,9 +4738,9 @@ fn the_planner_accounts_for_the_device_the_way_the_baseline_records_it() {
 
 /// The volume the planner refuses is the volume the baseline refuses, to the byte.
 ///
-/// Both numbers come from the same conservative reckoning — every chunk laid down on the way to
-/// the finished filesystem, each at the largest length its rule can produce — so agreeing at the
-/// boundary is evidence the reckoning is the same one rather than two that happen to be close.
+/// The planner's four minima are the baseline's observed bounds, so this is the gate that keeps
+/// them observed: the baseline must accept each one and refuse a byte less, and the planner must
+/// do the same.
 #[test]
 #[cfg(feature = "btrfs")]
 fn the_planner_refuses_the_volume_the_baseline_refuses() {
@@ -5921,4 +6287,66 @@ fn uuid_text(uuid: &[u8; 16]) -> String {
         hex(8..10),
         hex(10..16)
     )
+}
+
+/// Files the pinned `mkfs.btrfs --compress zlib` wrote, read back.
+///
+/// The baseline compresses a file's last extent from the file's own bytes and records the
+/// extent's length as a whole number of sectors, so the stream of a file whose length is not
+/// a multiple of the sector expands to fewer bytes than its record declares. Every such file
+/// reads back, at every length around a sector and a compressed extent's edges.
+#[test]
+#[cfg(all(feature = "btrfs", feature = "zlib"))]
+fn files_the_baseline_compressed_read_back_whatever_their_length() {
+    use ferrosys::btrfs::Reader;
+
+    if !suite_ready() {
+        return;
+    }
+    let lab = Lab::new();
+    let root = lab.path().join("compressed-source");
+    fs::create_dir_all(&root).expect("create the source");
+    let mut files = Vec::new();
+    for len in [
+        4097usize, 4451, 6000, 8191, 8193, 65_537, 131_071, 131_073, 300_001,
+    ] {
+        let name = format!("f{len}");
+        let bytes: Vec<u8> = LARGE_FILE_PATTERN
+            .iter()
+            .copied()
+            .cycle()
+            .take(len)
+            .collect();
+        fs::write(root.join(&name), &bytes).expect("write a file");
+        files.push((name, bytes));
+    }
+    let image = lab.formatted(
+        "compressed.img",
+        ORDINARY,
+        &[
+            "--compress",
+            "zlib",
+            "-r",
+            root.to_str().expect("a UTF-8 scratch path"),
+        ],
+    );
+    btrfs_check_clean(&image, &["--check-data-csum"])
+        .unwrap_or_else(|e| panic!("the checker rejected a compressed baseline: {e}"));
+    let fs_tree = inspect(&image, &["dump-tree", "-t", "fs"]);
+    assert!(
+        fs_tree.contains("compression 1 (zlib)"),
+        "the baseline compressed the files:\n{fs_tree}"
+    );
+    let mut reader = Reader::open(File::open(&image).expect("open the image")).expect("open it");
+    assert!(reader.scan().is_clean(), "the volume scans clean");
+    for (name, bytes) in files {
+        let node = reader
+            .lookup(format!("/{name}").as_bytes())
+            .expect("the file");
+        assert_eq!(
+            reader.read_data(&node).expect("its bytes"),
+            bytes,
+            "{name} reads back"
+        );
+    }
 }

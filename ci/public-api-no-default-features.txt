@@ -1,4 +1,5 @@
 #[non_exhaustive] pub enum ferrosys::AclError
+#[non_exhaustive] pub enum ferrosys::Bound
 #[non_exhaustive] pub enum ferrosys::DetectError
 #[non_exhaustive] pub enum ferrosys::Direction
 #[non_exhaustive] pub enum ferrosys::EntryKind
@@ -20,8 +21,10 @@
 #[non_exhaustive] pub ferrosys::TreeError::Io
 #[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
 #[non_exhaustive] pub ferrosys::TreeError::Malformed
+#[non_exhaustive] pub ferrosys::TreeError::NotFound
 #[non_exhaustive] pub ferrosys::TreeError::Unsupported
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Child<N>
 #[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::CompressedFile
 #[non_exhaustive] pub struct ferrosys::Darwin
@@ -34,12 +37,15 @@
 #[non_exhaustive] pub struct ferrosys::SourceEntry
 #[non_exhaustive] pub struct ferrosys::Synthesis
 #[non_exhaustive] pub struct ferrosys::TreeEntry<N>
+#[non_exhaustive] pub struct ferrosys::Usage
 impl Clone for ferrosys::AcceptedLoss
 impl Clone for ferrosys::Acl
 impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Bound
+impl Clone for ferrosys::Child
 impl Clone for ferrosys::Civil
 impl Clone for ferrosys::CompressedFile
 impl Clone for ferrosys::Darwin
@@ -72,10 +78,12 @@ impl Clone for ferrosys::Timestamp
 impl Clone for ferrosys::TreeBuilder
 impl Clone for ferrosys::TreeEntry
 impl Clone for ferrosys::TreeError
+impl Clone for ferrosys::Usage
 impl Clone for ferrosys::Xattr
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Bound
 impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
@@ -90,12 +98,15 @@ impl Copy for ferrosys::ReadPolicy
 impl Copy for ferrosys::Severity
 impl Copy for ferrosys::Synthesis
 impl Copy for ferrosys::Timestamp
+impl Copy for ferrosys::Usage
 impl Debug for ferrosys::AcceptedLoss
 impl Debug for ferrosys::Acl
 impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Bound
+impl Debug for ferrosys::Child
 impl Debug for ferrosys::Civil
 impl Debug for ferrosys::CompressedFile
 impl Debug for ferrosys::Darwin
@@ -128,6 +139,7 @@ impl Debug for ferrosys::Timestamp
 impl Debug for ferrosys::TreeBuilder
 impl Debug for ferrosys::TreeEntry
 impl Debug for ferrosys::TreeError
+impl Debug for ferrosys::Usage
 impl Debug for ferrosys::Xattr
 impl Default for ferrosys::AcceptedLoss
 impl Default for ferrosys::Darwin
@@ -153,6 +165,8 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Bound
+impl Eq for ferrosys::Child
 impl Eq for ferrosys::Civil
 impl Eq for ferrosys::CompressedFile
 impl Eq for ferrosys::Darwin
@@ -183,6 +197,7 @@ impl Eq for ferrosys::Synthesis
 impl Eq for ferrosys::Timestamp
 impl Eq for ferrosys::TreeEntry
 impl Eq for ferrosys::TreeError
+impl Eq for ferrosys::Usage
 impl Eq for ferrosys::Xattr
 impl Error for ferrosys::AclError
 impl Error for ferrosys::DetectError
@@ -211,6 +226,8 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Bound
+impl PartialEq for ferrosys::Child
 impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::CompressedFile
 impl PartialEq for ferrosys::Darwin
@@ -241,6 +258,7 @@ impl PartialEq for ferrosys::Synthesis
 impl PartialEq for ferrosys::Timestamp
 impl PartialEq for ferrosys::TreeEntry
 impl PartialEq for ferrosys::TreeError
+impl PartialEq for ferrosys::Usage
 impl PartialEq for ferrosys::Xattr
 impl PartialOrd for ferrosys::Severity
 impl Source for ferrosys::ImageSource
@@ -315,6 +333,12 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Bound::Entries
+pub ferrosys::Bound::FileBytes
+pub ferrosys::Bound::PathBytes
+pub ferrosys::Child::kind: NodeKind
+pub ferrosys::Child::name: Vec<u8>
+pub ferrosys::Child::node: N
 pub ferrosys::Civil::day: u32
 pub ferrosys::Civil::hour: u32
 pub ferrosys::Civil::minute: u32
@@ -422,12 +446,18 @@ pub ferrosys::TreeEntry::path: Vec<u8>
 pub ferrosys::TreeEntry::shared: Option<u64>
 pub ferrosys::TreeError::Io::kind: std::io::ErrorKind
 pub ferrosys::TreeError::Io::message: String
+pub ferrosys::TreeError::LimitExceeded::bound: Bound
 pub ferrosys::TreeError::LimitExceeded::detail: String
 pub ferrosys::TreeError::LimitExceeded::family: crate::finding::Family
 pub ferrosys::TreeError::Malformed::detail: String
 pub ferrosys::TreeError::Malformed::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::path: Vec<u8>
 pub ferrosys::TreeError::Unsupported::detail: String
 pub ferrosys::TreeError::Unsupported::family: crate::finding::Family
+pub ferrosys::Usage::free: u64
+pub ferrosys::Usage::total: u64
+pub ferrosys::Usage::unit: u64
 pub ferrosys::Xattr::name: Vec<u8>
 pub ferrosys::Xattr::value: Vec<u8>
 pub fn ferrosys::Acl::decode(bytes: &[u8]) -> Result<Self, AclError>
@@ -435,6 +465,7 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Child::new(name: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::Darwin::compressed(self, form: CompressedFile) -> Self
 pub fn ferrosys::Deviation::is_source_failure(&self) -> bool /* required */
 pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
@@ -471,10 +502,13 @@ pub fn ferrosys::FsTree::bsd_flags(&mut self, node: &<Self as >::Node) -> Result
 pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
 pub fn ferrosys::FsTree::darwin(&mut self, node: &<Self as >::Node) -> Result<Option<Darwin>, TreeError>
 pub fn ferrosys::FsTree::family(&self) -> Family /* required */
+pub fn ferrosys::FsTree::find(&mut self, path: &[u8]) -> Result<Child<<Self as >::Node>, TreeError> /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::list(&mut self, dir: &<Self as >::Node) -> Result<Vec<Child<<Self as >::Node>>, TreeError> /* required */
 pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
+pub fn ferrosys::FsTree::usage(&mut self) -> Result<Usage, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
 pub fn ferrosys::ImageFile::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::ImageSource::entries(&self) -> &[SourceEntry]
@@ -516,6 +550,7 @@ pub fn ferrosys::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: im
 pub fn ferrosys::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
 pub fn ferrosys::TreeEntry::new(path: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
+pub fn ferrosys::Usage::new(unit: u64, total: u64, free: u64) -> Self
 pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
 pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
 pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>

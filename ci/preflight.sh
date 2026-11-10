@@ -40,11 +40,12 @@ CODEC_REFERENCE="$(bash "$root/ci/build-codec-reference.sh" --print-version)"
 UUID="f0e17055-0000-4000-8000-000000000000"
 FAKE_TIME="1700000000"
 
-# The three targets the cross job builds, each with the flags that job passes it.
+# The four targets the cross job builds, each with the flags that job passes it.
 CROSS_TARGETS=(
     "x86_64-apple-darwin|--all-targets"
     "x86_64-pc-windows-msvc|"
     "i686-unknown-linux-gnu|--all-targets"
+    "riscv64gc-unknown-linux-gnu|--all-targets"
 )
 
 # The gate the host-policy run cannot judge. Mounting a filesystem needs a user namespace,

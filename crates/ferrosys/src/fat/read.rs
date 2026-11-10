@@ -71,13 +71,14 @@ use crate::path::{is_hostile_component, is_reserved_name_char};
 use crate::policy::MAX_PATH;
 use crate::policy::{Limits, ReadPolicy};
 use crate::time::{DosTimestamp, Timestamp};
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, Bound, Child, FsTree, NodeKind, TreeEntry, TreeError, Usage};
 
 use super::charset::ShortNameCharset;
 use super::geometry::{
     FatLayout, FatType, MAX_BYTES_PER_CLUSTER, MAX_CLUSTERS_FAT12, MIN_CLUSTERS_FAT16,
     layout_from_boot,
 };
+use super::model::{MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES};
 use super::ondisk::{
     Attributes as DirAttributes, BootSector, BootSectorTail, DIR_ENTRY_SIZE, DirEntry, FsInfo,
     LFN_CHARS_PER_ENTRY, LFN_LAST_ENTRY, LFN_MAX_ENTRIES, LFN_PADDING, LfnEntry, NAME_DELETED,
@@ -347,6 +348,16 @@ pub enum ReadError {
     #[error("entry {index} is a second volume label, and the first is the volume's")]
     #[non_exhaustive]
     SecondVolumeLabel {
+        /// The entry's index within the root directory.
+        index: u32,
+    },
+    /// The root's volume label entry begins with a space, which a name field's first byte may
+    /// not be (documented). The pinned `fsck.fat` removes such a label (observed). Its padding
+    /// is not a label, so [`Reader::volume_label`] reads a field of nothing but spaces as no
+    /// label at all.
+    #[error("entry {index} is a volume label beginning with a space")]
+    #[non_exhaustive]
+    LabelBeginsWithSpace {
         /// The entry's index within the root directory.
         index: u32,
     },
@@ -737,6 +748,23 @@ pub enum ReadError {
         /// The index of the first entry past the marker.
         index: u32,
     },
+    /// A directory is larger than the format lets one be.
+    ///
+    /// The bound is [`MAX_DIRECTORY_BYTES`], on the directory's
+    /// own size, so its first slot past the bound is the finding whatever that slot holds. A
+    /// driver following the format grows no directory past it, and a directory that has been
+    /// grown past it reads whole, as a Linux kernel reads it (observed).
+    #[error(
+        "the directory reaches entry {index}, past the {limit} bytes the format lets one \
+         directory be"
+    )]
+    #[non_exhaustive]
+    DirectoryTooLong {
+        /// The index of the first entry past the bound.
+        index: u32,
+        /// [`MAX_DIRECTORY_BYTES`].
+        limit: u64,
+    },
     /// A volume label entry sits somewhere other than the root directory, where it is the
     /// one place the format defines for it.
     #[error("a volume label entry sits at entry {index} of a directory that is not the root")]
@@ -778,18 +806,20 @@ pub enum ReadError {
         /// The limit in force.
         limit: u64,
     },
-    /// A walked path is longer than any consumer of one could use.
+    /// A walk reached a name whose path is longer than the longest a walk builds, 4,096
+    /// bytes, which is Linux's `PATH_MAX`.
     ///
     /// Nothing in either format bounds how deep a tree nests, and a walk's entry cap counts
     /// *names* rather than the bytes their paths occupy — so a caterpillar tree of sixty-five
     /// thousand directories, each holding one entry naming the next, stays under every count
     /// while its paths grow by one component each and cost the walk their sum. A 32 MiB
-    /// volume reaches tens of gigabytes of path bytes that way.
+    /// volume reaches tens of gigabytes of path bytes that way. A walk hands out every name's
+    /// whole path, so it holds each to this bound.
     ///
-    /// The bound is `PATH_MAX`, which is the ceiling on what a path can be *used* for: a
-    /// consumer resolving one against a host gets `ENAMETOOLONG` past it, so a longer path
-    /// is not a path anything could act on.
-    #[error("a walked path is longer than the {limit} bytes a path may be")]
+    /// The tree is well-formed, so this is a limit rather than damage: the shared surface
+    /// reports it as [`TreeError::LimitExceeded`] with [`Bound::PathBytes`], and a
+    /// [`scan`](Reader::scan) reads the tree whole.
+    #[error("a walked path is longer than the {limit} bytes a walk builds")]
     #[non_exhaustive]
     PathTooLong {
         /// The longest path a walk builds.
@@ -858,7 +888,8 @@ impl ReadError {
                 at(None, None, Some(*index)),
             ),
             ReadError::LabelWithDirectoryAttribute { index }
-            | ReadError::SecondVolumeLabel { index } => (
+            | ReadError::SecondVolumeLabel { index }
+            | ReadError::LabelBeginsWithSpace { index } => (
                 Severity::Conformance,
                 Category::Directory,
                 at(None, None, Some(*index)),
@@ -977,6 +1008,9 @@ impl ReadError {
             | ReadError::ReservedCharacter { index, .. }
             | ReadError::UninterpretedShortName { index, .. }
             | ReadError::EntriesAfterEnd { index }
+            // Read whole, as a driver reads it, and larger than the format lets a driver grow
+            // one.
+            | ReadError::DirectoryTooLong { index, .. }
             // A recovered field outside the range the format states for it. The entry reads
             // back whole and one field of it means nothing.
             | ReadError::MalformedTimestamp { index, .. }
@@ -1182,12 +1216,9 @@ impl From<ReadError> for TreeError {
     fn from(err: ReadError) -> Self {
         match err {
             ReadError::Io { kind, message } => TreeError::Io { kind, message },
-            ReadError::FileTooLarge { .. }
-            | ReadError::PathTooLong { .. }
-            | ReadError::WalkTooLarge { .. } => TreeError::LimitExceeded {
-                family: Family::Fat,
-                detail: err.to_string(),
-            },
+            ReadError::FileTooLarge { .. } => TreeError::limit(Family::Fat, Bound::FileBytes, &err),
+            ReadError::PathTooLong { .. } => TreeError::limit(Family::Fat, Bound::PathBytes, &err),
+            ReadError::WalkTooLarge { .. } => TreeError::limit(Family::Fat, Bound::Entries, &err),
             other => TreeError::Malformed {
                 family: Family::Fat,
                 detail: other.to_string(),
@@ -1232,9 +1263,10 @@ pub struct Times {
     /// When the entry was created, to ten milliseconds, or `None` where the entry's creation
     /// field is wholly zero, which is how the format records a time not kept.
     pub create: Option<Timestamp>,
-    /// When it was last accessed. The format stores a date and no time of day, so this is
-    /// always midnight UTC.
-    pub access: Timestamp,
+    /// When it was last accessed, or `None` where the entry's access date is zero, which is
+    /// how the format records a date not kept — the same rule the creation field follows. The
+    /// format stores a date and no time of day, so a date kept is always midnight UTC.
+    pub access: Option<Timestamp>,
     /// When it was last written, to two seconds.
     pub modify: Timestamp,
 }
@@ -1759,7 +1791,12 @@ impl<R: Read + Seek> Reader<R> {
             Ok(ControlFlow::Continue(()))
         })?;
         if let Some(name) = found {
-            return Ok(Some(self.charset.decode(&volume_label(&name))));
+            // A field of nothing but padding names nothing.
+            let label = volume_label(&name);
+            if label.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(self.charset.decode(&label)));
         }
         let stored = self.boot.tail.volume().label;
         if stored == super::ondisk::VolumeInfo::NO_NAME {
@@ -2219,6 +2256,18 @@ impl<R: Read + Seek> Reader<R> {
             };
             last_slot = Some((at, index));
             slots = index + 1;
+            // The format bounds the directory's own size, so the first slot past it is the
+            // finding wherever it lies: a used entry, a free one, or one past the end marker.
+            // The read goes on, as a driver's does.
+            if u64::from(index) == MAX_DIRECTORY_ENTRIES {
+                deviations.record(
+                    at,
+                    ReadError::DirectoryTooLong {
+                        index,
+                        limit: MAX_DIRECTORY_BYTES,
+                    },
+                )?;
+            }
             let entry = slot.entry;
             let first = entry.name[0];
 
@@ -2333,6 +2382,9 @@ impl<R: Read + Seek> Reader<R> {
                     labels += 1;
                     if labels > 1 {
                         deviations.record(at, ReadError::SecondVolumeLabel { index })?;
+                    }
+                    if entry.name[0] == b' ' {
+                        deviations.record(at, ReadError::LabelBeginsWithSpace { index })?;
                     }
                 }
                 // A run in front of the label belongs to nothing: the format hangs a long
@@ -3225,6 +3277,9 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Every directory and every chain, returning the clusters the tree reaches.
     ///
+    /// Each name is reported by its [label](crate::walk::label), so a tree of any depth is
+    /// read whole.
+    ///
     /// `None` where the walk did not finish — because the findings cap was reached or a
     /// walk bound was — in which case the lost-cluster question has no answer, since every
     /// cluster the walk never got to would look unreachable. A count derived from a partial
@@ -3244,7 +3299,7 @@ impl<R: Read + Seek> Reader<R> {
         let mut names = 0usize;
         let cap = self.limits.max_walk_entries.min(self.max_names());
 
-        while let Some((path, node, parent)) = queue.pop() {
+        while let Some((label, node, parent)) = queue.pop() {
             if findings.is_full() {
                 // The tree is not fully walked, so the clusters it did not reach are not
                 // evidence of anything. Saying so is the only honest answer: the
@@ -3254,12 +3309,12 @@ impl<R: Read + Seek> Reader<R> {
             }
             // The node's own chain, claimed cluster by cluster so a second claim is a
             // cross-link rather than a second traversal.
-            let claimed = self.claim_chain(&node, &path, &mut reached, findings);
+            let claimed = self.claim_chain(&node, &label, &mut reached, findings);
             if node.is_dir() {
                 let mut deviations = OnDeviation::Collect(findings);
                 let placement = Placement {
                     parent,
-                    path: Some(&path),
+                    path: Some(&label),
                 };
                 let entries = match self.parse_dir(&node, placement, &mut deviations) {
                     Ok(entries) => entries,
@@ -3286,9 +3341,7 @@ impl<R: Read + Seek> Reader<R> {
                         // as allocated and unreferenced.
                         return None;
                     }
-                    let mut child = path.clone();
-                    child.push(b'/');
-                    child.extend_from_slice(&entry.name);
+                    let child = crate::walk::label(&label, &entry.name);
                     let descend = match entry.node.storage {
                         Storage::Chain(start) if entry.node.is_dir() => visited.insert(start),
                         _ => false,
@@ -3313,7 +3366,7 @@ impl<R: Read + Seek> Reader<R> {
                         detail: format!(
                             "{}: a length of {size} bytes needs {need} bytes of clusters and \
                              its chain holds {chain_bytes}",
-                            crate::escape::printable(&path)
+                            crate::escape::printable(&label)
                         ),
                     });
                 }
@@ -3391,36 +3444,50 @@ impl<R: Read + Seek> Reader<R> {
         Some(count * u64::from(self.layout.bytes_per_cluster()))
     }
 
-    /// What the table says of every cluster: the ones it marks allocated that no chain
-    /// reached, where `reached` is the whole tree's, and the ones it marks free, against the
-    /// count the information sector keeps.
-    fn scan_usage(&mut self, findings: &mut Findings<Anomaly>, reached: Option<&ClusterSet>) {
-        let fat_type = self.layout.fat_type;
-        let bad = table::bad_cluster(fat_type);
-        let mut lost = 0u32;
-        let mut first = None;
-        let mut free = 0u32;
-        let mut whole = true;
+    /// Count what the table says of every cluster: free, and allocated with no chain in
+    /// `reached` holding it. Without `reached`, nothing is counted lost.
+    fn census(&mut self, reached: Option<&ClusterSet>) -> Census {
+        let bad = table::bad_cluster(self.layout.fat_type);
+        let mut census = Census {
+            free: 0,
+            lost: 0,
+            first_lost: None,
+            failed: None,
+        };
         for cluster in 2..self.layout.clusters + 2 {
             let entry = match self.table_entry(cluster) {
                 Ok(entry) => entry,
-                // A table that cannot be read past here has already been reported by
-                // whatever tried to follow a chain through it, and neither count is whole.
-                Err(_) => {
-                    whole = false;
+                Err(e) => {
+                    census.failed = Some(e);
                     break;
                 }
             };
             if entry == table::FREE {
-                free += 1;
+                census.free += 1;
                 continue;
             }
             if entry == bad || reached.is_none_or(|reached| reached.contains(cluster)) {
                 continue;
             }
-            lost += 1;
-            first.get_or_insert(cluster);
+            census.lost += 1;
+            census.first_lost.get_or_insert(cluster);
         }
+        census
+    }
+
+    /// What the table says of every cluster: the ones it marks allocated that no chain
+    /// reached, where `reached` is the whole tree's, and the ones it marks free, against the
+    /// count the information sector keeps.
+    fn scan_usage(&mut self, findings: &mut Findings<Anomaly>, reached: Option<&ClusterSet>) {
+        // A table that cannot be read past where the census stopped has already been reported
+        // by whatever tried to follow a chain through it, and neither count is whole.
+        let Census {
+            free,
+            lost,
+            first_lost: first,
+            failed,
+        } = self.census(reached);
+        let whole = failed.is_none();
         if let Some(first) = first {
             findings.push(ReadError::LostClusters { count: lost, first }.anomaly());
         }
@@ -3455,6 +3522,18 @@ impl<R: Read + Seek> Reader<R> {
         anomaly.location = anomaly.location.or(at);
         findings.push(anomaly);
     }
+}
+
+/// What the table says of every cluster, counted once for a scan and for a volume's usage.
+struct Census {
+    /// The clusters it marks free.
+    free: u32,
+    /// The clusters it marks allocated that no chain the census was handed holds.
+    lost: u32,
+    /// The first of those.
+    first_lost: Option<u32>,
+    /// Where a read of the table failed, which stops the count there.
+    failed: Option<ReadError>,
 }
 
 /// One 32-byte slot of a directory, with where it sits: its index within the directory, and
@@ -3846,12 +3925,14 @@ fn node_of(entry: &DirEntry, fat_type: FatType) -> Node {
             })
             .filter(|stamp| *stamp != DosTimestamp::default())
             .map(DosTimestamp::decode),
-            access: DosTimestamp {
-                date: entry.access_date,
-                time: 0,
-                tenth: 0,
-            }
-            .decode(),
+            access: (entry.access_date != 0).then(|| {
+                DosTimestamp {
+                    date: entry.access_date,
+                    time: 0,
+                    tenth: 0,
+                }
+                .decode()
+            }),
             modify: DosTimestamp {
                 date: entry.write_date,
                 time: entry.write_time,
@@ -3890,13 +3971,7 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         visit(self, TreeEntry::new(Vec::new(), NodeKind::Directory, root))?;
 
         let outcome = self.walk_with::<WalkFail<E>>(|reader, entry| {
-            let kind = if entry.node.is_dir() {
-                NodeKind::Directory
-            } else {
-                NodeKind::File {
-                    size: u64::from(entry.node.size),
-                }
-            };
+            let kind = node_kind(&entry.node);
             // No `shared`: the format has no second name for a node, so two paths are
             // always two nodes.
             visit(reader, TreeEntry::new(entry.path, kind, entry.node)).map_err(WalkFail::Visitor)
@@ -3937,6 +4012,58 @@ impl<R: Read + Seek> FsTree for Reader<R> {
             detail: "a FAT volume holds no symbolic links".to_string(),
         })
     }
+
+    fn find(&mut self, path: &[u8]) -> Result<Child<Node>, TreeError> {
+        let node = self.lookup(path).map_err(|e| match e {
+            ReadError::NotFound { .. } | ReadError::NotADirectory { .. } => TreeError::NotFound {
+                family: Family::Fat,
+                path: path.to_vec(),
+            },
+            other => TreeError::from(other),
+        })?;
+        Ok(Child::new(
+            crate::tree::last_name(path),
+            node_kind(&node),
+            node,
+        ))
+    }
+
+    fn list(&mut self, dir: &Node) -> Result<Vec<Child<Node>>, TreeError> {
+        if !dir.is_dir() {
+            return Err(crate::tree::not_a_directory(Family::Fat));
+        }
+        let entries = self.read_dir(dir)?.into_iter().map(|e| (e.name, e.node));
+        Ok(crate::tree::listed(Family::Fat, entries)?
+            .into_iter()
+            .map(|(name, node)| Child::new(name, node_kind(&node), node))
+            .collect())
+    }
+
+    /// In clusters: the volume's cluster count, and the clusters its table marks free. The
+    /// information sector's free count is a hint a driver need not keep, so it is not read.
+    fn usage(&mut self) -> Result<Usage, TreeError> {
+        let census = self.census(None);
+        if let Some(e) = census.failed {
+            return Err(e.into());
+        }
+        Ok(Usage::new(
+            u64::from(self.layout.bytes_per_cluster()),
+            u64::from(self.layout.clusters),
+            u64::from(census.free),
+        ))
+    }
+}
+
+/// What a node is, in the shared frame's words: the one projection a walk, a lookup and a
+/// listing all go through. A FAT node is a directory or a file and nothing else.
+fn node_kind(node: &Node) -> NodeKind {
+    if node.is_dir() {
+        NodeKind::Directory
+    } else {
+        NodeKind::File {
+            size: u64::from(node.size),
+        }
+    }
 }
 
 /// The shared walk failure over this family's read error.
@@ -3954,8 +4081,8 @@ impl<E> From<ReadError> for WalkFail<E> {
 mod tests {
     use super::*;
     use crate::fat::{
-        BootCode, ClusterSize, FatTypeRequest, FormatOptions, Image, MEDIA_REMOVABLE, PlanRequest,
-        ReservedSectors, VolumeLabel, format,
+        BootCode, ClusterSize, DiskGeometry, FatTypeRequest, FormatOptions, Image, MEDIA_REMOVABLE,
+        PlanRequest, ReservedSectors, VolumeLabel, format,
     };
     use crate::path::canonical_parts;
     use crate::source::{Metadata, TreeBuilder};
@@ -4322,6 +4449,66 @@ mod tests {
     }
 
     #[test]
+    fn an_access_date_of_zero_is_a_date_not_kept() {
+        // Zero is how the format records a date not kept, as it is for the creation field: it
+        // is no date in the format's own range. So the node has no access time, and what the
+        // shared surface reports for one is the modification time, marked invented.
+        use crate::tree::FsTree;
+        let (_, image) = each_type().into_iter().next().expect("a type");
+        let mut bytes = image.as_bytes().to_vec();
+        // `BOOTX64 EFI`, its own short name, and its access date the word at 18 of the entry.
+        let at = bytes
+            .windows(11)
+            .position(|w| w == b"BOOTX64 EFI")
+            .expect("the entry");
+        bytes[at + 18..at + 20].fill(0);
+        let mut r = Reader::open(Cursor::new(&bytes[..])).expect("open");
+        let node = r.lookup(b"/EFI/BOOT/BOOTX64.EFI").expect("the file");
+        let times = node.times.expect("an entry's times");
+        assert_eq!(times.access, None);
+        let stat = r.stat(&node, &Synthesis::new()).expect("its attributes");
+        assert!(
+            stat.synthesized
+                .contains(&crate::fidelity::Property::AccessTime)
+        );
+        assert_eq!(stat.meta.atime, stat.meta.mtime);
+    }
+
+    #[test]
+    fn a_label_entry_of_spaces_is_no_label_and_one_led_by_a_space_is_reported() {
+        for (what, image) in each_type() {
+            let bytes = image.as_bytes().to_vec();
+            // The root's label entry: the name the writer gave it, then the label attribute.
+            let at = bytes
+                .windows(12)
+                .position(|w| w == b"FERROSYS   \x08")
+                .expect("the label entry");
+            let mut led = bytes.clone();
+            led[at..at + 11].copy_from_slice(b" FERROSYS  ");
+            let mut r = Reader::open_with(
+                Cursor::new(&led[..]),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .expect("open");
+            assert!(
+                r.scan()
+                    .anomalies()
+                    .iter()
+                    .any(|a| a.detail.contains("beginning with a space")),
+                "{what}"
+            );
+            let mut blank = bytes;
+            blank[at..at + 11].fill(b' ');
+            let mut r = Reader::open_with(
+                Cursor::new(&blank[..]),
+                &OpenOptions::new().policy(ReadPolicy::Lenient),
+            )
+            .expect("open");
+            assert_eq!(r.volume_label().expect("a label read"), None, "{what}");
+        }
+    }
+
+    #[test]
     fn a_strict_scan_of_a_volume_this_crate_wrote_is_clean() {
         // The line the severities are drawn against: a strict read accepts everything the
         // writer emits, so a scan of one finds nothing at all.
@@ -4370,6 +4557,16 @@ mod tests {
                 }),
             ),
             (
+                "disk geometry",
+                Box::new(|o: FormatOptions| {
+                    let most = std::num::NonZeroU16::MAX;
+                    o.disk_geometry(DiskGeometry::Exactly {
+                        sectors_per_track: most,
+                        heads: most,
+                    })
+                }),
+            ),
+            (
                 "volume id",
                 Box::new(|mut o: FormatOptions| {
                     o.volume_id = 0;
@@ -4412,6 +4609,7 @@ mod tests {
             label: _,
             oem_name: _,
             hidden_sectors: _,
+            disk_geometry: _,
             volume_id: _,
             time: _,
             media: _,
@@ -5517,9 +5715,11 @@ mod tests {
                 expected: 0,
             },
             ReadError::EntriesAfterEnd { index: 0 },
+            ReadError::DirectoryTooLong { index: 0, limit: 0 },
             ReadError::MisplacedVolumeLabel { index: 0 },
             ReadError::LabelWithDirectoryAttribute { index: 0 },
             ReadError::SecondVolumeLabel { index: 0 },
+            ReadError::LabelBeginsWithSpace { index: 0 },
             ReadError::LostClusters { count: 1, first: 2 },
             ReadError::FreeCountOutOfRange {
                 stated: 9,
@@ -5674,7 +5874,12 @@ mod tests {
     /// image, so no structural bound refuses it, and a read that materialized the directory
     /// before consulting a limit would allocate the volume's size whatever the caller asked
     /// for.
-    fn root_chained_through_the_whole_volume() -> (Vec<u8>, FatLayout) {
+    /// An empty undersized FAT32 of one-sector clusters whose root chains through `clusters`
+    /// clusters from its first, every slot of them the entry `slot` makes of its index.
+    fn root_chained_through(
+        clusters: Option<u32>,
+        slot: impl Fn(usize) -> [u8; DIR_ENTRY_SIZE],
+    ) -> (Vec<u8>, FatLayout) {
         let opts = options().plan(
             PlanRequest::new(0)
                 .cluster_size(ClusterSize::Sectors(1))
@@ -5684,15 +5889,17 @@ mod tests {
         let image = format(TreeBuilder::new(), 8 << 20, opts).expect("format");
         let layout = *image.layout();
         let mut bytes = image.into_bytes();
-
-        // Every cluster points at the next, so the chain that begins at the root runs to the
-        // end of the volume.
-        let last = layout.clusters + 1;
+        let root = layout.fat32.expect("a FAT32 volume").root_cluster;
+        assert_eq!(root, 2, "the root is the first cluster");
+        // Every cluster the chain takes points at the next, so the chain that begins at the
+        // root runs through all of them.
+        let last = root + clusters.unwrap_or(layout.clusters) - 1;
+        assert!(last < layout.clusters + 2, "the volume holds the chain");
         let table_bytes = layout.fat_sectors as usize * layout.bytes_per_sector as usize;
         for copy in 0..layout.fats {
             let start = at(&layout, layout.fat_start_sector(copy).expect("a table"));
             let table = &mut bytes[start..start + table_bytes];
-            for cluster in 2..=last {
+            for cluster in root..=last {
                 let value = if cluster == last {
                     table::end_of_chain(layout.fat_type)
                 } else {
@@ -5701,22 +5908,36 @@ mod tests {
                 assert!(table::write_entry(layout.fat_type, table, cluster, value));
             }
         }
-
-        // And every slot in the data region is an entry, so nothing stops the parse early.
-        // Each carries a real write time, because the bound under test is the entry cap and
-        // an entry whose date the calendar does not have is a deviation that would stop the
-        // parse first — on a fixture where the times were never the point.
-        let mut slot = [0u8; DIR_ENTRY_SIZE];
-        slot[..11].copy_from_slice(b"FILLER  TXT");
-        slot[11] = 0x20; // archive, which is what an ordinary file carries
-        let stamp = DosTimestamp::encode(Timestamp::from_secs(1_426_325_212)).expect("in range");
-        slot[22..24].copy_from_slice(&stamp.time.to_le_bytes());
-        slot[24..26].copy_from_slice(&stamp.date.to_le_bytes());
         let data = at(&layout, layout.first_data_sector);
-        for chunk in bytes[data..].as_chunks_mut::<DIR_ENTRY_SIZE>().0 {
-            *chunk = slot;
+        let end = data + (last - root + 1) as usize * layout.bytes_per_cluster() as usize;
+        for (n, chunk) in bytes[data..end]
+            .as_chunks_mut::<DIR_ENTRY_SIZE>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            *chunk = slot(n);
         }
         (bytes, layout)
+    }
+
+    /// A file entry named `name` (the eleven bytes of a short name), stamped `TIME`.
+    fn file_slot(name: &[u8]) -> [u8; DIR_ENTRY_SIZE] {
+        let mut slot = [0u8; DIR_ENTRY_SIZE];
+        slot[..11].copy_from_slice(name);
+        slot[11] = 0x20; // archive, which is what an ordinary file carries
+        let stamp = DosTimestamp::encode(TIME).expect("in range");
+        slot[22..24].copy_from_slice(&stamp.time.to_le_bytes());
+        slot[24..26].copy_from_slice(&stamp.date.to_le_bytes());
+        slot
+    }
+
+    fn root_chained_through_the_whole_volume() -> (Vec<u8>, FatLayout) {
+        // Every slot in the data region is an entry, so nothing stops the parse early. Each
+        // carries a real write time, because the bound under test is the entry cap and an
+        // entry whose date the calendar does not have is a deviation that would stop the
+        // parse first — on a fixture where the times were never the point.
+        root_chained_through(None, |_| file_slot(b"FILLER  TXT"))
     }
 
     #[test]
@@ -5752,6 +5973,70 @@ mod tests {
             r.chain(2),
             Err(ReadError::WalkTooLarge { limit: 16 })
         ));
+    }
+
+    /// A volume whose root chains through `clusters` one-sector clusters, every slot of them
+    /// a file with a short name of its own, the `n`th slot naming `F{n:07}.TXT`.
+    fn root_of_clusters(clusters: u32) -> Vec<u8> {
+        root_chained_through(Some(clusters), |n| {
+            file_slot(format!("F{n:07}TXT").as_bytes())
+        })
+        .0
+    }
+
+    #[test]
+    fn a_directory_past_the_format_s_size_is_read_whole_and_named() {
+        let per_cluster = 512 / DIR_ENTRY_SIZE as u64;
+        let at_bound = u32::try_from(MAX_DIRECTORY_BYTES / 512).expect("a cluster count");
+        let lenient = OpenOptions::new().policy(ReadPolicy::Lenient);
+        let finding = ReadError::DirectoryTooLong {
+            index: u32::try_from(MAX_DIRECTORY_ENTRIES).expect("an index"),
+            limit: MAX_DIRECTORY_BYTES,
+        }
+        .to_string();
+
+        // At the bound, a strict read takes the whole directory and a scan has nothing to say
+        // about its size.
+        let bytes = root_of_clusters(at_bound);
+        let mut r = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
+        let root = r.root();
+        let entries = r.read_dir(&root).expect("a directory of the format's size");
+        assert_eq!(entries.len() as u64, MAX_DIRECTORY_ENTRIES);
+        let mut r = Reader::open_with(Cursor::new(bytes.as_slice()), &lenient).expect("open");
+        assert!(
+            !r.scan().anomalies().iter().any(|a| a.detail == finding),
+            "a directory of exactly the bound"
+        );
+
+        // One cluster past it.
+        let bytes = root_of_clusters(at_bound + 1);
+        let mut r = Reader::open(Cursor::new(bytes.as_slice())).expect("open");
+        let root = r.root();
+        let err = r.read_dir(&root).expect_err("a strict read refuses it");
+        assert_eq!(err.to_string(), finding);
+        assert_eq!(err.anomaly().severity, Severity::Conformance);
+        // A lookup reads only as far as its name, so a name before the bound resolves.
+        assert!(r.lookup(b"/F0000009.TXT").is_ok());
+
+        // A lenient read takes every entry, the ones past the bound included, as a driver
+        // reads them; a scan names the directory once.
+        let mut r = Reader::open_with(Cursor::new(bytes.as_slice()), &lenient).expect("open");
+        let root = r.root();
+        let entries = r.read_dir(&root).expect("a lenient read");
+        assert_eq!(entries.len() as u64, MAX_DIRECTORY_ENTRIES + per_cluster);
+        let last = format!("F{:07}.TXT", MAX_DIRECTORY_ENTRIES + per_cluster - 1);
+        assert_eq!(
+            entries.last().map(|e| e.name.as_slice()),
+            Some(last.as_bytes())
+        );
+        let report = r.scan();
+        let named: Vec<_> = report
+            .anomalies()
+            .iter()
+            .filter(|a| a.detail == finding)
+            .collect();
+        assert_eq!(named.len(), 1, "{:#?}", report.anomalies());
+        assert_eq!(named[0].severity, Severity::Conformance);
     }
 
     #[test]

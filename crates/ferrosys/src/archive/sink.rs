@@ -275,10 +275,18 @@ impl<W: Write> ArchiveSink<W> {
             // The filesystem's own verdict, kept beside the I/O error it had to travel as,
             // so a file the image cannot yield is the image's failure and not the
             // destination's.
-            Err(e) => Err(match body.into_inner().failed {
-                Some(source) => ArchiveError::Read(source),
-                None => ArchiveError::from_body_io(e, &m.path),
-            }),
+            Err(e) => {
+                let body = body.into_inner();
+                Err(match (body.failed, body.short) {
+                    (Some(source), _) => ArchiveError::Read(source),
+                    (None, true) => ArchiveError::ShortRead {
+                        path: m.path.clone(),
+                        size,
+                        got: body.offset,
+                    },
+                    (None, false) => ArchiveError::from_body_io(e, &m.path),
+                })
+            }
         }
     }
 }
@@ -297,6 +305,10 @@ struct NodeData<'a, T: FsTree> {
     /// The filesystem's failure, when a read of it is what stopped the body. A `Read` can
     /// only speak `io::Error`, so this is where the typed verdict waits to be handed back.
     failed: Option<TreeError>,
+    /// Whether the filesystem yielded nothing with bytes of the declared length still owed.
+    /// `tar` reads a zero as the end of the body and pads to the bytes it copied, so a short
+    /// body is an error here and not an end.
+    short: bool,
 }
 
 impl<'a, T: FsTree> NodeData<'a, T> {
@@ -307,6 +319,7 @@ impl<'a, T: FsTree> NodeData<'a, T> {
             offset: 0,
             size,
             failed: None,
+            short: false,
         }
     }
 }
@@ -335,6 +348,13 @@ impl<T: FsTree> Read for NodeData<'_, T> {
                 return Err(carried);
             }
         };
+        if filled == 0 {
+            self.short = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the filesystem yielded fewer bytes than the file's length",
+            ));
+        }
         self.offset += filled as u64;
         Ok(filled)
     }

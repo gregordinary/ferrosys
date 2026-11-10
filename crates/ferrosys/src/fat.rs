@@ -1,5 +1,5 @@
-//! The FAT12/FAT16/FAT32 family: the formatter, the geometry planner, and the byte-exact
-//! on-disk structures.
+//! The FAT12/FAT16/FAT32 family: the formatter, the reader, the geometry planner, and the
+//! byte-exact on-disk structures.
 //!
 //! The three FATs are one lineage. They share a boot sector, a directory format, and a
 //! cluster heap, and differ in the width of a file allocation table entry and in where the
@@ -114,7 +114,9 @@ pub mod table;
 pub(crate) use detect::claim;
 
 pub use charset::ShortNameCharset;
-pub use model::{MAX_FILE_BYTES, ModelError, TimeField};
+pub use model::{
+    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES, MAX_FILE_BYTES, ModelError, TimeField,
+};
 pub use name::{MAX_NAME_UNITS, NameError};
 pub use read::{
     Anomaly, Category, Entry, Location, Node, OpenOptions, ReadError, Reader, ScanReport, Storage,
@@ -127,8 +129,8 @@ pub use geometry::{
     MIN_CLUSTERS_FAT16, MIN_CLUSTERS_FAT32, PlanRequest, ReservedSectors, RootEntries, plan_layout,
 };
 pub use materialize::{
-    BootCode, DEFAULT_OEM_NAME, FormatError, FormatOptions, FormatPlan, Image, LabelError,
-    MEDIA_FIXED, MEDIA_REMOVABLE, VolumeLabel, format, format_to,
+    BootCode, DEFAULT_OEM_NAME, DiskGeometry, FormatError, FormatOptions, FormatPlan, Image,
+    LabelError, MEDIA_FIXED, MEDIA_REMOVABLE, VolumeLabel, format, format_to,
 };
 
 // The crate root's family-agnostic vocabulary, reached from here as well, so a caller

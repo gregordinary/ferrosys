@@ -22,7 +22,7 @@ use std::io::{ErrorKind, Read, Seek};
 use crate::detect::{DetectError, DetectOptions, Filesystem};
 use crate::io::{offset_of, read_exact_at};
 
-use super::ondisk::{self, MIRRORS, SUPER_INFO_SIZE, SuperBlock};
+use super::ondisk::{MIRRORS, SUPER_INFO_SIZE, SuperBlock};
 
 /// Whether the btrfs family claims the image.
 ///
@@ -58,23 +58,21 @@ fn classify(bytes: &[u8]) -> bool {
     let Ok(superblock) = SuperBlock::read_from(bytes) else {
         return false;
     };
-    // Only the algorithm the crate computes can be held to its own checksum. A filesystem
-    // using another one is still btrfs and is still classified: the magic and a parse are what
-    // says so, and the reader is where the algorithm is named as the reason it cannot be read.
-    let Some(digest_len) = superblock.csum_type.digest_len() else {
-        return true;
-    };
-    if superblock.csum_type != ondisk::ChecksumType::CRC32C {
+    // A superblock is held to its own checksum in whichever algorithm it names. A value the
+    // format does not define names none, and a filesystem carrying one is still btrfs and is
+    // still classified: the magic and a parse are what say so, and the reader is where the
+    // value is named as the reason it cannot be read.
+    if superblock.csum_type.digest_len().is_none() {
         return true;
     }
-    ondisk::stored_crc32c(bytes) == ondisk::checksum(bytes)
-        && ondisk::padding_is_clear(bytes, digest_len)
+    superblock.csum_type.holds(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::btrfs::forge::Forge;
+    use crate::btrfs::ondisk;
     use std::io::Cursor;
 
     /// The bytes of the forged image's primary superblock.
@@ -136,18 +134,45 @@ mod tests {
     }
 
     #[test]
-    fn a_checksum_this_crate_does_not_compute_is_not_held_against_the_image() {
-        // A filesystem checksummed by an algorithm nothing here implements is still a btrfs.
-        // Comparing its field against a crc32c would answer "not ours" for a whole class of
-        // healthy filesystems, which is the failure this arm exists to avoid.
+    fn a_checksum_the_format_does_not_define_is_not_held_against_the_image() {
+        // A filesystem naming an algorithm the format has no digest for is still a btrfs.
+        // Holding its field to some digest would answer "not ours" for it, where the reader
+        // names the value as the reason it cannot be read.
         let mut bytes = a_superblock();
         let mut sb = SuperBlock::read_from(&bytes).expect("a superblock");
-        sb.csum_type = ondisk::ChecksumType::BLAKE2B;
+        sb.csum_type = ondisk::ChecksumType::from_value(0x7f);
         sb.write_to(&mut bytes);
         assert!(
             classify(&bytes),
             "the checksum no longer covers it, and it is still btrfs"
         );
+    }
+
+    #[test]
+    fn a_superblock_is_held_to_whichever_algorithm_it_names() {
+        // Sealed in each algorithm, a superblock classifies; naming another one than it was
+        // sealed in, it does not, as a damaged crc32c one never has.
+        for csum_type in [
+            ondisk::ChecksumType::CRC32C,
+            ondisk::ChecksumType::XXHASH64,
+            ondisk::ChecksumType::SHA256,
+            ondisk::ChecksumType::BLAKE2B,
+        ] {
+            let mut bytes = a_superblock();
+            let mut sb = SuperBlock::read_from(&bytes).expect("a superblock");
+            sb.csum_type = csum_type;
+            sb.write_to(&mut bytes);
+            let field = csum_type
+                .field(&bytes[ondisk::CHECKSUM_COVERED_FROM..])
+                .expect("a defined algorithm");
+            bytes[..ondisk::CSUM_FIELD_LEN].copy_from_slice(&field);
+            assert!(classify(&bytes), "{csum_type:?}");
+            bytes[ondisk::CSUM_FIELD_LEN] ^= 1;
+            assert!(
+                !classify(&bytes),
+                "{csum_type:?}, a byte past the field changed"
+            );
+        }
     }
 
     #[test]

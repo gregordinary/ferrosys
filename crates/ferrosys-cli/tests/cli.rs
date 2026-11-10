@@ -2482,7 +2482,13 @@ fn a_read_is_bounded_by_the_cap_it_is_given() {
         "--cat",
         "/etc/big",
     ]);
-    assert_ne!(code(&out), OK, "a file over the cap must not be written");
+    // The cap is the caller's and the file is sound, so the run is one it could not carry
+    // out, not a verdict about the filesystem.
+    assert_eq!(
+        code(&out),
+        OPERATIONAL,
+        "a file over the cap must not be written"
+    );
     assert!(
         out.stdout.is_empty(),
         "no bytes are written before the refusal"
@@ -2493,6 +2499,21 @@ fn a_read_is_bounded_by_the_cap_it_is_given() {
         "the message names the size: {stderr}"
     );
     assert!(stderr.contains("1024"), "and the cap: {stderr}");
+    assert!(
+        !stderr.contains("malformed"),
+        "and calls nothing malformed: {stderr}"
+    );
+    for how in [&["--to-tar", "-"][..], &["--to-dir", "unpacked"][..]] {
+        let mut args = vec!["extract", path, "--max-file-bytes", "1K"];
+        let target = dir.path().join("unpacked");
+        let target = target.to_str().expect("a text path");
+        args.extend(
+            how.iter()
+                .map(|a| if *a == "unpacked" { target } else { a }),
+        );
+        let out = run(&args);
+        assert_eq!(code(&out), OPERATIONAL, "{how:?}");
+    }
 
     // Under the cap the same file reads whole, so the bound is a bound and not a break.
     let out = run(&[
@@ -2536,9 +2557,9 @@ fn a_read_is_bounded_even_when_no_cap_is_given() {
     assert!(out.status.success(), "debugfs did not run");
 
     let out = run(&["extract", path, "--cat", "/etc/big"]);
-    assert_ne!(
+    assert_eq!(
         code(&out),
-        OK,
+        OPERATIONAL,
         "a file whose declared size dwarfs the image must not be written out by default"
     );
     assert!(
@@ -3773,40 +3794,76 @@ fn a_volume_nothing_here_wrote_is_read_by_the_shipping_binary() {
 }
 
 #[test]
-fn a_size_this_family_cannot_search_for_is_refused_before_anything_is_read() {
+fn an_auto_size_fits_an_exfat_volume_and_a_btrfs_and_each_passes_its_checker() {
+    if !available("fsck.exfat") || !available("mkfs.btrfs") {
+        return;
+    }
     let dir = scratch();
-    let image = at(&dir, "esp.img");
+    let tree = btrfs_source(&dir);
+    let tree = tree.to_str().expect("a text path");
+    let size_of = |image: &Path| std::fs::metadata(image).expect("the image exists").len();
 
-    // `--size auto` plans candidate sizes and places the contents into each, and that search
-    // is a family's own. This one has none, so the refusal comes from the command line rather
-    // than from a plan — which is what keeps a whole tree from being walked to say so.
-    //
-    // The source is a directory that is not there, and that is the assertion: a run that
-    // reached the planning stage would fail on the missing tree instead, so the message being
-    // about the size is what says nothing was read. Without it the refusal could equally come
-    // from the plan, which spells the same words on purpose.
-    let out = run(&[
-        "format",
-        "--size",
-        "auto",
-        "-t",
-        "exfat",
-        "--volume-serial",
-        EXFAT_SERIAL,
-        "--accept-loss",
-        "change-time,time-precision",
-        "--from-dir",
-        dir.path()
-            .join("no-such-tree")
-            .to_str()
-            .expect("a text path"),
-        image.to_str().expect("a text path"),
-    ]);
-    assert_eq!(code(&out), USAGE);
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(said.contains("--size auto"), "{said}");
-    assert!(said.contains("exfat"), "{said}");
-    assert!(!image.exists(), "a refused line wrote nothing");
+    // exFAT: the smallest volume, then one with room, both clean to the pinned checker.
+    let exfat = |image: &Path, slack: Option<&str>| {
+        let mut argv = vec![
+            "format",
+            "--size",
+            "auto",
+            "-t",
+            "exfat",
+            "--volume-serial",
+            EXFAT_SERIAL,
+            "--owner",
+            "0:0",
+            "--accept-loss",
+            "all",
+            "--from-dir",
+            tree,
+        ];
+        if let Some(room) = slack {
+            argv.extend(["--slack", room]);
+        }
+        argv.push(image.to_str().expect("a text path"));
+        let out = run(&argv);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        fsck_exfat_clean(image);
+    };
+    let tight = at(&dir, "tight.exfat");
+    exfat(&tight, None);
+    let roomy = at(&dir, "roomy.exfat");
+    exfat(&roomy, Some("64M"));
+    assert!(size_of(&roomy) >= size_of(&tight) + (64 << 20));
+
+    // btrfs: the same, against `btrfs check`.
+    let btrfs = |image: &Path, slack: Option<&str>| {
+        let mut argv = vec![
+            "format",
+            "--size",
+            "auto",
+            "-t",
+            "btrfs",
+            "--fsid",
+            FSID,
+            "--time",
+            TIME,
+            "--owner",
+            "0:0",
+            "--from-dir",
+            tree,
+        ];
+        if let Some(room) = slack {
+            argv.extend(["--slack", room]);
+        }
+        argv.push(image.to_str().expect("a text path"));
+        let out = run(&argv);
+        assert_eq!(code(&out), OK, "{}", String::from_utf8_lossy(&out.stderr));
+        btrfs_check_clean(image);
+    };
+    let tight = at(&dir, "tight.btrfs");
+    btrfs(&tight, None);
+    let roomy = at(&dir, "roomy.btrfs");
+    btrfs(&roomy, Some("256M"));
+    assert!(size_of(&roomy) > size_of(&tight));
 }
 
 #[test]
@@ -3871,6 +3928,129 @@ fn an_option_belongs_to_a_family_or_to_the_class_that_shares_it() {
     assert!(!image.exists(), "a refused line wrote nothing");
 }
 
+/// Every family the tool formats, each with what it takes to format a tree losing nothing a
+/// test here is not about: its identity, its time where its format records one, and its size.
+fn every_family() -> [(&'static str, Vec<&'static str>); 5] {
+    [
+        (
+            "ext4",
+            vec!["--uuid", UUID, "--time", TIME, "--size", "64M"],
+        ),
+        (
+            "fat32",
+            vec![
+                "--volume-id",
+                SERIAL,
+                "--time",
+                TIME,
+                "--accept-loss",
+                "change-time,time-precision",
+                "--size",
+                "64M",
+            ],
+        ),
+        (
+            "exfat",
+            vec![
+                "--volume-serial",
+                EXFAT_SERIAL,
+                "--accept-loss",
+                "change-time,time-precision",
+                "--size",
+                "64M",
+            ],
+        ),
+        // The one family whose smallest default-profile volume is past sixty-four mebibytes.
+        (
+            "btrfs",
+            vec!["--fsid", FSID, "--time", TIME, "--size", "128M"],
+        ),
+        (
+            "apfs",
+            vec![
+                "--container-uuid",
+                CONTAINER_UUID,
+                "--volume",
+                APFS_VOLUME,
+                "--time",
+                TIME,
+                "--size",
+                "64M",
+            ],
+        ),
+    ]
+}
+
+/// An archive of a tree nested past the longest path a walk builds, 4,096 bytes: a hundred
+/// and twenty directories of 37-byte names, each inside the one before, and a file at the
+/// bottom.
+fn deep_archive() -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    let mut add = |path: &str, kind: tar::EntryType, mode: u32, data: &[u8]| {
+        // A ustar header holds 100 bytes of path, so the path is a PAX record.
+        b.append_pax_extensions([("path", path.as_bytes())])
+            .expect("pax records");
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(kind);
+        h.set_mode(mode);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_mtime(1_700_000_000);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).expect("append");
+    };
+    let mut path = String::new();
+    for level in 0..120 {
+        path.push_str(&format!("{level:03}-a-component-of-substantial-length/"));
+        add(&path, tar::EntryType::Directory, 0o755, &[]);
+    }
+    path.push_str("bottom");
+    add(&path, tar::EntryType::Regular, 0o644, b"deep\n");
+    drop(add);
+    b.into_inner().expect("finish the archive")
+}
+
+/// A tree nested past the longest path a walk builds is well-formed in every format, so it
+/// scans clean, and a listing stops at the bound as a limit: exit 8, naming the limit, with
+/// no word of `--max-file-bytes`, which raises a different bound.
+#[test]
+fn a_tree_deeper_than_a_walk_builds_scans_clean_and_lists_as_a_limit_whichever_family_holds_it() {
+    let dir = scratch();
+    let archive = at(&dir, "deep.tar");
+    std::fs::write(&archive, deep_archive()).expect("write the archive");
+    let archive = archive.to_str().expect("a text path");
+    for (family, identity) in every_family() {
+        let image = at(&dir, &format!("{family}.img"));
+        let path = image.to_str().expect("a text path");
+        let mut args = vec!["format", "-t", family, "--from-tar", archive];
+        args.extend_from_slice(&identity);
+        args.push(path);
+        let out = run(&args);
+        assert_eq!(
+            code(&out),
+            OK,
+            "{family}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let out = run(&["inspect", path]);
+        assert_eq!(
+            code(&out),
+            OK,
+            "{family}: a deep tree is no finding:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let out = run(&["extract", path, "--list"]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(code(&out), OPERATIONAL, "{family}: {said}");
+        assert!(said.contains("read exceeded a limit"), "{family}: {said}");
+        assert!(!said.contains("--max-file-bytes"), "{family}: {said}");
+    }
+}
+
 /// A path that descends through a regular file is the caller's error, on every family.
 ///
 /// The exit-code contract draws the 4-versus-8 line at "a filesystem was read, and it is
@@ -3893,52 +4073,10 @@ fn a_path_through_a_file_is_the_callers_error_whichever_family_answers() {
     .expect("the file's mode");
     let tree = tree.to_str().expect("a text path");
 
-    let families: [(&str, Vec<&str>); 5] = [
-        ("ext4", vec!["--uuid", UUID, "--time", TIME]),
-        (
-            "fat32",
-            vec![
-                "--volume-id",
-                SERIAL,
-                "--time",
-                TIME,
-                "--accept-loss",
-                "change-time,time-precision",
-            ],
-        ),
-        (
-            "exfat",
-            vec![
-                "--volume-serial",
-                EXFAT_SERIAL,
-                "--accept-loss",
-                "change-time,time-precision",
-            ],
-        ),
-        // The one family whose smallest default-profile volume is past sixty-four mebibytes.
-        (
-            "btrfs",
-            vec!["--fsid", FSID, "--time", TIME, "--size", "128M"],
-        ),
-        (
-            "apfs",
-            vec![
-                "--container-uuid",
-                CONTAINER_UUID,
-                "--volume",
-                APFS_VOLUME,
-                "--time",
-                TIME,
-            ],
-        ),
-    ];
-    for (family, identity) in families {
+    for (family, identity) in every_family() {
         let image = at(&dir, &format!("{family}.img"));
         let path = image.to_str().expect("a text path");
         let mut args = vec!["format", "-t", family, "--owner", "0:0", "--from-dir", tree];
-        if family != "btrfs" {
-            args.extend_from_slice(&["--size", "64M"]);
-        }
         args.extend_from_slice(&identity);
         args.push(path);
         let out = run(&args);
@@ -4156,6 +4294,43 @@ fn sparse_fixture(dir: &tempfile::TempDir, name: &str, out: &str) -> PathBuf {
     let path = at(dir, out);
     std::fs::write(&path, image).expect("write the image");
     path
+}
+
+/// An ext4 a Linux 7.1 kernel encrypted part of: `/secret` under an fscrypt v2 policy, with
+/// files, links and directories in it, and `/plain` beside it unencrypted. The library's
+/// `kernel_ext_features` gate reads the same bytes.
+fn encrypted_ext4_fixture(dir: &tempfile::TempDir) -> PathBuf {
+    sparse_fixture(dir, "ext4-kernel-encrypt.sparse", "encrypted.img")
+}
+
+#[test]
+fn an_encrypted_ext4_reads_its_plaintext_and_refuses_its_ciphertext_as_unsupported() {
+    let dir = scratch();
+    let image = encrypted_ext4_fixture(&dir);
+    let path = image.to_str().expect("a text path");
+
+    // The filesystem is sound, and reads as sound.
+    ok(&["inspect", path]);
+    assert_eq!(
+        ok(&["extract", path, "--cat", "/plain/hello.txt"]),
+        b"hello from a plain directory\n"
+    );
+    // What is ciphertext is beyond this tool without the key, which is no verdict about the
+    // filesystem: through `--cat`, `--list` and an archive alike, it is a command that could
+    // not be carried out, and it says so without calling the filesystem malformed.
+    for args in [
+        &["extract", path, "--cat", "/secret/a.txt"][..],
+        &["extract", path, "--list"][..],
+        &["extract", path, "--to-tar", "-"][..],
+    ] {
+        let out = run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(code(&out), OPERATIONAL, "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("encrypted") && !stderr.contains("malformed"),
+            "{args:?}: {stderr}"
+        );
+    }
 }
 
 /// The bytes the fixture's `/hello` holds: the pattern the library's assembler writes.
@@ -5012,27 +5187,6 @@ fn a_btrfs_format_this_tool_refuses_says_which_word_it_refused_and_writes_nothin
     assert_eq!(code(&out), USAGE);
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("--uuid") && said.contains("btrfs"), "{said}");
-
-    // And `--size auto` names a search this family does not have, refused before a source is
-    // read rather than after.
-    let out = run(&[
-        "format",
-        "--size",
-        "auto",
-        "-t",
-        "btrfs",
-        "--fsid",
-        FSID,
-        "--time",
-        TIME,
-        image.to_str().expect("a text path"),
-    ]);
-    assert_eq!(code(&out), USAGE);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("--size auto"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 #[test]
@@ -6425,4 +6579,36 @@ fn a_volume_left_mounted_is_described_and_passes_a_conformance_verdict() {
         let json = String::from_utf8(ok(&["inspect", "--quick", "--json", path])).expect("text");
         assert!(json.contains("\"volume_dirty\":true"), "{fs}: {json}");
     }
+}
+
+#[test]
+fn a_symbolic_link_loop_is_no_such_path_on_every_family() {
+    // `a` names `b` and `b` names `a`: a sound filesystem, with a path that resolves to
+    // nothing. That is the answer btrfs and APFS give, and the one the shared surface gives
+    // for ext; the ext reader's own error reaches the same exit, not "malformed".
+    let dir = scratch();
+    let archive = at(&dir, "loop.tar");
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, target) in [("a", "b"), ("b", "a")] {
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_mode(0o777);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_size(0);
+        h.set_mtime(1_700_000_000);
+        h.set_path(name).expect("a name");
+        h.set_link_name(target).expect("a target");
+        h.set_cksum();
+        b.append(&h, std::io::empty()).expect("append");
+    }
+    std::fs::write(&archive, b.into_inner().expect("the archive")).expect("write");
+    let image = at(&dir, "fs.img");
+    assert_eq!(code(&format(&image, "16M", Some(&archive))), OK);
+    let path = image.to_str().expect("a text path");
+    let out = run(&["extract", path, "--cat", "/a"]);
+    assert_eq!(code(&out), OPERATIONAL);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no such path"), "{stderr}");
+    assert!(!stderr.contains("malformed"), "{stderr}");
 }

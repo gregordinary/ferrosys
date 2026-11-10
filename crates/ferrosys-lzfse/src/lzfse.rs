@@ -1,10 +1,10 @@
 //! LZFSE, decoded.
 //!
 //! The input is a filesystem's own bytes and therefore untrusted, and every bound the decoder
-//! reads is one this crate's gates hold it to. The decoder is derived from the one in Apple's
+//! reads is one this crate's tests hold it to. The decoder is derived from the one in Apple's
 //! reference implementation, the `lzfse` project (copyright 2015-2016 Apple Inc., under the
-//! BSD-3-Clause license, whose notice the crate's `THIRD-PARTY-NOTICES` carries): its value
-//! tables, the build of its decoding tables and its bit reader follow that decoder's.
+//! BSD-3-Clause license, whose text the crate's `LICENSE` carries): its value tables, the
+//! build of its decoding tables and its bit reader follow that decoder's.
 //!
 //! This module is pure — bytes in, bytes out, no I/O — and what it decodes is one *stream*.
 //!
@@ -44,23 +44,29 @@
 //! As for LZVN: backwards into what the stream has produced, and never before its start. The
 //! first command of a stream has no distance before it to repeat.
 
-use super::{Algorithm, Error, lzvn};
-use crate::bytes::{get_u32, get_u64};
+use crate::{Error, lzvn};
 
 /// What a stream says it is wrong about.
 fn malformed(fault: &'static str) -> Error {
-    Error::Malformed {
-        algorithm: Algorithm::Lzfse,
-        fault,
-    }
+    Error::Malformed { fault }
 }
 
 /// The output buffer is full and the stream goes on.
 fn overrun(out: &[u8]) -> Error {
     Error::Overrun {
-        algorithm: Algorithm::Lzfse,
         expected: out.len(),
     }
+}
+
+/// The little-endian 32-bit word at `at` of `buf`: a block's magic, and each count its header
+/// records.
+fn get_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
+/// The little-endian 64-bit word at `at` of `buf`: each of a packed header's three bit fields.
+fn get_u64(buf: &[u8], at: usize) -> u64 {
+    u64::from(get_u32(buf, at)) | u64::from(get_u32(buf, at + 4)) << 32
 }
 
 const END: u32 = u32::from_le_bytes(*b"bvx$");
@@ -108,7 +114,7 @@ const D_BASE: [u32; D_SYMBOLS] = [
 /// Undo one LZFSE stream into `out`, returning how many bytes it produced.
 ///
 /// The stream ends at its end block; bytes after it are not read.
-pub(super) fn decompress(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+pub(crate) fn decompress(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     let mut src = 0usize;
     let mut dst = 0usize;
     loop {
@@ -358,7 +364,7 @@ impl Block {
             lit += length;
             at += length;
             let back = distance.unwrap_or(0);
-            if !super::copy_back(out, at, back, matched) {
+            if !crate::copy_back(out, at, back, matched) {
                 return Err(malformed("a match reaches before the start of the output"));
             }
             at += matched;
@@ -796,7 +802,7 @@ mod tests {
         raw_then_lzvn.extend_from_slice(&lzvn);
         for stream in [ended(raw_then_lzvn), ended(the_block(12, 8, 4))] {
             let whole = decode(&stream, 64).expect("the stream decodes");
-            crate::compress::sweep_changes_of(&stream, whole.len() + 16, decompress);
+            crate::sweep_changes_of(&stream, whole.len() + 16, decompress);
         }
     }
 

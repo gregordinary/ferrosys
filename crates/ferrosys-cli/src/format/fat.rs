@@ -25,8 +25,6 @@ use crate::{Error, emit, render};
 impl Plan for FormatPlan {
     type Options = FormatOptions;
 
-    const FAMILY: &'static str = "fat";
-
     fn sized(source: impl Source, bytes: u64, options: FormatOptions) -> Result<Self, Error> {
         Ok(FormatPlan::new(source, bytes, options)?)
     }
@@ -85,7 +83,7 @@ fn report(
     if args.json {
         emit(receipt(args, target, layout, free_clusters, fidelity, written).as_bytes())
     } else {
-        eprint!("{}", summary(args, target, layout, free_clusters, fidelity));
+        note!("{}", summary(args, target, layout, free_clusters, fidelity));
         Ok(())
     }
 }

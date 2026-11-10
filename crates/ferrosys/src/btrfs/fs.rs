@@ -23,8 +23,10 @@
 //! # A subvolume is a directory that is a different tree
 //!
 //! A directory entry whose location names a `ROOT_ITEM` rather than an inode is where a
-//! subvolume is mounted, and stepping through it means continuing in another tree entirely. A
-//! walk crosses those seams, so what it yields is every name in the filesystem rather than
+//! subvolume is mounted, where that subvolume's backref names the entry, and stepping through
+//! it means continuing in another tree entirely. Any other entry naming a subvolume, as a
+//! snapshot keeps for a nested one, is an empty directory, a [`Node::stub`]. A walk crosses
+//! those seams, so what it yields is every name in the filesystem rather than
 //! every name in one tree — and [`Node::tree`] is what says which tree a node was found in,
 //! because an inode number means nothing without it.
 //!
@@ -39,7 +41,7 @@ use crate::finding::{Family, Severity};
 use crate::policy::MAX_PATH;
 use crate::source::Metadata;
 use crate::time::Timestamp;
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, Bound, Child, FsTree, NodeKind, TreeEntry, TreeError, Usage};
 use crate::xattr::Xattr;
 use crate::{Limits, OpenOptions, ReadPolicy};
 
@@ -67,6 +69,16 @@ pub struct Node {
     pub inode: u64,
     /// What the inode records: mode, ownership, size, and the four times.
     pub item: InodeItem,
+    /// Whether this is the empty directory standing where an entry names a subvolume linked
+    /// somewhere else, which is the shape a snapshot of a subvolume holding nested ones has.
+    ///
+    /// Documented in `btrfs-subvolume(8)`: a snapshot is not recursive, and a subvolume nested
+    /// in the one snapshotted appears in the snapshot as an empty directory. The snapshot keeps
+    /// the entry naming it, and that subvolume's backref names the place it was created; an
+    /// entry the backref does not name is this stub. It holds nothing, and its tree holds no
+    /// inode for it: [`inode`](Self::inode) is the id of the subvolume the entry names, and
+    /// [`item`](Self::item) is the directory holding the entry's, as a directory of mode 0755.
+    pub stub: bool,
 }
 
 impl Node {
@@ -327,6 +339,7 @@ impl<R: Read + Seek> Reader<R> {
             tree,
             inode,
             item: InodeItem::read_from(&found.data)?,
+            stub: false,
         })
     }
 
@@ -343,6 +356,9 @@ impl<R: Read + Seek> Reader<R> {
     pub fn read_dir(&mut self, node: &Node) -> Result<Vec<Entry>, ReadError> {
         if !node.is_dir() {
             return Err(ReadError::NotADirectory { path: Vec::new() });
+        }
+        if node.stub {
+            return Ok(Vec::new());
         }
         let root = self.tree_root(node.tree)?;
         let from = DiskKey::first_of(node.inode, ItemType::DIR_INDEX);
@@ -387,8 +403,9 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// Each component is found through the `DIR_ITEM` keyed by the hash of its name, so a
     /// resolution costs one descent per component rather than a listing per directory. A
-    /// component naming a subvolume continues in that subvolume's tree, which is what makes a
-    /// path across a subvolume boundary one path.
+    /// component naming a subvolume continues in that subvolume's tree where the subvolume's
+    /// backref names that entry, which is what makes a path across a subvolume boundary one
+    /// path. Any other entry naming one is an empty directory, a [`Node::stub`].
     ///
     /// A `..` component ascends to the directory the resolution descended from, staying at the
     /// root where there is nothing to ascend to — so it crosses back out of a subvolume the
@@ -436,6 +453,9 @@ impl<R: Read + Seek> Reader<R> {
     /// Whatever a descent refuses, and [`ReadError::BadDirEntry`] where an item under the
     /// name's own hash does not frame as entries.
     pub fn find_entry(&mut self, dir: &Node, name: &[u8]) -> Result<Option<Entry>, ReadError> {
+        if dir.stub {
+            return Ok(None);
+        }
         let root = self.tree_root(dir.tree)?;
         let key = DiskKey::new(dir.inode, ItemType::DIR_ITEM, name_hash(name));
         let Some(found) = self.volume.tree(root).find_exact(key)? else {
@@ -469,7 +489,7 @@ impl<R: Read + Seek> Reader<R> {
     /// of, [`ReadError::MissingInode`] where it names an inode its tree does not hold, and
     /// [`ReadError::BadDirEntry`] where it names neither.
     pub fn step(&mut self, dir: &Node, entry: &Entry) -> Result<Node, ReadError> {
-        self.at_location(dir.tree, entry.location)
+        self.at_location(dir, &entry.name, entry.location)
     }
 
     /// Every extended attribute of a node, in the order the tree holds them.
@@ -484,6 +504,9 @@ impl<R: Read + Seek> Reader<R> {
     /// Whatever a walk of the tree refuses, and [`ReadError::BadXattr`] where a record does not
     /// frame as a name and a value.
     pub fn xattrs(&mut self, node: &Node) -> Result<Vec<Xattr>, ReadError> {
+        if node.stub {
+            return Ok(Vec::new());
+        }
         let root = self.tree_root(node.tree)?;
         let from = DiskKey::first_of(node.inode, ItemType::XATTR_ITEM);
         let mut out = Vec::new();
@@ -546,7 +569,9 @@ impl<R: Read + Seek> Reader<R> {
         if offset >= size || buf.is_empty() {
             return Ok(0);
         }
-        let want = buf.len().min((size - offset) as usize);
+        let want = buf
+            .len()
+            .min(usize::try_from(size - offset).unwrap_or(usize::MAX));
         let out = &mut buf[..want];
         // Everything the extents do not cover is a hole, so the answer starts as zeros and
         // what is read overwrites them. A record that covers nothing therefore leaves the
@@ -950,8 +975,8 @@ impl<R: Read + Seek> Reader<R> {
     /// Hold every byte of a regular file against the checksums the filesystem recorded for it.
     ///
     /// **The check no other family in this crate can make.** ext4 checksums its metadata and
-    /// not its data; neither FAT nor exFAT checksums anything. btrfs keeps a crc32c per sector
-    /// of every data extent in a tree of its own, so an extent that has decayed on the medium,
+    /// not its data; neither FAT nor exFAT checksums anything. btrfs keeps a checksum per
+    /// sector of every data extent in a tree of its own, in the algorithm its superblock names, so an extent that has decayed on the medium,
     /// or a file whose bytes were replaced under a correct-looking tree, is detectable — and a
     /// reader that verified only what it walked through would not detect either.
     ///
@@ -980,23 +1005,38 @@ impl<R: Read + Seek> Reader<R> {
             return Ok(());
         }
         let sector = u64::from(self.volume.superblock().sectorsize);
+        let csum_type = self.volume.superblock().csum_type;
         let records = self.extent_records(node, 0, u64::MAX)?;
         for (at, item, _) in records {
             if item.kind.is_inline() || item.is_hole() || item.kind == ExtentKind::Prealloc {
                 continue;
             }
-            // The whole extent rather than this record's share of it: the checksums are keyed
-            // by the extent's own address, and a record that takes the middle of a shared
-            // extent is still asking about bytes the tree records under that address.
-            let mut logical = item.disk_bytenr;
-            let end = logical
-                .checked_add(item.disk_num_bytes)
-                .ok_or(ReadError::BadExtent {
-                    tree: node.tree,
-                    inode: node.inode,
-                    at,
-                    fault: "the extent's address runs past the end of the address space",
-                })?;
+            // The sectors this record's bytes are read from. A compressed extent is one stream,
+            // so every byte a record reads depends on the whole of it, and the whole extent is
+            // checked. An uncompressed record reads its own share, from its offset for its
+            // length, and that share is what holds checksums: a write into part of a
+            // preallocated extent leaves a regular record over the written sectors, which
+            // carry checksums, and preallocated records over the rest, which do not.
+            let bad = || ReadError::BadExtent {
+                tree: node.tree,
+                inode: node.inode,
+                at,
+                fault: "the extent's address runs past the end of the address space",
+            };
+            let (from, len) = if item.compression == super::ondisk::Compression::None {
+                let first = item.offset - item.offset % sector;
+                let last = item
+                    .offset
+                    .checked_add(item.num_bytes)
+                    .ok_or_else(bad)?
+                    .next_multiple_of(sector)
+                    .min(item.disk_num_bytes.max(first));
+                (first, last - first)
+            } else {
+                (0, item.disk_num_bytes)
+            };
+            let mut logical = item.disk_bytenr.checked_add(from).ok_or_else(bad)?;
+            let end = logical.checked_add(len).ok_or_else(bad)?;
             let mut buf = vec![0u8; sector as usize];
             while logical < end {
                 let take = (end - logical).min(sector) as usize;
@@ -1004,7 +1044,7 @@ impl<R: Read + Seek> Reader<R> {
                 let recorded = self
                     .data_checksum(logical)?
                     .ok_or(ReadError::MissingDataChecksum { logical })?;
-                if super::ondisk::crc32c_over(&buf[..take]) != recorded {
+                if csum_type.field(&buf[..take]) != Some(recorded) {
                     return Err(ReadError::DataChecksum { logical });
                 }
                 logical += take as u64;
@@ -1020,7 +1060,14 @@ impl<R: Read + Seek> Reader<R> {
     /// holds one digest per sector from there, so finding the one covering an address is the
     /// last item keyed at or before it — and whether it reaches that far is arithmetic on its
     /// own length.
-    fn data_checksum(&mut self, logical: u64) -> Result<Option<u32>, ReadError> {
+    ///
+    /// The digest comes back in the checksum field's form — its bytes at the front and zeros
+    /// behind — which is the form [`ChecksumType::field`](super::ondisk::ChecksumType::field)
+    /// computes one in.
+    fn data_checksum(
+        &mut self,
+        logical: u64,
+    ) -> Result<Option<[u8; super::ondisk::CSUM_FIELD_LEN]>, ReadError> {
         let sector = u64::from(self.volume.superblock().sectorsize);
         let Some(digest) = self.volume.superblock().csum_type.digest_len() else {
             return Ok(None);
@@ -1042,10 +1089,12 @@ impl<R: Read + Seek> Reader<R> {
             return Ok(None);
         }
         let index = ((logical - found.key.offset) / sector) as usize * digest;
-        // Only the four bytes a crc32c fills are the digest; the rest of a record is another
-        // algorithm's, and a filesystem using one never reaches here because opening it names
-        // the algorithm as the reason it cannot be read.
-        Ok((index + 4 <= found.data.len()).then(|| crate::bytes::get_u32(&found.data, index)))
+        // An item holds the digests packed at the algorithm's own length, one per sector.
+        Ok(found.data.get(index..index + digest).map(|stored| {
+            let mut field = [0u8; super::ondisk::CSUM_FIELD_LEN];
+            field[..digest].copy_from_slice(stored);
+            field
+        }))
     }
 
     /// Where one of the filesystem's own trees begins, found through the root tree.
@@ -1082,7 +1131,7 @@ impl<R: Read + Seek> Reader<R> {
         &mut self,
         dir: &Node,
         path: &[u8],
-    ) -> Result<Vec<(Vec<u8>, u64, DiskKey)>, ReadError> {
+    ) -> Result<Vec<(Vec<u8>, Node, DiskKey)>, ReadError> {
         let entries = self
             .read_dir(dir)?
             .into_iter()
@@ -1095,23 +1144,48 @@ impl<R: Read + Seek> Reader<R> {
         )?;
         Ok(pending
             .into_iter()
-            .map(|(child, location)| (child, dir.tree, location))
+            .map(|(child, location)| (child, *dir, location))
             .collect())
     }
 
-    /// The node a directory entry's location names, given the subvolume the entry was found in.
-    fn at_location(&mut self, tree: u64, location: DiskKey) -> Result<Node, ReadError> {
+    /// The node the entry `name` of directory `dir` names by `location`.
+    ///
+    /// An entry naming a subvolume crosses into it where the subvolume's backref names this
+    /// directory of this tree under this name, which is the one place the subvolume is linked.
+    /// Any other entry naming it is a [stub](Node::stub), an empty directory, and is not
+    /// crossed: a snapshot of a subvolume holding nested ones keeps their entries, and
+    /// following them would read the nested subvolumes as the snapshot's content.
+    fn at_location(
+        &mut self,
+        dir: &Node,
+        name: &[u8],
+        location: DiskKey,
+    ) -> Result<Node, ReadError> {
+        let tree = dir.tree;
         match location.kind {
             ItemType::INODE_ITEM => self.inode(tree, location.objectid),
             ItemType::ROOT_ITEM => {
                 let id = location.objectid;
-                let root_dir = self
+                let sub = self
                     .subvolumes
                     .iter()
                     .find(|sub| sub.id == id)
-                    .ok_or(ReadError::MissingTree { objectid: id })?
-                    .root_dir;
-                self.inode(id, root_dir)
+                    .ok_or(ReadError::MissingTree { objectid: id })?;
+                if sub.parent == Some(tree) && sub.parent_dir == dir.inode && sub.name == name {
+                    let root_dir = sub.root_dir;
+                    return self.inode(id, root_dir);
+                }
+                let mut item = dir.item;
+                item.mode = MODE_DIR | 0o755;
+                item.size = 0;
+                item.nbytes = 0;
+                item.nlink = 1;
+                Ok(Node {
+                    tree,
+                    inode: id,
+                    item,
+                    stub: true,
+                })
             }
             other => Err(ReadError::BadDirEntry {
                 tree,
@@ -1332,9 +1406,24 @@ impl<R: Read + Seek> Reader<R> {
     /// supplied — so it is held to what this format compresses in before a byte is allocated
     /// for it. A record claiming a gibibyte costs a refusal rather than a gibibyte.
     ///
-    /// A stream that stops before it has produced what the record declared is refused rather
-    /// than zero-filled, which is the same rule the uncompressed inline path follows: the tail
-    /// would be zeros the file does not have.
+    /// **An inline record's stream may expand to a whole sector.** The file is its first
+    /// `ram_bytes`, and what follows is the rest of the sector it was compressed from. Observed:
+    /// every inline extent a Linux 7.1 driver compressed with zlib, LZO or zstd, a file of 1 to
+    /// 4095 bytes in a 4096-byte sector, expands to the whole sector, where `mkfs.btrfs`
+    /// compresses the file's bytes alone. So an inline record is undone into a sector's room
+    /// and holds to its own length within it.
+    ///
+    /// **A regular extent's stream may stop at the file's end.** Its record declares a whole
+    /// number of sectors, and the stream may hold only the bytes the file has. Observed: the
+    /// pinned `mkfs.btrfs --compress zlib -r` writes a 4451-byte file's last extent as 8192
+    /// declared, its stream expanding to 4451, and `btrfs check --check-data-csum` and `btrfs
+    /// restore` both accept it. So a regular extent's stream holds to every byte the file reads
+    /// from it — from the record's offset into the extent up to the file's size — and what lies
+    /// past that and past the stream is zeros the file never reads.
+    ///
+    /// A stream that stops inside what the file reads is refused rather than zero-filled, which
+    /// is the same rule the uncompressed inline path follows: the tail would be zeros the file
+    /// does not have.
     fn expand(
         &mut self,
         node: &Node,
@@ -1352,7 +1441,13 @@ impl<R: Read + Seek> Reader<R> {
             });
         }
         let sector_size = self.volume.superblock().sectorsize;
-        let mut whole = vec![0u8; item.ram_bytes as usize];
+        let declared = item.ram_bytes as usize;
+        let room = if item.kind.is_inline() {
+            declared.max(sector_size as usize)
+        } else {
+            declared
+        };
+        let mut whole = vec![0u8; room];
         let produced = decode::decode(algorithm, stored, &mut whole, sector_size).map_err(|e| {
             ReadError::BadCompressedExtent {
                 tree: node.tree,
@@ -1361,17 +1456,26 @@ impl<R: Read + Seek> Reader<R> {
                 fault: e.to_string(),
             }
         })?;
-        if produced != whole.len() {
+        let holds = if item.kind.is_inline() {
+            produced >= declared
+        } else {
+            // The bytes of the extent the file reads: from the record's offset into it, for
+            // the record's length or up to the file's end, whichever comes first.
+            let read = item
+                .num_bytes
+                .min(node.item.size.saturating_sub(at))
+                .saturating_add(item.offset);
+            produced == declared || (produced < declared && produced as u64 >= read)
+        };
+        if !holds {
             return Err(ReadError::BadCompressedExtent {
                 tree: node.tree,
                 inode: node.inode,
                 at,
-                fault: format!(
-                    "it expands to {produced} bytes and the record declares {}",
-                    whole.len()
-                ),
+                fault: format!("it expands to {produced} bytes and the record declares {declared}"),
             });
         }
+        whole.truncate(declared);
         Ok(whole)
     }
 }
@@ -1397,6 +1501,11 @@ fn read_subvolumes<R: Read + Seek>(volume: &mut Volume<R>) -> Result<Vec<Subvolu
         }
         match key.kind {
             ItemType::ROOT_ITEM => match RootItem::read_from(data) {
+                // A subvolume being deleted: no reference holds it, or a drop of its tree has
+                // begun and records how far it got. Documented: a deleted subvolume's tree is
+                // freed in the background, so after an unclean unmount part of it may already
+                // be gone. It is no subvolume of the filesystem, and its blocks are not read.
+                Ok(item) if item.refs == 0 || item.drop_progress.objectid != 0 => true,
                 Ok(item) => {
                     let root = TreeRoot {
                         objectid: key.objectid,
@@ -1576,13 +1685,14 @@ impl<R: Read + Seek> crate::resolve::Resolve for Reader<R> {
 /// element carries **the subvolume its parent was in**: a location naming an inode is an inode
 /// of that same tree, and one naming a root is where another tree begins.
 impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
-    /// A name reached and not yet visited: its path, the subvolume the directory holding it is
-    /// in, and the key of what it names.
+    /// A name reached and not yet visited: its path, the directory holding it, and the key of
+    /// what it names.
     ///
     /// The node itself is not kept. The frontier holds every name reached and not yet visited,
     /// and re-reading an inode is one descent — so what rides here is the least that can find
-    /// it again.
-    type Pending = (Vec<u8>, u64, DiskKey);
+    /// it again: the holding directory's node is a copy of a few words, and it is what says
+    /// whether an entry naming a subvolume is the one the subvolume is linked by.
+    type Pending = (Vec<u8>, Node, DiskKey);
     type Entry = WalkEntry;
     type Key = (u64, u64);
     type Error = ReadError;
@@ -1598,8 +1708,12 @@ impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
     }
 
     fn resolve(&mut self, pending: Self::Pending) -> Result<WalkEntry, ReadError> {
-        let (path, tree, location) = pending;
-        let node = self.at_location(tree, location)?;
+        let (path, dir, location) = pending;
+        let name = crate::path::canonical_parts(&path)
+            .last()
+            .copied()
+            .unwrap_or_default();
+        let node = self.at_location(&dir, name, location)?;
         Ok(WalkEntry { path, node })
     }
 
@@ -1616,10 +1730,9 @@ impl<R: Read + Seek> crate::walk::Walk for Reader<R> {
     }
 
     fn descend_key(&self, entry: &WalkEntry) -> Option<(u64, u64)> {
-        entry
-            .node
-            .is_dir()
-            .then_some((entry.node.tree, entry.node.inode))
+        // A stub holds nothing to descend into, and its pair names a subvolume rather than an
+        // inode of its tree.
+        (entry.node.is_dir() && !entry.node.stub).then_some((entry.node.tree, entry.node.inode))
     }
 
     fn children(&mut self, entry: &WalkEntry) -> Result<Vec<Self::Pending>, ReadError> {
@@ -1644,11 +1757,14 @@ impl From<ReadError> for TreeError {
     fn from(err: ReadError) -> Self {
         match err {
             ReadError::Io { kind, message } => TreeError::Io { kind, message },
-            ReadError::FileTooLarge { .. } | ReadError::TooManyEntries { .. } => {
-                TreeError::LimitExceeded {
-                    family: Family::Btrfs,
-                    detail: err.to_string(),
-                }
+            ReadError::FileTooLarge { .. } => {
+                TreeError::limit(Family::Btrfs, Bound::FileBytes, &err)
+            }
+            ReadError::TooManyEntries { .. } | ReadError::WalkTooLarge { .. } => {
+                TreeError::limit(Family::Btrfs, Bound::Entries, &err)
+            }
+            ReadError::PathTooLong { .. } => {
+                TreeError::limit(Family::Btrfs, Bound::PathBytes, &err)
             }
             // A filesystem that is entirely well-formed and beyond this build. Every one of
             // these names what it would take to read it, which is what the shared frame calls
@@ -1694,33 +1810,7 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         let mut shared: BTreeMap<(u64, u64), u64> = BTreeMap::new();
         let outcome = self.walk_with::<WalkFail<E>, _>(|reader, entry| {
             let node = entry.node;
-            let kind = match node.item.mode_type() {
-                MODE_DIR => NodeKind::Directory,
-                MODE_REG => NodeKind::File {
-                    size: node.item.size,
-                },
-                MODE_LNK => NodeKind::Symlink,
-                MODE_CHR => {
-                    let (major, minor) = node.item.device();
-                    NodeKind::CharDevice { major, minor }
-                }
-                MODE_BLK => {
-                    let (major, minor) = node.item.device();
-                    NodeKind::BlockDevice { major, minor }
-                }
-                MODE_FIFO => NodeKind::Fifo,
-                MODE_SOCK => NodeKind::Socket,
-                other => {
-                    return Err(WalkFail::Tree(TreeError::Malformed {
-                        family: Family::Btrfs,
-                        detail: format!(
-                            "inode {} of subvolume {} records file type {other:#o}, which names \
-                             no file type",
-                            node.inode, node.tree
-                        ),
-                    }));
-                }
-            };
+            let kind = node_kind(&node).map_err(WalkFail::Tree)?;
             let mut out = TreeEntry::new(entry.path, kind, node);
             // A directory has one name by construction, so its link count says nothing and it
             // is never a second name for anything. Only a node the image says has more than
@@ -1756,6 +1846,82 @@ impl<R: Read + Seek> FsTree for Reader<R> {
     fn link_target(&mut self, node: &Node) -> Result<Vec<u8>, TreeError> {
         Ok(Reader::link_target(self, node)?)
     }
+
+    fn find(&mut self, path: &[u8]) -> Result<Child<Node>, TreeError> {
+        let node = self.lookup(path).map_err(|e| match e {
+            ReadError::NotFound { .. }
+            | ReadError::NotADirectory { .. }
+            | ReadError::SymlinkLoop { .. } => TreeError::NotFound {
+                family: Family::Btrfs,
+                path: path.to_vec(),
+            },
+            other => TreeError::from(other),
+        })?;
+        let kind = node_kind(&node)?;
+        Ok(Child::new(crate::tree::last_name(path), kind, node))
+    }
+
+    fn list(&mut self, dir: &Node) -> Result<Vec<Child<Node>>, TreeError> {
+        if !dir.is_dir() {
+            return Err(crate::tree::not_a_directory(Family::Btrfs));
+        }
+        let entries = self.read_dir(dir)?.into_iter().map(|e| (e.name.clone(), e));
+        let mut out = Vec::new();
+        for (name, entry) in crate::tree::listed(Family::Btrfs, entries)? {
+            // Through the entry's own key, which is a subvolume's root where the entry names
+            // one: a listing crosses into a subvolume as a walk does.
+            let node = self.step(dir, &entry)?;
+            let kind = node_kind(&node)?;
+            out.push(Child::new(name, kind, node));
+        }
+        Ok(out)
+    }
+
+    /// In sectors: the device's size, and the superblock's account of what is free, which is
+    /// logical. The superblock counts the bytes its extents use once each, so the free count
+    /// is the device's size less those: a tree block a DUP profile stores twice is counted
+    /// once, and the device holds that many fewer sectors unused than this says.
+    fn usage(&mut self) -> Result<Usage, TreeError> {
+        let sb = self.volume.superblock();
+        let unit = u64::from(sb.sectorsize);
+        Ok(Usage::new(
+            unit,
+            sb.total_bytes / unit,
+            sb.total_bytes.saturating_sub(sb.bytes_used) / unit,
+        ))
+    }
+}
+
+/// What a node is, in the shared frame's words: the one projection a walk, a lookup and a
+/// listing all go through.
+fn node_kind(node: &Node) -> Result<NodeKind, TreeError> {
+    Ok(match node.item.mode_type() {
+        MODE_DIR => NodeKind::Directory,
+        MODE_REG => NodeKind::File {
+            size: node.item.size,
+        },
+        MODE_LNK => NodeKind::Symlink,
+        MODE_CHR => {
+            let (major, minor) = node.item.device();
+            NodeKind::CharDevice { major, minor }
+        }
+        MODE_BLK => {
+            let (major, minor) = node.item.device();
+            NodeKind::BlockDevice { major, minor }
+        }
+        MODE_FIFO => NodeKind::Fifo,
+        MODE_SOCK => NodeKind::Socket,
+        other => {
+            return Err(TreeError::Malformed {
+                family: Family::Btrfs,
+                detail: format!(
+                    "inode {} of subvolume {} records file type {other:#o}, which names no \
+                     file type",
+                    node.inode, node.tree
+                ),
+            });
+        }
+    })
 }
 
 /// The `S_IFMT` value of a character-special device node.
@@ -1834,6 +2000,11 @@ mod tests {
 
     /// The same, with a subvolume mounted at `/nested` and a file inside it.
     fn a_filesystem_with_a_subvolume() -> Forge {
+        a_filesystem_with_a_subvolume_and(Vec::new())
+    }
+
+    /// The same, with `extra` among the top-level tree's items.
+    fn a_filesystem_with_a_subvolume_and(extra: Vec<(DiskKey, Vec<u8>)>) -> Forge {
         let mut top = vec![
             (
                 DiskKey::new(ROOT_DIR, ItemType::INODE_ITEM, 0),
@@ -1863,6 +2034,7 @@ mod tests {
             DiskKey::new(SUB_ID, ItemType::ROOT_ITEM, u64::MAX),
             DirEntryType::Dir,
         ));
+        top.extend(extra);
 
         let mut sub = vec![
             (
@@ -2316,6 +2488,97 @@ mod tests {
     }
 
     #[test]
+    fn a_subvolume_being_deleted_is_no_subvolume_of_the_filesystem() {
+        // No reference holds its root, or a drop of its tree has begun: either way its tree is
+        // being freed, and after an unclean unmount part of it may be gone. It is left out of
+        // what the filesystem holds rather than walked as a live tree.
+        for (what, at, value) in [("no reference", 216usize, 0u8), ("a drop begun", 220, 1)] {
+            let mut forge = Forge::new();
+            forge.block(
+                FS_TREE_AT,
+                &fs_tree(
+                    FS_TREE_AT,
+                    objectid::FS_TREE,
+                    vec![(
+                        DiskKey::new(ROOT_DIR, ItemType::INODE_ITEM, 0),
+                        inode_item(MODE_DIR | 0o755, 0, 1),
+                    )],
+                ),
+            );
+            forge.block(
+                SUB_TREE_AT,
+                &fs_tree(
+                    SUB_TREE_AT,
+                    SUB_ID,
+                    vec![(
+                        DiskKey::new(ROOT_DIR, ItemType::INODE_ITEM, 0),
+                        inode_item(MODE_DIR | 0o755, 0, 1),
+                    )],
+                ),
+            );
+            let mut dying = root_item(SUB_TREE_AT, 0, ROOT_DIR);
+            dying[at..at + 4].fill(0);
+            dying[at] = value;
+            forge.root_leaf(&[
+                (
+                    DiskKey::new(objectid::FS_TREE, ItemType::ROOT_ITEM, 0),
+                    root_item(FS_TREE_AT, 0, ROOT_DIR),
+                ),
+                (DiskKey::new(SUB_ID, ItemType::ROOT_ITEM, 0), dying),
+            ]);
+            let reader = open(&forge);
+            assert_eq!(reader.subvolumes().len(), 1, "{what}");
+        }
+    }
+
+    #[test]
+    fn an_entry_naming_a_subvolume_linked_elsewhere_is_an_empty_directory() {
+        // A snapshot of a subvolume holding a nested one keeps the entry naming it, and the
+        // nested subvolume's backref names where it was created. Here `/stub` is the kept
+        // entry and `/nested` the link: `/stub` reads as an empty directory, a walk reaches
+        // the nested subvolume once, under `/nested`, and a strict walk finds nothing twice.
+        let forge = a_filesystem_with_a_subvolume_and(entry(
+            ROOT_DIR,
+            4,
+            b"stub",
+            DiskKey::new(SUB_ID, ItemType::ROOT_ITEM, u64::MAX),
+            DirEntryType::Dir,
+        ));
+        let mut reader = open(&forge);
+        let stub = reader.lookup(b"/stub").expect("the stub");
+        assert!(stub.stub && stub.is_dir());
+        assert_eq!(
+            stub.tree,
+            objectid::FS_TREE,
+            "a stub is in the tree holding it"
+        );
+        assert_eq!(reader.read_dir(&stub).expect("its entries"), Vec::new());
+        assert!(
+            reader.lookup(b"/stub/within").is_err(),
+            "nothing is under it"
+        );
+        let nested = reader.lookup(b"/nested/within").expect("the nested file");
+        assert_eq!(reader.read_data(&nested).expect("its bytes"), b"inside");
+
+        let paths: Vec<Vec<u8>> = reader
+            .walk()
+            .expect("a strict walk")
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                Vec::new(),
+                b"/above".to_vec(),
+                b"/nested".to_vec(),
+                b"/nested/within".to_vec(),
+                b"/stub".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
     fn a_parent_component_ascends_back_out_of_the_subvolume_it_descended_into() {
         // The ascent holds the directories a resolution went through, not the inode numbers
         // they have — and this family is why. Inode 257 exists in every subvolume, so a
@@ -2672,6 +2935,16 @@ mod tests {
             4096,
             addressed_extent(ExtentKind::Regular, DATA_AT, 4096, 0, 4096),
         );
+        a_checksummed_filesystem_holding(items, on_the_volume, covering)
+    }
+
+    /// A filesystem whose root holds `items`, with `on_the_volume` at the data address and the
+    /// checksum tree recording one checksum per sector of `covering` from there.
+    fn a_checksummed_filesystem_holding(
+        items: Vec<(DiskKey, Vec<u8>)>,
+        on_the_volume: &[u8],
+        covering: &[u8],
+    ) -> Forge {
         let mut forge = Forge::new();
         let mut all = vec![(
             DiskKey::new(ROOT_DIR, ItemType::INODE_ITEM, 0),
@@ -2732,6 +3005,42 @@ mod tests {
             reader.verify_data(&node),
             Err(ReadError::DataChecksum { logical }) if logical == DATA_AT
         ));
+    }
+
+    #[test]
+    fn a_record_over_part_of_an_extent_is_held_to_its_own_sectors() {
+        // A write into part of a preallocated extent leaves a regular record over the written
+        // sector, which carries a checksum, and a preallocated one over the rest, which does
+        // not. What the file reads through the regular record is what has a checksum.
+        let mut items = vec![
+            (
+                DiskKey::new(257, ItemType::INODE_ITEM, 0),
+                inode_item(MODE_REG | 0o644, 8192, 1),
+            ),
+            (
+                DiskKey::new(257, ItemType::EXTENT_DATA, 0),
+                addressed_extent(ExtentKind::Regular, DATA_AT, 8192, 0, 4096),
+            ),
+            (
+                DiskKey::new(257, ItemType::EXTENT_DATA, 4096),
+                addressed_extent(ExtentKind::Prealloc, DATA_AT, 8192, 4096, 4096),
+            ),
+        ];
+        items.extend(entry(
+            ROOT_DIR,
+            2,
+            b"part",
+            DiskKey::new(257, ItemType::INODE_ITEM, 0),
+            DirEntryType::RegFile,
+        ));
+        let mut on_the_volume = vec![0u8; 8192];
+        on_the_volume[..4096].fill(DATA_BYTE);
+        let forge = a_checksummed_filesystem_holding(items, &on_the_volume, &on_the_volume[..4096]);
+        let mut reader = open(&forge);
+        let node = reader.lookup(b"/part").expect("the file");
+        reader
+            .verify_data(&node)
+            .expect("the written sector verifies, and the rest holds nothing to check");
     }
 
     #[test]

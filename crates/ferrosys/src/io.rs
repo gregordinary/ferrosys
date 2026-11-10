@@ -360,6 +360,27 @@ pub(crate) const fn offset_of(base: u64, index: u64, unit: u64) -> Option<u64> {
     }
 }
 
+/// A zeroed buffer of `bytes` to build an image in, or `None` where this platform cannot
+/// address that many bytes or the allocator will not provide them.
+///
+/// An in-memory format holds its whole image, so its size is a request for that much memory.
+/// A size past what a `usize` addresses is refused, and so is one the allocator answers it has
+/// no room for, which is the multi-tebibyte request a 64-bit platform addresses and no machine
+/// holds; asking for it directly would abort the process rather than refuse. The buffer that
+/// is handed back is the zeroed allocation, whose untouched pages cost nothing until written.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+pub(crate) fn image_buffer(bytes: u64) -> Option<Vec<u8>> {
+    let len = usize::try_from(bytes).ok()?;
+    Vec::<u8>::new().try_reserve_exact(len).ok()?;
+    Some(vec![0u8; len])
+}
+
 /// What every error in this crate records about an [`std::io::Error`]: how it classified
 /// itself, and what it says.
 ///

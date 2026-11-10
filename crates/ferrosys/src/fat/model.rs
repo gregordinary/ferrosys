@@ -57,6 +57,18 @@ use super::ondisk::{Attributes, DIR_ENTRY_SIZE};
 /// The largest file the format records a length for: the length field is 32 bits.
 pub const MAX_FILE_BYTES: u64 = u32::MAX as u64;
 
+/// The largest a directory may be: 65,536 entries of 32 bytes, 2 MiB.
+///
+/// The format states it as a bound on the directory's own size, so it counts every entry the
+/// directory occupies — long-name entries, `.` and `..`, the volume label in the root — rather
+/// than the files it names. It holds for every directory, the root included, and a FAT12 or
+/// FAT16 root's fixed region is smaller still. A Linux kernel reads a larger directory whole
+/// and refuses to grow one past this size (observed).
+pub const MAX_DIRECTORY_BYTES: u64 = MAX_DIRECTORY_ENTRIES * DIR_ENTRY_SIZE as u64;
+
+/// Directory entries the largest directory holds.
+pub const MAX_DIRECTORY_ENTRIES: u64 = 1 << 16;
+
 /// Which of an entry's times a range refusal is about, so the message names a field rather
 /// than an instant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -272,13 +284,32 @@ pub enum ModelError {
         /// What it would lose.
         property: Property,
     },
+    /// A directory needs more entries than the format lets one directory hold.
+    ///
+    /// The bound is [`MAX_DIRECTORY_BYTES`], and it is a property of the tree rather than of
+    /// the volume: no size holds the directory. A long name costs one entry per thirteen
+    /// characters on top of the entry it names, so shorter names or a second directory make
+    /// room.
+    #[error(
+        "the directory {} needs {needed} bytes of entries and the format holds {limit} in one",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    DirectoryTooLarge {
+        /// The directory that could not be laid out.
+        path: Vec<u8>,
+        /// Bytes of entries the tree puts in it.
+        needed: u64,
+        /// Bytes the format holds in one directory.
+        limit: u64,
+    },
     /// The root directory region is full.
     ///
     /// FAT12 and FAT16 give the root a fixed region rather than a cluster chain, so its
     /// capacity is decided when the volume is planned and cannot grow. A long name costs one
     /// entry per thirteen characters on top of the entry it names, which is what usually
     /// fills one. Raise [`RootEntries`](super::RootEntries) or move the files into a
-    /// subdirectory, which has no such limit.
+    /// subdirectory, which holds up to [`MAX_DIRECTORY_ENTRIES`].
     #[error(
         "the root directory needs {needed} entries and its region holds {capacity}; FAT12 \
          and FAT16 fix that capacity when the volume is planned"
@@ -550,6 +581,7 @@ impl<'a> Builder<'a> {
         for entry in entries {
             self.place(entry)?;
         }
+        self.check_directory_capacity()?;
         Ok(PlacedTree {
             dirs: self.dirs,
             contents: self.contents,
@@ -667,6 +699,32 @@ impl<'a> Builder<'a> {
             times,
             node,
         });
+        Ok(())
+    }
+
+    /// Refuse a directory larger than the format lets one be.
+    ///
+    /// Every directory, the root included: the format bounds a directory's own size, and a
+    /// FAT32 root is an ordinary chain. A FAT12 or FAT16 root is also held to its fixed
+    /// region, which depends on the volume and is checked where a geometry is applied.
+    fn check_directory_capacity(&self) -> Result<(), ModelError> {
+        for (index, dir) in self.dirs.iter().enumerate() {
+            let needed = dir.slots(index, self.config.has_label) * DIR_ENTRY_SIZE as u64;
+            if needed > MAX_DIRECTORY_BYTES {
+                let key = self
+                    .dir_of
+                    .iter()
+                    .find_map(|(key, &at)| (at == index).then_some(key.as_slice()))
+                    .unwrap_or_default();
+                let mut path = b"/".to_vec();
+                path.extend_from_slice(key);
+                return Err(ModelError::DirectoryTooLarge {
+                    path,
+                    needed,
+                    limit: MAX_DIRECTORY_BYTES,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1700,12 +1758,80 @@ mod tests {
                 if needed == capacity * 2 && c == capacity),
             "{err:?}"
         );
-        // A subdirectory has no such limit, and the same files fit in one.
+        // A subdirectory is a chain and holds up to the format's bound, so the same files fit
+        // in one.
         let mut source = TreeBuilder::new().directory(b"/d".to_vec(), meta(0o755));
         for i in 0..capacity {
             source = source.file(format!("/d/file{i}").into_bytes(), b"x", meta(0o644));
         }
         assert!(build_model(source.into_entries(), &layout, &config(AcceptedLoss::NONE)).is_ok());
+    }
+
+    /// `/d` holding `files` empty files, each named by its own short name or, with `long`,
+    /// by a lower-case name that also takes a long-name entry.
+    fn directory_of(files: u64, long: bool) -> TreeBuilder {
+        let mut source = TreeBuilder::new().directory(b"/d".to_vec(), meta(0o755));
+        for i in 0..files {
+            let name = if long {
+                format!("/d/f{i:07}")
+            } else {
+                format!("/d/F{i:07}")
+            };
+            source = source.file(name.into_bytes(), Vec::new(), meta(0o644));
+        }
+        source
+    }
+
+    #[test]
+    fn a_directory_is_held_to_the_format_s_size_counting_every_entry_it_occupies() {
+        let config = config(AcceptedLoss::NONE);
+        // `.` and `..` lead every subdirectory, so 65,534 names fill one exactly.
+        let full = MAX_DIRECTORY_ENTRIES - 2;
+        assert!(place_tree(directory_of(full, false).into_entries(), &config).is_ok());
+        let err = place_tree(directory_of(full + 1, false).into_entries(), &config)
+            .expect_err("one entry past the bound");
+        assert!(
+            matches!(&err, ModelError::DirectoryTooLarge { path, needed, limit }
+                if path == b"/d"
+                    && *needed == MAX_DIRECTORY_BYTES + DIR_ENTRY_SIZE as u64
+                    && *limit == MAX_DIRECTORY_BYTES),
+            "{err:?}"
+        );
+        assert_eq!(MAX_DIRECTORY_BYTES, 2 << 20);
+
+        // A long-name entry is an entry: half as many names fill the directory when each
+        // takes two.
+        let half = full / 2;
+        assert!(place_tree(directory_of(half, true).into_entries(), &config).is_ok());
+        assert!(matches!(
+            place_tree(directory_of(half + 1, true).into_entries(), &config),
+            Err(ModelError::DirectoryTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn a_chained_root_is_held_to_the_bound_with_its_label_counted() {
+        // The label is the root's one leading entry, where a subdirectory has two.
+        let root_of = |files: u64| {
+            let mut source = TreeBuilder::new();
+            for i in 0..files {
+                let name = format!("/F{i:07}");
+                source = source.file(name.into_bytes(), Vec::new(), meta(0o644));
+            }
+            source.into_entries()
+        };
+        let labelled = ModelConfig {
+            has_label: true,
+            ..config(AcceptedLoss::NONE)
+        };
+        let full = MAX_DIRECTORY_ENTRIES - 1;
+        assert!(place_tree(root_of(full), &labelled).is_ok());
+        let err = place_tree(root_of(full + 1), &labelled).expect_err("one entry past the bound");
+        assert!(
+            matches!(&err, ModelError::DirectoryTooLarge { path, .. } if path == b"/"),
+            "{err:?}"
+        );
+        assert!(place_tree(root_of(full + 1), &config(AcceptedLoss::NONE)).is_ok());
     }
 
     #[test]

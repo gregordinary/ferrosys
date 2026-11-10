@@ -1,0 +1,5 @@
+pub const ferrosys_ucd::ASSIGNED: &[(u32, u32, u8, u8)]
+pub const ferrosys_ucd::CASE_FOLDING: &[(u32, &[u32])]
+pub const ferrosys_ucd::COMBINING_CLASS: &[(u32, u8)]
+pub const ferrosys_ucd::DECOMPOSITION: &[(u32, &[u32])]
+pub mod ferrosys_ucd

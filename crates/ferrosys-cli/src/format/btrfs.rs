@@ -17,17 +17,16 @@
 //! against four families asks all four the same question, and a family that answered by saying
 //! nothing would be one whose answer had to be known in advance.
 //!
-//! # No search for a size
+//! # A size found from the contents
 //!
-//! `--size auto` finds the smallest filesystem that holds the contents by planning candidates
-//! and placing into them, and that search is a family's own. This family has none, so the
-//! argument parser refuses `--size auto` for it before a source is read.
+//! `--size auto` asks the library for the smallest filesystem that holds the contents, with
+//! `--slack` of room for file data left in it, and writes that.
 
 use ferrosys::btrfs::ondisk::BlockGroupFlags;
 use ferrosys::btrfs::{
     BtrfsLayout, FormatOptions, FormatPlan, NodeSize, PlanRequest, SectorSize, VolumeLabel,
 };
-use ferrosys::{FidelityReport, Source};
+use ferrosys::{FidelityReport, Slack, Source};
 
 use crate::args::{BtrfsTarget, FormatArgs};
 use crate::format::{Plan, Written};
@@ -36,10 +35,12 @@ use crate::{Error, emit, render};
 impl Plan for FormatPlan {
     type Options = FormatOptions;
 
-    const FAMILY: &'static str = "btrfs";
-
     fn sized(source: impl Source, bytes: u64, options: FormatOptions) -> Result<Self, Error> {
         Ok(FormatPlan::new(source, bytes, options)?)
+    }
+
+    fn fitted(source: impl Source, options: FormatOptions, slack: Slack) -> Result<Self, Error> {
+        Ok(FormatPlan::fit(source, options, slack)?)
     }
 }
 
@@ -109,7 +110,7 @@ fn report(
     if args.json {
         emit(receipt(args, target, layout, fidelity, written).as_bytes())
     } else {
-        eprint!("{}", summary(args, target, layout, fidelity));
+        note!("{}", summary(args, target, layout, fidelity));
         Ok(())
     }
 }

@@ -6,8 +6,8 @@
 //! name, an identifier and a way of comparing names of its own, so the summary lists every
 //! volume the format was asked for in the slot it was given. What the container itself has is
 //! a block size, a block count and the blocks its space manager records free once every
-//! volume's content is placed. The first volume holds the contents and every other volume is
-//! empty but for its root directory.
+//! volume's content is placed. The first volume holds the contents, and every other volume
+//! holds the tree its `--volume-from-dir` names, or its root directory alone.
 //!
 //! # Nothing is lost, and the report says so anyway
 //!
@@ -32,8 +32,6 @@ use crate::{Error, emit, render};
 
 impl Plan for FormatPlan {
     type Options = FormatOptions;
-
-    const FAMILY: &'static str = "apfs";
 
     fn sized(source: impl Source, bytes: u64, options: FormatOptions) -> Result<Self, Error> {
         Ok(FormatPlan::new(source, bytes, options)?)
@@ -79,7 +77,7 @@ pub fn run(args: &FormatArgs, target: &ApfsTarget) -> Result<(), Error> {
     if args.json {
         emit(receipt(args, target, &outcome, written).as_bytes())
     } else {
-        eprint!("{}", summary(args, target, &outcome));
+        note!("{}", summary(args, target, &outcome));
         Ok(())
     }
 }

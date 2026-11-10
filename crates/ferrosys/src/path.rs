@@ -76,8 +76,9 @@ pub(crate) fn canonical_key(path: &[u8]) -> Vec<u8> {
 /// Whether `name` is one no directory entry could carry: it is empty, or holds a path
 /// separator or a NUL.
 ///
-/// The kernel's `ext4_check_dir_entry` forbids the last two, so either marks a crafted or
-/// corrupt image, and no FAT driver writes them either. A name carrying `/` traverses out of
+/// A filename holds neither of the last two (POSIX.1-2017, XBD 3.170 "Filename"), and the
+/// pinned `e2fsck` faults an ext directory entry holding either (observed), so either marks a
+/// crafted or corrupt image; no FAT driver writes them either. A name carrying `/` traverses out of
 /// its directory (`../../etc/...`); one carrying a NUL ends early at the C-string boundary a
 /// consumer would build a host path against.
 ///
@@ -114,6 +115,7 @@ pub(crate) fn is_hostile_entry(name: &[u8]) -> bool {
 /// receives it, after a FAT long name is decoded and a short one is read under the volume's
 /// code page, because that is the byte string a path is built from.
 #[cfg(any(
+    feature = "ext",
     feature = "fat",
     feature = "exfat",
     feature = "btrfs",

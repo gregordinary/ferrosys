@@ -63,7 +63,12 @@ pub(crate) fn get_u24(buf: &[u8], off: usize) -> u32 {
 
 /// Read one little-endian `u64` at `off`.
 #[inline]
-#[cfg(any(feature = "exfat", feature = "btrfs", feature = "apfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn get_u64(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes([
         buf[off],
@@ -79,7 +84,7 @@ pub(crate) fn get_u64(buf: &[u8], off: usize) -> u64 {
 
 /// Read one big-endian `u32` at `off`.
 #[inline]
-#[cfg(any(feature = "ext", feature = "apfs"))]
+#[cfg(any(feature = "ext", feature = "apfs", feature = "btrfs"))]
 pub(crate) fn get_u32_be(buf: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
@@ -141,14 +146,19 @@ pub(crate) fn put_u32(buf: &mut [u8], off: usize, v: u32) {
 
 /// Write one little-endian `u64` at `off`.
 #[inline]
-#[cfg(any(feature = "exfat", feature = "btrfs", feature = "apfs"))]
+#[cfg(any(
+    feature = "ext",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
 pub(crate) fn put_u64(buf: &mut [u8], off: usize, v: u64) {
     buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Write one big-endian `u32` at `off`.
 #[inline]
-#[cfg(any(feature = "ext", all(feature = "apfs", test)))]
+#[cfg(any(feature = "ext", feature = "btrfs", all(feature = "apfs", test)))]
 pub(crate) fn put_u32_be(buf: &mut [u8], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
 }

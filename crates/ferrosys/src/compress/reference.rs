@@ -23,7 +23,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::{Error, lzbitmap, lzfse, lzvn};
+use super::{Algorithm, Error, decompress};
 use crate::bytes::get_u32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,9 +36,9 @@ enum Codec {
 impl Codec {
     fn decode(self, input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         match self {
-            Codec::Lzvn => lzvn::decompress(input, out),
-            Codec::Lzfse => lzfse::decompress(input, out),
-            Codec::Lzbitmap => lzbitmap::decompress(input, out),
+            Codec::Lzvn => decompress(Algorithm::Lzvn, input, out),
+            Codec::Lzfse => decompress(Algorithm::Lzfse, input, out),
+            Codec::Lzbitmap => decompress(Algorithm::Lzbitmap, input, out),
         }
     }
 }

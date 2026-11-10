@@ -445,9 +445,19 @@ pub(crate) fn build_model(
     layout: &ExfatLayout,
     config: &ModelConfig<'_>,
 ) -> Result<ExfatModel, ModelError> {
-    let mut placed = Builder::new(config).place_all(entries)?;
+    let mut placed = place_tree(entries, config)?;
     let used_clusters = placed.allocate(layout)?;
     Ok(placed.finish(used_clusters))
+}
+
+/// Decide everything about a tree that does not depend on how large the volume is: the half
+/// of [`build_model`] a fit search runs once, so that what it runs per candidate is
+/// [`PlacedTree::allocate`] alone.
+pub(crate) fn place_tree(
+    entries: Vec<SourceEntry>,
+    config: &ModelConfig<'_>,
+) -> Result<PlacedTree, ModelError> {
+    Builder::new(config).place_all(entries)
 }
 
 /// What a path holds, decided before anything is placed.
@@ -858,6 +868,22 @@ impl PlacedTree {
     pub(crate) fn allocate(&mut self, layout: &ExfatLayout) -> Result<u32, ModelError> {
         self.check_directory_capacity()?;
         self.allocate_clusters(layout)
+    }
+
+    /// A count of sectors no volume holding this tree can be below: each file's bytes and
+    /// each directory's entries in whole sectors. It understates on purpose, since a floor
+    /// only has to be a size the answer is not beneath.
+    pub(crate) fn content_sectors(&self, bytes_per_sector: u64) -> u64 {
+        let mut total = 0u64;
+        for (index, dir) in self.dirs.iter().enumerate() {
+            total = total.saturating_add(dir.bytes(index).div_ceil(bytes_per_sector));
+            for entry in &dir.entries {
+                if let Node::File { size, .. } = entry.node {
+                    total = total.saturating_add(size.div_ceil(bytes_per_sector));
+                }
+            }
+        }
+        total
     }
 
     /// Turn this into the finished model, at the geometry it was last allocated against.

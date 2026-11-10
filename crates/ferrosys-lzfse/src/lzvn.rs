@@ -1,10 +1,10 @@
 //! LZVN, decoded.
 //!
 //! The algorithm is small and fixed, the input is a filesystem's own bytes and therefore
-//! untrusted, and every bound the decoder reads is one this crate's gates hold it to. The
+//! untrusted, and every bound the decoder reads is one this crate's tests hold it to. The
 //! decoder is derived from the one in Apple's reference implementation, the `lzfse` project
-//! (copyright 2015-2016 Apple Inc., under the BSD-3-Clause license, whose notice the crate's
-//! `THIRD-PARTY-NOTICES` carries).
+//! (copyright 2015-2016 Apple Inc., under the BSD-3-Clause license, whose text the crate's
+//! `LICENSE` carries).
 //!
 //! This module is pure — bytes in, bytes out, no I/O — and what it decodes is one *stream*.
 //! How a filesystem cuts a file into streams, and where each begins, is that format's framing
@@ -40,14 +40,11 @@
 //! one byte — so the copy is a byte at a time and the overlapping case is ordinary. Every match
 //! is held to this, including the two that take their distance from the instruction before.
 
-use super::{Algorithm, Error};
+use crate::Error;
 
 /// What a stream says it is wrong about.
 fn malformed(fault: &'static str) -> Error {
-    Error::Malformed {
-        algorithm: Algorithm::Lzvn,
-        fault,
-    }
+    Error::Malformed { fault }
 }
 
 /// The bytes the end-of-stream instruction takes.
@@ -56,15 +53,14 @@ const END_LEN: usize = 8;
 /// Undo one LZVN stream into `out`, returning how many bytes it produced.
 ///
 /// The stream ends at its end marker; bytes after the marker are not read.
-pub(super) fn decompress(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+pub(crate) fn decompress(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     decode_from(input, out, 0).map(|(_, end)| end)
 }
 
 /// Undo one LZVN stream into `out` from byte `start`, the bytes before it being output a match
 /// may reach back into as well, and say where the stream's end marker ends and where its
 /// output does. An LZFSE stream holds LZVN blocks that reach back into the blocks before them.
-#[cfg_attr(not(feature = "lzfse"), allow(dead_code))]
-pub(super) fn decode_from(
+pub(crate) fn decode_from(
     input: &[u8],
     out: &mut [u8],
     start: usize,
@@ -124,7 +120,6 @@ pub(super) fn decode_from(
         }
         if out.len() - dst < literal + matched {
             return Err(Error::Overrun {
-                algorithm: Algorithm::Lzvn,
                 expected: out.len(),
             });
         }
@@ -133,7 +128,7 @@ pub(super) fn decode_from(
         src = body + literal;
 
         if matched > 0 {
-            if !super::copy_back(out, dst, at, matched) {
+            if !crate::copy_back(out, dst, at, matched) {
                 return Err(malformed("a match reaches before the start of the output"));
             }
             dst += matched;
@@ -223,7 +218,7 @@ mod tests {
         stream.extend_from_slice(&[0xF4, (1 << 6) | 6, b'z', 0xF3]);
         stream.extend_from_slice(&END);
         let whole = decode(&stream, 128).expect("the stream decodes");
-        crate::compress::sweep_changes_of(&stream, whole.len() + 16, decompress);
+        crate::sweep_changes_of(&stream, whole.len() + 16, decompress);
     }
 
     #[test]

@@ -413,6 +413,27 @@ pub enum FormatError {
     /// The source names something this filesystem cannot hold.
     #[error(transparent)]
     Model(#[from] ModelError),
+    /// A fit search was asked to leave a larger share of the filesystem free than it will
+    /// look for.
+    ///
+    /// At the limit the filesystem is ten times the tree it holds, and each further step
+    /// toward an empty one multiplies the size again. A filesystem that far from what its
+    /// contents need is a size to name rather than to search for.
+    #[error("slack of {hundredths} hundredths of a percent is past the limit of {limit}")]
+    #[non_exhaustive]
+    SlackShareTooLarge {
+        /// The share asked for, in hundredths of one percent.
+        hundredths: u16,
+        /// The largest share a search will look for.
+        limit: u16,
+    },
+    /// No filesystem this family accepts holds the tree with the room the slack asked for.
+    #[error("no filesystem up to {ceiling} bytes holds the tree with the room asked for")]
+    #[non_exhaustive]
+    DoesNotFit {
+        /// The largest filesystem the search could have tried, in bytes.
+        ceiling: u64,
+    },
     /// More tree blocks were spent than the planner reserved.
     ///
     /// Nothing a caller passes reaches this: the reservation is a bound over what the content
@@ -587,6 +608,41 @@ impl FormatPlan {
         })
     }
 
+    /// The smallest filesystem that holds `source` with `slack` free, planned and ready to
+    /// write.
+    ///
+    /// The tree is built once and the geometry planned for each candidate size, which is
+    /// arithmetic: no file is read. What a candidate leaves free is what a writer could still
+    /// store in it as file data, the room inside its data chunks and the unallocated device
+    /// space shared out between the data profile's copies, which is how `df` reports a
+    /// btrfs. [`volume_bytes`](Self::volume_bytes) is the size the search settled on.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::SlackShareTooLarge`] for a share past the limit,
+    /// [`FormatError::DoesNotFit`] when no size holds the tree with the room asked for, and
+    /// otherwise the failure the search met: an input no size makes valid, a tree this family
+    /// cannot carry, or a chunk map no size holds.
+    pub fn fit(
+        source: impl Source,
+        options: FormatOptions,
+        slack: crate::Slack,
+    ) -> Result<Self, FormatError> {
+        let (request, model) = modelled(source, &options)?;
+        let layout = crate::btrfs::fit::search(&request, slack)?;
+        Ok(Self {
+            volume_bytes: layout.volume_bytes,
+            prepared: Prepared { model, layout },
+            options,
+        })
+    }
+
+    /// What the tree asked the planner for.
+    #[cfg(test)]
+    pub(crate) const fn content(&self) -> super::geometry::Content {
+        self.prepared.model.content
+    }
+
     /// The geometry the bytes will realize — exact rather than estimated, because it is the
     /// same value the write uses.
     #[must_use]
@@ -594,7 +650,8 @@ impl FormatPlan {
         &self.prepared.layout
     }
 
-    /// Bytes the destination will hold, which is the size the format was asked for.
+    /// Bytes the destination will hold: the size the format was asked for, or for a
+    /// [`fit`](Self::fit) plan the size the search settled on.
     #[must_use]
     pub const fn volume_bytes(&self) -> u64 {
         self.volume_bytes
@@ -684,10 +741,11 @@ pub fn format(
     // Planned before the buffer is allocated, so a geometry or a source that cannot be realized
     // fails without first asking for the volume's worth of memory.
     let plan = FormatPlan::new(source, volume_bytes, options)?;
-    let size = usize::try_from(volume_bytes).map_err(|_| FormatError::ImageTooLargeInMemory {
-        bytes: volume_bytes,
-    })?;
-    let mut image = Cursor::new(vec![0u8; size]);
+    let buffer =
+        crate::io::image_buffer(volume_bytes).ok_or(FormatError::ImageTooLargeInMemory {
+            bytes: volume_bytes,
+        })?;
+    let mut image = Cursor::new(buffer);
     let slack = plan.write_to(&mut image)?;
     Ok(Image {
         bytes: image.into_inner(),
@@ -745,11 +803,23 @@ fn prepare(
     volume_bytes: u64,
     options: &FormatOptions,
 ) -> Result<Prepared, FormatError> {
+    let (mut request, model) = modelled(source, options)?;
+    request.volume_bytes = volume_bytes;
+    let layout = plan_layout(&request)?;
+    Ok(Prepared { model, layout })
+}
+
+/// Turn a source into a tree, and the planning request that asks for what the tree needs.
+///
+/// Everything here is independent of the volume's size, so a fit search runs it once.
+fn modelled(
+    source: impl Source,
+    options: &FormatOptions,
+) -> Result<(PlanRequest, BtrfsModel), FormatError> {
     if !options.time.has_proper_fraction() {
         return Err(FormatError::TimeOutOfRange { time: options.time });
     }
     let mut request = options.plan;
-    request.volume_bytes = volume_bytes;
     let (sector_size, node_size) = block_sizes(&request)?;
     let model = build_model(
         source.into_entries(),
@@ -761,8 +831,58 @@ fn prepare(
         options.time,
     )?;
     request.content = model.content;
-    let layout = plan_layout(&request)?;
-    Ok(Prepared { model, layout })
+    joined_records_fit(&model, node_size)?;
+    Ok((request, model))
+}
+
+/// The most bytes one record holds: a leaf, less its header and the one item that describes
+/// the record.
+fn record_capacity(node_size: u32) -> usize {
+    node_size as usize - Header::SIZE - Item::SIZE
+}
+
+/// Refuse a model whose names, or whose attribute names, share a hash in numbers one record
+/// cannot join.
+///
+/// Every such group becomes one record (see [`packed`]), so its size is known from the model
+/// alone, and asking here is what keeps a write from failing on it after the destination is
+/// open: a source can hold names chosen to collide as readily as any other names.
+///
+/// # Errors
+///
+/// [`FormatError::RecordTooLarge`] for the first group past what a leaf holds.
+fn joined_records_fit(model: &BtrfsModel, node_size: u32) -> Result<(), FormatError> {
+    let capacity = record_capacity(node_size);
+    let check = |sizes: &mut dyn Iterator<Item = (u64, usize)>| {
+        let mut joined: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for (hash, bytes) in sizes {
+            let total = joined.entry(hash).or_default();
+            *total += bytes;
+            if *total > capacity {
+                return Err(FormatError::RecordTooLarge {
+                    bytes: *total,
+                    capacity,
+                });
+            }
+        }
+        Ok(())
+    };
+    for object in model.subvolumes.iter().flat_map(|sub| &sub.objects) {
+        if let ObjectKind::Directory(entries) = &object.kind {
+            check(
+                &mut entries
+                    .iter()
+                    .map(|e| (name_hash(&e.name), DirItem::SIZE + e.name.len())),
+            )?;
+        }
+        check(&mut object.xattrs.iter().map(|x| {
+            (
+                name_hash(&x.name),
+                DirItem::SIZE + x.name.len() + x.value.len(),
+            )
+        }))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,7 +2329,7 @@ fn extent_records(
 /// [`FormatError::RecordTooLarge`] where the joined record outgrows a leaf, which is a directory
 /// holding more colliding names than one block can describe.
 fn packed(records: Vec<Record>, node_size: u32) -> Result<Vec<Record>, FormatError> {
-    let capacity = node_size as usize - Header::SIZE - Item::SIZE;
+    let capacity = record_capacity(node_size);
     let mut out: Vec<Record> = Vec::with_capacity(records.len());
     for record in sorted(records) {
         match out.last_mut() {
@@ -2653,7 +2773,10 @@ fn write_filesystem<W: Write + Seek>(
     volume_bytes: u64,
 ) -> Result<Slack, FormatError> {
     let Prepared { model, layout } = prepared;
-    let (mut filesystem, data) = assemble(model, layout, options, volume_bytes)?;
+    // The device the filesystem records is the layout's, a whole number of sectors; the
+    // destination is extended to the size asked for, and what lies past the last whole sector
+    // is no part of the filesystem.
+    let (mut filesystem, data) = assemble(model, layout, options, layout.volume_bytes)?;
     let mut sink = ByteSink::new(sink);
     let metadata_id = options.metadata_id();
 
@@ -2723,7 +2846,14 @@ fn write_filesystem<W: Write + Seek>(
         .blocks_of(layout, BlockGroupFlags::SYSTEM);
     let slack = layout.reservation.account(used_metadata, used_system)?;
 
-    let superblock = superblock(&filesystem, model, layout, options, volume_bytes, slack);
+    let superblock = superblock(
+        &filesystem,
+        model,
+        layout,
+        options,
+        layout.volume_bytes,
+        slack,
+    );
     let backup = backup_of(&filesystem, &superblock);
     let mut bytes = vec![0u8; SUPER_INFO_SIZE];
     for &at in &layout.superblock_mirrors {
@@ -3203,6 +3333,32 @@ mod tests {
     }
 
     #[test]
+    fn an_image_no_allocator_holds_is_refused_rather_than_aborting() {
+        // An exbibyte plans as any volume does, and no machine holds one in memory: the
+        // in-memory format refuses it as too large rather than asking for it and aborting.
+        let err = format(TreeBuilder::new(), 1 << 60, options()).err();
+        assert!(
+            matches!(err, Some(FormatError::ImageTooLargeInMemory { bytes }) if bytes == 1 << 60),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_size_past_a_whole_sector_records_the_whole_sectors() {
+        // The device is a whole number of sectors: the destination is the size asked for, and
+        // the filesystem records the sectors in it, as the pinned `mkfs.btrfs` does.
+        let bytes = (1u64 << 30) + 513;
+        let mut sink = Sparse::new(bytes);
+        let layout =
+            format_to(&mut sink, TreeBuilder::new(), bytes, options()).expect("formattable");
+        assert_eq!(layout.volume_bytes, 1 << 30);
+        let sb = SuperBlock::read_from(&sink.read_at(MIRRORS[0], SUPER_INFO_SIZE))
+            .expect("the superblock");
+        assert_eq!(sb.total_bytes, 1 << 30);
+        assert_eq!(sb.dev_item.total_bytes, 1 << 30);
+    }
+
+    #[test]
     fn every_superblock_copy_the_device_holds_is_written_and_says_where_it_is() {
         // A volume of a quarter of a terabyte plus one superblock is the smallest that carries
         // all three, and the streaming entry point is what makes writing one affordable: only
@@ -3516,6 +3672,70 @@ mod tests {
             sink.into_inner().is_empty(),
             "a destination is not touched by a format that could not have succeeded"
         );
+    }
+
+    /// `prefix` with four bytes after it that bring the name hash to `target`.
+    ///
+    /// The hash is the CRC-32C register after the name, and each byte moves the register by a
+    /// table entry whose top byte names it. So the entries the last four steps used are read
+    /// back from `target`, and the four bytes are what lead the register into them.
+    fn colliding(prefix: &[u8], target: u32) -> Vec<u8> {
+        let table: Vec<u32> = (0..256u32)
+            .map(|i| {
+                (0..8).fold(i, |c, _| {
+                    if c & 1 == 0 {
+                        c >> 1
+                    } else {
+                        (c >> 1) ^ 0x82F6_3B78
+                    }
+                })
+            })
+            .collect();
+        let top = |byte: u32| (0..256).find(|&i| table[i] >> 24 == byte).expect("unique");
+        let mut indices = [0usize; 4];
+        let mut state = target;
+        for k in (0..4).rev() {
+            indices[k] = top(state >> 24);
+            state = ((state ^ table[indices[k]]) << 8) | indices[k] as u32;
+        }
+        let mut register = crate::crc32c(!1, prefix);
+        let mut name = prefix.to_vec();
+        for &index in &indices {
+            name.push(((register ^ index as u32) & 0xff) as u8);
+            register = (register >> 8) ^ table[index];
+        }
+        assert_eq!(
+            name_hash(&name),
+            u64::from(target),
+            "the forged name hashes to the target"
+        );
+        name
+    }
+
+    #[test]
+    fn names_sharing_a_hash_past_what_a_leaf_holds_are_refused_when_planned() {
+        // Every name of a directory with one hash joins one record, so sixty names of 250 bytes
+        // under one hash outgrow a 16 KiB leaf. The plan refuses them, before a destination is
+        // opened, rather than the write.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let mut source = TreeBuilder::new().directory("/d", Metadata::new(0o755, time));
+        let mut made = 0;
+        for i in 0u32.. {
+            let prefix = format!("/d/{i:0>246}");
+            let path = colliding(prefix.as_bytes(), 0x1234_5678);
+            if path[3..].iter().any(|&b| b == b'/' || b == 0) {
+                continue;
+            }
+            source = source.file(path, b"x".to_vec(), Metadata::new(0o644, time));
+            made += 1;
+            if made == 60 {
+                break;
+            }
+        }
+        assert!(matches!(
+            FormatPlan::new(source, 256 * MIB, options()),
+            Err(FormatError::RecordTooLarge { .. })
+        ));
     }
 
     #[test]

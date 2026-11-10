@@ -1194,6 +1194,16 @@ impl LayeredSource {
                 let beneath = self.beneath(&key);
                 self.drop_names(&beneath);
             }
+            // A name replaced is a name that goes: the file it named keeps any other name it
+            // has, so a hard link to it goes on naming that file rather than the entry that
+            // replaces it. A directory replaced by a directory merges, and no link names one.
+            if self
+                .entries
+                .get(&key)
+                .is_some_and(|old| !matches!(old.kind, EntryKind::Directory))
+            {
+                self.drop_names(std::slice::from_ref(&key));
+            }
             self.entries.insert(key, entry);
         }
         self
@@ -1754,6 +1764,41 @@ mod tests {
             !message.contains('\x1b'),
             "the path is escaped: {message:?}"
         );
+    }
+
+    #[test]
+    fn a_later_layer_replacing_one_name_of_a_linked_file_leaves_the_other_its_file() {
+        // `/etc/b` is a second name for `/etc/a`'s file. An overlay replacing `/etc/a` replaces
+        // a name, and the file it named keeps `/etc/b`: the overlay's content goes to `/etc/a`
+        // alone, and `/etc/b` holds what it held.
+        let time = meta().mtime;
+        let base = TreeBuilder::new()
+            .directory(b"/etc".to_vec(), Metadata::new(0o755, time))
+            .file(
+                b"/etc/a".to_vec(),
+                b"OLD".to_vec(),
+                Metadata::new(0o644, time),
+            )
+            .hardlink(
+                b"/etc/b".to_vec(),
+                b"/etc/a".to_vec(),
+                Metadata::new(0o644, time),
+            );
+        let over = TreeBuilder::new().file(
+            b"/etc/a".to_vec(),
+            b"NEW".to_vec(),
+            Metadata::new(0o600, time),
+        );
+        let entries = LayeredSource::new().layer(base).layer(over).into_entries();
+        let content = |path: &[u8]| {
+            let entry = entries.iter().find(|e| e.path == path).expect("the entry");
+            match &entry.kind {
+                EntryKind::File(c) => (c.read().unwrap().as_ref().to_vec(), entry.meta.mode),
+                other => panic!("{} is {other:?}", String::from_utf8_lossy(path)),
+            }
+        };
+        assert_eq!(content(b"/etc/a"), (b"NEW".to_vec(), 0o600));
+        assert_eq!(content(b"/etc/b"), (b"OLD".to_vec(), 0o644));
     }
 
     #[test]

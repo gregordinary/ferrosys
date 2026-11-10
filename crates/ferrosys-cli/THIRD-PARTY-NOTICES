@@ -1,17 +1,26 @@
 Third-party notices
 
-The ferrosys crate compiles the code these notices cover by feature: the `lzvn` and
-`lzfse` features compile the LZVN and LZFSE decoders, and the `lzbitmap` feature the
-LZBITMAP decoder. All three are in the default feature set, and the ferrosys binary
-carries all three.
+The ferrosys binary, which the ferrosys-cli crate builds, carries every family and every
+decoder, and with them the code these notices cover:
 
-The LZVN and LZFSE decoders (src/compress/lzvn.rs and src/compress/lzfse.rs in the
-ferrosys crate) are derived from the decoders in Apple's lzfse project, which is
-distributed under the following license.
+- The LZVN and LZFSE decoders, from the ferrosys-lzfse crate, are derived from the decoders
+  in Apple's lzfse project, and are distributed under the license that crate carries, which
+  follows.
+- The LZBITMAP decoder, in the ferrosys crate, reads the layout libzbitmap decodes, and
+  carries libzbitmap's notice, which follows, in attribution.
+- The Unicode Character Database tables, from the ferrosys-ucd crate, are distributed under
+  the Unicode License v3, whose copyright and permission notice LICENSE-UNICODE carries.
+
+The ferrosys library compiles each of these only through the feature that uses it: `lzvn`
+and `lzfse`, `lzbitmap`, and `apfs`.
+
+The ferrosys-lzfse crate is distributed under the following license, Apple's lzfse license
+with its copyright notices.
 
 --------------------------------------------------------------------------------
 
 Copyright (c) 2015-2016, Apple Inc. All rights reserved.
+Copyright (c) 2026 The ferrosys Authors
 
 Redistribution and use in source and binary forms, with or without modification,
 are permitted provided that the following conditions are met:
@@ -41,9 +50,8 @@ OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 
-The LZBITMAP decoder (src/compress/lzbitmap.rs in the ferrosys crate) reads the
-layout libzbitmap decodes, and carries its notice in attribution. libzbitmap is
-distributed under the following license.
+The LZBITMAP decoder reads the layout libzbitmap decodes. libzbitmap is distributed
+under the following license.
 
 --------------------------------------------------------------------------------
 

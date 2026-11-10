@@ -11,10 +11,25 @@ in safe Rust. Each filesystem family is a module behind a feature of its own:
 - `apfs` is the container format of every Mac and of the disk images macOS makes, which
   this crate reads and writes
 
+The default build carries the first four and the decoders they read, and compiles this
+project's code under MIT OR Apache-2.0 alone. APFS is named with the decoders its compressed
+files use. Two of those features each add a crate under a license of its own:
+
+| Feature | The crate it adds | Its license |
+|---|---|---|
+| `apfs` | `ferrosys-ucd`, the Unicode tables APFS names are compared with | Unicode-3.0 |
+| `lzvn`, `lzfse` | `ferrosys-lzfse`, the LZVN and LZFSE decoders, derived from Apple's lzfse | BSD-3-Clause |
+
+```sh
+cargo add ferrosys                                        # ext, FAT, exFAT and btrfs
+cargo add ferrosys --features apfs,lzvn,lzfse,lzbitmap    # and APFS, with every decoder
+```
+
 Formatting runs in two phases: a planner computes the complete on-disk layout as an
-in-memory value, and a materializer writes bytes against that plan. The UUID, hash
-seed, and timestamps are inputs the caller supplies, so the same inputs produce the
-same image byte for byte. The crate builds on Rust 1.88 or newer.
+in-memory value, and a materializer writes bytes against that plan. In every family,
+`FormatPlan::fit` plans the smallest image that holds a source with the room asked for left
+free. The UUID, hash seed, and timestamps are inputs the caller supplies, so the same inputs
+produce the same image byte for byte. The crate builds on Rust 1.88 or newer.
 
 > **Status:** ferrosys is under active development. The version numbers follow the `0.x`
 > semantics of Cargo. A breaking change increases the minor version, and a `0.x`
@@ -195,6 +210,14 @@ print!("{}", String::from_utf8_lossy(&reader.read_data(&node)?));
   reads cleanly. It reads `meta_bg`, the descriptor layout `mke2fs` uses on very large
   filesystems and a kernel converts to when it grows one online. `lookup` resolves a path
   through symbolic links against the image's own root.
+- **Content kept in the inode** (`inline_data`), **attribute values kept in inodes of their
+  own** (`ea_inode`), **case-folded directories** (`casefold`), and **three-level directory
+  indexes** (`large_dir`). A case-folded directory's names match as they are stored.
+- **Multiple-mount protection** (`mmp`). Its block is held to its magic and its checksum,
+  and a scan reports a record a host or a running checker left in it.
+- **Encrypted directories** (`encrypt`). Everything stored in the clear reads. An encrypted
+  file's data, directory's names, and link's target are each refused by name. Ciphertext is
+  never handed back as content.
 - **Streaming a write**. `format_to` writes an image to any seekable destination,
   touching only the blocks the filesystem uses. A file therefore stays sparse, and a
   filesystem larger than memory is possible. `format` collects the same bytes in memory.
@@ -224,8 +247,8 @@ print!("{}", String::from_utf8_lossy(&reader.read_data(&node)?));
 - **Volume identity, held to what the format holds**. An eleven-byte label, upper-cased
   and checked against what a directory entry's name field can contain. It is written to
   the boot sector and to the root directory alike. The media descriptor, held to the
-  values the format defines, is an input. So are the partition's start offset and the boot
-  loader's own bytes.
+  values the format defines, is an input. So are the partition's start offset, the disk
+  geometry the boot sector records, and the boot loader's own bytes.
 - **A reader for any conformant volume with one or two tables, whatever wrote it**. It
   follows chains at all three entry widths. It reassembles long names and ties them to
   their short entry by checksum. A whole-volume scan reports what a checker would. It
@@ -280,9 +303,11 @@ This crate reads a btrfs in full, and writes one from a source tree:
   filesystem this crate did not write verifies as itself. A block also records its own
   address and the filesystem it belongs to. The reader holds both against what it believed
   when it went to fetch the block.
-- **File data held against the checksums the filesystem recorded for it**. A crc32c per
+- **File data held against the checksums the filesystem recorded for it**. A checksum per
   sector, in a tree of its own. It is the one check no other family here can make. A file
   whose bytes decayed on the medium sits under trees that are entirely well-formed.
+- **Every checksum algorithm the format defines**: crc32c, xxhash64, SHA-256, and BLAKE2b.
+  Metadata and data are verified in whichever one the filesystem was formatted with.
 - **Subvolumes walked as part of one tree**. A directory entry naming a `ROOT_ITEM` is
   where a subvolume is mounted. A walk therefore crosses the seam, and a path across it is
   one path. A node is a subvolume and an inode together, because an inode number means
@@ -347,9 +372,10 @@ This crate reads an APFS container, and writes one from a source tree:
 
 ## Features
 
-Fourteen, and the first five are the filesystem families. The default build carries all five
-and the six decoders. It reads what a Linux kernel mounts, a compressed btrfs root
-included, and a Mac's compressed files. A build that turns the default off takes the
+Fourteen, and the first five are the filesystem families. The default build carries the
+first four and the three decoders they read. It reads what a Linux kernel mounts, a
+compressed btrfs root included. APFS is named with the decoders a Mac's compressed files
+use, as `--features apfs,lzvn,lzfse,lzbitmap`. A build that turns the default off takes the
 families it names.
 
 | Feature | Default | The module it adds |
@@ -358,7 +384,7 @@ families it names.
 | `fat` | on | The FAT12, FAT16, and FAT32 formatter, reader, geometry planner, on-disk structures, and classifier, under `fat` |
 | `exfat` | on | The same set for exFAT, under `exfat` |
 | `btrfs` | on | That family's reader, its logical address space, its B-trees, its geometry planner, its writer with subvolumes, its on-disk structures, and its classifier, under `btrfs` |
-| `apfs` | on | The APFS container and volume reader, its snapshots, its scan, its geometry planner, its formatter, its on-disk structures, and its classifier, under `apfs` |
+| `apfs` | off | The APFS container and volume reader, its snapshots, its scan, its geometry planner, its formatter, its on-disk structures, and its classifier, under `apfs`. It depends on `ferrosys-ucd`, under Unicode-3.0 |
 
 Granularity is per *family* rather than per format, since each set is one lineage sharing
 its on-disk structures. exFAT is a family of its own rather than a fourth FAT, because it
@@ -371,10 +397,10 @@ an image holds. It leaves no family code at all, and depends on `thiserror` alon
 the build for a consumer that classifies images without reading them.
 
 Six more name an algorithm rather than a family. An encoding is a property of a run of
-bytes, not of the format around it. Each is in the default build. Each is what lets a build
-read a file stored that way. btrfs extents use `zlib` for DEFLATE, `lzo` for LZO1X, and
-`zstd` for Zstandard. APFS compressed files use `zlib` as well, `lzvn` for LZVN, `lzfse` for
-LZFSE, and `lzbitmap` for LZBITMAP.
+bytes, not of the format around it. Each is what lets a build read a file stored that way.
+btrfs extents use `zlib` for DEFLATE, `lzo` for LZO1X, and `zstd` for Zstandard, and those
+three are in the default build. APFS compressed files use `zlib` as well, `lzvn` for LZVN,
+`lzfse` for LZFSE, and `lzbitmap` for LZBITMAP, and those three are named beside `apfs`.
 
 btrfs and APFS are the families here that store runs that way. A build that names its own features names
 a decoder beside it to read them: `--features btrfs,zstd`. A build without the decoder for the
@@ -382,10 +408,11 @@ algorithm a file was stored with declines that *file* by name. A build without a
 for an algorithm the filesystem advertises in its feature word declines the *filesystem*,
 which is what that word means.
 
-`lzo`, `lzvn`, `lzfse` and `lzbitmap` take no dependency, their decoders being in this crate. `lzfse`
-turns `lzvn` on, since an LZFSE stream carries LZVN blocks among its own. The other two take
-`miniz_oxide` and `ruzstd`, both of which decode and neither of which is reached by
-anything else. Verification needs none of them. The checksums a filesystem records cover
+`lzo` and `lzbitmap` take no dependency, their decoders being in this crate. `zlib` and
+`zstd` take `miniz_oxide` and `ruzstd`, both of which decode and neither of which is reached
+by anything else. `lzvn` and `lzfse` take `ferrosys-lzfse`, whose decoders are derived from
+Apple's lzfse project and are under its BSD-3-Clause license. `lzfse` turns `lzvn` on, since
+an LZFSE stream carries LZVN blocks among its own. Verification needs none of them. The checksums a filesystem records cover
 the bytes it stored, so a compressed extent is verified without being expanded.
 
 The last three are off by default. None of them names a family. A source feeds whichever
@@ -409,11 +436,12 @@ directory tree and extracts one back, with no ext code compiled:
   Linux's, so the types are built there. Elsewhere the feature compiles to nothing, and
   `ArchiveSource` and `ArchiveSink` are the portable way to describe and emit a tree.
 - **`serde`**. `Serialize` on the findings vocabulary (`Finding`, `FindingReport`,
-  `Severity`, `Family`) and ext's own taxonomy behind it (`Anomaly`, `ScanReport`,
-  `Category`, `Location`). Also on the planned geometry (`Layout`, `GroupLayout`,
-  `BlockRange`) and the feature model (`FeatureSet`, `Profile`), for a consumer embedding
-  them in a document of its own. The crate's own `to_json` and `to_sarif` emitters are
-  unaffected, and stay the schema-versioned canonical form.
+  `Severity`, `Family`), the `FidelityReport`, and `Usage`. Also on each family's scan
+  taxonomy (`ScanReport`, `Anomaly`, `Category`) and planned geometry (`Layout`,
+  `FatLayout`, `ExfatLayout`, `BtrfsLayout`, `ApfsLayout`, and their parts), and on ext's
+  feature model (`FeatureSet`, `Profile`). A closed set serializes as the word the crate
+  prints for it, and a flag word as the on-disk word it wraps. The crate's own `to_json`
+  and `to_sarif` emitters are unaffected, and stay the schema-versioned canonical form.
 
 ## Command line
 
@@ -427,13 +455,13 @@ The [guide](https://gregordinary.github.io/ferrosys/) is a narrative introductio
 
 ## License
 
-<!-- prose-lint: off -- Rule 23 exempts legal boilerplate. -->
+<!-- prose-lint: off -- Rule 29 exempts legal boilerplate. -->
 
 Licensed under either of Apache License, Version 2.0 or the MIT license, at your option.
-The Unicode character tables APFS names are held to are data from the Unicode Character
-Database, distributed under the Unicode License v3. The LZVN and LZFSE decoders are derived
-from Apple's lzfse project, distributed under the BSD-3-Clause license, and the LZBITMAP
-decoder reads the layout libzbitmap decodes; both notices are in `THIRD-PARTY-NOTICES`.
-The `apfs` feature compiles the Unicode tables, and the `lzvn` and `lzfse` features compile
-the decoders derived from Apple's code; all three are in the default set. A build of the other
-features compiles code under MIT OR Apache-2.0 alone.
+The LZBITMAP decoder reads the layout libzbitmap decodes, and carries libzbitmap's notice in
+attribution in `THIRD-PARTY-NOTICES`.
+
+The `apfs` feature depends on `ferrosys-ucd`, whose tables are data from the Unicode Character
+Database, distributed under the Unicode License v3. The `lzvn` and `lzfse` features depend on
+`ferrosys-lzfse`, whose decoders are derived from Apple's lzfse project, distributed under the
+BSD-3-Clause license. Each of those crates carries its own license.

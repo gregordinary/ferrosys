@@ -51,6 +51,7 @@ bless=0
 # fills.
 config_flags() {
     case "$1" in
+        ucd|lzfse) echo "" ;;
         all-features) echo "--all-features" ;;
         no-default-features) echo "--no-default-features" ;;
         default) echo "" ;;
@@ -63,22 +64,34 @@ config_flags() {
     esac
 }
 
+# The package each configuration renders. The two crates holding code under licenses of their
+# own are published on their own and have a surface of their own, which `ferrosys` reaches
+# through its features and a consumer may name directly; each has no features, so each is one
+# configuration.
+config_package() {
+    case "$1" in
+        ucd) echo "ferrosys-ucd" ;;
+        lzfse) echo "ferrosys-lzfse" ;;
+        *) echo "ferrosys" ;;
+    esac
+}
+
 render() {
-    local snapshot="$1"
-    shift
-    cargo "+$NIGHTLY" rustdoc -p ferrosys "$@" --target-dir "$out" -- \
+    local snapshot="$1" package="$2"
+    shift 2
+    cargo "+$NIGHTLY" rustdoc -p "$package" "$@" --target-dir "$out" -- \
         -Z unstable-options --output-format json >/dev/null
-    python3 "$renderer" "$out/doc/ferrosys.json" > "$snapshot"
+    python3 "$renderer" "$out/doc/${package//-/_}.json" > "$snapshot"
 }
 
 status=0
-for config in all-features no-default-features default fat fat-dir exfat btrfs apfs; do
+for config in all-features no-default-features default fat fat-dir exfat btrfs apfs ucd lzfse; do
     committed="$root/ci/public-api-$config.txt"
     actual="$out/public-api-$config.txt"
     mkdir -p "$out"
     # Word splitting is what turns the flag string into separate arguments.
     # shellcheck disable=SC2046
-    render "$actual" $(config_flags "$config")
+    render "$actual" "$(config_package "$config")" $(config_flags "$config")
 
     if [ "$bless" = 1 ]; then
         cp "$actual" "$committed"

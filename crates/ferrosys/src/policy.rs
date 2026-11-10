@@ -12,11 +12,14 @@ use crate::finding::Severity;
 
 /// The longest path any read here builds, matching Linux's `PATH_MAX`.
 ///
-/// Two bounds rest on it, and they are the same bound seen from either end. A symbolic
-/// link's target is a path, so a target longer than this is one nothing could resolve — and
-/// a walked path is a path, so a tree nested deeply enough to build a longer one is building
-/// something no consumer could act on. Neither format bounds either, and a well-formed image
-/// of either family reaches neither.
+/// Two bounds rest on it, and they differ in kind. A symbolic link's target is a path the
+/// image stores, so a target longer than this is one nothing could resolve, and a read refuses
+/// it. A walked path is one a walk builds, joining names from the root down, and no format
+/// here bounds how deep a tree nests: a well-formed tree builds a longer path, and every
+/// writer here writes one. So a walk holds the paths it hands out to this bound and reports a
+/// longer one as a limit, [`Bound::PathBytes`](crate::Bound::PathBytes), and a scan, which
+/// hands out no paths, names what it finds by a label no longer than this and reads the tree
+/// whole.
 ///
 /// Compiled where there is a reader to hold to it.
 #[cfg(any(

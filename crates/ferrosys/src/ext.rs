@@ -1,7 +1,7 @@
 //! The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
 //! structures.
 //!
-//! This module is the crate's filesystem surface. [`format()`] and [`format_to()`] write
+//! This module is the ext family's surface. [`format()`] and [`format_to()`] write
 //! an image, [`Reader`] reads one back, and [`TreeBuilder`] and [`Source`] describe the
 //! tree to write. The layer modules ([`geometry`], [`ondisk`], [`extent`], and the rest)
 //! expose the machinery beneath them. The convenience constructors [`ext4`], [`ext3`], and
@@ -163,7 +163,7 @@ pub use crate::model::{FsModel, ModelConfig, ModelError, build_model};
 pub use crate::ondisk::ParseError;
 pub use crate::read::{
     Anomaly, Category, Entry, JournalReplay, Location, OpenOptions, ReadError, Reader, ScanReport,
-    WalkEntry, incompat_name,
+    WalkEntry, incompat_name, ro_compat_name,
 };
 
 // The crate root's family-agnostic vocabulary, reached from here as well — see the note on

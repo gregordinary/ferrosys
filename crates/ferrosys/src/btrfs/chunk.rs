@@ -37,6 +37,7 @@ use super::ondisk::{BlockGroupFlags, Chunk, DiskKey, ItemType, Stripe, objectid}
 
 /// One chunk of the map: a run of logical space, and where its copies are on this device.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct MappedChunk {
     /// The logical address the run begins at, which is the chunk item's key offset rather than
     /// a field of the chunk.

@@ -638,3 +638,43 @@ impl<R: std::io::Seek> std::io::Seek for Failing<R> {
         self.inner.seek(pos)
     }
 }
+
+/// Names that leave ASCII, for a FAT or exFAT tree an outside reader reads back: every name
+/// a path under `/`, with the bytes the file holds.
+///
+/// Long-name lengths at and beside each thirteen-unit slot boundary and at the format's 255;
+/// letters from Latin-1, Greek, Cyrillic and fullwidth forms; "Straße" beside "STRASSE", one
+/// name under a simple up-case table and two under full case folding; a case pair of Greek
+/// names, each in a directory of its own; and characters outside the Basic Multilingual Plane,
+/// each a surrogate pair, among them a name of exactly 255 UTF-16 units.
+pub fn names_beyond_ascii() -> Vec<(String, Vec<u8>)> {
+    let mut names: Vec<String> = [
+        "café.txt",
+        "naïve résumé.md",
+        "Ωμέγα",
+        "Привет мир",
+        "ＡＢＣ全角",
+        "Straße",
+        "STRASSE",
+        "𝔉𝔯𝔞𝔨𝔱𝔲𝔯",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    for units in [12usize, 13, 14, 25, 26, 27, 38, 39, 40, 254, 255] {
+        // One non-ASCII letter at the end, so each long name is held to the slot it ends in.
+        names.push(format!("{}é", "n".repeat(units - 1)));
+    }
+    // A pair counts two units, so 253 letters after one reach 255.
+    names.push(format!("\u{1F600}{}", "z".repeat(253)));
+    let mut tree: Vec<(String, Vec<u8>)> = names
+        .into_iter()
+        .map(|name| {
+            let bytes = name.as_bytes().to_vec();
+            (format!("/{name}"), bytes)
+        })
+        .collect();
+    tree.push(("/lower/ωμέγα".to_string(), b"lower".to_vec()));
+    tree.push(("/upper/ΩΜΈΓΑ".to_string(), b"upper".to_vec()));
+    tree
+}

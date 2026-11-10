@@ -176,8 +176,8 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
                 Error::NotAFilesystem { source, .. } => source.to_string(),
                 other => other.to_string(),
             };
-            eprintln!("{}: reading {image} leniently: {reason}", crate::args::TOOL);
-            eprintln!(
+            noteln!("{}: reading {image} leniently: {reason}", crate::args::TOOL);
+            noteln!(
                 "{}: what it holds is interpreted best-effort; --strict refuses instead",
                 crate::args::TOOL
             );
@@ -196,21 +196,22 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
         // compiles in every family the library has, so nothing in this workspace reaches it.
         _ => Err(Error::UnsupportedFamily),
     };
-    // A bound stopped the read, and the bound in force was this tool's rather than one the
-    // invocation named. Saying so is what keeps the default from being a refusal with no way
-    // forward: the message the library raises names the cap, and this names where it came
-    // from and what raises it.
+    // The file-size cap stopped the read, and the cap in force was this tool's rather than
+    // one the invocation named. Saying so is what keeps the default from being a refusal with
+    // no way forward: the message the library raises names the cap, and this names where it
+    // came from and what raises it. Another bound has no setting here, and its own message is
+    // the whole answer.
     if let Err(error) = &outcome
         && !named_the_cap
-        && stopped_by_a_limit(error)
+        && stopped_by_the_size_cap(error)
     {
-        eprintln!(
+        noteln!(
             "{}: no --max-file-bytes was given, so this run refused any file or attribute \
              larger than {max_file_bytes} bytes — {SPARSE_HEADROOM} times the length of the \
              filesystem being read",
             crate::args::TOOL
         );
-        eprintln!(
+        noteln!(
             "{}: a file may legitimately be that sparse, and an attribute that large — name \
              a larger --max-file-bytes to read one",
             crate::args::TOOL
@@ -219,25 +220,18 @@ pub fn run(args: ExtractArgs) -> Result<(), Error> {
     outcome
 }
 
-/// Whether `error` is a read a caller-imposed bound stopped, whichever surface it reached
-/// this command through.
+/// Whether `error` is a read the file-size cap stopped, whichever surface it reached this
+/// command through.
 ///
 /// The ways out of an image carry the reader's verdict differently: `--cat` and `--stat`
 /// name a path and get one family's own error, while a drained tree goes through the shared
 /// extraction surface — as itself for `--list`, wrapped once by an archive, wrapped again by
 /// a host tree. What the bound stopped is the same read in all of them.
-fn stopped_by_a_limit(error: &Error) -> bool {
-    use ferrosys::ext::ReadError as ExtError;
-
+fn stopped_by_the_size_cap(error: &Error) -> bool {
     let through_the_tree = match error {
-        // One family's read, reported as itself. FAT's goes through the shared
-        // classification on its way here and so lands below.
-        Error::Image(
-            ExtError::FileTooLarge { .. }
-            | ExtError::PathTooLong { .. }
-            | ExtError::WalkTooLarge { .. },
-        ) => return true,
-        Error::Tree(source) => Some(source),
+        // Every family's read a bound stopped, `--cat` and `--stat` included, reaches this
+        // command through the shared classification, which says which bound it was.
+        Error::Limit(source) | Error::Tree(source) => Some(source),
         Error::Archive(ferrosys::ArchiveError::Read(source)) => Some(source),
         #[cfg(any(target_os = "linux", target_os = "android"))]
         Error::Host(ferrosys::HostError::Read { source, .. }) => Some(source),
@@ -245,7 +239,10 @@ fn stopped_by_a_limit(error: &Error) -> bool {
     };
     matches!(
         through_the_tree,
-        Some(ferrosys::TreeError::LimitExceeded { .. })
+        Some(ferrosys::TreeError::LimitExceeded {
+            bound: ferrosys::Bound::FileBytes,
+            ..
+        })
     )
 }
 
@@ -379,7 +376,7 @@ where
                 what: "standard output".to_string(),
                 source,
             })?;
-            eprint!("{}", not_kept(&fidelity));
+            note!("{}", not_kept(&fidelity));
             Ok(())
         }
         ExtractMode::ToTar(Stream::File(path)) => {
@@ -394,7 +391,7 @@ where
             out.flush().map_err(|e| Error::io(&path, e))?;
             drop(out);
             dest.commit()?;
-            eprint!("{}", not_kept(&fidelity));
+            note!("{}", not_kept(&fidelity));
             Ok(())
         }
         ExtractMode::ToDir {
@@ -515,7 +512,7 @@ fn to_dir<R: FsTree>(
             ),
         );
     }
-    eprint!("{}", rows.finish());
+    note!("{}", rows.finish());
     Ok(())
 }
 

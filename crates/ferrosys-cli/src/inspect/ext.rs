@@ -13,6 +13,7 @@ use ferrosys::ext::ondisk::{
 };
 use ferrosys::ext::{
     FeatureSet, HashSignedness, HashVersion, Incompat, JournalReplay, Reader, incompat_name,
+    ro_compat_name,
 };
 
 use crate::args::InspectArgs;
@@ -151,6 +152,26 @@ fn incompat_names(feature: FeatureSet) -> (Vec<&'static str>, u32) {
     (names, unknown)
 }
 
+/// The `ro_compat` word's names, the bits [`RoCompat`](ferrosys::ext::RoCompat) does not model
+/// among them, and the bits `dumpe2fs` names none for — [`incompat_names`]'s counterpart, so a
+/// bit a driver sets as a state, `orphan_present` most of all, is named rather than unknown.
+fn ro_compat_names(feature: FeatureSet) -> (Vec<&'static str>, u32) {
+    let mut names = feature.ro_compat.names();
+    let mut unknown = 0u32;
+    let unmodelled = feature.ro_compat.unknown_bits();
+    for i in 0..u32::BITS {
+        let bit = 1u32 << i;
+        if unmodelled & bit == 0 {
+            continue;
+        }
+        match ro_compat_name(bit) {
+            Some(name) => names.push(name),
+            None => unknown |= bit,
+        }
+    }
+    (names, unknown)
+}
+
 /// The inode-table blocks one group takes: its inodes, rounded up to whole blocks.
 fn inode_table_blocks(sb: &SuperBlock, feature: FeatureSet) -> u32 {
     let per_block = feature.inodes_per_block();
@@ -239,16 +260,17 @@ fn table(
     line("Filesystem UUID:", render::uuid(&sb.uuid));
     line("Filesystem magic number:", format!("0x{:X}", sb.magic));
     let (incompat, unknown_incompat) = incompat_names(feature);
+    let (ro_compat, unknown_ro_compat) = ro_compat_names(feature);
     let mut names = feature.compat.names();
     names.extend(incompat);
-    names.extend(feature.ro_compat.names());
+    names.extend(ro_compat);
     line("Filesystem features:", names.join(" "));
     // A feature this tool does not know is never passed over in silence: an image
     // carrying one is not an image it understands, whatever the rest of the line says.
     let unknown = [
         ("compat", feature.compat.unknown_bits()),
         ("incompat", unknown_incompat),
-        ("ro_compat", feature.ro_compat.unknown_bits()),
+        ("ro_compat", unknown_ro_compat),
     ];
     if unknown.iter().any(|(_, bits)| *bits != 0) {
         let named: Vec<String> = unknown
@@ -453,17 +475,18 @@ fn json(
     s.end();
 
     let (incompat, unknown_incompat) = incompat_names(feature);
+    let (ro_compat, unknown_ro_compat) = ro_compat_names(feature);
     let mut f = ext.obj("features");
     f.strings("compat", &feature.compat.names());
     f.strings("incompat", &incompat);
-    f.strings("ro_compat", &feature.ro_compat.names());
+    f.strings("ro_compat", &ro_compat);
     // Always reported, zero or not: a consumer that reads this document must be able to
     // tell that a filesystem carries a feature this tool did not understand, and an absent
     // field would read as though there were none.
     let mut u = f.obj("unknown");
     u.u64("compat", u64::from(feature.compat.unknown_bits()));
     u.u64("incompat", u64::from(unknown_incompat));
-    u.u64("ro_compat", u64::from(feature.ro_compat.unknown_bits()));
+    u.u64("ro_compat", u64::from(unknown_ro_compat));
     u.end();
     f.end();
 
@@ -509,6 +532,17 @@ fn json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ro_compat_bit_dumpe2fs_names_is_named_and_not_unknown() {
+        // `orphan_present` is what a driver leaves set on a filesystem it did not unmount
+        // cleanly, so a report of one is a report of the commonest unclean filesystem.
+        let mut feature = FeatureSet::EMPTY;
+        feature.ro_compat = ferrosys::ext::RoCompat::from_bits(0x0001_0000 | 0x0400 | 0x8000_0000);
+        let (names, unknown) = ro_compat_names(feature);
+        assert_eq!(names, ["metadata_csum", "orphan_present"]);
+        assert_eq!(unknown, 0x8000_0000, "a bit no tool names stays unknown");
+    }
 
     #[test]
     fn the_state_line_says_what_dumpe2fs_says() {

@@ -1,4 +1,5 @@
 #[non_exhaustive] pub enum ferrosys::AclError
+#[non_exhaustive] pub enum ferrosys::Bound
 #[non_exhaustive] pub enum ferrosys::DetectError
 #[non_exhaustive] pub enum ferrosys::Direction
 #[non_exhaustive] pub enum ferrosys::EntryKind
@@ -11,6 +12,7 @@
 #[non_exhaustive] pub enum ferrosys::Property
 #[non_exhaustive] pub enum ferrosys::ReadPolicy
 #[non_exhaustive] pub enum ferrosys::RemovalError
+#[non_exhaustive] pub enum ferrosys::Slack
 #[non_exhaustive] pub enum ferrosys::TreeError
 #[non_exhaustive] pub enum ferrosys::btrfs::Category
 #[non_exhaustive] pub enum ferrosys::btrfs::FormatError
@@ -39,10 +41,13 @@
 #[non_exhaustive] pub ferrosys::TreeError::Io
 #[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
 #[non_exhaustive] pub ferrosys::TreeError::Malformed
+#[non_exhaustive] pub ferrosys::TreeError::NotFound
 #[non_exhaustive] pub ferrosys::TreeError::Unsupported
 #[non_exhaustive] pub ferrosys::btrfs::FormatError::DataExhausted
+#[non_exhaustive] pub ferrosys::btrfs::FormatError::DoesNotFit
 #[non_exhaustive] pub ferrosys::btrfs::FormatError::ImageTooLargeInMemory
 #[non_exhaustive] pub ferrosys::btrfs::FormatError::RecordTooLarge
+#[non_exhaustive] pub ferrosys::btrfs::FormatError::SlackShareTooLarge
 #[non_exhaustive] pub ferrosys::btrfs::FormatError::TimeOutOfRange
 #[non_exhaustive] pub ferrosys::btrfs::GeometryError::ChunkMapTooLarge
 #[non_exhaustive] pub ferrosys::btrfs::GeometryError::ContentTooLarge
@@ -56,6 +61,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::BsdFlagsNotHeld
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::ContentsNotHeld
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::DeviceNumberTooLarge
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::Duplicate
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::HardlinkCycle
@@ -64,6 +70,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::InvalidComponent
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::LinkCarriesXattrs
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::ModeCarriesFileType
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::NameHoldsNul
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::NameTooLong
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::ParentMissing
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::ParentNotDir
@@ -72,6 +79,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeDuplicate
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeNotADirectory
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated
+#[non_exhaustive] pub ferrosys::btrfs::ModelError::SymlinkTarget
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::TimeOutOfRange
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::XattrName
 #[non_exhaustive] pub ferrosys::btrfs::ModelError::XattrRepeated
@@ -118,6 +126,7 @@
 #[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::BadMagic
 #[non_exhaustive] pub ferrosys::btrfs::ondisk::ParseError::TooShort
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Child<N>
 #[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::CompressedFile
 #[non_exhaustive] pub struct ferrosys::Darwin
@@ -130,6 +139,7 @@
 #[non_exhaustive] pub struct ferrosys::SourceEntry
 #[non_exhaustive] pub struct ferrosys::Synthesis
 #[non_exhaustive] pub struct ferrosys::TreeEntry<N>
+#[non_exhaustive] pub struct ferrosys::Usage
 #[non_exhaustive] pub struct ferrosys::btrfs::Anomaly
 #[non_exhaustive] pub struct ferrosys::btrfs::BtrfsLayout
 #[non_exhaustive] pub struct ferrosys::btrfs::Content
@@ -170,6 +180,8 @@ impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Bound
+impl Clone for ferrosys::Child
 impl Clone for ferrosys::Civil
 impl Clone for ferrosys::CompressedFile
 impl Clone for ferrosys::Darwin
@@ -197,12 +209,14 @@ impl Clone for ferrosys::ReadPolicy
 impl Clone for ferrosys::RemovalError
 impl Clone for ferrosys::ScanReport
 impl Clone for ferrosys::Severity
+impl Clone for ferrosys::Slack
 impl Clone for ferrosys::SourceEntry
 impl Clone for ferrosys::Synthesis
 impl Clone for ferrosys::Timestamp
 impl Clone for ferrosys::TreeBuilder
 impl Clone for ferrosys::TreeEntry
 impl Clone for ferrosys::TreeError
+impl Clone for ferrosys::Usage
 impl Clone for ferrosys::Xattr
 impl Clone for ferrosys::btrfs::Anomaly
 impl Clone for ferrosys::btrfs::BtrfsLayout
@@ -276,6 +290,7 @@ impl Clone for ferrosys::btrfs::ondisk::SuperFlags
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Bound
 impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
@@ -288,8 +303,10 @@ impl Copy for ferrosys::OpenOptions
 impl Copy for ferrosys::Property
 impl Copy for ferrosys::ReadPolicy
 impl Copy for ferrosys::Severity
+impl Copy for ferrosys::Slack
 impl Copy for ferrosys::Synthesis
 impl Copy for ferrosys::Timestamp
+impl Copy for ferrosys::Usage
 impl Copy for ferrosys::btrfs::Category
 impl Copy for ferrosys::btrfs::Content
 impl Copy for ferrosys::btrfs::LabelError
@@ -351,6 +368,8 @@ impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Bound
+impl Debug for ferrosys::Child
 impl Debug for ferrosys::Civil
 impl Debug for ferrosys::CompressedFile
 impl Debug for ferrosys::Darwin
@@ -378,12 +397,14 @@ impl Debug for ferrosys::ReadPolicy
 impl Debug for ferrosys::RemovalError
 impl Debug for ferrosys::ScanReport
 impl Debug for ferrosys::Severity
+impl Debug for ferrosys::Slack
 impl Debug for ferrosys::SourceEntry
 impl Debug for ferrosys::Synthesis
 impl Debug for ferrosys::Timestamp
 impl Debug for ferrosys::TreeBuilder
 impl Debug for ferrosys::TreeEntry
 impl Debug for ferrosys::TreeError
+impl Debug for ferrosys::Usage
 impl Debug for ferrosys::Xattr
 impl Debug for ferrosys::btrfs::Anomaly
 impl Debug for ferrosys::btrfs::BtrfsLayout
@@ -466,6 +487,7 @@ impl Default for ferrosys::Limits
 impl Default for ferrosys::OpenOptions
 impl Default for ferrosys::ReadPolicy
 impl Default for ferrosys::ScanReport
+impl Default for ferrosys::Slack
 impl Default for ferrosys::Synthesis
 impl Default for ferrosys::Timestamp
 impl Default for ferrosys::TreeBuilder
@@ -501,6 +523,8 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Bound
+impl Eq for ferrosys::Child
 impl Eq for ferrosys::Civil
 impl Eq for ferrosys::CompressedFile
 impl Eq for ferrosys::Darwin
@@ -527,11 +551,13 @@ impl Eq for ferrosys::ReadPolicy
 impl Eq for ferrosys::RemovalError
 impl Eq for ferrosys::ScanReport
 impl Eq for ferrosys::Severity
+impl Eq for ferrosys::Slack
 impl Eq for ferrosys::SourceEntry
 impl Eq for ferrosys::Synthesis
 impl Eq for ferrosys::Timestamp
 impl Eq for ferrosys::TreeEntry
 impl Eq for ferrosys::TreeError
+impl Eq for ferrosys::Usage
 impl Eq for ferrosys::Xattr
 impl Eq for ferrosys::btrfs::Anomaly
 impl Eq for ferrosys::btrfs::BtrfsLayout
@@ -660,6 +686,8 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Bound
+impl PartialEq for ferrosys::Child
 impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::CompressedFile
 impl PartialEq for ferrosys::Darwin
@@ -686,11 +714,13 @@ impl PartialEq for ferrosys::ReadPolicy
 impl PartialEq for ferrosys::RemovalError
 impl PartialEq for ferrosys::ScanReport
 impl PartialEq for ferrosys::Severity
+impl PartialEq for ferrosys::Slack
 impl PartialEq for ferrosys::SourceEntry
 impl PartialEq for ferrosys::Synthesis
 impl PartialEq for ferrosys::Timestamp
 impl PartialEq for ferrosys::TreeEntry
 impl PartialEq for ferrosys::TreeError
+impl PartialEq for ferrosys::Usage
 impl PartialEq for ferrosys::Xattr
 impl PartialEq for ferrosys::btrfs::Anomaly
 impl PartialEq for ferrosys::btrfs::BtrfsLayout
@@ -780,6 +810,7 @@ pub const ferrosys::FindingReport::MAX_FINDINGS: usize
 pub const ferrosys::MAX_SYMLINK_HOPS: u32
 pub const ferrosys::NamedChoice::NAMES: &'static [Self]
 pub const ferrosys::Severity::NAMES: &'static [Self]
+pub const ferrosys::Slack::MAX_SHARE: u16
 pub const ferrosys::Timestamp::NANOS_PER_SEC: u32
 pub const ferrosys::btrfs::BOOTSTRAP_SYSTEM_CHUNK: u64
 pub const ferrosys::btrfs::Content::EMPTY: Self
@@ -1059,7 +1090,7 @@ pub const fn ferrosys::btrfs::PlanRequest::metadata_profile(self, profile: Profi
 pub const fn ferrosys::btrfs::PlanRequest::new(volume_bytes: u64) -> Self
 pub const fn ferrosys::btrfs::PlanRequest::node_size(self, size: NodeSize) -> Self
 pub const fn ferrosys::btrfs::PlanRequest::sector_size(self, size: SectorSize) -> Self
-pub const fn ferrosys::btrfs::Pool::name(self) -> &'static str
+pub const fn ferrosys::btrfs::Pool::as_str(self) -> &'static str
 pub const fn ferrosys::btrfs::Profile::as_str(self) -> &'static str
 pub const fn ferrosys::btrfs::Profile::copies(self) -> u64
 pub const fn ferrosys::btrfs::Profile::flag(self) -> BlockGroupFlags
@@ -1162,6 +1193,12 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Bound::Entries
+pub ferrosys::Bound::FileBytes
+pub ferrosys::Bound::PathBytes
+pub ferrosys::Child::kind: NodeKind
+pub ferrosys::Child::name: Vec<u8>
+pub ferrosys::Child::node: N
 pub ferrosys::Civil::day: u32
 pub ferrosys::Civil::hour: u32
 pub ferrosys::Civil::minute: u32
@@ -1258,6 +1295,9 @@ pub ferrosys::Severity::Conformance
 pub ferrosys::Severity::Cosmetic
 pub ferrosys::Severity::Integrity
 pub ferrosys::Severity::Structural
+pub ferrosys::Slack::Bytes(u64)
+pub ferrosys::Slack::None
+pub ferrosys::Slack::Share(u16)
 pub ferrosys::SourceEntry::darwin: Option<Darwin>
 pub ferrosys::SourceEntry::kind: EntryKind
 pub ferrosys::SourceEntry::meta: Metadata
@@ -1275,12 +1315,18 @@ pub ferrosys::TreeEntry::path: Vec<u8>
 pub ferrosys::TreeEntry::shared: Option<u64>
 pub ferrosys::TreeError::Io::kind: std::io::ErrorKind
 pub ferrosys::TreeError::Io::message: String
+pub ferrosys::TreeError::LimitExceeded::bound: Bound
 pub ferrosys::TreeError::LimitExceeded::detail: String
 pub ferrosys::TreeError::LimitExceeded::family: crate::finding::Family
 pub ferrosys::TreeError::Malformed::detail: String
 pub ferrosys::TreeError::Malformed::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::path: Vec<u8>
 pub ferrosys::TreeError::Unsupported::detail: String
 pub ferrosys::TreeError::Unsupported::family: crate::finding::Family
+pub ferrosys::Usage::free: u64
+pub ferrosys::Usage::total: u64
+pub ferrosys::Usage::unit: u64
 pub ferrosys::Xattr::name: Vec<u8>
 pub ferrosys::Xattr::value: Vec<u8>
 pub ferrosys::btrfs::Anomaly::category: Category
@@ -1316,6 +1362,7 @@ pub ferrosys::btrfs::Entry::kind: super::ondisk::DirEntryType
 pub ferrosys::btrfs::Entry::location: super::ondisk::DiskKey
 pub ferrosys::btrfs::Entry::name: Vec<u8>
 pub ferrosys::btrfs::FormatError::DataExhausted::planned: u64
+pub ferrosys::btrfs::FormatError::DoesNotFit::ceiling: u64
 pub ferrosys::btrfs::FormatError::Geometry(super::geometry::GeometryError)
 pub ferrosys::btrfs::FormatError::ImageTooLargeInMemory::bytes: u64
 pub ferrosys::btrfs::FormatError::Io(std::io::Error)
@@ -1324,6 +1371,8 @@ pub ferrosys::btrfs::FormatError::Model(super::model::ModelError)
 pub ferrosys::btrfs::FormatError::RecordTooLarge::bytes: usize
 pub ferrosys::btrfs::FormatError::RecordTooLarge::capacity: usize
 pub ferrosys::btrfs::FormatError::Reservation(super::geometry::ReservationExceeded)
+pub ferrosys::btrfs::FormatError::SlackShareTooLarge::hundredths: u16
+pub ferrosys::btrfs::FormatError::SlackShareTooLarge::limit: u16
 pub ferrosys::btrfs::FormatError::TimeOutOfRange::time: crate::Timestamp
 pub ferrosys::btrfs::FormatOptions::chunk_tree_uuid: [u8; 16]
 pub ferrosys::btrfs::FormatOptions::default_subvolume: Option<Vec<u8>>
@@ -1365,6 +1414,7 @@ pub ferrosys::btrfs::Mirror::Absent
 pub ferrosys::btrfs::Mirror::Damaged
 pub ferrosys::btrfs::Mirror::Diverged
 pub ferrosys::btrfs::Mirror::Diverged::generation: u64
+pub ferrosys::btrfs::Mirror::Foreign
 pub ferrosys::btrfs::Mirror::Misplaced
 pub ferrosys::btrfs::Mirror::Misplaced::bytenr: u64
 pub ferrosys::btrfs::Mirror::OutsideDevice
@@ -1375,6 +1425,9 @@ pub ferrosys::btrfs::ModelError::BsdFlagsNotHeld::flags: u32
 pub ferrosys::btrfs::ModelError::BsdFlagsNotHeld::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::ContentsNotHeld::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::DefaultSubvolumeUnknown::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::DeviceNumberTooLarge::major: u32
+pub ferrosys::btrfs::ModelError::DeviceNumberTooLarge::minor: u32
+pub ferrosys::btrfs::ModelError::DeviceNumberTooLarge::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::Duplicate::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::HardlinkCrossesSubvolume::target: Vec<u8>
@@ -1387,6 +1440,7 @@ pub ferrosys::btrfs::ModelError::InvalidComponent::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::LinkCarriesXattrs::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::ModeCarriesFileType::mode: u16
 pub ferrosys::btrfs::ModelError::ModeCarriesFileType::path: Vec<u8>
+pub ferrosys::btrfs::ModelError::NameHoldsNul::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::NameTooLong::bytes: usize
 pub ferrosys::btrfs::ModelError::NameTooLong::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::ParentMissing::path: Vec<u8>
@@ -1402,6 +1456,9 @@ pub ferrosys::btrfs::ModelError::SubvolumeNotADirectory::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::first: Vec<u8>
 pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::second: Vec<u8>
 pub ferrosys::btrfs::ModelError::SubvolumeUuidRepeated::uuid: [u8; 16]
+pub ferrosys::btrfs::ModelError::SymlinkTarget::bytes: usize
+pub ferrosys::btrfs::ModelError::SymlinkTarget::limit: usize
+pub ferrosys::btrfs::ModelError::SymlinkTarget::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::TimeOutOfRange::nanos: u32
 pub ferrosys::btrfs::ModelError::TimeOutOfRange::path: Vec<u8>
 pub ferrosys::btrfs::ModelError::TimeOutOfRange::secs: i64
@@ -1411,6 +1468,7 @@ pub ferrosys::btrfs::ModelError::XattrRepeated::name: Vec<u8>
 pub ferrosys::btrfs::ModelError::XattrRepeated::path: Vec<u8>
 pub ferrosys::btrfs::Node::inode: u64
 pub ferrosys::btrfs::Node::item: super::ondisk::InodeItem
+pub ferrosys::btrfs::Node::stub: bool
 pub ferrosys::btrfs::Node::tree: u64
 pub ferrosys::btrfs::NodeSize::Auto
 pub ferrosys::btrfs::NodeSize::Bytes(u32)
@@ -1760,6 +1818,7 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Child::new(name: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::Darwin::compressed(self, form: CompressedFile) -> Self
 pub fn ferrosys::Deviation::is_source_failure(&self) -> bool /* required */
 pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
@@ -1797,10 +1856,13 @@ pub fn ferrosys::FsTree::bsd_flags(&mut self, node: &<Self as >::Node) -> Result
 pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
 pub fn ferrosys::FsTree::darwin(&mut self, node: &<Self as >::Node) -> Result<Option<Darwin>, TreeError>
 pub fn ferrosys::FsTree::family(&self) -> Family /* required */
+pub fn ferrosys::FsTree::find(&mut self, path: &[u8]) -> Result<Child<<Self as >::Node>, TreeError> /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::list(&mut self, dir: &<Self as >::Node) -> Result<Vec<Child<<Self as >::Node>>, TreeError> /* required */
 pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
+pub fn ferrosys::FsTree::usage(&mut self) -> Result<Usage, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
 pub fn ferrosys::ImageFile::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::ImageSource::entries(&self) -> &[SourceEntry]
@@ -1842,6 +1904,7 @@ pub fn ferrosys::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: im
 pub fn ferrosys::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
 pub fn ferrosys::TreeEntry::new(path: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
+pub fn ferrosys::Usage::new(unit: u64, total: u64, free: u64) -> Self
 pub fn ferrosys::btrfs::BtrfsLayout::chunks_of(&self, kind: BlockGroupFlags) -> impl Iterator<Item = &MappedChunk>
 pub fn ferrosys::btrfs::BtrfsLayout::device_bytes_used(&self) -> u64
 pub fn ferrosys::btrfs::BtrfsLayout::logical_end(&self) -> u64
@@ -1862,6 +1925,7 @@ pub fn ferrosys::btrfs::FormatOptions::plan(self, plan: PlanRequest) -> Self
 pub fn ferrosys::btrfs::FormatOptions::subvolume(self, request: SubvolumeRequest) -> Self
 pub fn ferrosys::btrfs::FormatOptions::subvolume_uuid(self, uuid: [u8; 16]) -> Self
 pub fn ferrosys::btrfs::FormatPlan::fidelity(&self) -> &FidelityReport
+pub fn ferrosys::btrfs::FormatPlan::fit(source: impl Source, options: FormatOptions, slack: crate::Slack) -> Result<Self, FormatError>
 pub fn ferrosys::btrfs::FormatPlan::layout(&self) -> &BtrfsLayout
 pub fn ferrosys::btrfs::FormatPlan::new(source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<Self, FormatError>
 pub fn ferrosys::btrfs::FormatPlan::write_to(&self, sink: impl Write + Seek) -> Result<Slack, FormatError>
@@ -1942,6 +2006,8 @@ pub fn ferrosys::btrfs::format(source: impl Source, volume_bytes: u64, options: 
 pub fn ferrosys::btrfs::format_to<W: Write + Seek>(sink: W, source: impl Source, volume_bytes: u64, options: FormatOptions) -> Result<super::geometry::BtrfsLayout, FormatError>
 pub fn ferrosys::btrfs::ondisk::BlockGroupItem::read_from(buf: &[u8]) -> Result<Self, ParseError>
 pub fn ferrosys::btrfs::ondisk::BlockGroupItem::write_to(&self, buf: &mut [u8])
+pub fn ferrosys::btrfs::ondisk::ChecksumType::field(self, covered: &[u8]) -> Option<[u8; 32]>
+pub fn ferrosys::btrfs::ondisk::ChecksumType::holds(self, object: &[u8]) -> bool
 pub fn ferrosys::btrfs::ondisk::Chunk::read_from(buf: &[u8]) -> Result<Self, ParseError>
 pub fn ferrosys::btrfs::ondisk::Chunk::stripe_at(&self, buf: &[u8], index: u16) -> Result<Stripe, ParseError>
 pub fn ferrosys::btrfs::ondisk::Chunk::write_to(&self, buf: &mut [u8])

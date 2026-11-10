@@ -69,7 +69,7 @@ use crate::io::{Bounded, offset_of, read_exact_at};
 use crate::path::{is_hostile_component, is_reserved_name_char};
 use crate::policy::{Limits, MAX_PATH, OpenOptions, ReadPolicy};
 use crate::time::Timestamp;
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, Bound, Child, FsTree, NodeKind, TreeEntry, TreeError, Usage};
 
 use super::geometry::{ExfatLayout, FIRST_CLUSTER, layout_from_boot};
 use super::model::MAX_DIRECTORY_BYTES;
@@ -1092,17 +1092,19 @@ pub enum ReadError {
         /// The limit in force.
         limit: u64,
     },
-    /// A walked path is longer than any consumer of one could use.
+    /// A walk reached a name whose path is longer than the longest a walk builds, 4,096
+    /// bytes, which is Linux's `PATH_MAX`.
     ///
     /// Nothing in the format bounds how deep a tree nests, and a walk's entry cap counts
     /// *names* rather than the bytes their paths occupy — so a caterpillar tree of directories
     /// each holding one entry naming the next stays under every count while its paths grow by
-    /// one component each and cost the walk their sum.
+    /// one component each and cost the walk their sum. A walk hands out every name's whole
+    /// path, so it holds each to this bound.
     ///
-    /// The bound is `PATH_MAX`, which is the ceiling on what a path can be *used* for: a
-    /// consumer resolving one against a host gets `ENAMETOOLONG` past it, so a longer path is
-    /// not a path anything could act on.
-    #[error("a walked path is longer than the {limit} bytes a path may be")]
+    /// The tree is well-formed, so this is a limit rather than damage: the shared surface
+    /// reports it as [`TreeError::LimitExceeded`] with [`Bound::PathBytes`], and a
+    /// [`scan`](Reader::scan) reads the tree whole.
+    #[error("a walked path is longer than the {limit} bytes a walk builds")]
     #[non_exhaustive]
     PathTooLong {
         /// The longest path a walk builds.
@@ -1362,12 +1364,13 @@ impl From<ReadError> for TreeError {
     fn from(err: ReadError) -> Self {
         match err {
             ReadError::Io { kind, message } => TreeError::Io { kind, message },
-            ReadError::FileTooLarge { .. }
-            | ReadError::PathTooLong { .. }
-            | ReadError::WalkTooLarge { .. } => TreeError::LimitExceeded {
-                family: Family::ExFat,
-                detail: err.to_string(),
-            },
+            ReadError::FileTooLarge { .. } => {
+                TreeError::limit(Family::ExFat, Bound::FileBytes, &err)
+            }
+            ReadError::PathTooLong { .. } => {
+                TreeError::limit(Family::ExFat, Bound::PathBytes, &err)
+            }
+            ReadError::WalkTooLarge { .. } => TreeError::limit(Family::ExFat, Bound::Entries, &err),
             // A shape the format defines and this reader does not follow, which is what the
             // shared frame calls unsupported rather than malformed.
             ReadError::TexFat | ReadError::FatCount { .. } => TreeError::Unsupported {
@@ -1735,8 +1738,10 @@ impl<R: Read + Seek> Reader<R> {
     /// Open the exFAT volume `src` holds, under `options`.
     ///
     /// The boot sector is validated through the same function detection classifies with, so a
-    /// volume detection claims is one this opens and a volume it does not claim is one this
-    /// refuses. What the reader adds is a reason.
+    /// volume it does not claim is one this refuses, and what the reader adds is a reason. A
+    /// volume it claims is one this opens, but for one: a volume recording other than one
+    /// allocation table is an exFAT volume, which detection names, and this refuses it by name
+    /// as [`ReadError::TexFat`] or [`ReadError::FatCount`], a variant it does not read.
     ///
     /// Opening reads more than the boot sector, and it has to: the allocation bitmap and the
     /// up-case table are found by reading the root directory and nowhere else, and a name
@@ -2542,7 +2547,9 @@ impl<R: Read + Seek> Reader<R> {
                 });
             };
             let bytes = self.read_cluster(cluster)?;
-            let take = bytes.len().min((len - out.len() as u64) as usize);
+            let take = bytes
+                .len()
+                .min(usize::try_from(len - out.len() as u64).unwrap_or(usize::MAX));
             out.extend_from_slice(&bytes[..take]);
             index += 1;
         }
@@ -3403,7 +3410,9 @@ impl<R: Read + Seek> Reader<R> {
             return Ok(0);
         }
         let bytes_per_cluster = u64::from(self.layout.bytes_per_cluster);
-        let want = buf.len().min((size - offset) as usize);
+        let want = buf
+            .len()
+            .min(usize::try_from(size - offset).unwrap_or(usize::MAX));
         let mut done = 0usize;
         while done < want {
             let at = offset + done as u64;
@@ -3413,7 +3422,8 @@ impl<R: Read + Seek> Reader<R> {
                 buf[done..want].fill(0);
                 return Ok(want);
             }
-            let take = (want - done).min((node.valid_data_length - at) as usize);
+            let take = (want - done)
+                .min(usize::try_from(node.valid_data_length - at).unwrap_or(usize::MAX));
             let index = at / bytes_per_cluster;
             let within = (at % bytes_per_cluster) as usize;
             let Some(cluster) = self.stream_cluster(node.storage, index)? else {
@@ -3473,7 +3483,9 @@ impl<R: Read + Seek> Reader<R> {
         let mut buf = vec![0u8; self.layout.bytes_per_cluster as usize];
         let mut done = 0u64;
         while done < size {
-            let want = buf.len().min((size - done) as usize);
+            let want = buf
+                .len()
+                .min(usize::try_from(size - done).unwrap_or(usize::MAX));
             let got = self.read_into(node, done, &mut buf[..want])?;
             if got == 0 {
                 return Err(ReadError::StreamTooShort {
@@ -3624,6 +3636,9 @@ impl<R: Read + Seek> Reader<R> {
 
     /// Walk the tree, collecting every deviation and the clusters it occupies.
     ///
+    /// Each name is reported by its [label](crate::walk::label), so a tree of any depth is
+    /// read whole.
+    ///
     /// `None` where the walk did not finish. What it did not reach is not evidence of anything,
     /// and an allocation comparison over a partial traversal reads as a fact and is not one.
     fn scan_tree(&mut self, findings: &mut Findings<Anomaly>) -> Option<ClusterSet> {
@@ -3646,18 +3661,18 @@ impl<R: Read + Seek> Reader<R> {
         let mut names = 0usize;
         let cap = self.limits.max_walk_entries.min(self.max_names());
 
-        while let Some((path, node)) = queue.pop() {
+        while let Some((label, node)) = queue.pop() {
             if findings.is_full() {
                 return None;
             }
             if node.is_dir() {
                 // The root's clusters were claimed above with the other residents; every other
                 // directory's are its own.
-                if !path.is_empty() {
+                if !label.is_empty() {
                     self.claim_stream(
                         node.storage,
                         node.data_length,
-                        &path,
+                        &label,
                         &mut reached,
                         findings,
                     );
@@ -3671,7 +3686,7 @@ impl<R: Read + Seek> Reader<R> {
                 // What the directory's benign entries allocate is the directory's to account
                 // for, whether or not the rest of it parsed.
                 for allocation in allocations {
-                    let mut owner = path.clone();
+                    let mut owner = label.clone();
                     owner.extend_from_slice(
                         format!(" (the allocation of entry {})", allocation.index).as_bytes(),
                     );
@@ -3700,9 +3715,7 @@ impl<R: Read + Seek> Reader<R> {
                         findings.push(ReadError::WalkTooLarge { limit: cap }.anomaly());
                         return None;
                     }
-                    let mut child = path.clone();
-                    child.push(b'/');
-                    child.extend_from_slice(&entry.name);
+                    let child = crate::walk::label(&label, &entry.name);
                     let descend = match entry.node.storage {
                         Storage::None => false,
                         Storage::Contiguous(first) | Storage::Chain(first) => {
@@ -3717,7 +3730,7 @@ impl<R: Read + Seek> Reader<R> {
                 self.claim_stream(
                     node.storage,
                     node.data_length,
-                    &path,
+                    &label,
                     &mut reached,
                     findings,
                 );
@@ -3851,29 +3864,41 @@ impl<R: Read + Seek> Reader<R> {
         !findings.is_full()
     }
 
-    /// Hold the allocation bitmap against what the walk reached, and how full the volume says
-    /// it is against how full it is.
-    fn scan_allocation(&mut self, findings: &mut Findings<Anomaly>, reached: &ClusterSet) {
-        let mut lost = 0u64;
-        let mut first_lost = None;
-        let mut in_use = 0u64;
+    /// Count what the allocation bitmap says of every cluster: in use, and in use with no chain
+    /// in `reached` holding it. Without `reached`, nothing is counted lost.
+    fn census(&mut self, reached: Option<&ClusterSet>) -> Result<Census, ReadError> {
+        let mut census = Census {
+            in_use: 0,
+            lost: 0,
+            first_lost: None,
+        };
         for n in 0..self.layout.cluster_count {
             let cluster = FIRST_CLUSTER + n;
-            let allocated = match self.is_allocated(cluster) {
-                Ok(allocated) => allocated,
-                Err(e) => {
-                    findings.push(e.anomaly());
-                    return;
-                }
-            };
-            if allocated {
-                in_use += 1;
-                if !reached.contains(cluster) {
-                    lost += 1;
-                    first_lost.get_or_insert(cluster);
+            if self.is_allocated(cluster)? {
+                census.in_use += 1;
+                if reached.is_some_and(|reached| !reached.contains(cluster)) {
+                    census.lost += 1;
+                    census.first_lost.get_or_insert(cluster);
                 }
             }
         }
+        Ok(census)
+    }
+
+    /// Hold the allocation bitmap against what the walk reached, and how full the volume says
+    /// it is against how full it is.
+    fn scan_allocation(&mut self, findings: &mut Findings<Anomaly>, reached: &ClusterSet) {
+        let Census {
+            in_use,
+            lost,
+            first_lost,
+        } = match self.census(Some(reached)) {
+            Ok(census) => census,
+            Err(e) => {
+                findings.push(e.anomaly());
+                return;
+            }
+        };
         if let Some(first) = first_lost {
             findings.push(ReadError::LostClusters { count: lost, first }.anomaly());
         }
@@ -4048,13 +4073,7 @@ impl<R: Read + Seek> FsTree for Reader<R> {
         visit(self, TreeEntry::new(Vec::new(), NodeKind::Directory, root))?;
 
         let outcome = self.walk_with::<WalkFail<E>>(|reader, entry| {
-            let kind = if entry.node.is_dir() {
-                NodeKind::Directory
-            } else {
-                NodeKind::File {
-                    size: entry.node.data_length,
-                }
-            };
+            let kind = node_kind(&entry.node);
             // No `shared`: the format has no second name for a node, so two paths are always
             // two nodes.
             visit(reader, TreeEntry::new(entry.path, kind, entry.node)).map_err(WalkFail::Visitor)
@@ -4078,7 +4097,8 @@ impl<R: Read + Seek> FsTree for Reader<R> {
             synthesis,
             node.is_dir(),
             node.attributes.contains(FileAttributes::READ_ONLY),
-            node.times.map(|t| (t.access, t.modify, Some(t.create))),
+            node.times
+                .map(|t| (Some(t.access), t.modify, Some(t.create))),
         ))
     }
 
@@ -4094,6 +4114,68 @@ impl<R: Read + Seek> FsTree for Reader<R> {
             detail: "an exFAT volume holds no symbolic links".to_string(),
         })
     }
+
+    fn find(&mut self, path: &[u8]) -> Result<Child<Node>, TreeError> {
+        let node = self.lookup(path).map_err(|e| match e {
+            ReadError::NotFound { .. } | ReadError::NotADirectory { .. } => TreeError::NotFound {
+                family: Family::ExFat,
+                path: path.to_vec(),
+            },
+            other => TreeError::from(other),
+        })?;
+        Ok(Child::new(
+            crate::tree::last_name(path),
+            node_kind(&node),
+            node,
+        ))
+    }
+
+    fn list(&mut self, dir: &Node) -> Result<Vec<Child<Node>>, TreeError> {
+        if !dir.is_dir() {
+            return Err(crate::tree::not_a_directory(Family::ExFat));
+        }
+        let entries = self.read_dir(dir)?.into_iter().map(|e| (e.name, e.node));
+        Ok(crate::tree::listed(Family::ExFat, entries)?
+            .into_iter()
+            .map(|(name, node)| Child::new(name, node_kind(&node), node))
+            .collect())
+    }
+
+    /// In clusters: the volume's cluster count, and the clusters its allocation bitmap marks
+    /// free. The boot sector's percentage in use is a hint a driver keeps outside the boot
+    /// checksum and need not keep current, so it is not read.
+    fn usage(&mut self) -> Result<Usage, TreeError> {
+        let census = self.census(None)?;
+        let total = u64::from(self.layout.cluster_count);
+        Ok(Usage::new(
+            u64::from(self.layout.bytes_per_cluster),
+            total,
+            total - census.in_use,
+        ))
+    }
+}
+
+/// What a node is, in the shared frame's words: the one projection a walk, a lookup and a
+/// listing all go through. An exFAT node is a directory or a file and nothing else.
+fn node_kind(node: &Node) -> NodeKind {
+    if node.is_dir() {
+        NodeKind::Directory
+    } else {
+        NodeKind::File {
+            size: node.data_length,
+        }
+    }
+}
+
+/// What the allocation bitmap says of every cluster, counted once for a scan and for a
+/// volume's usage.
+struct Census {
+    /// The clusters it marks in use.
+    in_use: u64,
+    /// Those that no chain the census was handed holds.
+    lost: u64,
+    /// The first of them.
+    first_lost: Option<u32>,
 }
 
 /// The shared walk failure over this family's read error.
@@ -4153,12 +4235,13 @@ impl PendingSet {
     }
 }
 
-/// A dense set over the volume's clusters, one bit each.
+/// A set over the volume's clusters, one bit each, kept a 64-cluster word at a time and only
+/// for the words that hold a member.
 ///
-/// Sized from the count the boot sector records, which the geometry has already held to the
+/// Bounded by the count the boot sector records, which the geometry has already held to the
 /// heap fitting inside the source — so the widest set this reaches is one bit per cluster of a
-/// volume that exists, which is exactly the size of the allocation bitmap that volume already
-/// carries.
+/// volume that exists — and costing what is in it below that: a directory's chain walk holds
+/// the clusters of that chain, and a scan's set the clusters it reached.
 ///
 /// This is the one answer to "which clusters has this been to", and every question of that
 /// shape asks it: the chain a directory follows, the chain the root's length is measured from,
@@ -4166,17 +4249,19 @@ impl PendingSet {
 /// is the same in all four — a cluster number of this volume — and a second structure over it
 /// would be a second answer to keep in step.
 struct ClusterSet {
-    bits: Vec<u64>,
+    /// The set's words, by index: word `w` holds clusters `64 * w` to `64 * w + 63`. Only a
+    /// word holding a member is kept, so a set costs memory in proportion to what is in it
+    /// rather than to the volume: a directory of one cluster on a volume of four billion is
+    /// one word, where a word per 64 clusters of the volume would be half a gibibyte for every
+    /// directory read.
+    words: std::collections::HashMap<u32, u64>,
     clusters: u32,
 }
 
 impl ClusterSet {
     fn new(clusters: u32) -> Self {
-        // Clusters number from two, so the set is sized for the highest number rather than for
-        // the count.
-        let highest = clusters as usize + FIRST_CLUSTER as usize;
         Self {
-            bits: vec![0u64; highest.div_ceil(64)],
+            words: std::collections::HashMap::new(),
             clusters,
         }
     }
@@ -4191,15 +4276,19 @@ impl ClusterSet {
         if !self.holds(cluster) {
             return true;
         }
-        let (word, bit) = (cluster as usize / 64, cluster as usize % 64);
-        let was = self.bits[word] & (1 << bit) != 0;
-        self.bits[word] |= 1 << bit;
+        let word = self.words.entry(cluster / 64).or_default();
+        let bit = 1u64 << (cluster % 64);
+        let was = *word & bit != 0;
+        *word |= bit;
         !was
     }
 
     fn contains(&self, cluster: u32) -> bool {
         self.holds(cluster)
-            && self.bits[cluster as usize / 64] & (1 << (cluster as usize % 64)) != 0
+            && self
+                .words
+                .get(&(cluster / 64))
+                .is_some_and(|word| word & (1u64 << (cluster % 64)) != 0)
     }
 }
 

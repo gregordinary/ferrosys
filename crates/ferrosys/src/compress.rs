@@ -31,6 +31,11 @@
 //! and *undoing* it are different questions and a reader has to answer the first either way: a
 //! file this build cannot decode is reported as one it cannot decode, naming the algorithm,
 //! rather than as a file whose bytes are what the volume holds.
+//!
+//! LZO's and LZBITMAP's decoders are this crate's own, DEFLATE's and Zstandard's are
+//! `miniz_oxide`'s and `ruzstd`'s, and LZVN's and LZFSE's are `ferrosys-lzfse`'s, derived from
+//! Apple's lzfse project and under its BSD-3-Clause license. [`decompress`] gives every answer
+//! in this module's terms, so a caller meets one [`Error`] whichever crate decoded the stream.
 
 /// Which encoding a run of bytes on a volume is in.
 ///
@@ -90,6 +95,28 @@ impl Algorithm {
     }
 }
 
+/// The clause a refusal ends with when a read stops for want of a decoder: which Cargo feature
+/// compiles it. Each decoder's feature is named for its algorithm.
+///
+/// Every refusal of a compressed file ends with this one — the shared decoder's, and each
+/// family's own, which names the inode as well — so a build left without a decoder says how to
+/// get it in the same words wherever a read stops. It writes nothing for `None`, which is an
+/// encoding no feature decodes: a value the format leaves undefined.
+pub(crate) struct CompiledBy(pub(crate) Option<Algorithm>);
+
+impl std::fmt::Display for CompiledBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(algorithm) => write!(
+                f,
+                "; the `{}` feature compiles its decoder",
+                algorithm.name()
+            ),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Why a run of compressed bytes could not be turned back into the bytes it stands for.
 ///
 /// The three are kept apart because they mean different things about the image: a stream this
@@ -116,7 +143,11 @@ impl Algorithm {
 #[non_exhaustive]
 pub(crate) enum Error {
     /// This build carries no decoder for the algorithm.
-    #[error("{} is an algorithm this build does not decode", .0.name())]
+    #[error(
+        "{} is an algorithm this build does not decode{}",
+        .0.name(),
+        CompiledBy(Some(*.0))
+    )]
     Unavailable(Algorithm),
     /// The stream is not a well-formed one of its kind.
     #[error("the {} stream does not decode: {fault}", .algorithm.name())]
@@ -176,9 +207,12 @@ pub(crate) fn decompress(
         #[cfg(feature = "zstd")]
         Algorithm::Zstd => zstd::decompress(input, out),
         #[cfg(feature = "lzvn")]
-        Algorithm::Lzvn => lzvn::decompress(input, out),
+        Algorithm::Lzvn => lifted(Algorithm::Lzvn, ferrosys_lzfse::decompress_lzvn(input, out)),
         #[cfg(feature = "lzfse")]
-        Algorithm::Lzfse => lzfse::decompress(input, out),
+        Algorithm::Lzfse => lifted(
+            Algorithm::Lzfse,
+            ferrosys_lzfse::decompress_lzfse(input, out),
+        ),
         #[cfg(feature = "lzbitmap")]
         Algorithm::Lzbitmap => lzbitmap::decompress(input, out),
         // Whichever of the algorithms this build did not take. Reached only through a caller that
@@ -299,12 +333,36 @@ mod zstd {
     }
 }
 
+/// What `ferrosys-lzfse` answered for a stream of `algorithm`, in this module's terms: the two
+/// faults it reports are the two this module's [`Error`] carries for every decoder, named here
+/// with the algorithm the stream was.
+#[cfg(feature = "lzvn")]
+fn lifted(
+    algorithm: Algorithm,
+    answer: Result<usize, ferrosys_lzfse::Error>,
+) -> Result<usize, Error> {
+    answer.map_err(|error| match error {
+        ferrosys_lzfse::Error::Malformed { fault, .. } => Error::Malformed { algorithm, fault },
+        ferrosys_lzfse::Error::Overrun { expected, .. } => Error::Overrun {
+            algorithm,
+            expected,
+        },
+        // The decoder crate is released with this one and required at exactly its version,
+        // so a refusal it adds is named here in the same release. Until it is, a stream the
+        // decoder refuses is one that does not decode.
+        _ => Error::Malformed {
+            algorithm,
+            fault: "the decoder refuses the stream",
+        },
+    })
+}
+
 /// Write the `count` bytes from `distance` back at `at` of `out`, a byte at a time: a copy may
 /// reach into the run it is producing, so a distance of one and a count of ten is ten copies of
 /// one byte, and a block move would read bytes not yet written. `false`, copying nothing, where
 /// the distance is zero or reaches before the output's start. The caller holds `at + count` to
 /// the output's length.
-#[cfg(any(feature = "lzo", feature = "lzvn", feature = "lzfse"))]
+#[cfg(feature = "lzo")]
 fn copy_back(out: &mut [u8], at: usize, distance: usize, count: usize) -> bool {
     if distance == 0 || distance > at {
         return false;
@@ -317,12 +375,6 @@ fn copy_back(out: &mut [u8], at: usize, distance: usize, count: usize) -> bool {
 
 #[cfg(feature = "lzo")]
 pub(crate) mod lzo;
-
-#[cfg(feature = "lzvn")]
-mod lzvn;
-
-#[cfg(feature = "lzfse")]
-mod lzfse;
 
 #[cfg(feature = "lzbitmap")]
 mod lzbitmap;
@@ -343,7 +395,6 @@ mod reference;
         feature = "lzo",
         feature = "zlib",
         feature = "zstd",
-        feature = "lzvn",
         feature = "lzbitmap"
     )
 ))]
@@ -454,12 +505,49 @@ mod tests {
             (Algorithm::Lzbitmap, "lzbitmap"),
         ] {
             assert_eq!(algorithm.name(), name);
-            // And the refusal a build without the decoder gives names it too.
+            // And the refusal a build without the decoder gives names it too, with the
+            // feature that compiles the decoder.
             assert_eq!(
                 Error::Unavailable(algorithm).to_string(),
-                format!("{name} is an algorithm this build does not decode")
+                format!(
+                    "{name} is an algorithm this build does not decode; the `{name}` feature \
+                     compiles its decoder"
+                )
             );
         }
+    }
+
+    #[test]
+    fn the_feature_a_refusal_names_is_one_the_manifest_declares() {
+        // A refusal tells a caller which feature to turn on, so the word it names has to be a
+        // feature someone can turn on — not merely the algorithm's name.
+        let manifest = include_str!("../Cargo.toml");
+        let features = manifest
+            .split("\n[features]\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n[").next())
+            .expect("the manifest has a [features] table");
+        let declared: Vec<&str> = features
+            .lines()
+            .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+            .filter(|name| !name.starts_with('#'))
+            .collect();
+        for algorithm in [
+            Algorithm::Zlib,
+            Algorithm::Lzo,
+            Algorithm::Zstd,
+            Algorithm::Lzvn,
+            Algorithm::Lzfse,
+            Algorithm::Lzbitmap,
+        ] {
+            assert!(
+                declared.contains(&algorithm.name()),
+                "`{}` is not a feature in {declared:?}",
+                algorithm.name()
+            );
+        }
+        // An encoding no feature decodes adds nothing.
+        assert_eq!(CompiledBy(None).to_string(), "");
     }
 
     #[test]

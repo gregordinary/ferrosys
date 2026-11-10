@@ -15,16 +15,13 @@
 //! those are exactly what a read of the image fills in — so it loses nothing and the summary
 //! says so.
 //!
-//! # No search for a size
+//! # A size found from the contents
 //!
-//! `--size auto` finds the smallest filesystem that holds the contents by planning candidates
-//! and placing into them, and that search is a family's own. This family has none, so the
-//! argument parser refuses `--size auto` for it before a source is read. [`Plan::fitted`]'s
-//! default is what says so in the type, so a family without a search is one that writes no
-//! function rather than one that writes an unreachable one.
+//! `--size auto` asks the library for the smallest volume that holds the contents, with
+//! `--slack` free, and writes that.
 
 use ferrosys::exfat::{ExfatLayout, FormatOptions, FormatPlan, VolumeLabel};
-use ferrosys::{FidelityReport, Source};
+use ferrosys::{FidelityReport, Slack, Source};
 
 use crate::args::{ExFatTarget, FormatArgs};
 use crate::format::{Plan, Written};
@@ -33,10 +30,12 @@ use crate::{Error, emit, render};
 impl Plan for FormatPlan {
     type Options = FormatOptions;
 
-    const FAMILY: &'static str = "exfat";
-
     fn sized(source: impl Source, bytes: u64, options: FormatOptions) -> Result<Self, Error> {
         Ok(FormatPlan::new(source, bytes, options)?)
+    }
+
+    fn fitted(source: impl Source, options: FormatOptions, slack: Slack) -> Result<Self, Error> {
+        Ok(FormatPlan::fit(source, options, slack)?)
     }
 }
 
@@ -93,7 +92,7 @@ fn report(
     if args.json {
         emit(receipt(target, layout, free_clusters, fidelity, written).as_bytes())
     } else {
-        eprint!("{}", summary(target, layout, free_clusters, fidelity));
+        note!("{}", summary(target, layout, free_clusters, fidelity));
         Ok(())
     }
 }

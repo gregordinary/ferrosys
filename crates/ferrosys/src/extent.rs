@@ -119,6 +119,35 @@ impl ExtentNode {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Whether the node's entries lie in ascending order inside `range`, the logical blocks
+    /// its parent's index entry gives it: from that entry's first block up to the next
+    /// entry's, or to the parent's own end for the last.
+    ///
+    /// Documented: an index entry names the first logical block its subtree covers, and the
+    /// entries of a node are sorted. So an index entry below one lies inside its range and
+    /// after the entry before it, and a leaf begins inside the range, after the leaf before
+    /// it ends, and ends where the range does at the latest. A tree breaking it maps a
+    /// logical block one way to a read of the whole file and another to a read of part of
+    /// it, since a windowed read follows only the subtrees whose ranges meet its window.
+    pub(crate) fn holds_range(&self, range: &std::ops::Range<u64>) -> bool {
+        let mut next_free = range.start;
+        match self {
+            Self::Leaves(leaves) => leaves.iter().all(|leaf| {
+                let lo = u64::from(leaf.block);
+                let hi = lo + u64::from(leaf.len);
+                let held = lo >= next_free && hi <= range.end;
+                next_free = hi;
+                held
+            }),
+            Self::Index { entries, .. } => entries.iter().all(|idx| {
+                let lo = u64::from(idx.block);
+                let held = lo >= next_free && lo < range.end;
+                next_free = lo + 1;
+                held
+            }),
+        }
+    }
 }
 
 /// An external node and the physical block it occupies.

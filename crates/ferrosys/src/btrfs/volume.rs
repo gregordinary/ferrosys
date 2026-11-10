@@ -9,10 +9,11 @@
 //! 1. Read every superblock location the source reaches, and judge each one — is it there, is
 //!    it a superblock, does its checksum cover it, and does it agree about where it lives.
 //! 2. Choose the copy at the highest generation, which is the filesystem's own rule for which
-//!    of them is live.
+//!    of them is live. Where the primary verifies, only copies of its filesystem inside its
+//!    device compete.
 //! 3. Refuse what cannot be read at all: a filesystem spanning several devices, a checksum
-//!    algorithm this crate does not compute, a feature bit it does not implement, a geometry
-//!    the format does not define.
+//!    algorithm the format does not define, a feature bit this crate does not implement, a
+//!    geometry the format does not define.
 //! 4. Judge the copies that were *not* chosen against the device's own length and against the
 //!    chosen one, so a missing or stale one, or one at the live generation that is not a copy
 //!    of the live record, is reported rather than passed over.
@@ -26,6 +27,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::cache::BlockCache;
+use crate::compress::Algorithm;
 use crate::io::{Bounded, io_error, offset_of, read_exact_at, read_exact_into};
 use crate::{Limits, OpenOptions, ReadPolicy};
 
@@ -51,9 +53,10 @@ use super::ondisk::{
 /// **Two of the entries depend on what this build carries**, and that is the one place this
 /// list is not fixed. A filesystem that sets a compression bit says some extent of it is
 /// stored that way, so whether it can be read at all is whether this build has the decoder —
-/// which makes each bit exactly as supported as its Cargo feature. The remaining algorithm
-/// sets no bit, because every reader of this format has always understood it, so a filesystem
-/// using it opens either way and it is the *file* that cannot be read without the decoder.
+/// which makes each bit exactly as supported as its Cargo feature, `lzo` and `zstd`. The
+/// remaining algorithm sets no bit, because every reader of this format has always understood
+/// it, so a filesystem using it opens either way and it is the *file* that cannot be read
+/// without the decoder.
 pub const SUPPORTED_INCOMPAT: IncompatFlags = IncompatFlags::from_bits(
     IncompatFlags::MIXED_BACKREF.bits()
         | IncompatFlags::DEFAULT_SUBVOL.bits()
@@ -62,17 +65,43 @@ pub const SUPPORTED_INCOMPAT: IncompatFlags = IncompatFlags::from_bits(
         | IncompatFlags::SKINNY_METADATA.bits()
         | IncompatFlags::NO_HOLES.bits()
         | IncompatFlags::METADATA_UUID.bits()
-        | if cfg!(feature = "lzo") {
-            IncompatFlags::COMPRESS_LZO.bits()
-        } else {
-            0
-        }
-        | if cfg!(feature = "zstd") {
-            IncompatFlags::COMPRESS_ZSTD.bits()
-        } else {
-            0
-        },
+        | decodable_compression_bits(),
 );
+
+/// The `incompat` bits that say an extent is compressed, each with the algorithm it names.
+const COMPRESSION_BITS: [(IncompatFlags, Algorithm); 2] = [
+    (IncompatFlags::COMPRESS_LZO, Algorithm::Lzo),
+    (IncompatFlags::COMPRESS_ZSTD, Algorithm::Zstd),
+];
+
+/// The [`COMPRESSION_BITS`] whose decoder this build carries.
+const fn decodable_compression_bits() -> u64 {
+    let mut bits = 0;
+    let mut i = 0;
+    while i < COMPRESSION_BITS.len() {
+        let (flag, algorithm) = COMPRESSION_BITS[i];
+        if algorithm.available() {
+            bits |= flag.bits();
+        }
+        i += 1;
+    }
+    bits
+}
+
+/// What a refusal of `incompat` bits adds for each one that names a compression algorithm: the
+/// feature that compiles its decoder. A build refuses such a bit only for want of that.
+struct DecodersFor(u64);
+
+impl std::fmt::Display for DecodersFor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (flag, algorithm) in COMPRESSION_BITS {
+            if self.0 & flag.bits() != 0 {
+                write!(f, "{}", crate::compress::CompiledBy(Some(algorithm)))?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// What was found at one of the three superblock locations.
 ///
@@ -115,6 +144,10 @@ pub enum Mirror {
         /// The transaction it records, which is the live one.
         generation: u64,
     },
+    /// A superblock of another filesystem: its filesystem identifier is not the primary
+    /// copy's. A filesystem written over the start of a device that held another leaves that
+    /// one's copies wherever the new one wrote none of its own, at a generation of its own.
+    Foreign,
 }
 
 impl Mirror {
@@ -217,8 +250,8 @@ impl<R: Read + Seek> Volume<R> {
     /// define, or a chunk tree that does not describe an address space.
     ///
     /// Under [`ReadPolicy::Strict`] a copy of the superblock that the device has room for and
-    /// that is missing, damaged, misplaced, behind the chosen one, or at its generation without
-    /// being a copy of it is also a refusal.
+    /// that is missing, damaged, misplaced, behind the chosen one, of another filesystem, or at
+    /// its generation without being a copy of it is also a refusal.
     /// Under [`ReadPolicy::Lenient`] every one of those is recorded in
     /// [`mirrors`](Self::mirrors) and the filesystem opens.
     pub fn open_with(src: R, options: OpenOptions) -> Result<Self, ReadError> {
@@ -268,6 +301,27 @@ impl<R: Read + Seek> Volume<R> {
             };
             candidates[index] = Some(superblock);
             records[index] = Some(bytes);
+        }
+
+        // A primary copy that verifies names the filesystem: a copy competes with it only where
+        // it is of the same filesystem and inside the device the primary describes. A
+        // filesystem written over the start of a device that held another leaves that one's
+        // copies past its own end and wherever it wrote none, at generations of their own —
+        // observed, the pinned `mkfs.btrfs` leaves a copy at 256 GiB in place when it formats
+        // a smaller filesystem on a larger device — and the newest of those is no copy of
+        // this one. Where the primary does not verify, the copies are all there is.
+        if let Some(primary) = &candidates[0] {
+            let (fsid, device) = (primary.fsid, primary.dev_item.total_bytes);
+            for (index, &at) in MIRRORS.iter().enumerate().skip(1) {
+                let state = match &candidates[index] {
+                    Some(_) if !holds_mirror(device, at) => Mirror::OutsideDevice,
+                    Some(copy) if copy.fsid != fsid => Mirror::Foreign,
+                    _ => continue,
+                };
+                found[index] = state;
+                candidates[index] = None;
+                records[index] = None;
+            }
         }
 
         // The filesystem's own rule for which copy is live: the newest. Ties go to the
@@ -348,6 +402,7 @@ impl<R: Read + Seek> Volume<R> {
                         "a copy of the superblock at the live generation is not a copy of the \
                          live one"
                     }
+                    Mirror::Foreign => "a copy of the superblock belongs to another filesystem",
                 };
                 return Err(ReadError::MirrorDisagreement {
                     mirror: index,
@@ -1034,18 +1089,10 @@ impl TreeBlock {
 /// foreign tool's bytes, and a verifier built on one would report every filesystem it did not
 /// write as damaged.
 ///
-/// An algorithm this crate does not compute answers `false` — but a filesystem using one never
-/// reaches here, because [`check_readable`] refuses it by name at open with a message saying
-/// which algorithm it was.
+/// A value the format does not define answers `false` — but a filesystem carrying one never
+/// reaches here, because [`check_readable`] refuses it by its number at open.
 fn checksum_holds(object: &[u8], csum_type: ChecksumType) -> bool {
-    if csum_type != ChecksumType::CRC32C {
-        return false;
-    }
-    let Some(digest_len) = csum_type.digest_len() else {
-        return false;
-    };
-    ondisk::stored_crc32c(object) == ondisk::checksum(object)
-        && ondisk::padding_is_clear(object, digest_len)
+    csum_type.holds(object)
 }
 
 /// Whether two superblock records are copies of one: the same bytes outside the checksum
@@ -1064,7 +1111,7 @@ fn same_record(a: &[u8], b: &[u8]) -> bool {
 /// Each refusal names what it would take to read it rather than reporting an unexpected value,
 /// because every one of these is a filesystem that is *fine* and simply beyond this reader.
 fn check_readable(sb: &SuperBlock) -> Result<(), ReadError> {
-    if sb.csum_type != ChecksumType::CRC32C {
+    if sb.csum_type.digest_len().is_none() {
         return Err(ReadError::UnsupportedChecksum {
             csum_type: sb.csum_type.value(),
         });
@@ -1177,15 +1224,18 @@ pub enum ReadError {
         /// What is wrong with it.
         fault: &'static str,
     },
-    /// The filesystem's checksums are computed by an algorithm this crate does not implement.
-    #[error("checksum algorithm {csum_type} is not one this crate computes")]
+    /// The filesystem's checksums name an algorithm the format does not define.
+    #[error("checksum algorithm {csum_type} is not one the format defines")]
     #[non_exhaustive]
     UnsupportedChecksum {
         /// The on-disk value.
         csum_type: u16,
     },
     /// The filesystem carries a feature whose on-disk form this crate does not implement.
-    #[error("unsupported incompatible features: {names} ({bits:#x})")]
+    #[error(
+        "unsupported incompatible features: {names} ({bits:#x}){}",
+        DecodersFor(*.bits)
+    )]
     #[non_exhaustive]
     UnsupportedFeatures {
         /// The bits that are not supported.
@@ -1441,10 +1491,17 @@ pub enum ReadError {
     },
     /// A file's bytes are compressed by an algorithm this build does not decode.
     #[error(
-        "inode {inode} of subvolume {tree} is compressed with {}, which this build does not decode",
+        "inode {inode} of subvolume {tree} is compressed with {}, which this build does not \
+         decode{}",
         crate::btrfs::ondisk::Compression::from_u8(*.compression)
             .name()
-            .unwrap_or("an algorithm the format has not defined")
+            .unwrap_or("an algorithm the format has not defined"),
+        crate::compress::CompiledBy(
+            crate::btrfs::decode::algorithm(crate::btrfs::ondisk::Compression::from_u8(
+                *.compression
+            ))
+            .flatten()
+        )
     )]
     #[non_exhaustive]
     UnsupportedCompression {
@@ -1539,7 +1596,13 @@ pub enum ReadError {
         /// The logical address with no checksum.
         logical: u64,
     },
-    /// A name a walk built would be longer than any path this crate will produce.
+    /// A walk reached a name whose path is longer than the longest a walk builds, 4,096
+    /// bytes, which is Linux's `PATH_MAX`.
+    ///
+    /// Nothing in the format bounds how deep a tree nests, so the tree is well-formed and this
+    /// is a limit rather than damage: the shared surface reports it as
+    /// [`TreeError::LimitExceeded`](crate::TreeError::LimitExceeded) with
+    /// [`Bound::PathBytes`](crate::Bound::PathBytes), and a scan reads the tree whole.
     #[error("a path longer than this crate builds: {}", crate::escape::printable(.path))]
     #[non_exhaustive]
     PathTooLong {
@@ -1584,6 +1647,68 @@ impl<R: Read + Seek> Volume<R> {
 mod tests {
     use super::*;
     use crate::btrfs::ondisk::{CSUM_FIELD_LEN, CompatFlags, CompatRoFlags, DevItem, SuperFlags};
+
+    #[test]
+    fn a_refused_compression_names_the_feature_that_decodes_it() {
+        // zstd: an algorithm the format defines, refused only by a build that left it out.
+        let refused = ReadError::UnsupportedCompression {
+            tree: 5,
+            inode: 257,
+            compression: 3,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "inode 257 of subvolume 5 is compressed with zstd, which this build does not \
+             decode; the `zstd` feature compiles its decoder"
+        );
+        // A value the format leaves undefined has no feature to name.
+        let undefined = ReadError::UnsupportedCompression {
+            tree: 5,
+            inode: 257,
+            compression: 0x7f,
+        };
+        assert_eq!(
+            undefined.to_string(),
+            "inode 257 of subvolume 5 is compressed with an algorithm the format has not \
+             defined, which this build does not decode"
+        );
+    }
+
+    #[test]
+    fn a_refused_compression_bit_names_the_feature_that_decodes_it() {
+        // The refusal a build without the zstd decoder gives a filesystem whose feature word
+        // says it stores zstd extents: it is refused at open, before any file is read.
+        let mut names = String::new();
+        IncompatFlags::COMPRESS_ZSTD.describe(&mut names);
+        let refused = ReadError::UnsupportedFeatures {
+            bits: IncompatFlags::COMPRESS_ZSTD.bits(),
+            names,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "unsupported incompatible features: compress-zstd (0x10); the `zstd` feature \
+             compiles its decoder"
+        );
+        // A bit no feature decodes names nothing more.
+        let mut names = String::new();
+        IncompatFlags::RAID56.describe(&mut names);
+        let raid = ReadError::UnsupportedFeatures {
+            bits: IncompatFlags::RAID56.bits(),
+            names: names.clone(),
+        };
+        assert_eq!(
+            raid.to_string(),
+            format!("unsupported incompatible features: {names} (0x80)")
+        );
+        // And each compression bit is supported exactly when its decoder is compiled.
+        for (flag, algorithm) in COMPRESSION_BITS {
+            assert_eq!(
+                SUPPORTED_INCOMPAT.contains(flag),
+                algorithm.available(),
+                "{flag:?}"
+            );
+        }
+    }
 
     fn a_superblock() -> SuperBlock {
         let mut sb = SuperBlock {
@@ -1723,10 +1848,18 @@ mod tests {
     }
 
     #[test]
-    fn a_checksum_algorithm_this_crate_does_not_compute_is_named_rather_than_misverified() {
-        // Comparing bytes against a digest this crate did not produce would report every
-        // block of a healthy filesystem as damaged, which says nothing true about it.
-        for value in [1u16, 2, 3, 9] {
+    fn every_checksum_algorithm_the_format_defines_is_read_and_another_is_named() {
+        // Each of the four is computed, so a filesystem checksummed by any of them opens.
+        for value in [0u16, 1, 2, 3] {
+            let sb = SuperBlock {
+                csum_type: ChecksumType::from_value(value),
+                ..a_superblock()
+            };
+            check_readable(&sb).unwrap_or_else(|e| panic!("checksum type {value}: {e}"));
+        }
+        // A value past them names no digest at all, and comparing bytes against one would
+        // report every block of the filesystem as damaged, which says nothing true about it.
+        for value in [4u16, 9, u16::MAX] {
             let sb = SuperBlock {
                 csum_type: ChecksumType::from_value(value),
                 ..a_superblock()
@@ -1843,7 +1976,7 @@ mod tests {
         /// say about it.
         type Damage = (&'static str, Box<dyn Fn(&mut Forge)>, Mirror);
 
-        let damage: [Damage; 4] = [
+        let damage: [Damage; 5] = [
             (
                 "a checksum that no longer covers it",
                 Box::new(|f: &mut Forge| {
@@ -1866,9 +1999,16 @@ mod tests {
                 Mirror::Misplaced { bytenr: MIRRORS[0] },
             ),
             (
-                "a copy at the live generation naming another filesystem",
+                "a copy naming another filesystem",
                 Box::new(|f: &mut Forge| {
                     f.amend_superblock(1, |sb| sb.fsid[0] ^= 1);
+                }),
+                Mirror::Foreign,
+            ),
+            (
+                "a copy at the live generation recording another label",
+                Box::new(|f: &mut Forge| {
+                    f.amend_superblock(1, |sb| sb.label[0] ^= 1);
                 }),
                 Mirror::Diverged {
                     generation: super::super::forge::GENERATION,

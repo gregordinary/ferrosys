@@ -23,14 +23,15 @@
 //!
 //! # The order chunks are laid down in, and the unallocated span before them
 //!
-//! The first mebibyte of the device holds no chunk. That much is the format: a superblock lives
-//! at 64 KiB and the region around it is reserved.
+//! The first mebibyte of the device holds no chunk. That much is the format: btrfs(5) leaves it
+//! unused apart from the superblock at 64 KiB ("Bootloader support").
 //!
-//! What follows the first mebibyte is not always a chunk either. A filesystem whose metadata is
-//! mirrored has an unallocated span between the reserved head and its first chunk, because the
-//! layout laid out here is the one the format's own tooling arrives at, and that tooling reaches
-//! it by allocating unmirrored chunks first and replacing the ones whose replication turned out
-//! wrong. The spans those replaced chunks occupied stay unallocated.
+//! What follows the first mebibyte is not always a chunk either. Where the pinned baseline
+//! replicates a kind of block group, it leaves an unallocated span ahead of that kind's chunks,
+//! exactly as long as the unreplicated chunks of that kind would be: the bootstrap system chunk
+//! and an unreplicated metadata chunk where metadata is replicated, and an unreplicated data
+//! chunk where data is. The layout here lays those chunks down and drops them, which reproduces
+//! the spans at every pairing of profiles (observed).
 //!
 //! Reproducing that is deliberate, and it costs nothing: an unallocated span is device space and
 //! logical space that no chunk claims, which a driver allocates from later exactly as it
@@ -41,12 +42,14 @@
 //!
 //! # What a chunk's length comes from
 //!
-//! Every length below is measured from the pinned baseline rather than transcribed, and the
-//! rules have one shape: a preferred length per kind of block group, capped at a tenth of the
-//! volume, floored at a minimum that depends on the kind, and rounded down to
-//! [`STRIPE_LEN`]. The one surprise in them is that **the per-kind rule applies only where the
-//! block group is replicated**: an unmirrored chunk of any kind takes one generic rule instead,
-//! so an unmirrored data chunk is eight mebibytes where a mirrored one runs to a gibibyte.
+//! Each length is documented or observed. mkfs.btrfs(8) gives a metadata block group 256 MiB
+//! below 50 GiB and 1 GiB above, and a data block group 1 GiB. The rest is the pinned
+//! baseline's output, which the oracle tier holds this planner to chunk by chunk. The rule has
+//! one shape: a preferred length per kind of block group where a tenth of the volume holds it,
+//! and otherwise that tenth shared between the chunk's copies, rounded down to [`STRIPE_LEN`]
+//! and held to a floor. The one surprise is that **the per-kind lengths apply only where the
+//! block group is replicated**: an unmirrored chunk of any kind prefers eight mebibytes, so an
+//! unmirrored data chunk is eight mebibytes where a mirrored one runs to a gibibyte.
 //! [`chunk_length`] is where that is written down.
 
 use super::MappedChunk;
@@ -62,18 +65,20 @@ use serde::Serialize;
 
 /// Bytes at the start of the device that no chunk may claim.
 ///
-/// The first superblock sits at 64 KiB, inside this span. Nothing else in it is addressed.
+/// The first superblock sits at 64 KiB, inside this span, and btrfs(5) leaves the rest of it
+/// unused ("Bootloader support").
 pub const RESERVED_HEAD: u64 = 1 << 20;
 
 /// The granularity a chunk's length is rounded down to.
 ///
-/// The format records it per chunk and every implementation writes this value; a length that is
-/// not a whole number of them is one no driver's allocator produces.
+/// The format records it per chunk, as the chunk item's stripe length. Every chunk the pinned
+/// baseline writes records this value and is a whole number of them long (observed).
 pub const STRIPE_LEN: u64 = 64 << 10;
 
 /// The length of the system chunk a filesystem is bootstrapped with.
 ///
-/// Fixed rather than derived: it is laid down before there is a filesystem to take a share of.
+/// The pinned baseline's first system chunk is this long whatever the volume and the profiles
+/// (observed).
 pub const BOOTSTRAP_SYSTEM_CHUNK: u64 = 4 << 20;
 
 /// The share of the volume no single chunk may exceed, as a divisor.
@@ -90,9 +95,9 @@ pub const DEFAULT_NODE_SIZE: u32 = 16 << 10;
 
 /// The sector size a filesystem takes where a caller names none.
 ///
-/// The format's own tooling takes the page size of the machine it runs on, which makes its
-/// output depend on where it ran. A planner whose contract is reproducibility cannot: the
-/// default here is a value, so two runs on two architectures plan the same filesystem.
+/// Four kibibytes, the default mkfs.btrfs(8) documents and the one the pinned baseline writes.
+/// It is a value rather than a property of the host, so two runs on two architectures plan the
+/// same filesystem.
 pub const DEFAULT_SECTOR_SIZE: u32 = 4096;
 
 /// How a block group is replicated across the one device an image is.
@@ -101,7 +106,6 @@ pub const DEFAULT_SECTOR_SIZE: u32 = 4096;
 /// device to read — so they are absent here rather than refused: a layout that cannot be
 /// expressed cannot be asked for by mistake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub enum Profile {
     /// One copy.
@@ -137,6 +141,8 @@ crate::naming::named_choice!(Profile {
     Profile::Single => "single",
     Profile::Dup => "dup",
 });
+
+crate::naming::serialize_as_name!(Profile);
 
 /// The size of the smallest addressable unit of file data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -259,7 +265,7 @@ impl Reservation {
     /// small. The system pool holds the chunk tree alone, which is one leaf on a small
     /// filesystem and is not on a large one: a chunk record is a hundred and twelve bytes and a
     /// volume with tens of thousands of chunks has a chunk tree of megabytes, against a system
-    /// block group whose ceiling is sixteen.
+    /// chunk of four or eight.
     ///
     /// # Errors
     ///
@@ -295,7 +301,6 @@ impl Reservation {
 
 /// Which of a [`Reservation`]'s two pools a count is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub enum Pool {
     /// Every tree but the chunk tree.
@@ -308,13 +313,15 @@ pub enum Pool {
 impl Pool {
     /// The name this pool is known by.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Metadata => "metadata",
             Self::System => "system",
         }
     }
 }
+
+crate::naming::serialize_as_name!(Pool);
 
 /// Blocks reserved and not spent, per pool.
 ///
@@ -332,7 +339,7 @@ pub struct Slack {
 
 /// A filesystem that consumed more blocks than were reserved for it, from one of the two pools.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
-#[error("the {} reservation of {reserved} blocks was exceeded: {used} were spent", pool.name())]
+#[error("the {} reservation of {reserved} blocks was exceeded: {used} were spent", pool.as_str())]
 #[non_exhaustive]
 pub struct ReservationExceeded {
     /// Which pool ran out.
@@ -411,11 +418,11 @@ pub enum GeometryError {
     ///
     /// Every chunk the layout keeps is a record in the chunk tree, and the chunk tree lives in
     /// the system block group — one chunk, laid down before the content's chunks exist, whose
-    /// length is fixed by the volume and the metadata profile. Content large enough needs more
+    /// length is fixed by the metadata profile. Content large enough needs more
     /// chunk records than that chunk's blocks can hold, and the refusal is issued here, while
     /// the map is still arithmetic, rather than discovered by a writer that has already emitted
-    /// the content. The ceiling grows with the volume and with metadata replication; within
-    /// them, the way out is less content.
+    /// the content. Replicating metadata doubles that chunk; otherwise the way out is less
+    /// content.
     #[error(
         "this content needs {chunks} chunks, whose records need {needed_blocks} tree blocks, \
          and the system chunk holds {available_blocks}"
@@ -491,9 +498,8 @@ pub const WRITABLE_COMPAT_RO: CompatRoFlags = CompatRoFlags::from_bits(
 
 /// The `incompat` word a filesystem takes where a caller names none.
 ///
-/// `BIG_METADATA` is absent here and set by the planner instead: the format defines it as
-/// tree blocks being larger than the four kibibytes they were originally fixed at, so it is a
-/// consequence of the node size rather than a choice.
+/// `BIG_METADATA` is absent here and set by the planner instead, exactly where a node is larger
+/// than four kibibytes: a consequence of the node size rather than a choice.
 pub const DEFAULT_INCOMPAT: IncompatFlags = IncompatFlags::from_bits(
     IncompatFlags::MIXED_BACKREF.bits()
         | IncompatFlags::EXTENDED_IREF.bits()
@@ -600,6 +606,7 @@ impl PlanRequest {
 
 /// Everything about a filesystem that is decided before a byte of it is written.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct BtrfsLayout {
     /// The device the filesystem occupies the whole of, in bytes.
@@ -662,6 +669,13 @@ impl BtrfsLayout {
 /// not write, or a feature asked for without what it rests on.
 pub fn plan_layout(request: &PlanRequest) -> Result<BtrfsLayout, GeometryError> {
     let (sector_size, node_size) = block_sizes(request)?;
+    // The device is a whole number of sectors, and a length past the last whole one is not
+    // part of it. Observed: the pinned `mkfs.btrfs` records 1073741824 bytes on a file of
+    // 1073742337, and its `btrfs check` warns of a length that is not sector-aligned.
+    let asked = request.volume_bytes;
+    let mut aligned = *request;
+    aligned.volume_bytes -= asked % u64::from(sector_size);
+    let request = &aligned;
 
     let incompat = validated_features(request, node_size)?;
     let compat_ro = request.compat_ro_flags;
@@ -669,7 +683,7 @@ pub fn plan_layout(request: &PlanRequest) -> Result<BtrfsLayout, GeometryError> 
     let minimum = minimum_volume_bytes(request.metadata_profile, request.data_profile);
     if request.volume_bytes < minimum {
         return Err(GeometryError::VolumeTooSmall {
-            volume_bytes: request.volume_bytes,
+            volume_bytes: asked,
             minimum,
         });
     }
@@ -757,8 +771,10 @@ const fn is_block_size(bytes: u32) -> bool {
 /// The feature words a filesystem will carry, with what the geometry implies folded in.
 ///
 /// Two things happen here that a caller cannot state. `BIG_METADATA` is set exactly where a
-/// tree block exceeds the four kibibytes the format originally fixed them at, so it follows
-/// from the node size rather than from a request — a word written per request would be wrong
+/// tree block exceeds four kibibytes, so it follows from the node size rather than from a
+/// request. btrfs(5) states the bit against the page size; four kibibytes is where the pinned
+/// baseline sets it on a host of 4 KiB pages (observed), and a rule that does not depend on the
+/// host — a word written per request would be wrong
 /// on the one node size where the bit does not belong and right by transcription everywhere
 /// else. And a feature whose prerequisites were not asked for is refused rather than dropped.
 fn validated_features(
@@ -805,8 +821,8 @@ fn validated_features(
         }
     }
 
-    // The wide-block bit is what a node size larger than the four kibibytes the format
-    // originally fixed tree blocks at *means*, so it is set from the geometry rather than from
+    // The wide-block bit is what a node size larger than four kibibytes *means* here, so it is
+    // set from the geometry rather than from
     // the request. A caller that asked for it at the one node size where it does not belong
     // asked for something the format does not define, and is told so — clearing it quietly
     // would be the same silent drop this function refuses a paragraph above.
@@ -824,73 +840,82 @@ fn validated_features(
 
 /// The fewest bytes a volume can be and still hold these profiles' chunks.
 ///
-/// Conservative by construction: it charges for every chunk laid down on the way to the
-/// finished filesystem, including the ones whose replication turns out wrong and are replaced,
-/// and it charges each at the largest length its rule can produce. A volume that clears this
-/// bound is one the layout fits in with room to spare.
+/// These are the pinned baseline's own bounds, observed to the byte: it formats a volume of
+/// each size and refuses one a byte smaller. Holding the planner to the same four numbers
+/// keeps the two in agreement about which volumes are too small, and every layout planned at
+/// or above them fits its device.
+///
+/// | metadata | data | smallest volume |
+/// |---|---|---|
+/// | `Single` | `Single` | 45 MiB |
+/// | `Dup` | `Single` | 109 MiB |
+/// | `Single` | `Dup` | 165 MiB |
+/// | `Dup` | `Dup` | 229 MiB |
+///
+/// Replicating metadata adds 64 MiB to the bound and replicating data adds 120 MiB, whichever
+/// the other profile is.
 #[must_use]
 pub const fn minimum_volume_bytes(metadata: Profile, data: Profile) -> u64 {
-    // The reserved head, the bootstrap system chunk, and the two unmirrored chunks that are
-    // laid down before any profile is known — eight mebibytes each.
-    let bootstrap = RESERVED_HEAD + BOOTSTRAP_SYSTEM_CHUNK + 2 * (8 << 20);
-    // A mirrored metadata chunk cannot be smaller than thirty-two mebibytes, and each of its
-    // two copies costs that; an unmirrored one is eight.
-    let metadata_bytes = match metadata {
-        Profile::Dup => 2 * ((8 << 20) + (32 << 20)),
-        Profile::Single => (8 << 20) + (8 << 20),
-    };
-    // A mirrored data chunk cannot be smaller than sixty-four mebibytes a copy.
-    let data_bytes = match data {
-        Profile::Dup => 2 * (64 << 20),
-        Profile::Single => 8 << 20,
-    };
-    bootstrap + metadata_bytes + data_bytes
+    const MIB: u64 = 1 << 20;
+    match (metadata, data) {
+        (Profile::Single, Profile::Single) => 45 * MIB,
+        (Profile::Dup, Profile::Single) => 109 * MIB,
+        (Profile::Single, Profile::Dup) => 165 * MIB,
+        (Profile::Dup, Profile::Dup) => 229 * MIB,
+    }
 }
 
-/// The length of one chunk, as the format's own allocator derives it.
+/// The length of one chunk.
 ///
-/// A preferred length, capped at a share of the volume, floored at a minimum, and rounded down
-/// to whole stripes. The preferences and both bounds depend on what the chunk holds — but
-/// **only where it is replicated**: an unreplicated chunk of any kind takes the generic rule,
+/// A chunk takes its preferred length where a tenth of the volume holds it. Where it does not,
+/// the tenth is shared out between the chunk's copies, rounded down to whole stripes, and held
+/// to the chunk's floor. Which preferred length and which floor depend on what the chunk holds
+/// **only where it is replicated**: an unreplicated chunk of any kind prefers eight mebibytes,
 /// which is why an unreplicated data chunk is eight mebibytes on a volume where a replicated
 /// one is a gibibyte.
+///
+/// | chunk | preferred | floor |
+/// |---|---|---|
+/// | unreplicated, any kind | 8 MiB | one stripe |
+/// | replicated system | 8 MiB | one stripe |
+/// | replicated metadata | 256 MiB up to [`LARGE_VOLUME`], 1 GiB above | 32 MiB |
+/// | replicated data | 1 GiB | 64 MiB |
+///
+/// The replicated metadata and data lengths are the block group sizes mkfs.btrfs(8) gives.
+/// Every other length, both floors that are not one stripe, and the tenth are the pinned
+/// baseline's, observed chunk by chunk across volumes and profiles. A floor of one stripe binds
+/// only below every [`minimum_volume_bytes`], and is this crate's: a chunk is never shorter
+/// than the unit its length is counted in.
 #[must_use]
 pub const fn chunk_length(kind: BlockGroupFlags, profile: Profile, volume_bytes: u64) -> u64 {
-    // The generic rule, and the whole of the rule for an unreplicated chunk.
-    let mut preferred: u64 = 8 << 20;
-    let mut min_length: u64 = 1 << 20;
-    let mut max_length: u64 = 32 << 20;
-
-    if matches!(profile, Profile::Dup) {
-        if kind.contains(BlockGroupFlags::SYSTEM) {
-            max_length = 16 << 20;
-        } else if kind.contains(BlockGroupFlags::DATA) {
-            preferred = 1 << 30;
-            max_length = 10 << 30;
-            min_length = 64 << 20;
-        } else if kind.contains(BlockGroupFlags::METADATA) {
-            max_length = if volume_bytes > LARGE_VOLUME {
-                1 << 30
-            } else {
-                256 << 20
-            };
-            preferred = max_length;
-            min_length = 32 << 20;
-        }
-    }
-
+    let (preferred, floor) = preference(kind, profile, volume_bytes);
     let share = volume_bytes / VOLUME_SHARE;
-    if share < max_length {
-        max_length = share;
+    if preferred <= share {
+        return preferred;
     }
-    let mut length = preferred;
-    if length > max_length {
-        length = round_down(max_length / profile.copies(), STRIPE_LEN);
+    let shared = round_down(share / profile.copies(), STRIPE_LEN);
+    if shared > floor { shared } else { floor }
+}
+
+/// A chunk's preferred length and its floor, by what it holds and how it is replicated: the
+/// table [`chunk_length`] gives.
+const fn preference(kind: BlockGroupFlags, profile: Profile, volume_bytes: u64) -> (u64, u64) {
+    const UNREPLICATED: (u64, u64) = (8 << 20, STRIPE_LEN);
+    if !matches!(profile, Profile::Dup) {
+        return UNREPLICATED;
     }
-    if length < min_length {
-        length = min_length;
+    if kind.contains(BlockGroupFlags::DATA) {
+        (1 << 30, 64 << 20)
+    } else if kind.contains(BlockGroupFlags::METADATA) {
+        let preferred = if volume_bytes > LARGE_VOLUME {
+            1 << 30
+        } else {
+            256 << 20
+        };
+        (preferred, 32 << 20)
+    } else {
+        UNREPLICATED
     }
-    round_down(length, STRIPE_LEN)
 }
 
 /// `value` rounded down to a whole number of `unit`s.
@@ -909,8 +934,8 @@ struct Pending {
     keep: bool,
 }
 
-/// Every chunk to be laid down, in the order the format's own tooling arrives at, before any
-/// has an address.
+/// Every chunk to be laid down, in the order the pinned baseline's chunks fall in (observed at
+/// every pairing of profiles), before any has an address.
 ///
 /// The metadata bound and the content's data decide how many extra chunks are appended here,
 /// and `lost` is what each kind of block group gives up to superblock copies on top of that:
@@ -931,8 +956,8 @@ fn pending_chunks(
     let dat = BlockGroupFlags::DATA;
 
     let mut pending = Vec::new();
-    // The filesystem is bootstrapped through unreplicated chunks, because there is no tree to
-    // record a replicated one in until there is somewhere to put the tree.
+    // First one unreplicated chunk of each kind. Those of a replicated kind are dropped once
+    // placed, which leaves the spans the baseline leaves.
     pending.push(Pending {
         kind: system,
         profile: Profile::Single,
@@ -1101,7 +1126,8 @@ fn held_mirrors(volume_bytes: u64) -> Vec<u64> {
 /// groups alike, and it records the window as free space. It is observed rather than
 /// documented: the format's documentation places the superblock copies on the device and says
 /// nothing of a chunk that covers one. A chunk is a whole number of stripes long, so a window
-/// never runs past the chunk's end.
+/// never runs past the chunk's end. Every copy this planner places starts on a stripe boundary
+/// of the device, so the stripe measured from the copy's start is also the device's.
 pub(crate) fn mirror_windows(chunk: &MappedChunk, mirrors: &[u64]) -> Vec<u64> {
     let mut windows = Vec::new();
     for &copy in &chunk.copies {
@@ -1317,7 +1343,7 @@ fn reserve_metadata(
 ///
 /// The bound is also checked against the system chunk's own capacity, less any window a
 /// superblock copy takes from it, while the map is still arithmetic. That chunk's length is
-/// fixed by the volume and the metadata profile rather than by the content, so a chunk map that
+/// fixed by the metadata profile rather than by the content, so a chunk map that
 /// outgrows it is refused as [`GeometryError::ChunkMapTooLarge`] here rather than surfacing from
 /// the writer as an exceeded reservation.
 fn reserve_system(
@@ -1467,14 +1493,33 @@ mod tests {
     #[test]
     fn a_replicated_metadata_chunk_reaches_a_gibibyte_only_past_the_volume_that_earns_it() {
         let kind = BlockGroupFlags::METADATA;
-        // The threshold is exact and it is a strict comparison: a volume of exactly fifty
-        // gibibytes takes the lower ceiling and one byte more takes the higher. Both are below
-        // the volume's own tenth here, so the ceiling is what binds in each case and the step
-        // between them is the whole of the difference.
+        // The threshold is a strict comparison, as mkfs.btrfs(8)'s "larger than 50GiB" reads: a
+        // volume of exactly fifty gibibytes takes the lower preferred length (observed) and one
+        // byte more takes the higher. A tenth of either volume holds the preferred length, so the
+        // step between them is the whole of the difference.
         assert_eq!(chunk_length(kind, Profile::Dup, LARGE_VOLUME), 256 * MIB);
         assert_eq!(chunk_length(kind, Profile::Dup, LARGE_VOLUME + 1), GIB);
-        // A tenth of a hundred gibibytes is ten of them, so past the threshold the ceiling binds.
+        // A tenth of a hundred gibibytes is ten of them, which holds the preferred gibibyte.
         assert_eq!(chunk_length(kind, Profile::Dup, 100 * GIB), GIB);
+    }
+
+    #[test]
+    fn below_every_minimum_a_chunk_is_never_shorter_than_one_stripe() {
+        // Outside the volumes the planner accepts, and so this crate's choice rather than an
+        // observation: no baseline formats a volume this small to be compared with.
+        for volume in [0, 1, STRIPE_LEN, MIB, 10 * MIB] {
+            for kind in [BlockGroupFlags::SYSTEM, BlockGroupFlags::METADATA] {
+                for profile in [Profile::Single, Profile::Dup] {
+                    let length = chunk_length(kind, profile, volume);
+                    assert!(length >= STRIPE_LEN, "{kind:?} {profile:?} on {volume}");
+                    assert_eq!(length % STRIPE_LEN, 0);
+                }
+            }
+        }
+        assert_eq!(
+            chunk_length(BlockGroupFlags::SYSTEM, Profile::Single, 0),
+            STRIPE_LEN
+        );
     }
 
     #[test]

@@ -91,6 +91,10 @@ skip|crates/ferrosys/src/apfs/firmlink.rs:starts_with(b"/")|a firmlink list stat
 # byte order once. This catches the indexed form specifically: `x.to_le_bytes()` fed to a
 # checksum is a value being hashed, not a field being placed, and is not this.
 rule|crates/ferrosys/src/bytes.rs|code|bytes::get_u32 / put_u32 and their siblings|(from_le_bytes\(\[[a-z_]+\[|copy_from_slice\(&[a-z_]+\.to_le_bytes)
+# `ferrosys-lzfse` is a crate of its own under a license of its own, which `ferrosys` depends
+# on and which cannot depend on `ferrosys` in turn; its decoder reads the two widths a stream
+# records through accessors of its own, in that one file.
+skip|crates/ferrosys-lzfse/src/lzfse.rs:from_le_bytes([buf[|the decoder's crate cannot reach `bytes`, since `ferrosys` depends on it; its one 32-bit accessor, which its 64-bit one is built from
 
 # --- decoding -------------------------------------------------------------------------
 
@@ -100,6 +104,10 @@ rule|crates/ferrosys/src/compress.rs|code|compress::copy_back|\bout\[[a-z_]+ - [
 # LZBITMAP mixes literals into a copy bit by bit under a mask, and its distance is held to a
 # rule of its own, so its loop is not the copy every other decoder shares.
 skip|crates/ferrosys/src/compress/lzbitmap.rs:out[at - distance]|a step takes each byte from its literals or from the output by a mask bit, and its distance is held to its own step
+# The LZVN and LZFSE decoders' copy is the same rule in `ferrosys-lzfse`, a crate `ferrosys`
+# depends on and which cannot depend on `ferrosys` in turn, and the two decoders there share
+# that crate's one copy.
+skip|crates/ferrosys-lzfse/src/lib.rs:out[i - distance]|the decoder crate's own home for the copy, shared by its two decoders; it cannot reach `compress::copy_back`, since `ferrosys` depends on it
 
 # --- time -----------------------------------------------------------------------------
 

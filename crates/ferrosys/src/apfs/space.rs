@@ -432,6 +432,7 @@ fn hold_mappings<R: Read + Seek>(
         "the container"
     };
     let mut placed: Vec<(u64, u64, u64)> = Vec::new();
+    let mut readable: Vec<&CheckpointMapping> = Vec::new();
     for (i, (address, map, mappings)) in maps.iter().enumerate() {
         // The last mapping block of a checkpoint alone carries the flag (reference p. 42).
         let want = if i == last { CHECKPOINT_MAP_LAST } else { 0 };
@@ -470,6 +471,7 @@ fn hold_mappings<R: Read + Seek>(
                 continue;
             }
             placed.push((m.address, m.address + blocks, m.oid));
+            readable.push(m);
             if m.pad != 0 {
                 scan.at(
                     Category::Space,
@@ -495,29 +497,13 @@ fn hold_mappings<R: Read + Seek>(
                     ),
                 );
             }
-            match container.read_ephemeral(m, m.kind(), live) {
-                Ok(object) => {
-                    let header = super::ondisk::ObjectHeader::read_from(&object);
-                    if header.is_ok_and(|h| h.subtype != m.subtype) {
-                        scan.at(
-                            Category::Space,
-                            Severity::Conformance,
-                            Some(m.address),
-                            None,
-                            format!(
-                                "the live checkpoint maps object {} as of subtype {:#x}, and the \
-                                 object records another",
-                                m.oid, m.subtype
-                            ),
-                        );
-                    }
-                }
-                Err(e) => scan.failed(None, &format!("ephemeral object {}", m.oid), &e),
-            }
         }
     }
     placed.sort_unstable();
+    let mut overlapping = std::collections::HashSet::new();
     for (first, second) in overlaps(&placed) {
+        overlapping.insert(first.0);
+        overlapping.insert(second.0);
         scan.at(
             Category::Space,
             Severity::Integrity,
@@ -528,6 +514,36 @@ fn hold_mappings<R: Read + Seek>(
                 first.2, second.2
             ),
         );
+    }
+    // Each object is read once its place is judged, and only where it is a place of its own:
+    // a mapping may claim sixteen mebibytes, and two hundred thousand of them may claim the
+    // same ones. Read this way, what a scan reads is bounded by the area they are kept in.
+    for m in readable {
+        if scan.found.is_full() {
+            return;
+        }
+        if overlapping.contains(&m.address) {
+            continue;
+        }
+        match container.read_ephemeral(m, m.kind(), live) {
+            Ok(object) => {
+                let header = super::ondisk::ObjectHeader::read_from(&object);
+                if header.is_ok_and(|h| h.subtype != m.subtype) {
+                    scan.at(
+                        Category::Space,
+                        Severity::Conformance,
+                        Some(m.address),
+                        None,
+                        format!(
+                            "the live checkpoint maps object {} as of subtype {:#x}, and the \
+                             object records another",
+                            m.oid, m.subtype
+                        ),
+                    );
+                }
+            }
+            Err(e) => scan.failed(None, &format!("ephemeral object {}", m.oid), &e),
+        }
     }
 }
 

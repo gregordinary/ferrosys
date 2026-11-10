@@ -124,8 +124,8 @@ pub(crate) const CHECKSUM_OFFSET: usize = 16;
 /// The fixed part of one entry (`struct ext4_xattr_entry`) before its name.
 const ENTRY_HEADER_LEN: usize = 16;
 
-/// Round `n` up to the 4-byte boundary entries and values are aligned to
-/// (`EXT4_XATTR_PAD`).
+/// Round `n` up to the 4-byte boundary entries and values are aligned to (the ext4
+/// documentation's Extended Attributes page).
 const fn align4(n: usize) -> usize {
     (n + 3) & !3
 }
@@ -137,10 +137,11 @@ const fn align4(n: usize) -> usize {
 /// `system.posix_acl_access` and `system.posix_acl_default` with an empty stored
 /// name.
 ///
-/// The rarely used indices (5 Lustre, 9 encryption, 10 Hurd) are not listed. A name
-/// this crate writes always maps to a listed prefix or to index 0 with its whole self
-/// stored; a foreign attribute carrying an unlisted index reads back by its stored
-/// name without the namespace prefix expanded.
+/// The rarely used indices (5 Lustre, 10 Hurd) are not listed. A name this crate writes
+/// always maps to a listed prefix or to index 0 with its whole self stored; a foreign
+/// attribute carrying an unlisted index reads back by its stored name without the namespace
+/// prefix expanded. Index 9 is not listed either: its one entry, an encrypted inode's
+/// context, is not read back as an attribute at all (`Stored::is_the_formats`).
 const PREFIXES: &[(u8, &[u8])] = &[
     (2, b"system.posix_acl_access"),
     (3, b"system.posix_acl_default"),
@@ -194,52 +195,43 @@ fn join_name(index: u8, stored: &[u8]) -> Vec<u8> {
     stored.to_vec()
 }
 
-/// Hash one attribute's name and value (`ext4_xattr_hash_entry`).
+/// The hash an attribute block's entry records in `e_hash`, over its stored name and value.
 ///
-/// The name bytes (the stored remainder, not the namespace prefix) are folded one
-/// byte at a time, then the value is folded as little-endian 32-bit words over its
-/// 4-byte-padded length. This is the hash `e2fsck` recomputes for every block
-/// entry, so the shifts and word count match `e2fsprogs` exactly.
+/// The rule is the one FreeBSD's ext2fs implements in its extended-attribute code
+/// (BSD-2-Clause): from zero, each byte of the stored name (the part after the namespace
+/// prefix) is folded in by rotating the hash left five bits and XOR-ing the byte, then each
+/// little-endian 32-bit word of the value, over its length rounded up to whole words, by
+/// rotating left sixteen bits and XOR-ing the word.
 ///
-/// `signed` selects how a name byte at or above `0x80` is folded: sign-extended, as the
-/// host `char` `ext2fs_ext_attr_hash_entry` reads (signed on x86, unsigned on arm64), or
-/// zero-extended. It follows the same choice the directory-name hashes take, so one
-/// signedness governs every name hash in the image. The two agree for an ASCII name.
-fn hash_entry(name: &[u8], value: &[u8], signed: bool) -> u32 {
-    const NAME_HASH_SHIFT: u32 = 5;
-    const VALUE_HASH_SHIFT: u32 = 16;
-    let mut hash: u32 = 0;
-    for &b in name {
-        let nb = if signed { b as i8 as u32 } else { u32::from(b) };
-        hash = (hash << NAME_HASH_SHIFT) ^ (hash >> (32 - NAME_HASH_SHIFT)) ^ nb;
-    }
-    // The value is hashed over its padded length: whole 4-byte little-endian words,
-    // the final word zero-filled past the value's end.
-    let words = value.len().div_ceil(4);
-    for i in 0..words {
-        let start = i * 4;
+/// A name byte at or above `0x80` is folded as its unsigned value. That is the value the
+/// pinned `mke2fs` writes, on a filesystem flagged for signed directory hashes as well, and
+/// the pinned `e2fsck` checks every entry's hash in a block and accepts it (observed). The
+/// entries of every block `mke2fs -d` and a Linux kernel wrote in this crate's gates carry
+/// exactly this hash.
+fn hash_entry(name: &[u8], value: &[u8]) -> u32 {
+    let named = name
+        .iter()
+        .fold(0u32, |hash, &byte| hash.rotate_left(5) ^ u32::from(byte));
+    value.chunks(4).fold(named, |hash, chunk| {
         let mut word = [0u8; 4];
-        let end = (start + 4).min(value.len());
-        word[..end - start].copy_from_slice(&value[start..end]);
-        let v = u32::from_le_bytes(word);
-        hash = (hash << VALUE_HASH_SHIFT) ^ (hash >> (32 - VALUE_HASH_SHIFT)) ^ v;
-    }
-    hash
+        word[..chunk.len()].copy_from_slice(chunk);
+        hash.rotate_left(16) ^ u32::from_le_bytes(word)
+    })
 }
 
-/// Fold the per-entry hashes into the block hash (`ext4_xattr_rehash`). A zero
-/// entry hash forces the block hash to zero, marking the block unshareable, exactly
-/// as `e2fsprogs` does.
+/// The hash an attribute block's header records in `h_hash`: the entries' hashes in entry
+/// order, folded by rotating left sixteen bits and XOR-ing each, or zero where any of them is
+/// zero (FreeBSD's ext2fs, as for [`hash_entry`]).
+///
+/// A Linux kernel writes this value (observed). The pinned `mke2fs -d` writes zero, and the
+/// pinned `e2fsck` accepts both; no checker compares the field.
 fn block_hash(entry_hashes: &[u32]) -> u32 {
-    const BLOCK_HASH_SHIFT: u32 = 16;
-    let mut hash: u32 = 0;
-    for &e in entry_hashes {
-        if e == 0 {
-            return 0;
-        }
-        hash = (hash << BLOCK_HASH_SHIFT) ^ (hash >> (32 - BLOCK_HASH_SHIFT)) ^ e;
+    if entry_hashes.contains(&0) {
+        return 0;
     }
-    hash
+    entry_hashes
+        .iter()
+        .fold(0, |hash, &entry| hash.rotate_left(16) ^ entry)
 }
 
 /// Storage an attribute set occupies past its header: the entry records (each
@@ -379,10 +371,7 @@ pub(crate) fn encode_inline(attrs: &[Xattr], region_len: usize) -> Option<Vec<u8
 /// is unreachable through the crate's own surface is why it is stated rather than assumed —
 /// a guard on the bytes this writes is worth nothing if it is compiled out of the build a
 /// consumer installs, and what it prevents is a silently wrong attribute block.
-///
-/// `signed` selects the name-byte signedness the per-entry `e_hash` folds with, matching
-/// the image's directory-name-hash choice; see [`hash_entry`].
-pub(crate) fn encode_block(attrs: &[Xattr], block_size: usize, signed: bool) -> Vec<u8> {
+pub(crate) fn encode_block(attrs: &[Xattr], block_size: usize) -> Vec<u8> {
     let attrs = sorted(attrs);
     // The same bound `encode_inline` applies to its region, in the same terms, before a
     // cursor moves. Reaching the loop with a set too large walks the value cursor below the
@@ -399,7 +388,7 @@ pub(crate) fn encode_block(attrs: &[Xattr], block_size: usize, signed: bool) -> 
         let (index, stored) = split_name(&x.name);
         value_off -= align4(x.value.len());
         buf[value_off..value_off + x.value.len()].copy_from_slice(&x.value);
-        let e_hash = hash_entry(stored, &x.value, signed);
+        let e_hash = hash_entry(stored, &x.value);
         hashes.push(e_hash);
         // Block value offsets are absolute from the block start; an empty value records
         // offset 0 rather than the cursor's position, as `mke2fs` writes it.
@@ -467,7 +456,17 @@ fn write_entry(
 /// # Errors
 ///
 /// [`ParseError`] if an entry or value reference runs outside the region.
+#[cfg(test)]
 pub(crate) fn parse_inline(region: &[u8]) -> Result<Vec<Xattr>, ParseError> {
+    Ok(attributes(parse_inline_stored(region)?))
+}
+
+/// Parse the inline xattr region into every entry it stores, the format's own among them.
+///
+/// # Errors
+///
+/// [`ParseError`] if an entry or value reference runs outside the region.
+pub(crate) fn parse_inline_stored(region: &[u8]) -> Result<Vec<Stored>, ParseError> {
     if region.len() < IBODY_HEADER_LEN || get_u32(region, 0) != XATTR_MAGIC {
         return Ok(Vec::new());
     }
@@ -480,11 +479,74 @@ pub(crate) fn parse_inline(region: &[u8]) -> Result<Vec<Xattr>, ParseError> {
 /// # Errors
 ///
 /// [`ParseError`] if an entry or value reference runs outside the block.
+#[cfg(test)]
 pub(crate) fn parse_block(block: &[u8]) -> Result<Vec<Xattr>, ParseError> {
+    Ok(attributes(parse_block_stored(block)?))
+}
+
+/// Parse an external xattr block into every entry it stores.
+///
+/// # Errors
+///
+/// [`ParseError`] if an entry or value reference runs outside the block.
+pub(crate) fn parse_block_stored(block: &[u8]) -> Result<Vec<Stored>, ParseError> {
     if block.len() < BLOCK_HEADER_LEN || get_u32(block, 0) != XATTR_MAGIC {
         return Ok(Vec::new());
     }
     parse_entries(block, BLOCK_HEADER_LEN, 0)
+}
+
+/// The attributes of `stored`, as a test reads them: the format's own entries left out, and a
+/// value kept in an inode read back empty.
+#[cfg(test)]
+fn attributes(stored: Vec<Stored>) -> Vec<Xattr> {
+    stored
+        .into_iter()
+        .filter(|entry| !entry.is_the_formats())
+        .map(|entry| Xattr {
+            name: entry.name,
+            value: match entry.value {
+                Value::Here(value) => value,
+                Value::InInode { .. } => Vec::new(),
+            },
+        })
+        .collect()
+}
+
+/// One entry of an attribute region, as it is stored.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Stored {
+    /// The name, its namespace expanded.
+    pub(crate) name: Vec<u8>,
+    /// The `e_name_index` it was stored under.
+    pub(crate) index: u8,
+    /// The value, or where it is kept.
+    pub(crate) value: Value,
+}
+
+/// Where an attribute's value is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Value {
+    /// In the region, beside the entry.
+    Here(Vec<u8>),
+    /// In the data of an inode of its own (`ea_inode`), `size` bytes of it.
+    InInode {
+        /// The inode, `e_value_inum`.
+        inode: u32,
+        /// The value's length, `e_value_size`.
+        size: u32,
+    },
+}
+
+impl Stored {
+    /// Whether the entry is one the format keeps for itself rather than an attribute of the
+    /// file: an encrypted inode's encryption context — name index 9, name `c`, observed on
+    /// every encrypted inode a Linux 7.1 driver wrote — and an inline inode's `system.data`,
+    /// which holds what its block area has no room for. The attribute calls expose neither:
+    /// the first describes the encryption, and the second is the file's own content.
+    pub(crate) fn is_the_formats(&self) -> bool {
+        (self.index == 9 && self.name == b"c") || (self.index == 7 && self.name == b"system.data")
+    }
 }
 
 /// Walk the entry list starting at `first_entry`, resolving each value at
@@ -497,7 +559,7 @@ fn parse_entries(
     buf: &[u8],
     first_entry: usize,
     value_base: usize,
-) -> Result<Vec<Xattr>, ParseError> {
+) -> Result<Vec<Stored>, ParseError> {
     let mut out = Vec::new();
     let mut off = first_entry;
     // The values one region yields, summed. Each entry's own bounds are exact — a value is
@@ -512,15 +574,19 @@ fn parse_entries(
     // cannot refuse a well-formed set: every value is stored in the region once.
     let mut value_bytes = 0usize;
     loop {
+        // The list ends at a zero word, which takes four bytes and not a whole header: entries
+        // whose values are kept in inodes of their own leave no values in the region, and can
+        // fill an inode's to within a header of its end. Observed: a Linux 7.1 driver's four
+        // such entries in a 96-byte region, ending at 84 with twelve zero bytes after.
+        if off + 4 <= buf.len() && get_u32(buf, off) == 0 {
+            break;
+        }
         if off + ENTRY_HEADER_LEN > buf.len() {
             return Err(ParseError::TooShort {
                 structure: "XattrEntry",
                 need: off + ENTRY_HEADER_LEN,
                 got: buf.len(),
             });
-        }
-        if get_u32(buf, off) == 0 {
-            break; // the all-zero entry header ends the list
         }
         let name_len = get_u8(buf, off) as usize;
         let name_index = get_u8(buf, off + 1);
@@ -535,14 +601,16 @@ fn parse_entries(
                 need: name_end,
                 got: buf.len(),
             })?;
-        // An attribute whose value lives in a separate inode (`e_value_inum != 0`, the
-        // `ea_inode` form) keeps no value in this region. This crate never writes that
-        // form and cannot resolve the external inode from these bytes, so its value reads
-        // back empty rather than as the unrelated bytes at `value_base + e_value_offs`
-        // (which a large `e_value_size` could also carry past the region). The name is
-        // preserved either way.
+        // An attribute whose value lives in an inode of its own (`e_value_inum != 0`, the
+        // `ea_inode` form) keeps no value in this region, so where it is kept is what comes
+        // back, for the reader to resolve — never the unrelated bytes at
+        // `value_base + e_value_offs`, which a large `e_value_size` could also carry past the
+        // region.
         let value = if value_inum != 0 {
-            Vec::new()
+            Value::InInode {
+                inode: value_inum,
+                size: u32::try_from(value_size).unwrap_or(u32::MAX),
+            }
         } else {
             // `value_size` is the image's own claim and spans the whole `u32` range, so
             // the end of the value is computed under a checked width: on a target whose
@@ -564,16 +632,19 @@ fn parse_entries(
                     value: value_bytes as u64,
                 });
             }
-            buf.get(vstart..vend)
-                .ok_or(ParseError::InvalidField {
-                    structure: "XattrEntry",
-                    field: "e_value_offs",
-                    value: value_offs as u64,
-                })?
-                .to_vec()
+            Value::Here(
+                buf.get(vstart..vend)
+                    .ok_or(ParseError::InvalidField {
+                        structure: "XattrEntry",
+                        field: "e_value_offs",
+                        value: value_offs as u64,
+                    })?
+                    .to_vec(),
+            )
         };
-        out.push(Xattr {
+        out.push(Stored {
             name: join_name(name_index, stored),
+            index: name_index,
             value,
         });
         off = name_end.next_multiple_of(4);
@@ -584,6 +655,32 @@ fn parse_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_ending_within_a_header_of_its_region_ends_at_its_zero_word() {
+        // The shape a kernel leaves in an inode body whose entries keep their values in inodes:
+        // the magic, four entries naming value inodes and storing no value, and a zero word
+        // with eight bytes after it — fewer than a header, more than the word.
+        let mut region = vec![0u8; 96];
+        put_u32(&mut region, 0, XATTR_MAGIC);
+        for k in 0..4u8 {
+            let at = 4 + usize::from(k) * 20;
+            region[at] = 2; // e_name_len
+            region[at + 1] = 1; // e_name_index: user
+            put_u32(&mut region, at + 4, 24 + u32::from(k)); // e_value_inum
+            put_u32(&mut region, at + 8, 2000); // e_value_size
+            region[at + 16..at + 18].copy_from_slice(&[b'm', b'1' + k]);
+        }
+        let stored = parse_inline_stored(&region).expect("the list ends at its zero word");
+        assert_eq!(stored.len(), 4);
+        assert_eq!(
+            stored[3].value,
+            Value::InInode {
+                inode: 27,
+                size: 2000
+            }
+        );
+    }
 
     /// Deliberately out of order, to prove the encoding canonicalizes.
     fn sample_acl() -> Acl {
@@ -730,7 +827,7 @@ mod tests {
             value: Vec::new(),
         }];
 
-        let block = encode_block(&attrs, 4096, false);
+        let block = encode_block(&attrs, 4096);
         assert_eq!(
             get_u16(&block, BLOCK_HEADER_LEN + 2),
             0,
@@ -749,14 +846,14 @@ mod tests {
 
     #[test]
     fn block_round_trips_with_a_stable_nonzero_hash() {
-        let block = encode_block(&attrs(), 4096, false);
+        let block = encode_block(&attrs(), 4096);
         assert_eq!(get_u32(&block, 0), XATTR_MAGIC);
         assert_eq!(get_u32(&block, 4), 1, "refcount");
         assert_eq!(get_u32(&block, 8), 1, "blocks");
         let h = get_u32(&block, 12);
         assert_ne!(h, 0, "block hash is set");
         // Deterministic: the same input hashes the same.
-        assert_eq!(get_u32(&encode_block(&attrs(), 4096, false), 12), h);
+        assert_eq!(get_u32(&encode_block(&attrs(), 4096), 12), h);
         let back = parse_block(&block).unwrap();
         assert_eq!(back.len(), 2);
         for a in attrs() {
@@ -767,26 +864,43 @@ mod tests {
     #[test]
     fn empty_value_and_empty_name_hash_to_defined_values() {
         // An empty name and value fold to zero (no bytes, no words).
-        assert_eq!(hash_entry(b"", b"", false), 0);
+        assert_eq!(hash_entry(b"", b""), 0);
         // A value shorter than a word is zero-padded, not skipped.
-        assert_ne!(hash_entry(b"x", b"a", false), hash_entry(b"x", b"", false));
+        assert_ne!(hash_entry(b"x", b"a"), hash_entry(b"x", b""));
     }
 
     #[test]
-    fn a_name_hash_follows_the_signedness_only_for_high_bytes() {
-        // The name-hash signedness follows the image's directory-hash choice. An ASCII
-        // name folds the same either way; a byte at or above 0x80 sign-extends under
-        // Signed, so the two diverge there, matching how `mke2fs` folds a host `char`.
+    fn an_entry_hash_is_the_one_mke2fs_and_a_kernel_record() {
+        // `e_hash` read out of attribute blocks the pinned `mke2fs -d` wrote (the user
+        // namespace, so the stored name is what follows `user.`), on x86_64 and on a
+        // filesystem flagged for signed directory hashes, and out of one a Linux 7.1 kernel
+        // wrote (`trusted.big`).
+        let pattern: Vec<u8> = (0..3000u32).map(|i| ((i * 131 + 7) % 251) as u8).collect();
+        let observed: [(&[u8], Vec<u8>, u32); 7] = [
+            (b"alpha", vec![b'A'; 500], 0x8c20_4766),
+            (b"beta", (0..512u32).map(|i| i as u8).collect(), 0x0030_9ae1),
+            (b"d", vec![b'q'; 301], 0x7171_7164),
+            (b"plain", vec![b'P'; 200], 0x0737_894e),
+            (b"gam\xe9", vec![b'Z'; 400], 0x0032_0949),
+            (b"\xff\x80x", vec![b'W'; 300], 0xbb2f_5754),
+            (b"big", pattern, 0x937c_311d),
+        ];
+        for (name, value, hash) in observed {
+            assert_eq!(hash_entry(name, &value), hash, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_block_hash_folds_its_entries_and_is_zero_beside_a_zero() {
+        // One entry: the kernel's block records its entry's hash (observed).
+        assert_eq!(block_hash(&[0x937c_311d]), 0x937c_311d);
         assert_eq!(
-            hash_entry(b"user", b"v", true),
-            hash_entry(b"user", b"v", false),
-            "an ASCII name is identical under either signedness"
+            block_hash(&[1, 2]),
+            0x0001_0002,
+            "the first rotates past the second"
         );
-        assert_ne!(
-            hash_entry(b"\xff", b"v", true),
-            hash_entry(b"\xff", b"v", false),
-            "a high name byte sign-extends under Signed and diverges"
-        );
+        assert_eq!(block_hash(&[1, 0, 2]), 0);
+        assert_eq!(block_hash(&[]), 0);
     }
 
     #[test]
@@ -841,10 +955,10 @@ mod tests {
     }
 
     #[test]
-    fn an_external_value_inode_entry_reads_an_empty_value_not_garbage() {
-        // A foreign `ea_inode` attribute keeps its value in a separate inode: e_value_inum
-        // is non-zero and e_value_size can be large. Its value must read back empty with
-        // the name preserved — never the unrelated bytes at e_value_offs, and never a
+    fn an_external_value_inode_entry_is_where_its_value_is_kept_not_garbage() {
+        // An `ea_inode` attribute keeps its value in an inode of its own: e_value_inum is
+        // non-zero and e_value_size can be large. The parse hands back that inode and size,
+        // with the name preserved — never the unrelated bytes at e_value_offs, and never a
         // parse failure from a declared size larger than the region.
         let mut block = vec![0u8; 4096];
         put_u32(&mut block, 0, XATTR_MAGIC);
@@ -856,12 +970,16 @@ mod tests {
         put_u32(&mut block, off + 8, 1_000_000); // e_value_size: larger than the block
         block[off + ENTRY_HEADER_LEN..off + ENTRY_HEADER_LEN + 4].copy_from_slice(b"test");
 
-        let attrs = parse_block(&block).expect("an ea_inode entry does not fail the parse");
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].name, b"user.test");
-        assert!(
-            attrs[0].value.is_empty(),
-            "the external value is not read as inline bytes"
+        let stored = parse_block_stored(&block).expect("an ea_inode entry does not fail the parse");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, b"user.test");
+        assert_eq!(
+            stored[0].value,
+            Value::InInode {
+                inode: 42,
+                size: 1_000_000
+            },
+            "the external value is where it is kept, not inline bytes"
         );
     }
 
@@ -961,7 +1079,7 @@ mod tests {
         assert!(back.contains(&attrs[0]));
         assert!(back.contains(&attrs[1]));
         // Same through the block form.
-        let block = encode_block(&attrs, 4096, false);
+        let block = encode_block(&attrs, 4096);
         let back = parse_block(&block).unwrap();
         assert_eq!(back.len(), 2);
         assert!(back.contains(&attrs[0]));

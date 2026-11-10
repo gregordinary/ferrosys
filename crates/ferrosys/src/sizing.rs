@@ -17,13 +17,14 @@
 /// filesystem with nothing left in it — correct for an image that will only ever be read,
 /// and useless for one that will be written to. This states how much must remain.
 ///
-/// The measure is what the finished filesystem reports free, in whatever unit it accounts
-/// for space in: blocks for a family that has them, clusters for one whose free counter
-/// counts those. It is the same number the filesystem's own free count carries and the same
-/// one `df` reports as *used* against *size*. Where a family lays a second reservation over
-/// those same units rather than making a second claim on them — as ext's super-user
-/// reservation does — the two add up, so a filesystem left a fifth free under a 5%
-/// reservation leaves an unprivileged writer 15% of it.
+/// The measure is the room the finished filesystem leaves free, in whatever unit it accounts
+/// for space in, and each family's `FormatPlan::fit` states the one it holds this to. For
+/// ext, FAT, and exFAT it is the filesystem's own free count, in blocks or clusters: the
+/// number `df` reports as *used* against *size*. A btrfs counts the room left for file data,
+/// as `df` reports it, and an APFS container the blocks macOS lets any user write. Where a
+/// family lays a second reservation over those same units rather than making a second claim
+/// on them — as ext's super-user reservation does — the two add up, so a filesystem left a
+/// fifth free under a 5% reservation leaves an unprivileged writer 15% of it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[non_exhaustive]
 pub enum Slack {
@@ -97,7 +98,13 @@ impl Slack {
 /// scoped to exactly that build: with a family compiled in, an arm no search reaches is a
 /// dead arm and is reported as one.
 #[cfg_attr(
-    not(any(feature = "ext", feature = "fat", feature = "apfs")),
+    not(any(
+        feature = "ext",
+        feature = "fat",
+        feature = "exfat",
+        feature = "btrfs",
+        feature = "apfs"
+    )),
     allow(dead_code)
 )]
 pub(crate) enum Probe<T, E> {
@@ -114,6 +121,13 @@ pub(crate) enum Probe<T, E> {
     TooSmall(E),
     /// Refused, and no *larger* size would do better either — the candidate is past the top
     /// of what this family accepts. Ends the climb rather than continuing it.
+    ///
+    /// btrfs has no such refusal: a larger filesystem takes longer chunks, so its search never
+    /// constructs this.
+    #[cfg_attr(
+        not(any(feature = "ext", feature = "fat", feature = "exfat", feature = "apfs")),
+        allow(dead_code)
+    )]
     Exhausted(E),
     /// Refused for a reason no size changes. Ends the search outright.
     Impossible(E),

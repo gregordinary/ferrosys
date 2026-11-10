@@ -11,9 +11,9 @@
 //! An inode carries an owner, a group, a full mode, a link count, a device number, and four
 //! timestamps each to the nanosecond; a name is up to [`MAX_NAME_LEN`] bytes and an object may
 //! have as many as a caller states; an extended attribute is a record of its own. That is every
-//! property a [`SourceEntry`] carries, so a tree goes in whole — this is the one family here
-//! where the fidelity report is empty in both directions rather than merely small, and
-//! [`BtrfsModel::fidelity`] says so rather than leaving it to be assumed.
+//! property a [`SourceEntry`] carries, so a tree goes in whole — the fidelity report is empty in
+//! both directions rather than merely small, as APFS's is, and [`BtrfsModel::fidelity`] says so
+//! rather than leaving it to be assumed.
 //!
 //! The one thing a source states that the format holds *differently* is a second name for a
 //! file: btrfs keeps hard links, and keeps them within one tree. A link whose two names fall on
@@ -46,6 +46,27 @@ use super::ondisk::{DirEntryType, DirItem, FileExtentItem, Header, Item, objecti
 /// One value for every kind of name: a directory entry, a hard link, and a subvolume are all
 /// named through the same record.
 pub const MAX_NAME_LEN: usize = 255;
+
+/// The longest attribute name, in bytes: the 255 `xattr(7)` documents for a Linux attribute
+/// name.
+const MAX_XATTR_NAME: usize = 255;
+
+/// `(major, minor)` where the inode's device field holds both, refusing numbers wider than it.
+///
+/// The field keeps the minor in its low twenty bits and the major in the twelve above them, as
+/// [`InodeItem::encode_device`](super::ondisk::InodeItem::encode_device) packs them, so a wider
+/// number would be cut to a different device.
+fn device_number(path: &[u8], major: u32, minor: u32) -> Result<(u32, u32), ModelError> {
+    use super::ondisk::InodeItem;
+    if major >> (32 - InodeItem::MINOR_BITS) != 0 || minor > InodeItem::MINOR_MASK {
+        return Err(ModelError::DeviceNumberTooLarge {
+            path: path.to_vec(),
+            major,
+            minor,
+        });
+    }
+    Ok((major, minor))
+}
 
 /// The most bytes of a file one data extent holds.
 ///
@@ -156,6 +177,46 @@ pub enum ModelError {
         /// How long the name is, in bytes.
         bytes: usize,
     },
+    /// A name holds a NUL, which ends a name wherever one is taken as a C string, and which a
+    /// directory of this format's reader holds no name with.
+    #[error("{}: the name holds a NUL", crate::escape::printable(.path))]
+    #[non_exhaustive]
+    NameHoldsNul {
+        /// The offending path.
+        path: Vec<u8>,
+    },
+    /// A symbolic link's target is empty, holds a NUL, or is a sector or longer. Observed: the
+    /// pinned `btrfs check` refuses an empty target as a bad file extent and one of a sector or
+    /// more as an inline extent too large, and a link's readers take its target as a C string.
+    #[error(
+        "{}: a link target of {bytes} bytes, empty, or holding a NUL; this format holds targets \
+         of 1 to {limit} bytes",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    SymlinkTarget {
+        /// The link's path.
+        path: Vec<u8>,
+        /// How long the target is, in bytes.
+        bytes: usize,
+        /// The longest target this filesystem holds: one byte short of a sector.
+        limit: usize,
+    },
+    /// A device node's major or minor number is wider than the twelve and twenty bits an
+    /// inode's device field holds them in.
+    #[error(
+        "{}: device numbers {major}:{minor} are wider than this format holds",
+        crate::escape::printable(.path)
+    )]
+    #[non_exhaustive]
+    DeviceNumberTooLarge {
+        /// The device node's path.
+        path: Vec<u8>,
+        /// The major number.
+        major: u32,
+        /// The minor number.
+        minor: u32,
+    },
     /// An entry's parent directory was not declared.
     #[error("path {} has no parent directory", crate::escape::printable(.path))]
     #[non_exhaustive]
@@ -224,8 +285,10 @@ pub enum ModelError {
         /// The target it names.
         target: Vec<u8>,
     },
-    /// An attribute's name is empty or holds a NUL: a host and an archive take a name as a C
-    /// string, which ends at its first NUL.
+    /// An attribute's name is empty, holds a NUL, or is longer than the 255 bytes `xattr(7)`
+    /// documents for a Linux attribute name: a host and an archive take a name as a C string,
+    /// which ends at its first NUL. Observed: the pinned `btrfs check` refuses a 305-byte name
+    /// as overlong.
     #[error(
         "{}: the attribute name {} cannot be stored",
         crate::escape::printable(.path),
@@ -786,6 +849,13 @@ impl Builder {
                     path: entry.path.clone(),
                     bytes: name.len(),
                 }),
+                // The name a directory of this format holds is the one its reader takes: the
+                // shared rule, which a NUL breaks.
+                Some(name) if crate::path::is_hostile_entry(name) => {
+                    Err(ModelError::NameHoldsNul {
+                        path: entry.path.clone(),
+                    })
+                }
                 _ => Ok(match &entry.kind {
                     EntryKind::Directory => Class::Directory,
                     EntryKind::HardLink { target } => Class::Link(canonical_key(target)),
@@ -899,7 +969,7 @@ impl Builder {
         }
         if let Some(x) = xattrs
             .iter()
-            .find(|x| x.name.is_empty() || x.name.contains(&0))
+            .find(|x| x.name.is_empty() || x.name.contains(&0) || x.name.len() > MAX_XATTR_NAME)
         {
             return Err(ModelError::XattrName {
                 name: x.name.clone(),
@@ -1141,6 +1211,14 @@ impl Builder {
                 }
             }
             EntryKind::Symlink(target) => {
+                let limit = self.sector_size as usize - 1;
+                if target.is_empty() || target.len() > limit || target.contains(&0) {
+                    return Err(ModelError::SymlinkTarget {
+                        path: path.to_vec(),
+                        bytes: target.len(),
+                        limit,
+                    });
+                }
                 let need = FileExtentItem::INLINE_DATA_START + target.len();
                 if need > self.capacity {
                     return Err(ModelError::RecordTooLarge {
@@ -1153,16 +1231,22 @@ impl Builder {
                 self.longest_value = self.longest_value.max(target.len() as u64);
                 ObjectKind::Symlink(target)
             }
-            EntryKind::CharDevice { major, minor } => ObjectKind::Device {
-                block: false,
-                major,
-                minor,
-            },
-            EntryKind::BlockDevice { major, minor } => ObjectKind::Device {
-                block: true,
-                major,
-                minor,
-            },
+            EntryKind::CharDevice { major, minor } => {
+                let (major, minor) = device_number(path, major, minor)?;
+                ObjectKind::Device {
+                    block: false,
+                    major,
+                    minor,
+                }
+            }
+            EntryKind::BlockDevice { major, minor } => {
+                let (major, minor) = device_number(path, major, minor)?;
+                ObjectKind::Device {
+                    block: true,
+                    major,
+                    minor,
+                }
+            }
             EntryKind::Fifo => ObjectKind::Fifo,
             EntryKind::Socket => ObjectKind::Socket,
             // A hard link never reaches here: it adds a name to an object that already exists,
@@ -1325,8 +1409,9 @@ mod tests {
     }
 
     #[test]
-    fn an_attribute_name_empty_or_holding_a_nul_is_refused() {
-        for name in [&b""[..], b"user.a\0b"] {
+    fn an_attribute_name_empty_holding_a_nul_or_overlong_is_refused() {
+        let overlong = [b"user.".as_slice(), &[b'a'; 300]].concat();
+        for name in [&b""[..], b"user.a\0b", &overlong] {
             let err = error_of(
                 TreeBuilder::new()
                     .file("/f", b"hello", meta())
@@ -1337,6 +1422,47 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_holding_a_nul_is_refused() {
+        // The reader refuses such a name in a directory, so the writer does not put one there.
+        let err = error_of(TreeBuilder::new().file("/with\0nul", b"x", meta()));
+        assert!(matches!(&err, ModelError::NameHoldsNul { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_link_target_the_checker_refuses_is_refused() {
+        // Empty, a sector or longer, and holding a NUL: the first two the pinned `btrfs check`
+        // refuses, and the third a reader of the link cuts short.
+        for target in [
+            Vec::new(),
+            vec![b'a'; 4096],
+            vec![b'a'; 10_000],
+            b"abc\0def".to_vec(),
+        ] {
+            let err = error_of(TreeBuilder::new().symlink("/l", target.clone(), meta()));
+            assert!(
+                matches!(&err, ModelError::SymlinkTarget { bytes, limit: 4095, .. } if *bytes == target.len()),
+                "{} bytes: {err:?}",
+                target.len()
+            );
+        }
+        model_of(TreeBuilder::new().symlink("/l", vec![b'a'; 4095], meta()));
+    }
+
+    #[test]
+    fn device_numbers_wider_than_the_field_are_refused() {
+        // Twelve bits of major and twenty of minor, as the field packs them; a wider number
+        // would read back as another device.
+        for (major, minor) in [(4096, 1), (1, 1 << 20)] {
+            let err = error_of(TreeBuilder::new().char_device("/d", major, minor, meta()));
+            assert!(
+                matches!(&err, ModelError::DeviceNumberTooLarge { major: a, minor: b, .. } if (*a, *b) == (major, minor)),
+                "{err:?}"
+            );
+        }
+        model_of(TreeBuilder::new().char_device("/d", 4095, (1 << 20) - 1, meta()));
     }
 
     #[test]

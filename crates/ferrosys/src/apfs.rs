@@ -121,7 +121,6 @@ mod names;
 mod records;
 mod scan;
 mod space;
-mod unicode_tables;
 
 // A container assembled byte by byte, so the guards over a malformed one are exercised in a
 // build with no corpus, and so the faults no image macOS wrote carries have a gate at all.

@@ -9,8 +9,8 @@
 //! the narrowest family, and one narrow enough to be true about it would be useless for the
 //! widest. The enum preserves each family's whole surface and costs a caller one `match`.
 //!
-//! What *is* shared across the families is [`FsTree`](crate::FsTree), the four operations an
-//! extraction needs of any of them.
+//! What *is* shared across the families is [`FsTree`](crate::FsTree), the operations an
+//! extraction, a lookup, and a listing need of any of them.
 //!
 //! The module is compiled only where at least one family is, since with none there is
 //! nothing an image could be opened as. The condition is the disjunction of every family

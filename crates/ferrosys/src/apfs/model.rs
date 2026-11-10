@@ -15,9 +15,10 @@
 //! carries, so a tree goes in whole and the fidelity report is empty. What a source states that
 //! macOS would not keep is refused rather than written where macOS cannot reach it: an
 //! attribute on a device node, and an attribute name that is not UTF-8. The fourth time, an
-//! inode's birth, is one a source does not state: it is the modification time where that is not
-//! before 1970 and not after the format's instant, and the format's instant otherwise, since
-//! macOS refuses to read an inode created before 1970.
+//! inode's birth, is the one the source states where it states one, and a birth before 1970
+//! is refused, since macOS refuses to read an inode created before 1970. Where the source states
+//! none, it is the modification time where that is not before 1970 and not after the format's
+//! instant, and the format's instant otherwise.
 //!
 //! # What a name may be
 //!
@@ -761,6 +762,8 @@ struct Planned {
     name: Vec<u8>,
     /// The hash its record is keyed by.
     hash: u32,
+    /// The form the directory compares it as: decomposed, and folded where the volume folds.
+    form: Vec<u32>,
 }
 
 /// A directory the walk has entered: the slot its inode is in, its entries in record order, and
@@ -848,21 +851,22 @@ impl Builder {
             children.entry(parent).or_default().push(Planned {
                 key: key.clone(),
                 hash: names::hash(&form),
+                form,
                 name,
             });
         }
+        // Two names a directory compares as one, found by the form each compares as: computed
+        // once per name above, and looked up rather than compared pair by pair, so a directory
+        // of names chosen to share a hash costs no more than one of names that do not.
         for list in children.values_mut() {
             list.sort_by(|a, b| a.hash.cmp(&b.hash).then_with(|| a.name.cmp(&b.name)));
-            for run in list.chunk_by(|a, b| a.hash == b.hash) {
-                for (i, a) in run.iter().enumerate() {
-                    for b in &run[i + 1..] {
-                        if names::key(&a.name, self.fold) == names::key(&b.name, self.fold) {
-                            return Err(ModelError::NamesCompareEqual {
-                                first: by_key[&a.key].path.clone(),
-                                second: by_key[&b.key].path.clone(),
-                            });
-                        }
-                    }
+            let mut seen: HashMap<&[u32], &Planned> = HashMap::with_capacity(list.len());
+            for b in list.iter() {
+                if let Some(a) = seen.insert(&b.form, b) {
+                    return Err(ModelError::NamesCompareEqual {
+                        first: by_key[&a.key].path.clone(),
+                        second: by_key[&b.key].path.clone(),
+                    });
                 }
             }
         }

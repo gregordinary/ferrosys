@@ -13,7 +13,8 @@
 # nothing; tree:N:DIRS:SEED:MAX, the tree the populated
 # gates generate from N entries under DIRS directories and SEED, no file larger than MAX bytes:
 # directories, files, symbolic links, hard links, device nodes, pipes, sockets, attributes either
-# side of 3,800 bytes, resource forks, names past ASCII, owners and times before 1970; or
+# side of 3,800 bytes, resource forks, names past ASCII, owners and times before 1970;
+# flat:N, N files of one byte each at the root, /f00000 onwards; or
 # corpus:RELEASE:ROW:VOLUME:SHA256, a volume of the APFS corpus ci/fetch-apfs-corpus.sh pins,
 # read back and changed as below. The rows named tree- hold a tree each: every block size but
 # 8 KiB, a tree of three levels of small files, files past a mebibyte, objects far in, a
@@ -54,6 +55,13 @@
 # one, Data first. Each container is to be listed as one group of its two volumes under the
 # Data volume's identifier, both volumes mounted, the System volume's snapshot listed and mounted
 # where it has one, and its firmlinked directories read back through its own mount.
+#
+# The rows named child- each hold the files flat:N gives, at a count where the root of a tree
+# the writer builds has one child, or at the next count where it has two: the file-system tree's
+# root over one leaf at 13 files and over two at 14, the volume object map's root over one leaf at
+# 1,548 and over two at 1,555, and the file-system tree's root over one index node at 1,980 and
+# 2,010 and over two at 2,017. A root of one child is what a level packs into when its entries
+# are too many for a root and few enough for one node below it.
 #
 # The container's identifier is the first 16 bytes of the SHA-256 of `container NAME`, and the
 # identifier of the volume in slot K is that of `volume K NAME`, and of its root snapshot that
@@ -144,3 +152,10 @@ group-b4k-p26-boot 4096 1073741824 26 1760000066.123456855 0:0 666572726f7379732
 group-b4k-p15-data-first 4096 1073741824 15 1760000067.123456856 0:0 666572726f7379732028302e362e3029 data/fold:44617461,system/fold:53797374656d tree:200:6:121:70000,tree:300:8:122:70000 - cb4d19192825cfeb accept 15,26,27
 group-b16k-p27-firm 16384 1073741824 27 1760000068.123456857 0:0 666572726f7379732028302e362e3029 system/fold:53797374656d:726f6f74,data/keep:44617461 tree:300:8:123:70000+firmlinks:6 - 4d451fe7d25cf14a accept 15,26,27
 group-b4k-p26-empty 4096 1073741824 26 1760000069.123456858 0:0 666572726f7379732028302e362e3029 data/fold:44617461,system/fold:53797374656d - - f0a523712c9f6e36 accept 15,26,27
+child-b4k-p26-fs-one 4096 1073741824 26 1760000070.123456859 0:0 666572726f7379732028302e362e3029 keep:416363657074 flat:13 - b8771e2253260da0 accept 15,26,27
+child-b4k-p26-fs-two 4096 1073741824 26 1760000071.123456860 0:0 666572726f7379732028302e362e3029 keep:416363657074 flat:14 - ce8ee9bbf58866d5 accept 15,26,27
+child-b4k-p15-map-one 4096 1073741824 15 1760000072.123456861 0:0 666572726f7379732028302e362e3029 keep:416363657074 flat:1548 - 8b54b8b51d0853cb accept 15,26,27
+child-b4k-p15-map-two 4096 1073741824 15 1760000073.123456862 0:0 666572726f7379732028302e362e3029 keep:416363657074 flat:1555 - 7554bb44d165eb45 accept 15,26,27
+child-b4k-p27-index-one 4096 1073741824 27 1760000074.123456863 0:0 666572726f7379732028302e362e3029 fold:416363657074 flat:1980 - 40c6049ebf227588 accept 15,26,27
+child-b4k-p27-index-two 4096 1073741824 27 1760000075.123456864 0:0 666572726f7379732028302e362e3029 fold:416363657074 flat:2017 - 2c5321ff4aad6e60 accept 15,26,27
+child-b4k-p14-index-one 4096 1073741824 14 1760000076.123456865 0:0 666572726f7379732028302e362e3029 keep:416363657074 flat:2010 - 01c0b2ed7fe99fd5 accept 15,26,27

@@ -7,6 +7,260 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
+## [Unreleased]
+
+### Added
+
+- **The ext reader reads a filesystem with encrypted directories** (`encrypt`). A strict
+  open accepts it, and everything stored in the clear reads and scans as on any other
+  filesystem. What is ciphertext is refused by name with `ext::ReadError::Encrypted`: an
+  encrypted file's data through `read_data`, `read_into` and `read_data_to`, an encrypted
+  directory's names through `read_dir`, `lookup` and a walk, and an encrypted link's target
+  through `read_symlink`. The shared surface reports the refusal as `TreeError::Unsupported`.
+  An encrypted inode's encryption context is not one of its attributes.
+- **The ext reader reads four more features a Linux kernel writes.** `inline_data`: a file or
+  directory kept in its inode reads from its block area and its `system.data` attribute,
+  which is the file's content and not one of its attributes. `ea_inode`: an attribute value
+  kept in an inode of its own reads from that inode, held to carrying the flag that says it
+  holds one and to the length the entry declares. `casefold`: a case-folded directory is read
+  through its blocks and a name matches as it is stored, since folding a name needs Unicode
+  tables. `large_dir`: a directory index may have two interior levels. Each is followed by a
+  strict open and checked by a scan; the new `ext::ReadError::BadInlineData` and
+  `ext::ReadError::BadValueInode` name what does not hold together.
+- **The ext reader reads a filesystem with multiple-mount protection** (`mmp`). Its block is
+  held to its magic and its checksum, as `ext::ReadError::BadMmpBlock` and a checksum mismatch.
+  A scan reports a record a host or a running checker left as `ext::ReadError::MmpInUse`, at
+  cosmetic severity, and `ext::ondisk::SuperBlock` carries `mmp_block` and
+  `mmp_update_interval`.
+- **`ext::ro_compat_name`** names the `ro_compat` bits `dumpe2fs` names, modelled or not.
+  `inspect` lists `orphan_present`, which a driver leaves set on a filesystem it did not
+  unmount cleanly, and the other named bits among the features rather than as unknown.
+- **`ext::ondisk::InodeFlags::ENCRYPT`**.
+- **`FsTree::find`, `FsTree::list` and `FsTree::usage`** answer one request at a time on
+  every family, through the shared surface. `find` resolves a path to a `Child` — its name,
+  its kind and its node — following symbolic links as each family's own `lookup` does.
+  `list` gives a directory's names in byte order without `.` and `..`, refusing a name a walk
+  would refuse. `usage` reports the room as a `Usage`: the allocation unit, the total, and
+  the count free, read from each format's own account — ext's group descriptors, FAT's table,
+  exFAT's allocation bitmap, btrfs's superblock, and APFS's space manager. A path that names
+  nothing is the new `TreeError::NotFound`, which the CLI reports as no such path. The three
+  are required methods, so an implementor of `FsTree` outside the crate implements them.
+- **The btrfs reader verifies every checksum algorithm the format defines**: crc32c,
+  xxhash64, SHA-256, and BLAKE2b, in metadata and in file data alike, where it read crc32c
+  alone. Each digest is written in safe Rust from its specification, with no path that
+  depends on the processor. `btrfs::ondisk::ChecksumType::field` computes the checksum field
+  an algorithm writes for a run of bytes, and `ChecksumType::holds` holds an object to its
+  own. `btrfs::ReadError::UnsupportedChecksum` names a value the format does not define.
+- **`fat::FormatOptions::disk_geometry`** records a stated sectors per track and heads in the
+  boot sector, as `fat::DiskGeometry::Exactly`, beside `hidden_sectors` for a volume written into
+  a partition. `DiskGeometry::Auto`, the default, derives both from the volume's size. A stated
+  geometry writes the bytes `mkfs.fat -g` writes.
+- **`--size auto` sizes an exFAT volume and a btrfs to their contents,** as it does the other
+  three families, through `exfat::FormatPlan::fit` and `btrfs::FormatPlan::fit`. An exFAT
+  search takes each band of one conventional cluster size in turn, so a tree that fits below
+  a step in the cluster size is fitted there. A btrfs counts its slack as room for file data,
+  as `df` reports it. `exfat::FormatError` and `btrfs::FormatError` gain `SlackShareTooLarge`
+  and `DoesNotFit`.
+- **`TreeError::LimitExceeded` says which bound stopped the read** in its `bound` field, a
+  `Bound`: `FileBytes` for `Limits::max_file_bytes`, `Entries` for `Limits::max_walk_entries`
+  and the names an image has room to describe, and `PathBytes` for the longest path a walk
+  builds, 4,096 bytes.
+- **`serde` covers every family.** `btrfs::BtrfsLayout` and `apfs::ApfsLayout`, with the types
+  they hold, and the btrfs and APFS scan reports serialize, as ext's, FAT's and exFAT's do. A
+  feature word and a block group's flags serialize as the on-disk words they wrap.
+
+### Fixed
+
+- **An ext inode whose attribute entries fill its body to within a header of its end reads.**
+  The entry list ends at a four-byte zero word, which such a region has room for and a
+  sixteen-byte header does not; the parse asked for the header first and refused the inode's
+  attributes.
+- **A btrfs file a Linux kernel compressed and stored inline reads back.** The kernel
+  compresses a small file together with the rest of the sector it occupies, so the stream of
+  an inline record expands to the whole sector and the record's `ram_bytes` is the file's
+  share of it. Every such file of every algorithm — zlib, LZO and zstd — was refused as a
+  stream expanding past its record, which on a volume mounted with compression is every file
+  small enough to be stored inline. An inline record's stream is undone into a sector's room,
+  and the file is its first `ram_bytes`.
+- **A btrfs file `mkfs.btrfs --compress` wrote reads back at every length.** The tool
+  compresses a file's last extent from the file's own bytes and records a whole number of
+  sectors, so the stream stops at the file's end. A regular extent's stream is held to every
+  byte the file reads from it, and the rest is zeros the file never reads.
+- **A btrfs snapshot of a subvolume holding nested ones reads as its snapshot.** An entry
+  naming a subvolume crosses into it only where the subvolume's backref names that directory
+  and name. Any other is an empty directory, `btrfs::Node::stub`, where a lookup and a walk
+  read the nested subvolume's files before.
+- **An ext attribute value kept in an inode of its own is bounded.** It is read only where the
+  filesystem has `ea_inode`, and only up to the 64 KiB an attribute value holds, so a sparse
+  value inode claiming gigabytes costs a refusal. A scan checks such an inode without reading
+  its data, and reports one the filesystem lacks.
+- **Opening an ext filesystem that needs recovery is bounded by its image.** The journal spans
+  at most the blocks the image holds, and a revoke block the log reaches many times revokes
+  each block once.
+- **An ext scan of directories sharing their blocks finishes in time proportional to the
+  image.** An index leaf is hashed once however many directories name it. Past the point where
+  directories claim more blocks than the image has, the scan reports it once as
+  `ext::ReadError::DirectoryBlocksShared` and walks no more directories' content.
+- **An ext read and an ext scan agree about an extent tree.** Every node is held to the
+  logical range its parent's entry gives it, so a whole-file read and a windowed one answer
+  each block one way, and a scan reports a node one tree reaches twice.
+- **An ext group descriptor's uninitialized flags mean something only under `uninit_bg` or
+  `metadata_csum`.** Without either they are reported as
+  `ext::ReadError::UninitFlagWithoutFeature` and the group is read as any other. Under
+  `uninit_bg` the crc16 descriptor checksum is verified, and an in-use inode in a group marked
+  as holding none is `ext::ReadError::InodeInUninitGroup`.
+- **An ext filesystem with `bigalloc` reads.** A group's blocks are its bitmap's clusters times
+  the blocks a cluster holds, and `FsTree::usage` reports clusters. At a 1 KiB block, where the
+  first data block is 0, the layout is refused by name as `ext::ReadError::UnsupportedLayout`,
+  and detection names it ext4.
+- **An ext format that cannot succeed fails before its destination opens.** A plan places its
+  model, so a source too large for the size is refused by `FormatPlan::new` and by a dry run.
+  `resize_inode` without `sparse_super` is refused, as `mke2fs` refuses it.
+- **An ext symbolic link reads as its target wherever the format keeps the target in the
+  inode.** A target shorter than sixty bytes is the inode's block area, as the format states,
+  however many blocks the link is charged for. A `bigalloc` filesystem charges a whole cluster
+  for a link's attribute block, and `ea_inode` charges the blocks of a value kept in an inode
+  of its own; either made a short link read its target as a block map.
+- **An ext attribute's hash reads its name's bytes as unsigned under either directory-hash
+  signedness,** as `mke2fs` writes it on every host. A name with a byte at or above `0x80`
+  hashed sign-extended where `hash_signedness` was `Signed`.
+- **An ext journal is the size `mke2fs` gives it at every size.** Between 2^22 and 2^25
+  blocks the size doubles at each power of two rather than growing with the block count, so
+  a 10 GiB filesystem of 4 KiB blocks has a 16,384-block journal where it had 20,480.
+- **An ext backup superblock past group 65,535 records 65,535 as its group,** as `mke2fs`
+  writes it, where it recorded the group's low sixteen bits.
+- **Smaller ext fixes.** One inode per block at a 1 KiB block fills each group's bitmap rather
+  than overflowing it. `s_overhead_clusters` matches `mke2fs` at every block size and on ext3.
+  A fit stops at a refusal no size changes. A hard link named under `/lost+found` is refused.
+  A filesystem needing recovery with no journal is malformed. An inline file is held to the
+  read cap by a streamed read, and an inline link to `PATH_MAX`. A directory's size takes its
+  high word under `large_dir`.
+- **A layer replacing one name of a file with two leaves the other name its file.**
+  `LayeredSource` replaces a name, so a hard link to the replaced entry goes on naming the
+  file it named rather than the replacement.
+- **An archive refuses a file whose storage yields fewer bytes than its length.** The member
+  would be shorter than its header, and every member after it read out of step. It is
+  `ArchiveError::ShortRead`, the refusal a directory extraction gives the same file.
+- **An extraction that could not set a recorded owner writes no set-user-ID or set-group-ID
+  bit on a file.** Those bits would make the program run as whoever extracted it. The drop is
+  recorded as special bits in the report's fidelity, and a directory keeps its set-group-ID.
+- **An extraction sets a node's attributes before its mode.** A `user.*` attribute needs write
+  permission on the node, so a node recorded as `0444` or `0555` took none of them. The ACLs
+  are set after the mode, which rewrites an access ACL's mask.
+- **An extraction removes the ACLs a destination passes down where the image records none,**
+  and finishes every node it cannot open without following a link.
+- **A GNU tar time before 1970 reads as that time.** GNU tar writes one in the binary
+  two's-complement form, which was refused as past the range ext4 stores.
+- **A btrfs filesystem's superblock copies compete only within their filesystem.** Where the
+  primary verifies, a copy of another filesystem is `btrfs::Mirror::Foreign` and is not
+  chosen however late its generation, as a filesystem written over a used device leaves them.
+- **Smaller btrfs fixes.** Data checksums are held over the sectors an uncompressed record
+  reads. A subvolume being deleted is not walked. A tree block above level 7 is refused. The
+  free count `usage` reports is the superblock's logical one, and is documented as such.
+- **The btrfs writer refuses what `btrfs check` refuses.** A link target that is empty, a sector
+  or longer, or holding a NUL; an attribute name past 255 bytes; a name holding a NUL; device
+  numbers wider than the field; and names sharing a hash past what one record joins, which
+  were refused only once the destination was open. The device it records is a whole number of
+  sectors.
+- **A FAT label may not begin with a space.** The writer refuses one, as `mkfs.fat` does, and
+  the reader reports a label entry led by a space and reads one of padding as no label.
+- **A FAT directory is held to the 2 MiB the format lets one be.** That is 65,536 entries of 32
+  bytes, long-name entries, `.`, `..` and the label included. The writer refuses a larger one
+  with `fat::ModelError::DirectoryTooLarge`, whatever the volume's size. The reader reads one
+  whole, as a Linux kernel does, and reports it as `fat::ReadError::DirectoryTooLong`, which
+  a strict read refuses. The bound is `fat::MAX_DIRECTORY_BYTES`, beside
+  `fat::MAX_DIRECTORY_ENTRIES`.
+- **The smallest exFAT volume is a mebibyte whatever its sectors.** A 1 MiB volume of
+  4096-byte sectors is 256 sectors, which the reader, detection and the planner refused.
+- **A read of an exFAT or btrfs file on a 32-bit target is not cut short by its length.** A
+  64-bit length narrows without truncating.
+- **An APFS read of part of a stream refuses a block two of its extents use,** as a read of
+  the whole stream does, wherever the two lie.
+- **APFS scans and formats stay in proportion to what they read.** A scan reads a checkpoint
+  object only once its place is judged apart from every other, checks its header first, and
+  stops when its findings are full. Names that compare equal are found by looking up each
+  name's form, so names chosen to share a hash cost no more than others.
+- **The command line classifies exits by whose fault they are.** A symbolic-link loop is no
+  such path, a read a cap stopped exits 8 without calling the filesystem malformed, and a short
+  file exits 4. A closed standard error ends no command early.
+- **The `ferrosys` binary's notice reproduces the `ferrosys-lzfse` license whole,** both of
+  its copyright lines included.
+- **A tree nested past the longest path a walk builds reads as the well-formed tree it is, in
+  every family.** A walk stops at the first path longer than 4,096 bytes as
+  `TreeError::LimitExceeded`, where btrfs and APFS reported `TreeError::Malformed`; a btrfs walk
+  past `Limits::max_walk_entries` is a limit as well. `extract` exits 8 on such a tree rather
+  than 4, through `--list`, `--to-tar` and `--to-dir` alike.
+- **An APFS scan reads a tree of any depth whole.** It reported the first path past 4,096 bytes
+  as structural damage and checked no link count in the volume. The APFS, FAT and exFAT scans
+  name what they find by a label of at most 4,096 bytes: the path, and past that bound an
+  ellipsis and the path's last components.
+- **`extract` names `--max-file-bytes` only when the file-size cap stopped the read.** It named
+  the option for every limit, a path too long included.
+
+### Changed
+
+- **APFS is a feature a build names, and the library's default build compiles this project's
+  code under MIT OR Apache-2.0 alone.** The default carries `ext`, `fat`, `exfat` and `btrfs`
+  with `zlib`, `lzo` and `zstd`, and a build reading APFS names `apfs`, `lzvn`, `lzfse` and
+  `lzbitmap`. The `ferrosys` and `ferrosys-cli` crates are licensed `MIT OR Apache-2.0`. The
+  Unicode Character Database tables APFS names are compared with are the `ferrosys-ucd`
+  crate, licensed `Unicode-3.0`, which `apfs` depends on; the LZVN and LZFSE decoders are the
+  `ferrosys-lzfse` crate, licensed `BSD-3-Clause`, which `lzvn` and `lzfse` depend on. Each is
+  released with this workspace's version and required at exactly that version. The `ferrosys`
+  binary carries every family and every decoder.
+- **An unrecognized image's refusal names each family the build leaves out.**
+  `DetectError::Unrecognized` ends its message with the Cargo feature that compiles each
+  family absent from the build, as "the `apfs` feature compiles APFS".
+- **A read that stops for want of a decoder names the Cargo feature that compiles it.** A
+  btrfs filesystem whose feature word records LZO or zstd extents, a btrfs file compressed
+  with zlib, LZO or zstd, and an APFS file of a decmpfs type this build does not decode are
+  each refused with a message ending "the `zstd` feature compiles its decoder", naming the
+  algorithm's own feature.
+- **`fat::Times::access` is an `Option`,** `None` for an access date the entry leaves zero,
+  which is how the format records a date not kept. Read as a date, zero was 1979-11-30.
+- **`exfat::MIN_VOLUME_SECTORS` is `exfat::MIN_VOLUME_BYTES`,** one mebibyte, since the floor
+  the specification states is in bytes and the sectors it spans follow from their size.
+- **`fat::VolumeLabel::new("")` is `LabelError::Empty`.** A volume without a label is one
+  whose `FormatOptions::label` is unset, and `format --label ""` formats one.
+- **`btrfs::Node` has a `stub` field,** true for the empty directory a snapshot holds in place
+  of a nested subvolume.
+- **`ferrosys_lzfse::Error` and its variants are `#[non_exhaustive]`,** as every error the
+  workspace publishes is.
+- **An in-memory format refuses an image no allocator will provide** as
+  `ImageTooLargeInMemory`, in every family, where it aborted the process.
+- **The CLI reports a read beyond this build as a command it could not carry out.** A
+  feature, an encoding, or content the build does not read is no verdict about the
+  filesystem, so `extract` reports it as itself, without "the filesystem is malformed", and
+  exits 8 rather than 4 — through `--cat`, `--list`, `--to-tar` and `--to-dir` alike.
+- **A closed set serializes as the word the crate prints for it, in every family.**
+  `fat::FatType` serializes as `"fat32"`, and `btrfs::Profile` and `btrfs::Pool` as `"dup"`
+  and `"system"`, where each serialized as its Rust variant name.
+- **`btrfs::Pool::name` is `btrfs::Pool::as_str`,** as every other closed set's word is.
+
+### Gates
+
+- **The public API snapshot pins `ferrosys-ucd` and `ferrosys-lzfse`** beside the library's
+  eight configurations, and the default configuration's snapshot is the surface without APFS.
+- **The ext reader's fuzz target holds two answers to each other.** A file read whole and
+  streamed reads the same bytes, and a read refused for the image's bytes is a read of an image
+  the scan does not call clean.
+- **New oracle gates.** `mke2fs` images with `uninit_bg` and with `bigalloc` read clean, and
+  `s_overhead_clusters` matches `mke2fs` for every profile and block size. Files
+  `mkfs.btrfs --compress zlib` wrote read back at lengths around a sector. A 1 MiB exFAT volume
+  of 4096-byte sectors reads, and one this crate writes passes `fsck.exfat`.
+- **macOS 15, 26 and 27 accept APFS trees whose root has one child.** Seven more containers
+  in the set macOS judges hold one-byte files at the counts where the writer gives the
+  file-system tree or the object map a root over one leaf or one index node, and at the next
+  count, where the root has two.
+- **The CI workflow's token reads the repository and writes nothing.**
+- **`cargo deny` allows `Unicode-3.0` and `BSD-3-Clause` for the crates that carry them
+  alone,** so a third-party crate under either still fails.
+- **The cross-target check builds for `riscv64gc-unknown-linux-gnu`**, a third 64-bit
+  instruction set beside the x86_64 and aarch64 the runners are, the crate and its test
+  targets alike.
+- **The `serde` gate holds every family.** Each family's scan report, planned layout and
+  closed sets are serialized in a module that runs with that family alone.
+
 ## [0.7.0] - 2026-10-29
 
 A fifth family: APFS, read and written. ferrosys reads an APFS container and every volume in

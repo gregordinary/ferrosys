@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/ferrosys-cli", "crates/ferrosys"]
+members = ["crates/ferrosys-cli", "crates/ferrosys", "crates/ferrosys-ucd", "crates/ferrosys-lzfse"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # Minimum supported Rust version: the floor a consumer must have. Development
 # builds on the newer toolchain pinned in rust-toolchain.toml; a dedicated CI job
@@ -11,18 +11,17 @@ edition = "2024"
 # silently raise it.
 rust-version = "1.88"
 # The crates' own code is under a permissive dual license, the Rust-ecosystem norm for
-# a library meant to be depended on widely. The Unicode character tables APFS names are
-# held to are data from the Unicode Character Database, under the Unicode License v3,
-# which each crate's LICENSE-UNICODE carries. The LZVN and LZFSE decoders are derived from
-# Apple's lzfse project, under BSD-3-Clause, whose notice each crate's THIRD-PARTY-NOTICES
-# carries. The expression covers the package as published, which holds all of that code; a
-# build compiles the tables with the `apfs` feature and the decoders with `lzvn` and `lzfse`,
-# so a build without those three compiles code under MIT OR Apache-2.0 alone.
-license = "(MIT OR Apache-2.0) AND Unicode-3.0 AND BSD-3-Clause"
-# Both crates share one guide, so the URL is declared once here and inherited. A
+# a library meant to be depended on widely. Two crates hold code under licenses of their own,
+# and each declares it in its manifest: `ferrosys-ucd`, the Unicode Character Database tables
+# APFS names are compared with, under the Unicode License v3, and `ferrosys-lzfse`, the LZVN
+# and LZFSE decoders derived from Apple's lzfse project, under BSD-3-Clause. `ferrosys`
+# depends on each through the features that use it, `apfs` and `lzvn`, so the licenses a
+# build carries are the licenses of the crates it compiles.
+license = "MIT OR Apache-2.0"
+# The crates share one guide, so the URL is declared once here and inherited. A
 # registry links it from every crate's page.
 homepage = "https://gregordinary.github.io/ferrosys/"
-# Both crates come from one repository, so the URL is declared once here and
+# The crates come from one repository, so the URL is declared once here and
 # inherited. A registry links it from every crate's page.
 repository = "https://github.com/gregordinary/ferrosys"
 
@@ -94,7 +93,14 @@ lzokay = { version = "2.0.1", default-features = false, features = ["compress", 
 sha2 = { version = "0.11.1", default-features = false }
 # The version is required alongside the path so `cargo publish` accepts the
 # dependency: a published crate cannot carry a path-only dependency. At `0.x` the
-# minor is the breaking axis, so `"0.7"` resolves `>=0.7.0, <0.8.0` — the published
+# minor is the breaking axis, so `"0.8"` resolves `>=0.8.0, <0.9.0` — the published
 # `ferrosys` a released `ferrosys-cli` builds against, and it moves with every
 # version bump.
-ferrosys = { path = "crates/ferrosys", version = "0.7" }
+ferrosys = { path = "crates/ferrosys", version = "0.8" }
+# The two crates holding code under licenses of their own, each reached through a feature of
+# `ferrosys`. Each is released with the workspace's version and required at exactly that
+# version: a table row decides which hash an APFS name is stored under, and a decoder decides a
+# file's bytes, so a `ferrosys` release reads with the tables and decoders it was checked
+# against. The requirement moves with every version bump, as the one above does.
+ferrosys-ucd = { path = "crates/ferrosys-ucd", version = "=0.8.0" }
+ferrosys-lzfse = { path = "crates/ferrosys-lzfse", version = "=0.8.0" }

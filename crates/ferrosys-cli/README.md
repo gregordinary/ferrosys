@@ -10,9 +10,8 @@ binary carries five families:
 - APFS
 
 It creates, reports on and reads all five: btrfs subvolumes, and APFS volumes and their
-snapshots, included. It runs in userspace as a single
-self-contained binary, in safe Rust, over
-[`ferrosys`](https://crates.io/crates/ferrosys). It builds on Rust 1.88 or newer.
+snapshots, included. It runs in userspace as a single self-contained binary, in safe Rust,
+over [`ferrosys`](https://crates.io/crates/ferrosys). It builds on Rust 1.88 or newer.
 
 > **Status:** ferrosys is under active development. The version numbers follow the `0.x`
 > semantics of Cargo, so a breaking change increases the minor version.
@@ -50,13 +49,13 @@ ferrosys extract disk.img --volume Data --to-tar - | tar -tv
 `format` writes a filesystem of the type `--type` names: `ext2`, `ext3`, `ext4`, `fat12`,
 `fat16`, `fat32`, `exfat`, `btrfs`, or `apfs`. The default is `ext4`. The source is a tar
 archive (`--from-tar`), a directory tree on this machine (`--from-dir`, with
-`--owner UID:GID` to override the host's ownership), or empty. You name the size, or for the
-ext, FAT and APFS families you give `--size auto`, which finds it from the contents.
+`--owner UID:GID` to override the host's ownership), or empty. You name the size, or
+give `--size auto`, which finds it from the contents.
 
 The size, the timestamps, and the family's own identity are inputs. The identity option is
 `--uuid` for ext, `--volume-id` for FAT, `--volume-serial` for exFAT, `--fsid` for btrfs,
-and `--container-uuid` for APFS. Each APFS volume is one
-`--volume` naming its identifier and its name. The tool reads only what you give it, so the
+and `--container-uuid` for APFS. Each APFS volume is one `--volume` naming its identifier
+and its name. The tool reads only what you give it, so the
 same inputs write the same image every time.
 
 Each family's geometry has its own options. ferrosys refuses an option that belongs to
@@ -100,7 +99,7 @@ sets the severity at which the run fails.
 
 A btrfs is read the same way, subvolumes included. A path crosses a subvolume boundary the
 way it crosses a directory. An APFS container is read one volume at a time. `--volume`
-names it, by name or slot, and `--snapshot` names one of its snapshots.
+names it, by name, identifier, or slot, and `--snapshot` names one of its snapshots.
 
 ### `detect`
 
@@ -126,7 +125,7 @@ opinion about a filesystem could be formed at all:
 | ---- | ------- |
 | `0`  | The command did what it was asked, and any filesystem it read is sound. |
 | `4`  | A filesystem was read, and it is bad. |
-| `8`  | The command could not be carried out: the host got in the way, or the bytes are not a filesystem at all. |
+| `8`  | The command could not be carried out. The host got in the way, the bytes are no filesystem, a cap stopped a read, or the request is beyond the build or family. |
 | `16` | The command line could not be understood. |
 
 ## Documentation
@@ -136,10 +135,12 @@ every subcommand and option.
 
 ## License
 
-<!-- prose-lint: off -- Rule 23 exempts legal boilerplate. -->
+<!-- prose-lint: off -- Rule 29 exempts legal boilerplate. -->
 
 Licensed under either of Apache License, Version 2.0 or the MIT license, at your option.
-The Unicode character tables APFS names are held to are data from the Unicode Character
-Database, distributed under the Unicode License v3. The LZVN and LZFSE decoders are derived
-from Apple's lzfse project, distributed under the BSD-3-Clause license, and the LZBITMAP
-decoder reads the layout libzbitmap decodes; both notices are in `THIRD-PARTY-NOTICES`.
+The binary carries every family and every decoder, and with them two crates under licenses
+of their own: `ferrosys-ucd`, whose Unicode tables are data from the Unicode Character
+Database, distributed under the Unicode License v3 (`LICENSE-UNICODE`), and
+`ferrosys-lzfse`, whose LZVN and LZFSE decoders are derived from Apple's lzfse project,
+distributed under the BSD-3-Clause license. The LZBITMAP decoder reads the layout libzbitmap
+decodes. The notices for both are in `THIRD-PARTY-NOTICES`.

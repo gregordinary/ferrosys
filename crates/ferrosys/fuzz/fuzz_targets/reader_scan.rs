@@ -4,11 +4,16 @@
 //! lenient whole-image scan, checksum verification, and writing a filesystem's
 //! contents into an archive must never panic: every malformed input is a returned
 //! error, not a crash.
+//!
+//! Two answers are also held to each other, since a reader that gives one image two
+//! answers is wrong in one of them. A file read whole and the same file streamed a
+//! window at a time read the same bytes where both read. And a read refused for the
+//! image's own bytes is a read of an image the scan does not call clean.
 
 use std::io::Cursor;
 
 use ferrosys::ext::{OpenOptions, ReadPolicy, Reader};
-use ferrosys::{ArchiveSink, Limits};
+use ferrosys::{ArchiveSink, Limits, TreeError};
 use libfuzzer_sys::fuzz_target;
 
 /// What one file may cost this target.
@@ -26,14 +31,32 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(mut reader) = Reader::open_with(Cursor::new(data), &OpenOptions::new().limits(limits))
     {
         let _ = reader.verify_checksums();
-        let _ = reader.scan();
+        let clean = reader.scan().is_clean();
         let _ = reader.journal_superblock();
         // Every inode the walk reaches feeds the data, symlink, and xattr parsers, so a
         // crafted extent tree, symlink, or attribute block is exercised, not just the
         // directory walk. The inodes are collected first to end the walk's borrow.
         if let Ok(entries) = reader.walk() {
             for e in &entries {
-                let _ = reader.read_data(&e.inode);
+                match reader.read_data(&e.inode) {
+                    Ok(whole) => {
+                        let mut streamed = Vec::new();
+                        let read = reader.read_data_to(&e.inode, &mut streamed);
+                        assert!(
+                            read.is_ok() && streamed == whole,
+                            "a file read whole and streamed differ: {read:?}"
+                        );
+                    }
+                    Err(refused) => {
+                        let malformed =
+                            matches!(TreeError::from(refused.clone()), TreeError::Malformed { .. });
+                        assert!(
+                            !(malformed && clean),
+                            "a read refused for the image's bytes on an image the scan calls \
+                             clean: {refused}"
+                        );
+                    }
+                }
                 let _ = reader.read_symlink(&e.inode);
                 let _ = reader.xattrs(&e.inode);
             }

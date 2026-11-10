@@ -232,6 +232,10 @@ pub struct Container<R> {
     cache: BlockCache<Object>,
     /// The live checkpoint's mappings of its ephemeral objects, read when first asked for.
     ephemeral: Option<Arc<[CheckpointMapping]>>,
+    /// The same mappings' identifiers and addresses, sorted, so finding the one naming an
+    /// object is a search rather than a pass over them all — a free queue's tree asks once per
+    /// node.
+    ephemeral_by_oid: Option<Arc<[(u64, u64)]>>,
 }
 
 /// A container superblock in the descriptor area newer than the live one, which opening did not
@@ -583,6 +587,7 @@ impl<R: Read + Seek> Container<R> {
             limits: options.limits,
             cache: BlockCache::within(OBJECT_CACHE_BYTES, block_size, 64),
             ephemeral: None,
+            ephemeral_by_oid: None,
         }
     }
 
@@ -889,16 +894,50 @@ impl<R: Read + Seek> Container<R> {
     /// [`ReadError::WrongObject`] where two do: an identifier names one object.
     pub(crate) fn ephemeral_address(&mut self, oid: u64) -> Result<u64, ReadError> {
         let xid = self.xid();
-        let mappings = self.checkpoint_mappings()?;
-        let mut naming = mappings.iter().filter(|mapping| mapping.oid == oid);
-        let first = naming.next().ok_or(ReadError::MissingObject { oid, xid })?;
-        if let Some(second) = naming.next() {
+        let index = match &self.ephemeral_by_oid {
+            Some(index) => Arc::clone(index),
+            None => {
+                let mut index: Vec<(u64, u64)> = self
+                    .checkpoint_mappings()?
+                    .iter()
+                    .map(|mapping| (mapping.oid, mapping.address))
+                    .collect();
+                index.sort_unstable();
+                let index: Arc<[(u64, u64)]> = index.into();
+                self.ephemeral_by_oid = Some(Arc::clone(&index));
+                index
+            }
+        };
+        let at = index.partition_point(|&(named, _)| named < oid);
+        let mut naming = index[at..].iter().take_while(|&&(named, _)| named == oid);
+        let &(_, first) = naming.next().ok_or(ReadError::MissingObject { oid, xid })?;
+        if let Some(&(_, second)) = naming.next() {
             return Err(ReadError::WrongObject {
-                block: second.address,
+                block: second,
                 fault: "an identifier another mapping of the checkpoint names",
             });
         }
-        Ok(first.address)
+        Ok(first)
+    }
+
+    /// The live checkpoint's space manager: the container's own account of which of its blocks
+    /// are allocated.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::MissingObject`] where no mapping of the live checkpoint names it, and
+    /// whatever reading and verifying it refuses.
+    pub(crate) fn space_manager(&mut self) -> Result<SpaceManager, ReadError> {
+        let xid = self.xid();
+        let oid = self.superblock.space_manager_oid;
+        let mappings = self.checkpoint_mappings()?;
+        let mapping = mappings
+            .iter()
+            .find(|mapping| mapping.oid == oid)
+            .copied()
+            .ok_or(ReadError::MissingObject { oid, xid })?;
+        let object = self.read_ephemeral(&mapping, kind::SPACE_MANAGER, xid)?;
+        Ok(SpaceManager::read_from(&object)?)
     }
 
     /// The ephemeral object `mapping` names, read whole, verified, and held to being of `kind`
@@ -918,15 +957,27 @@ impl<R: Read + Seek> Container<R> {
                 why: "not whole blocks, or more than this crate reads",
             });
         }
-        let mut bytes = vec![0u8; size as usize];
+        // The header is in the first block, and what it says is held to the mapping before the
+        // rest is read: a mapping may claim sixteen mebibytes for an object that is not there.
+        let mut bytes = vec![0u8; bs as usize];
         self.read_blocks(mapping.address, &mut bytes)?;
+        let header = ObjectHeader::read_from(&bytes)?;
+        if size > bs {
+            if header.oid != mapping.oid || header.type_word != mapping.type_word {
+                return Err(ReadError::WrongObject {
+                    block: mapping.address,
+                    fault: "an object of another type or identifier than its mapping says",
+                });
+            }
+            bytes.resize(size as usize, 0);
+            self.read_blocks(mapping.address + 1, &mut bytes[bs as usize..])?;
+        }
         if !verify(&bytes) {
             return Err(ReadError::BadChecksum {
                 object: "ephemeral object",
                 block: mapping.address,
             });
         }
-        let header = ObjectHeader::read_from(&bytes)?;
         // A mapping's type is the whole 32-bit type word, flags included (reference p. 40). A
         // subtype other than the mapping's is read past here, and graded by the scan.
         let fault = if header.kind() != kind || header.type_word != mapping.type_word {
@@ -1661,7 +1712,11 @@ pub enum ReadError {
     },
     /// A file's content is compressed with a method this build does not decode.
     #[error(
-        "inode {inode} is compressed with decmpfs type {method}, which this build does not decode"
+        "inode {inode} is compressed with decmpfs type {method}, which this build does not \
+         decode{}",
+        crate::compress::CompiledBy(
+            crate::apfs::decmpfs::layout(*.method).and_then(|(_, encoding)| encoding.algorithm())
+        )
     )]
     #[non_exhaustive]
     UnsupportedCompression {
@@ -1731,7 +1786,13 @@ pub enum ReadError {
         /// The limit.
         limit: usize,
     },
-    /// A path longer than this crate builds.
+    /// A walk reached a name whose path is longer than the longest a walk builds, 4,096
+    /// bytes, which is Linux's `PATH_MAX`.
+    ///
+    /// Nothing in the format bounds how deep a tree nests, so the tree is well-formed and this
+    /// is a limit rather than damage: the shared surface reports it as
+    /// [`TreeError::LimitExceeded`](crate::TreeError::LimitExceeded) with
+    /// [`Bound::PathBytes`](crate::Bound::PathBytes), and a scan reads the tree whole.
     #[error("a path longer than this crate builds: {}", crate::escape::printable(.path))]
     #[non_exhaustive]
     PathTooLong {
@@ -1745,6 +1806,29 @@ io_error!(ReadError);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_compression_names_the_feature_that_decodes_it() {
+        // Type 11 keeps LZFSE inline: refused only by a build that left the decoder out.
+        let refused = ReadError::UnsupportedCompression {
+            inode: 18,
+            method: 11,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "inode 18 is compressed with decmpfs type 11, which this build does not decode; the \
+             `lzfse` feature compiles its decoder"
+        );
+        // A type no decoder reads has no feature to name.
+        let undefined = ReadError::UnsupportedCompression {
+            inode: 18,
+            method: 0x7f,
+        };
+        assert_eq!(
+            undefined.to_string(),
+            "inode 18 is compressed with decmpfs type 127, which this build does not decode"
+        );
+    }
 
     #[test]
     fn unnamed_bits_are_named_by_their_value() {

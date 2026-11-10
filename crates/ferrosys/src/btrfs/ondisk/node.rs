@@ -18,11 +18,12 @@ use crate::bytes::{get_arr, get_u8, get_u32, get_u64, put_arr, put_u8, put_u32, 
 
 use super::{CSUM_FIELD_LEN, DiskKey, ParseError};
 
-/// The deepest a btrfs tree may be, counting the leaf as level 0.
+/// The highest level a btrfs tree block carries, counting the leaf as level 0.
 ///
-/// The format's own ceiling. A descent is bounded by it independently of the visited set, so a
-/// block whose level does not decrease on the way down is refused rather than followed.
-pub const MAX_LEVEL: u8 = 8;
+/// The format's own ceiling: a tree is at most eight levels deep, so its levels run from 0 to
+/// 7. A descent is bounded by it independently of the visited set, so a block whose level does
+/// not decrease on the way down is refused rather than followed.
+pub const MAX_LEVEL: u8 = 7;
 
 /// The level a leaf carries, and the only level at which a block holds items.
 pub const LEAF_LEVEL: u8 = 0;

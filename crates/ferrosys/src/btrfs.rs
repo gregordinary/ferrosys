@@ -9,8 +9,8 @@
 //!
 //! # A format built differently from the others here
 //!
-//! The three other families in this crate address storage directly: a block number or a
-//! cluster number is arithmetic away from a byte offset. btrfs does not. **Every address in a
+//! ext, FAT, and exFAT address storage directly: a block number or a cluster number is
+//! arithmetic away from a byte offset. btrfs does not. **Every address in a
 //! btrfs is logical**, and a *chunk tree* maps that space onto the device — so a tree root, a
 //! child pointer, and a file's extents are all addresses in a space that exists only because
 //! something translates it.
@@ -25,7 +25,8 @@
 //! # Opening one
 //!
 //! [`Volume`] is the address space and the trees on it. Opening one reads every superblock
-//! copy the device holds, chooses the newest that verifies, and builds the chunk map:
+//! copy the device holds, chooses the newest that verifies and is of the filesystem a
+//! verifying primary names, and builds the chunk map:
 //!
 //! ```no_run
 //! use ferrosys::btrfs::{Volume, ondisk::objectid};
@@ -96,10 +97,11 @@
 //!
 //! The `incompat` feature word is the format telling a reader in advance that it will not
 //! understand what follows, so a bit outside [`SUPPORTED_INCOMPAT`] is a refusal naming the
-//! feature rather than a read that guesses. So is a checksum algorithm this crate does not
-//! compute, a filesystem spanning more than one device, and a chunk whose copies are pieces
-//! rather than whole — each of those is a filesystem that is entirely well-formed, and the
-//! refusal says what it would take to read it.
+//! feature rather than a read that guesses. So is a filesystem spanning more than one device,
+//! and a chunk whose copies are pieces rather than whole — each of those is a filesystem that
+//! is entirely well-formed, and the refusal says what it would take to read it. Every checksum
+//! algorithm the format defines is verified, and a value it does not define is
+//! [`ReadError::UnsupportedChecksum`].
 //!
 //! An unrecognized *item type* is the opposite contract and takes the opposite answer: it is a
 //! record this reader has no opinion about sitting beside records it does, so it keeps its
@@ -110,6 +112,7 @@ mod btree;
 mod chunk;
 mod decode;
 mod detect;
+mod fit;
 mod fs;
 mod geometry;
 mod materialize;

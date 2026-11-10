@@ -84,30 +84,15 @@ pub(crate) trait Plan: Sized {
     /// The options that family's format takes.
     type Options;
 
-    /// The `-t` word this family answers to, for the refusal below.
-    const FAMILY: &'static str;
-
     /// Plan a filesystem of exactly `bytes` bytes.
     fn sized(source: impl Source, bytes: u64, options: Self::Options) -> Result<Self, Error>;
 
     /// Plan the smallest filesystem that holds `source` with `slack` left free.
     ///
-    /// The default refuses, because the search is a family's own: how much room a filesystem
-    /// has left follows from its size, so the size that just holds a tree is a fixed point
-    /// arrived at by planning candidates and placing into them rather than by a formula. A
-    /// family with no such search does not implement this, which is what makes "this family
-    /// cannot" a fact the type carries rather than a function nothing reaches.
-    ///
-    /// A caller never meets the refusal: [`UsageError::NoFitForFamily`] is raised while the
-    /// command line is being read, before a source is opened. It is spelled once, here, so the
-    /// two cannot come to say different things.
-    fn fitted(source: impl Source, options: Self::Options, slack: Slack) -> Result<Self, Error> {
-        let _ = (source, options, slack);
-        Err(crate::args::UsageError::NoFitForFamily {
-            family: Self::FAMILY,
-        }
-        .into())
-    }
+    /// The search is a family's own: how much room a filesystem has left follows from its
+    /// size, so the size that just holds a tree is a fixed point arrived at by planning
+    /// candidates and placing into them rather than by a formula.
+    fn fitted(source: impl Source, options: Self::Options, slack: Slack) -> Result<Self, Error>;
 }
 
 /// A family whose plan is carried through to an image by [`realize`] and nothing else.

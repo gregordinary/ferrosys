@@ -11,7 +11,8 @@
 //! extended area after it, and `i_extra_isize` at offset `0x80` declares how much of
 //! that area is *in use*. A field in the extended area therefore exists only when the
 //! inode is both large enough to hold it and declares an extra area that reaches past
-//! its end — the kernel's `EXT4_FITS_IN_INODE`, spelled here as [`Inode::fits`].
+//! its end (the ext4 documentation's Index Nodes page, "Inode Size" and "Inode Timestamps"),
+//! which is [`Inode::fits`].
 //!
 //! This is not a corner case. `mke2fs` leaves the reserved inodes at
 //! `i_extra_isize = 0`, so on a filesystem another tool formatted those inodes carry
@@ -36,9 +37,10 @@ pub const ROOT_INODE_MODE: u16 = 0o40755;
 /// Everything past it is the extended area, and conditional — see [`Inode::fits`].
 pub const GOOD_OLD_SIZE: usize = 128;
 
-/// `EXT2_GOOD_OLD_FIRST_INO`: the first inode a file may use on a revision-0
-/// filesystem, where the superblock carries no `s_first_ino` field and the count of
-/// reserved inodes is fixed by the revision.
+/// The first inode a file may use on a revision-0 filesystem, where the superblock carries
+/// no `s_first_ino` field and the reserved inodes are the ten the ext4 documentation's
+/// Special inodes table lists, inode 11 being the first one free (its Super Block page gives
+/// `s_first_ino` as a revision-1 field).
 pub const GOOD_OLD_FIRST_INODE: u32 = 11;
 
 /// The `i_extra_isize` an inode of `inode_size` carries.
@@ -58,8 +60,8 @@ pub const fn extra_isize_for(inode_size: u16) -> u16 {
 
 /// Inode flags (`i_flags`).
 ///
-/// Only the flags this crate sets are named; a bit it does not name is carried through
-/// unchanged, because what an image holds is what it holds.
+/// The flags this crate sets are named, and so are the ones its reader follows; a bit it
+/// does not name is carried through unchanged, because what an image holds is what it holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct InodeFlags(u32);
 
@@ -74,6 +76,20 @@ impl InodeFlags {
     pub const HUGE_FILE: Self = Self(0x0004_0000);
     /// `EXT4_INDEX_FL` (`0x1000`): the directory is hash-indexed (htree).
     pub const INDEX: Self = Self(0x0000_1000);
+    /// `EXT4_ENCRYPT_FL` (`0x800`): the inode is encrypted. A file's data blocks, a
+    /// directory's entry names, and a symbolic link's target hold ciphertext; the inode's
+    /// other fields, its extended attributes, and the framing of its directory entries do
+    /// not.
+    pub const ENCRYPT: Self = Self(0x0000_0800);
+    /// `EXT4_EA_INODE_FL` (`0x200000`): the inode holds one extended attribute's value in its
+    /// data, for an attribute entry whose value is too large to keep beside it.
+    pub const EA_INODE: Self = Self(0x0020_0000);
+    /// `EXT4_INLINE_DATA_FL` (`0x10000000`): the inode keeps its content in its 60-byte
+    /// block area and its `system.data` attribute rather than in blocks.
+    pub const INLINE_DATA: Self = Self(0x1000_0000);
+    /// `EXT4_CASEFOLD_FL` (`0x40000000`): the directory's names are compared, and its index
+    /// hashed, with their case folded.
+    pub const CASEFOLD: Self = Self(0x4000_0000);
 }
 
 /// The earliest instant an inode's time fields represent: the signed 32-bit seconds field
@@ -129,8 +145,8 @@ pub const fn encode_time(t: Timestamp) -> (u32, u32) {
 /// Decode an instant from the stored `(field, extra)` pair: the signed seconds field plus
 /// the epoch offset, and the nanoseconds from the extra word's upper bits.
 ///
-/// This is the kernel's `ext4_decode_extra_time`, and like it, it reports what the inode
-/// holds rather than what a valid fraction would be: the extra word's upper thirty bits
+/// The encoding is the ext4 documentation's (Index Nodes, "Inode Timestamps"). This reports
+/// what the inode holds rather than what a valid fraction would be: the extra word's upper thirty bits
 /// reach 1 073 741 823, past the 1 000 000 000 that makes a second, so a decoded
 /// [`nanos`](Timestamp::nanos) is bounded by the field and not by the second it divides. A
 /// caller that goes on to render or re-encode a decoded instant checks it with
@@ -146,31 +162,41 @@ pub const fn decode_time(field: u32, extra: u32) -> Timestamp {
 
 /// Encode a device number into the inode block words `(i_block[0], i_block[1])`.
 ///
-/// A device whose major and minor numbers both fit in eight bits uses the compact
-/// "old" form in `i_block[0]`; a wider device uses the "new" form in `i_block[1]`.
-/// The unused word is left zero, which is how the kernel decides which form to read:
-/// a non-zero `i_block[0]` is the old form, otherwise `i_block[1]` is the new form.
+/// Two forms, as a Linux kernel and the pinned `debugfs` write them (observed; the format's
+/// documentation says only that a device's number lives in the block area):
+///
+/// - **Compact**, where the major and the minor both fit in a byte: the word `i_block[0]`
+///   holds the minor in bits 0 to 7 and the major in bits 8 to 15, and `i_block[1]` is
+///   zero.
+/// - **Wide**, for everything else: `i_block[0]` is zero, and `i_block[1]` holds the
+///   minor's low byte in bits 0 to 7, the major's twelve bits in 8 to 19, and the minor's
+///   remaining twelve bits in 20 to 31.
+///
+/// So a major has twelve bits and a minor twenty, which is the range the model admits.
 #[must_use]
 pub(crate) fn encode_device(major: u32, minor: u32) -> (u32, u32) {
-    if major < 256 && minor < 256 {
-        ((major << 8) | minor, 0)
-    } else {
-        let new = (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12);
-        (0, new)
+    debug_assert!(
+        major < 1 << 12 && minor < 1 << 20,
+        "{major}:{minor} is out of range"
+    );
+    if major < 1 << 8 && minor < 1 << 8 {
+        return ((major << 8) | minor, 0);
     }
+    let wide = (minor & 0xff) | (major << 8) | ((minor >> 8) << 20);
+    (0, wide)
 }
 
-/// Decode a device number `(major, minor)` from the two inode block words, mirroring
-/// [`encode_device`].
+/// Decode a device number `(major, minor)` from the two inode block words: the compact form
+/// where `i_block[0]` is non-zero, and the wide form in `i_block[1]` otherwise, as
+/// [`encode_device`] lays them out.
 #[must_use]
 pub(crate) fn decode_device(block0: u32, block1: u32) -> (u32, u32) {
     if block0 != 0 {
-        ((block0 >> 8) & 0xff, block0 & 0xff)
-    } else {
-        let major = (block1 & 0x000f_ff00) >> 8;
-        let minor = (block1 & 0xff) | ((block1 >> 12) & 0x000f_ff00);
-        (major, minor)
+        return ((block0 >> 8) & 0xff, block0 & 0xff);
     }
+    let major = (block1 >> 8) & 0xfff;
+    let minor = (block1 & 0xff) | ((block1 >> 20) << 8);
+    (major, minor)
 }
 
 /// An inode: one file's metadata and the 60-byte area that maps its blocks.
@@ -264,8 +290,7 @@ impl Inode {
     pub const CHECKSUM_HI_OFFSET: usize = 0x82;
 
     /// Whether the extended field at `off` spanning `width` bytes exists in an inode of
-    /// `inode_size` whose extra area declares `extra_isize` — the kernel's
-    /// `EXT4_FITS_IN_INODE`.
+    /// `inode_size` whose extra area declares `extra_isize`.
     ///
     /// The field must lie within the inode *and* within the extra area the inode
     /// declares in use. Both bounds matter: the first is what makes a 128-byte inode
@@ -280,10 +305,9 @@ impl Inode {
 
     /// Whether this inode carries `i_checksum_hi`, the high half of its checksum.
     ///
-    /// When it does not, the stored checksum is the low sixteen bits alone, and a
-    /// verifier must narrow its computed value to match — which is what
-    /// `ext4_inode_csum_verify` does with `calculated &= 0xFFFF`. Comparing a full
-    /// 32-bit value against a stored half rejects a healthy inode.
+    /// When it does not, the stored checksum is the low sixteen bits alone (the ext4
+    /// documentation's Checksums page), and a verifier narrows its computed value to
+    /// match. Comparing a full 32-bit value against a stored half rejects a healthy inode.
     #[must_use]
     pub const fn has_checksum_hi(inode_size: u16, extra_isize: u16) -> bool {
         Self::fits(inode_size, extra_isize, Self::CHECKSUM_HI_OFFSET, 2)
@@ -720,7 +744,7 @@ mod tests {
 
     #[test]
     fn the_checksum_high_half_exists_only_when_the_extra_area_reaches_it() {
-        // The kernel's EXT4_FITS_IN_INODE(raw, ei, i_checksum_hi): 0x82 + 2 <= 128 +
+        // The field at 0x82 is two bytes, so it exists where 0x82 + 2 <= 128 +
         // i_extra_isize, i.e. i_extra_isize >= 4. mke2fs leaves the reserved inodes at
         // zero, so on a foreign filesystem they store the low half alone.
         assert!(!Inode::has_checksum_hi(256, 0), "mke2fs's reserved inodes");
@@ -878,27 +902,49 @@ mod tests {
     }
 
     #[test]
-    fn small_device_uses_the_old_form() {
-        // /dev/null is char 1:3; both fit in a byte, so i_block[0] holds it.
-        let (b0, b1) = encode_device(1, 3);
-        assert_eq!(b0, (1 << 8) | 3);
-        assert_eq!(b1, 0);
-        assert_eq!(decode_device(b0, b1), (1, 3));
-        // A block device 8:0 (/dev/sda) round-trips too.
-        let (b0, b1) = encode_device(8, 0);
-        assert_eq!(decode_device(b0, b1), (8, 0));
+    fn a_device_number_is_laid_out_as_a_kernel_and_debugfs_lay_it_out() {
+        // (major, minor) -> (i_block[0], i_block[1]), read out of device nodes a Linux 7.1
+        // kernel made (`mknod`) and the pinned `debugfs` made (`mknod`), then dumped.
+        let observed = [
+            ((1, 3), (0x0000_0103, 0)),
+            ((8, 0), (0x0000_0800, 0)),
+            ((0, 1), (0x0000_0001, 0)),
+            ((255, 255), (0x0000_ffff, 0)),
+            ((0, 0), (0, 0)),
+            ((256, 0), (0, 0x0001_0000)),
+            ((0, 256), (0, 0x0010_0000)),
+            ((255, 256), (0, 0x0010_ff00)),
+            ((256, 255), (0, 0x0001_00ff)),
+            ((300, 5), (0, 0x0001_2c05)),
+            ((4095, 0), (0, 0x000f_ff00)),
+            ((0, 65_535), (0, 0x0ff0_00ff)),
+            ((255, 65_536), (0, 0x1000_ff00)),
+            ((0x123, 0x4_5678), (0, 0x4561_2378)),
+            ((0, 1_048_575), (0, 0xfff0_00ff)),
+            ((4095, 1_048_575), (0, 0xffff_ffff)),
+        ];
+        for ((major, minor), words) in observed {
+            assert_eq!(encode_device(major, minor), words, "{major}:{minor}");
+            assert_eq!(
+                decode_device(words.0, words.1),
+                (major, minor),
+                "{words:x?}"
+            );
+        }
     }
 
     #[test]
-    fn wide_device_uses_the_new_form() {
-        // A minor past 255 forces the new form in i_block[1].
-        let (b0, b1) = encode_device(1, 300);
-        assert_eq!(b0, 0);
-        assert_ne!(b1, 0);
-        assert_eq!(decode_device(b0, b1), (1, 300));
-        // A large major too.
-        let (b0, b1) = encode_device(4095, 1_048_575);
-        assert_eq!(decode_device(b0, b1), (4095, 1_048_575));
+    fn every_device_number_in_range_round_trips() {
+        for major in (0..4096).step_by(7).chain([255, 256, 4095]) {
+            for minor in (0..1 << 20)
+                .step_by(4099)
+                .chain([255, 256, 65_535, 1_048_575])
+            {
+                let (b0, b1) = encode_device(major, minor);
+                assert_eq!(decode_device(b0, b1), (major, minor), "{major}:{minor}");
+                assert!(b0 == 0 || b1 == 0, "one form at a time");
+            }
+        }
     }
 
     #[test]

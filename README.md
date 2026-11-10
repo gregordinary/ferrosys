@@ -9,18 +9,24 @@ userspace, over ordinary byte streams, in safe Rust. It has five filesystem fami
 - btrfs
 - APFS
 
-Each family is a Cargo feature. The default build carries all five, and a build that turns
-the default off takes only the families you name.
+Each family is a Cargo feature. The default build carries the first four, and a build that
+turns the default off takes only the families you name. APFS is named with the decoders its
+compressed files use, as `--features apfs,lzvn,lzfse,lzbitmap`.
 
-This Cargo workspace has two crates:
+This Cargo workspace has four crates:
 
 - [`ferrosys`](crates/ferrosys) is the library. It has a reader per family, each behind a
   feature of its own, and a writer for each. The writers' on-disk geometry is
   byte-reproducible.
 - [`ferrosys-cli`](crates/ferrosys-cli) is the `ferrosys` binary. It puts the library on
   the command line and carries all five families.
+- [`ferrosys-ucd`](crates/ferrosys-ucd) is the Unicode Character Database tables APFS names
+  are compared with, under the Unicode License v3. The library's `apfs` feature depends on it.
+- [`ferrosys-lzfse`](crates/ferrosys-lzfse) is the LZVN and LZFSE decoders, derived from
+  Apple's lzfse project and under its BSD-3-Clause license. The library's `lzvn` and `lzfse`
+  features depend on it.
 
-Both crates build on Rust 1.88 or newer.
+Every crate in the workspace builds on Rust 1.88 or newer.
 
 > **Status:** ferrosys is under active development. The version numbers follow the `0.x`
 > semantics of Cargo. A breaking change increases the minor version, and a `0.x`
@@ -62,9 +68,10 @@ reservation. The image grows in place, and its descriptor table stays where it i
 The identifiers and timestamps an image carries are inputs. The writer produces the same
 image from the same inputs, every time, and puts only those inputs into it.
 
-The guarantee holds for one ferrosys version. Across versions it holds where the on-disk
-feature set is pinned. `ext::FeatureSet::DEFAULT` is frozen, and `ext::FeatureSet::LATEST`
-tracks current `mke2fs` and moves between releases by design.
+The guarantee holds for one ferrosys version. Across versions, a pinned feature set keeps
+its feature words, and the changelog names each correction to a formula under one.
+`ext::FeatureSet::DEFAULT` is frozen, and `ext::FeatureSet::LATEST` tracks current `mke2fs`
+and moves between releases by design.
 
 ### Fidelity and accepted loss
 
@@ -156,9 +163,9 @@ ferrosys extract disk.img --volume Data --snapshot before-upgrade --cat /notes.t
 | `detect` | Says which filesystem an image holds. |
 | `identity` | Re-stamps an ext filesystem with a new UUID, label, or checksum seed. |
 
-You name the size with `--size`. For the ext and FAT families, `--size auto` finds it
-from the contents. Every command that reads an image takes any family the binary carries.
-`identity` writes to one family and says so. The exit codes mirror the exit codes of
+You name the size with `--size`, or `--size auto` finds it from the contents. Every command
+that reads an image takes any family the binary carries. `identity` writes to one family and
+says so. The exit codes mirror the exit codes of
 `e2fsck`.
 
 The [command-line chapter](https://gregordinary.github.io/ferrosys/cli.html) of the guide
@@ -181,13 +188,13 @@ The guide and the API reference go to GitHub Pages together:
   built with [mdbook](https://rust-lang.github.io/mdBook/) from [`book/`](book). Build it
   locally with `mdbook serve book` or `mdbook build book`.
 - **[The API reference](https://gregordinary.github.io/ferrosys/api/)** is rustdoc for
-  the crate. `cargo doc --no-deps` generates it. The command
-  `mdbook test book -L target/debug/deps` compiles the guide's code examples against the
-  crate, so the examples and the API agree.
+  the crate, every feature included. `cargo doc --no-deps --all-features` generates it. The
+  command `mdbook test book -L target/debug/deps` compiles the guide's code examples against
+  the crate, so the examples and the API agree.
 
 ## License
 
-<!-- prose-lint: off -- Rule 23 exempts legal boilerplate. -->
+<!-- prose-lint: off -- Rule 29 exempts legal boilerplate. -->
 
 Licensed under either of
 
@@ -196,14 +203,19 @@ Licensed under either of
 
 at your option.
 
-The Unicode character tables APFS names are held to are data from the Unicode Character
-Database, distributed under the Unicode License v3 ([LICENSE-UNICODE](LICENSE-UNICODE)). The
-LZVN and LZFSE decoders are derived from Apple's lzfse project, distributed under the
-BSD-3-Clause license, and the LZBITMAP decoder reads the layout libzbitmap decodes; both
-notices are in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The library's `apfs` feature
-compiles the Unicode tables, and its `lzvn` and `lzfse` features compile the decoders derived
-from Apple's code; all three are in the default set. A build of the library's other features
-compiles code under MIT OR Apache-2.0 alone.
+`ferrosys` and `ferrosys-cli` are under that license. Two crates hold code under licenses of
+their own, and the library reaches each through the features that use it:
+
+- [`ferrosys-ucd`](crates/ferrosys-ucd), through `apfs`: its Unicode tables are data from the
+  Unicode Character Database, distributed under the Unicode License v3
+  ([LICENSE-UNICODE](crates/ferrosys-ucd/LICENSE-UNICODE)).
+- [`ferrosys-lzfse`](crates/ferrosys-lzfse), through `lzvn` and `lzfse`: its decoders are
+  derived from Apple's lzfse project, distributed under the BSD-3-Clause license
+  ([LICENSE](crates/ferrosys-lzfse/LICENSE)).
+
+The library's default build compiles this project's code under MIT OR Apache-2.0 alone. The
+LZBITMAP decoder reads the layout libzbitmap decodes, and the
+binary carries all three; [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) holds the notices.
 
 ### Contribution
 

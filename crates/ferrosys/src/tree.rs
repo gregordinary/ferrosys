@@ -1,13 +1,14 @@
-//! The extraction surface: [`FsTree`], the four things a sink needs of any family's
+//! The extraction surface: [`FsTree`], what a sink and a caller need of any family's
 //! reader.
 //!
 //! Opening an image hands back that family's own reader, whole, because the families'
 //! readers are not interchangeable. Draining one into somewhere else is the exception: a
 //! tar archive, a directory tree on this host, and a listing all want the same four things
 //! — walk the names, stat one, stream a file's bytes, resolve a link — and none of them
-//! wants to know which format is underneath.
+//! wants to know which format is underneath. A caller answering one request at a time wants
+//! three more: find a path, list a directory, and report the room.
 //!
-//! So this trait is exactly those four, kept to what those consumers call. Anything one
+//! So this trait is exactly those seven, kept to what those consumers call. Anything one
 //! family alone can answer stays on that family's concrete reader, where a caller reaches
 //! it by matching on what opening an image hands back.
 //!
@@ -42,10 +43,10 @@ pub(crate) const BODY_WINDOW: usize = 1 << 20;
 ///
 /// The classification is shared: whether the source could not be read at all, whether the
 /// filesystem's own bytes are wrong, whether it uses something this build does not follow,
-/// and whether a caller's limit stopped the read are the four answers a sink acts on, and
-/// they mean the same thing for every family. The family's own message rides along, and a
-/// caller that needs the family's *typed* error opens that family's reader directly rather
-/// than going through this surface.
+/// whether a bound stopped the read, and whether a path names nothing are the answers a sink
+/// acts on, and they mean the same thing for every family. The family's own message rides
+/// along, and a caller that needs the family's *typed* error opens that family's reader
+/// directly rather than going through this surface.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TreeError {
@@ -94,16 +95,73 @@ pub enum TreeError {
         /// That reader's own message.
         detail: String,
     },
-    /// A read would have exceeded a bound the caller set through
-    /// [`Limits`](crate::Limits).
+    /// A read would have exceeded a bound: one the caller set through
+    /// [`Limits`](crate::Limits), or the longest path a walk builds.
+    ///
+    /// No verdict that the filesystem is malformed: a sound one can reach the caller's caps
+    /// and the longest path. [`Bound::Entries`] is also reached by an image whose storage
+    /// describes fewer names than it claims.
     #[error("{family} read exceeded a limit: {detail}", family = .family.as_str())]
     #[non_exhaustive]
     LimitExceeded {
         /// The family whose reader stopped.
         family: Family,
+        /// Which bound applied.
+        bound: Bound,
         /// That reader's own message, naming the bound that applied.
         detail: String,
     },
+    /// A path names nothing in the filesystem: a component that is not there, one that is not a
+    /// directory with a name after it, or a chain of symbolic links that does not end.
+    ///
+    /// A statement about the path that was asked for, and none about the filesystem.
+    #[error(
+        "no such path in the {family} filesystem: {}",
+        crate::escape::printable(.path),
+        family = .family.as_str()
+    )]
+    #[non_exhaustive]
+    NotFound {
+        /// The family whose reader looked.
+        family: Family,
+        /// The path, as it was given.
+        path: Vec<u8>,
+    },
+}
+
+impl TreeError {
+    /// What a read `bound` stopped reports, in `family`'s words: `reason` is the family's own
+    /// account of the bound it reached.
+    pub(crate) fn limit(family: Family, bound: Bound, reason: &impl std::fmt::Display) -> Self {
+        TreeError::LimitExceeded {
+            family,
+            bound,
+            detail: reason.to_string(),
+        }
+    }
+}
+
+/// Which bound stopped a read, as [`TreeError::LimitExceeded`] reports it.
+///
+/// [`FileBytes`](Self::FileBytes) is the caller's, set through [`Limits`](crate::Limits), and a
+/// read past it is one a larger setting carries out. [`Entries`](Self::Entries) is the
+/// caller's cap too, or the names the image's storage has room to describe where that is
+/// lower, which a well-formed filesystem never reaches. [`PathBytes`](Self::PathBytes) is this
+/// crate's own and has no setting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Bound {
+    /// [`Limits::max_file_bytes`](crate::Limits::max_file_bytes): a file, or an attribute's
+    /// value, longer than the cap.
+    FileBytes,
+    /// [`Limits::max_walk_entries`](crate::Limits::max_walk_entries), or the names the
+    /// image's storage has room to describe where that is lower: a walk, a directory, or a
+    /// tree holding more entries than a read gathers.
+    Entries,
+    /// The longest path a walk builds, 4,096 bytes, which is Linux's `PATH_MAX`: a tree
+    /// nested deeper than the paths a walk hands out reach. Every format here holds such a
+    /// tree, and a scan reads one whole.
+    PathBytes,
 }
 
 /// What a node in a filesystem tree is, as an extraction sees it.
@@ -143,6 +201,124 @@ pub enum NodeKind {
     Fifo,
     /// A Unix-domain socket node.
     Socket,
+}
+
+/// One name in a directory: what it is called, what is there, and the family's own handle to
+/// it — what [`FsTree::list`] hands back for each name, and [`FsTree::find`] for the one a path
+/// ends at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub struct Child<N> {
+    /// The name. For a name [`FsTree::list`] hands back, it is the one the directory stores.
+    /// For the node [`FsTree::find`] reaches, it is the last component of the path as the
+    /// caller wrote it: the caller's spelling where a family compares names without case, `..`
+    /// or `.` where the path ends in one, and empty for the root and for a path of separators
+    /// alone. A separator at the end of a path ends no component.
+    pub name: Vec<u8>,
+    /// What is there.
+    pub kind: NodeKind,
+    /// The family's own handle to it, which the by-node operations take.
+    pub node: N,
+}
+
+impl<N> Child<N> {
+    /// A name `name`, holding `kind`, reached through `node`.
+    pub fn new(name: Vec<u8>, kind: NodeKind, node: N) -> Self {
+        Self { name, kind, node }
+    }
+}
+
+/// How much room a filesystem has, counted in the unit it allocates in.
+///
+/// The count is the filesystem's own account of itself, read from what it records: each family
+/// documents at [`FsTree::usage`] where its numbers come from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Usage {
+    /// Bytes one unit holds: the block, the cluster, or the sector the format allocates in.
+    pub unit: u64,
+    /// How many units the filesystem holds.
+    pub total: u64,
+    /// How many of them are not allocated to anything, by the filesystem's own account. Where
+    /// a format stores some blocks more than once, its account may count each once; each
+    /// family's [`FsTree::usage`] says which account it reads.
+    pub free: u64,
+}
+
+impl Usage {
+    /// `total` units of `unit` bytes, `free` of them unallocated.
+    pub fn new(unit: u64, total: u64, free: u64) -> Self {
+        Self { unit, total, free }
+    }
+}
+
+/// The names a listing hands back, out of a directory's entries: `.` and `..` left out, every
+/// other name held to the rule a walk holds a name to, and the rest in byte order of their
+/// names.
+///
+/// The one place a listing's names are decided, for every family: what a walk would refuse to
+/// make a path of is refused here too, so a caller resolving a name it was listed reaches what
+/// a walk reaches.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+pub(crate) fn listed<T>(
+    family: Family,
+    entries: impl IntoIterator<Item = (Vec<u8>, T)>,
+) -> Result<Vec<(Vec<u8>, T)>, TreeError> {
+    let mut out = Vec::new();
+    for (name, keep) in entries {
+        if crate::path::is_dot_entry(&name) {
+            continue;
+        }
+        if crate::path::is_hostile_component(&name) {
+            return Err(TreeError::Malformed {
+                family,
+                detail: format!(
+                    "a directory entry carries a name no directory can hold: {}",
+                    crate::escape::printable(&name)
+                ),
+            });
+        }
+        out.push((name, keep));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// The name a path ends at, as [`FsTree::find`] reports it: its last component, empty for the
+/// root.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+pub(crate) fn last_name(path: &[u8]) -> Vec<u8> {
+    crate::path::canonical_parts(path)
+        .last()
+        .map_or_else(Vec::new, |name| name.to_vec())
+}
+
+/// A node `find` resolved that is not a directory, handed to `list`, as every family refuses it.
+#[cfg(any(
+    feature = "ext",
+    feature = "fat",
+    feature = "exfat",
+    feature = "btrfs",
+    feature = "apfs"
+))]
+pub(crate) fn not_a_directory(family: Family) -> TreeError {
+    TreeError::Malformed {
+        family,
+        detail: "the node is not a directory".to_string(),
+    }
 }
 
 /// One name a walk reached: where it is, what is there, and the family's own handle to it.
@@ -233,10 +409,10 @@ impl Attributes {
     ///
     /// `times` is `(access, modification, birth)`, or `None` for a node the format stores no
     /// entry for — the root directory on both families, which therefore has no times at all
-    /// rather than invented ones. The birth time is `None` where the entry records that it was
-    /// not kept. There is no change time in either format, so the modification time stands for
-    /// it: it is the closest thing the volume records, and the alternative is a value invented
-    /// out of nothing.
+    /// rather than invented ones. The access and birth times are `None` where the entry records
+    /// that one was not kept. There is no change time in either format, so the modification
+    /// time stands for it, and for an access time not kept: it is the closest thing the volume
+    /// records, and the alternative is a value invented out of nothing.
     ///
     /// The read-only bit is the single permission bit either format holds, and it clears the
     /// write bits of whatever mode the caller named. The other eight still came from the
@@ -248,7 +424,7 @@ impl Attributes {
         is_dir: bool,
         read_only: bool,
         times: Option<(
-            crate::time::Timestamp,
+            Option<crate::time::Timestamp>,
             crate::time::Timestamp,
             Option<crate::time::Timestamp>,
         )>,
@@ -262,16 +438,21 @@ impl Attributes {
             mode &= !crate::fidelity::WRITE_BITS;
         }
         let zero = crate::time::Timestamp::from_secs(0);
-        let (atime, mtime, btime) = times.unwrap_or((zero, zero, None));
+        let (atime, mtime, btime) = times.unwrap_or((None, zero, None));
         let mut synthesized = vec![
             Property::Ownership,
             Property::Permissions,
             Property::ChangeTime,
         ];
-        if times.is_none() {
+        // An access time the volume did not keep is the modification time, as the change time
+        // the format has no field for is.
+        if atime.is_none() {
             synthesized.push(Property::AccessTime);
+        }
+        if times.is_none() {
             synthesized.push(Property::ModificationTime);
         }
+        let atime = atime.unwrap_or(mtime);
         Self {
             meta: Metadata {
                 mode,
@@ -288,11 +469,11 @@ impl Attributes {
     }
 }
 
-/// The four operations an extraction needs of a filesystem, whichever family it is.
+/// The operations an extraction, a lookup, and a listing need of a filesystem, whichever
+/// family it is.
 ///
 /// Implemented by each family's reader. A sink is written once against this and drains an
-/// ext4 image, a FAT image, or anything else a later family adds, without a `match` and
-/// without knowing what it is draining.
+/// image of any family without a `match` and without knowing what it is draining.
 ///
 /// The trait is deliberately narrow. It is not a general filesystem interface and is not
 /// meant to grow into one: a question only one family can answer belongs on that family's
@@ -405,6 +586,37 @@ pub trait FsTree {
     /// symbolic link is a [`TreeError::Malformed`].
     fn link_target(&mut self, node: &Self::Node) -> Result<Vec<u8>, TreeError>;
 
+    /// The node `path` names, resolved from the root the way the family's own `lookup`
+    /// resolves it: through symbolic links in every component, the last one included, against
+    /// the filesystem's own root.
+    ///
+    /// The [`Child`]'s name is the path's last component, empty for the root.
+    ///
+    /// # Errors
+    ///
+    /// [`TreeError::NotFound`] where the path names nothing, and a [`TreeError`] where what it
+    /// passes through cannot be read.
+    fn find(&mut self, path: &[u8]) -> Result<Child<Self::Node>, TreeError>;
+
+    /// The names in directory `dir`, in byte order of their names, without `.` and `..`.
+    ///
+    /// Each name is one a walk would make a path of: one carrying a separator or a NUL, or
+    /// standing for the directory itself or its parent, is refused rather than listed. Reading
+    /// one directory reads that directory and the nodes it names, and nothing below them.
+    ///
+    /// # Errors
+    ///
+    /// A [`TreeError`] where the directory or a node it names cannot be read. Calling it on a
+    /// node that is not a directory is a [`TreeError::Malformed`].
+    fn list(&mut self, dir: &Self::Node) -> Result<Vec<Child<Self::Node>>, TreeError>;
+
+    /// How much room the filesystem has, by its own account.
+    ///
+    /// # Errors
+    ///
+    /// A [`TreeError`] where what the account is read from cannot be read.
+    fn usage(&mut self) -> Result<Usage, TreeError>;
+
     /// Refuse a file whose declared length is past the cap this read is held to — the
     /// caller's [`Limits::max_file_bytes`](crate::Limits::max_file_bytes), which defaults to
     /// no cap at all.
@@ -445,14 +657,15 @@ pub trait FsTree {
     fn check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError> {
         let cap = self.max_file_bytes();
         if size > cap {
-            return Err(TreeError::LimitExceeded {
-                family: self.family(),
-                detail: format!(
-                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read \
-                     is held to",
+            return Err(TreeError::limit(
+                self.family(),
+                Bound::FileBytes,
+                &format_args!(
+                    "{}: the file is {size} bytes, more than the {cap}-byte cap this read is \
+                     held to",
                     crate::escape::printable(path)
                 ),
-            });
+            ));
         }
         Ok(())
     }

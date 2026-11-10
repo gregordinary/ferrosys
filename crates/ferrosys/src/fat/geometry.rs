@@ -16,11 +16,11 @@
 //! whose every chain resolves to a different place than intended.
 //!
 //! The count is also circular. It is the data sectors divided by the cluster size; the data
-//! sectors are what remains after the tables; and the tables are sized to hold one entry per
-//! cluster. [`plan_layout`] resolves it the way the format's own reference computation does
-//! — estimate the count, size the table for it, then recompute the count from the space the
-//! sized table actually left — and the estimate is deliberately the low one, so the second
-//! pass never needs a third.
+//! sectors are what remains after the tables; and a table holds one entry per cluster plus
+//! the two every table reserves at its head. [`plan_layout`] resolves it by taking the
+//! smallest table that holds an entry for every cluster the space beyond the tables leaves,
+//! which fixes the count at the same time. That is the table the pinned `mkfs.fat` writes
+//! at every geometry the oracle tier compares.
 //!
 //! # Alignment
 //!
@@ -105,7 +105,6 @@ const FS_INFO_SECTOR: u16 = 1;
 /// The domain is closed and the type is exhaustive: these three are the whole format, and a
 /// fourth *should* break a caller that switches on it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
 pub enum FatType {
     /// A 12-bit table entry: the entries are packed three bytes to two clusters, so an
     /// entry may straddle a sector boundary.
@@ -123,6 +122,8 @@ crate::naming::named_choice!(FatType {
     FatType::Fat16 => "fat16",
     FatType::Fat32 => "fat32",
 });
+
+crate::naming::serialize_as_name!(FatType);
 
 impl FatType {
     /// Bits in one file allocation table entry.
@@ -758,76 +759,71 @@ const fn align(sectors: u32, sectors_per_cluster: u32, aligning: bool) -> u32 {
     }
 }
 
-/// Size a table for `clusters` clusters of `bits`-wide entries, plus the two entries every
-/// table reserves at its head, rounded up to whole sectors and then to a cluster boundary.
-fn table_sectors(clusters: u32, bits: u32, bytes_per_sector: u32, spc: u32, aligning: bool) -> u32 {
-    let entries = u64::from(clusters) + 2;
-    // 12-bit entries pack three bytes to two entries, so the byte count rounds up on an odd
-    // entry count. The other two widths divide exactly.
-    let bytes = match bits {
+/// Bytes a table of `entries` entries of `bits` bits occupies: a twelve-bit table packs two
+/// entries into three bytes, so an odd count rounds its last byte up.
+fn table_bytes(entries: u64, bits: u32) -> u64 {
+    match bits {
         12 => (entries * 3).div_ceil(2),
-        16 => entries * 2,
-        _ => entries * 4,
-    };
-    let sectors = bytes.div_ceil(u64::from(bytes_per_sector));
-    // A table that needed more sectors than a 32-bit count holds would need more clusters
-    // than any type addresses, which the caller of this has already excluded.
-    let sectors = u32::try_from(sectors).unwrap_or(u32::MAX);
-    align(sectors, spc, aligning)
+        _ => entries * u64::from(bits / 8),
+    }
 }
 
-/// The clusters that would fit in `fat_data_sectors` if every cluster paid for its own entry
-/// in every table, before any table has been sized.
-///
-/// This deliberately understates the count: the unused remainder of the tables and of the
-/// data region can together make room for one more cluster than it charges for. That is what
-/// makes the circular computation converge in one pass — size a table for this, then
-/// recompute the count from the space that table actually left — rather than oscillating.
-///
-/// Everything is carried at twice scale. A 12-bit entry is a byte and a half, and on a
-/// volume with a single table that half is the difference between the right count and one
-/// too few.
-fn cluster_estimate(
-    fat_data_sectors: u32,
-    bits: u32,
-    bytes_per_sector: u32,
-    spc: u32,
-    fats: u32,
-) -> u32 {
-    // Bytes two table entries occupy: 3, 4, and 8 for the three widths.
-    let two_entries = u64::from(bits) / 4;
-    let sector_bytes = u64::from(bytes_per_sector);
-    // The two entries every table reserves at its head are charged once per table, which is
-    // the term added to the numerator; the per-cluster cost is a cluster's own bytes plus one
-    // entry in each table, which is the denominator.
-    let numerator =
-        2 * u64::from(fat_data_sectors) * sector_bytes + 2 * u64::from(fats) * two_entries;
-    let denominator = 2 * u64::from(spc) * sector_bytes + u64::from(fats) * two_entries;
-    u32::try_from(numerator / denominator).unwrap_or(u32::MAX)
+/// The sectors a table takes that holds an entry for each of `clusters` clusters and the two
+/// it reserves at its head, in whole clusters where the volume is aligned.
+fn table_sectors(clusters: u32, bits: u32, bytes_per_sector: u32, spc: u32, aligning: bool) -> u32 {
+    let sectors = table_bytes(u64::from(clusters) + 2, bits).div_ceil(u64::from(bytes_per_sector));
+    // A table past a 32-bit sector count would address more clusters than any type does,
+    // which the callers have already excluded.
+    align(u32::try_from(sectors).unwrap_or(u32::MAX), spc, aligning)
 }
 
-/// The clusters and table size one type reaches, given the sectors available to the tables
-/// and the data region together.
+/// The tables and the clusters one type reaches in `space` sectors, the sectors its tables
+/// and its data region share.
+///
+/// Every table holds an entry for each cluster and the two the format reserves at its head,
+/// and the clusters are the whole clusters left once the tables are laid down (the
+/// specification's `CountofClusters`). The table is the smallest that satisfies both: in
+/// whole sectors, and in whole clusters where the volume is aligned. A larger table leaves
+/// fewer clusters, so the smallest one that fits is found by bisection over its size.
 fn candidate(
-    fat_data_sectors: u32,
+    space: u32,
     bits: u32,
     bytes_per_sector: u32,
     spc: u32,
     fats: u32,
     aligning: bool,
 ) -> Option<Candidate> {
-    let estimate = cluster_estimate(fat_data_sectors, bits, bytes_per_sector, spc, fats);
-    let fat_sectors = table_sectors(estimate, bits, bytes_per_sector, spc, aligning);
-    // Recompute from the space the sized tables actually left. The unused remainder of the
-    // tables and of the data region can together make room for one more cluster than the
-    // estimate charged for, so this is the count, not the estimate.
-    let data = fat_data_sectors.checked_sub(fats.checked_mul(fat_sectors)?)?;
-    let clusters = data / spc;
+    let unit = if aligning { spc } else { 1 };
+    let left = |units: u32| -> Option<u32> {
+        let tables = u64::from(fats) * u64::from(units) * u64::from(unit);
+        let data = u64::from(space).checked_sub(tables)?;
+        Some((data / u64::from(spc)) as u32)
+    };
+    let holds = |units: u32| -> bool {
+        match left(units) {
+            Some(clusters) => {
+                table_bytes(u64::from(clusters) + 2, bits)
+                    <= u64::from(units) * u64::from(unit) * u64::from(bytes_per_sector)
+            }
+            // Tables that fill the space leave nothing to address.
+            None => true,
+        }
+    };
+    let (mut low, mut high) = (1u32, space.div_ceil(unit).max(1));
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if holds(mid) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    let clusters = left(low)?;
     if clusters == 0 {
         return None;
     }
     Some(Candidate {
-        fat_sectors,
+        fat_sectors: low * unit,
         clusters,
     })
 }
@@ -855,22 +851,18 @@ const fn starting_cluster_size(fat32: bool, sectors: u64) -> u32 {
 }
 
 /// Which reserved sector holds the backup boot sector, or `None` where the reserved region
-/// cannot hold one.
+/// cannot hold one, with the information sector at [`FS_INFO_SECTOR`].
 ///
-/// The backup goes in sector 6 wherever there is room, which is where every FAT32 volume in
-/// circulation puts it and where a driver recovering a damaged volume looks first. A smaller
-/// reserved region falls back to the last sector that is neither the boot sector nor the
-/// information sector.
-const fn backup_boot_sector(reserved: u32, info: u16) -> Option<u16> {
-    let info32 = info as u32;
-    if reserved >= 7 && info32 != 6 {
-        Some(6)
-    } else if reserved >= 3 + info32 && info32 != reserved - 2 && info32 != reserved - 1 {
-        Some((reserved - 2) as u16)
-    } else if reserved >= 3 && info32 != reserved - 1 {
-        Some((reserved - 1) as u16)
-    } else {
-        None
+/// Sector 6 wherever the region reaches it: the specification recommends no other value for
+/// `BPB_BkBootSec`. A smaller region places it where the pinned `mkfs.fat` does (observed at
+/// every count): nowhere in two sectors, at sector 2 in three or four, and two sectors before
+/// the region's end in five or six.
+const fn backup_boot_sector(reserved: u32) -> Option<u16> {
+    match reserved {
+        0..=2 => None,
+        3 | 4 => Some(2),
+        5 | 6 => Some((reserved - 2) as u16),
+        _ => Some(6),
     }
 }
 
@@ -1011,10 +1003,12 @@ pub fn plan_layout(request: &PlanRequest) -> Result<FatLayout, GeometryError> {
                 .and_then(|after_reserved| {
                     Some((after_reserved, after_reserved.checked_sub(root_aligned)?))
                 }) {
-                Some((fat_data_32, fat_data_1216)) => [
-                    candidate(fat_data_1216, 12, bytes_per_sector, spc, fats, aligning),
-                    candidate(fat_data_1216, 16, bytes_per_sector, spc, fats, aligning),
-                    candidate(fat_data_32, 32, bytes_per_sector, spc, fats, aligning),
+                // FAT32's tables follow the reserved region; FAT12's and FAT16's follow the
+                // fixed root directory region after it.
+                Some((beyond_reserved, beyond_root)) => [
+                    candidate(beyond_root, 12, bytes_per_sector, spc, fats, aligning),
+                    candidate(beyond_root, 16, bytes_per_sector, spc, fats, aligning),
+                    candidate(beyond_reserved, 32, bytes_per_sector, spc, fats, aligning),
                 ],
                 None => [None, None, None],
             };
@@ -1108,7 +1102,7 @@ pub fn plan_layout(request: &PlanRequest) -> Result<FatLayout, GeometryError> {
         first_data_sector,
         clusters: candidate.clusters,
         fat32: (fat_type == FatType::Fat32).then(|| {
-            let backup = backup_boot_sector(reserved_aligned, FS_INFO_SECTOR);
+            let backup = backup_boot_sector(reserved_aligned);
             Fat32Layout {
                 root_cluster: 2,
                 fs_info_sector: FS_INFO_SECTOR,
@@ -1143,17 +1137,12 @@ fn select(
         FatTypeRequest::Exactly(kind) => fits(kind).map(|c| (kind, c)),
         FatTypeRequest::UndersizedFat32 => fits(FatType::Fat32).map(|c| (FatType::Fat32, c)),
         FatTypeRequest::Auto => {
-            // Convention picks the type that addresses the volume in the fewest clusters it
-            // can: FAT16 wherever it reaches more clusters than FAT12 would, which is
-            // wherever FAT12 has run out of range.
-            let twelve = fits(FatType::Fat12);
-            let sixteen = fits(FatType::Fat16);
-            match (twelve, sixteen) {
-                (Some(a), Some(b)) if b.clusters > a.clusters => Some((FatType::Fat16, b)),
-                (Some(a), _) => Some((FatType::Fat12, a)),
-                (None, Some(b)) => Some((FatType::Fat16, b)),
-                (None, None) => None,
-            }
+            // Whichever of the two fits. At most one does: a sixteen-bit table never leaves
+            // more clusters than a twelve-bit one in the same space, and FAT16's least count
+            // is above FAT12's greatest.
+            fits(FatType::Fat12)
+                .map(|c| (FatType::Fat12, c))
+                .or_else(|| fits(FatType::Fat16).map(|c| (FatType::Fat16, c)))
         }
     }
 }
@@ -1597,56 +1586,51 @@ mod tests {
     }
 
     #[test]
-    fn the_cluster_estimate_is_the_reference_computation() {
-        // The three expressions the format's reference formatter uses, transcribed here in
-        // the shape it writes them — a separate 12-bit form with a leading factor of two,
-        // and 16- and 32-bit forms without one. [`cluster_estimate`] carries all three at a
-        // single scale, which is the same value and is not obviously the same value.
-        //
-        // This is checked directly rather than through the differential gate because the
-        // gate cannot see it. The estimate only seeds a table size, and the count is then
-        // recomputed from the space that table left, so an estimate off by one is invisible
-        // unless it crosses a sector boundary in the table as well — measured at well under
-        // a hundredth of a percent of parameter sets, which no practical sweep of a foreign
-        // formatter reaches. A second transcription reaches all of them.
-        fn reference(d: u64, ss: u64, spc: u64, f: u64, bits: u32) -> u64 {
-            match bits {
-                12 => 2 * (d * ss + f * 3) / (2 * spc * ss + f * 3),
-                16 => (d * ss + f * 4) / (spc * ss + f * 2),
-                _ => (d * ss + f * 8) / (spc * ss + f * 4),
-            }
-        }
+    fn every_table_holds_its_clusters_and_one_unit_less_would_not() {
+        // The rule, held directly over every small space: the table a candidate takes holds
+        // an entry for each cluster it leaves and the two reserved ones, and a table one
+        // sector (one cluster, aligned) smaller would not hold the clusters it would leave.
         let mut checked = 0u32;
         for bits in [12u32, 16, 32] {
             for bytes_per_sector in [512u32, 4096] {
                 for spc in [1u32, 2, 8] {
                     for fats in [1u32, 2] {
-                        for sectors in (1u32..12_000).step_by(1) {
-                            assert_eq!(
-                                u64::from(cluster_estimate(
-                                    sectors,
-                                    bits,
-                                    bytes_per_sector,
-                                    spc,
-                                    fats
-                                )),
-                                reference(
-                                    u64::from(sectors),
-                                    u64::from(bytes_per_sector),
-                                    u64::from(spc),
-                                    u64::from(fats),
-                                    bits
-                                ),
-                                "{bits}-bit, {bytes_per_sector}-byte sectors, {spc} per \
-                                 cluster, {fats} tables, {sectors} sectors of table and data"
-                            );
-                            checked += 1;
+                        for aligning in [false, true] {
+                            let unit = if aligning { spc } else { 1 };
+                            for space in 1u32..6_000 {
+                                let Some(c) =
+                                    candidate(space, bits, bytes_per_sector, spc, fats, aligning)
+                                else {
+                                    continue;
+                                };
+                                let what = format!(
+                                    "{bits}-bit, {bytes_per_sector}-byte sectors, {spc} per \
+                                     cluster, {fats} tables, aligned {aligning}, {space}"
+                                );
+                                assert_eq!(c.fat_sectors % unit, 0, "{what}");
+                                assert_eq!(c.clusters, (space - fats * c.fat_sectors) / spc);
+                                let room = u64::from(c.fat_sectors) * u64::from(bytes_per_sector);
+                                assert!(
+                                    table_bytes(u64::from(c.clusters) + 2, bits) <= room,
+                                    "{what}: the table does not hold its clusters"
+                                );
+                                if c.fat_sectors > unit {
+                                    let smaller = c.fat_sectors - unit;
+                                    let left = (space - fats * smaller) / spc;
+                                    let room = u64::from(smaller) * u64::from(bytes_per_sector);
+                                    assert!(
+                                        table_bytes(u64::from(left) + 2, bits) > room,
+                                        "{what}: a smaller table would have held"
+                                    );
+                                }
+                                checked += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        assert!(checked > 400_000, "only {checked} inputs were checked");
+        assert!(checked > 300_000, "only {checked} candidates were checked");
     }
 
     #[test]
@@ -2076,17 +2060,20 @@ mod tests {
 
     #[test]
     fn the_backup_boot_sector_falls_back_as_the_reserved_region_shrinks() {
-        // Sector 6 wherever there is room for it, which is where a driver recovering a
-        // damaged volume looks first.
-        assert_eq!(backup_boot_sector(32, 1), Some(6));
-        assert_eq!(backup_boot_sector(7, 1), Some(6));
-        // Below that, the last reserved sector that is neither the boot sector nor the
-        // information sector.
-        assert_eq!(backup_boot_sector(6, 1), Some(4));
-        assert_eq!(backup_boot_sector(4, 1), Some(2));
-        assert_eq!(backup_boot_sector(3, 1), Some(2));
-        // And a reserved region with no room for one at all.
-        assert_eq!(backup_boot_sector(2, 1), None);
+        // Where the pinned `mkfs.fat` puts it at each reserved count (observed): sector 6
+        // wherever the region reaches it, then sector 4, 3, 2 and 2, and nowhere in two.
+        for (reserved, backup) in [
+            (32, Some(6)),
+            (8, Some(6)),
+            (7, Some(6)),
+            (6, Some(4)),
+            (5, Some(3)),
+            (4, Some(2)),
+            (3, Some(2)),
+            (2, None),
+        ] {
+            assert_eq!(backup_boot_sector(reserved), backup, "{reserved} reserved");
+        }
     }
 
     #[test]

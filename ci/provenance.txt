@@ -144,25 +144,3 @@ operational|ci/build-exfat-populate.sh|builds libexfat from its release tarball,
 
 known|CHANGELOG.md|ext4_acl_from_disk|recorded when the gate began
 known|CHANGELOG.md|ext4_inode_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/csum.rs|ext4_block_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/csum.rs|ext4_inode_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/materialize.rs|ext4_block_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/materialize.rs|ext4_calculate_overhead|recorded when the gate began
-known|crates/ferrosys/src/materialize.rs|ext4_inode_bitmap_csum_set|recorded when the gate began
-known|crates/ferrosys/src/model.rs|ext2fs_needs_large_file_feature|recorded when the gate began
-known|crates/ferrosys/src/model.rs|ext4_xattr_set|recorded when the gate began
-known|crates/ferrosys/src/ondisk/dirent.rs|ext4_rec_len_from_disk|recorded when the gate began
-known|crates/ferrosys/src/ondisk/dirent.rs|ext4_rec_len_to_disk|recorded when the gate began
-known|crates/ferrosys/src/ondisk/inode.rs|ext4_decode_extra_time|recorded when the gate began
-known|crates/ferrosys/src/ondisk/inode.rs|ext4_inode_csum_verify|recorded when the gate began
-known|crates/ferrosys/src/ondisk/inode.rs|EXT4_FITS_IN_INODE|recorded when the gate began
-known|crates/ferrosys/src/ondisk/inode.rs|EXT4_FITS_IN_INODE(|recorded when the gate began
-known|crates/ferrosys/src/ondisk/superblock.rs|ext2_super_block|recorded when the gate began
-known|crates/ferrosys/src/ondisk/xattr.rs|ext2fs_ext_attr_hash_entry|recorded when the gate began
-known|crates/ferrosys/src/ondisk/xattr.rs|ext4_xattr_hash_entry|recorded when the gate began
-known|crates/ferrosys/src/ondisk/xattr.rs|ext4_xattr_rehash|recorded when the gate began
-known|crates/ferrosys/src/path.rs|ext4_check_dir_entry|recorded when the gate began
-known|crates/ferrosys/src/read.rs|ext4_check_dir_entry|recorded when the gate began
-known|crates/ferrosys/src/read.rs|ext4_iget|recorded when the gate began
-known|crates/ferrosys/src/read.rs|ext4_inode_blocks|recorded when the gate began
-known|crates/ferrosys/tests/foreign.rs|ext4_check_dir_entry|recorded when the gate began

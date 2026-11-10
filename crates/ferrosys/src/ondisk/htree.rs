@@ -44,9 +44,9 @@ pub const DX_NODE_COUNT_OFFSET: usize = 8;
 pub const DX_HASH_CONTINUED: u32 = 1;
 
 /// The deepest index this crate builds, counted in levels below the root. A
-/// directory without the `largedir` feature is limited to a hash tree of at most
-/// one interior level — two levels including the root — so the reader follows at
-/// most one level of indirection.
+/// directory without the `large_dir` feature is limited to a hash tree of at most
+/// one interior level — two levels including the root. The reader follows one level of
+/// indirection, and one more where the filesystem has `large_dir`.
 pub const DX_MAX_INDIRECT_LEVELS: u8 = 1;
 
 /// One index entry: the lowest hash found in the child it names, and that child's

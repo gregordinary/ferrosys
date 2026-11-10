@@ -33,6 +33,8 @@ use super::ParseError;
 /// chunk with no profile bit at all is `single`, one copy and nothing else, which is why the
 /// unreplicated case is an absence rather than a bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// Serializes as the raw on-disk word, as the superblock's feature words do.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct BlockGroupFlags(u64);
 
 flag_set!(BlockGroupFlags: u64);

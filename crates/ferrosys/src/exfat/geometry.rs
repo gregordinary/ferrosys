@@ -44,12 +44,20 @@ pub const FIRST_CLUSTER: u32 = 2;
 /// is one less than that, the numbering starting at [`FIRST_CLUSTER`].
 pub const MAX_CLUSTER_COUNT: u32 = 0xFFFF_FFF5;
 
-/// The fewest sectors a volume may span.
+/// The fewest bytes a volume may span: one mebibyte, whatever its sectors.
 ///
-/// Two boot regions are 24 sectors, and what remains has to hold an allocation table, an
-/// allocation bitmap, an up-case table and a root directory. Every implementation draws the
-/// line here.
-pub const MIN_VOLUME_SECTORS: u64 = 2048;
+/// Documented: a volume's length is at least `2^20 / 2^BytesPerSectorShift` sectors, which is
+/// the specification's way of saying no volume is smaller than a mebibyte. That is 2048
+/// sectors of 512 bytes and 256 of 4096, and two boot regions of 24 sectors leave room for an
+/// allocation table, an allocation bitmap, an up-case table and a root directory in either.
+pub const MIN_VOLUME_BYTES: u64 = 1 << 20;
+
+/// The fewest sectors of `bytes_per_sector` bytes a volume may span: [`MIN_VOLUME_BYTES`] of
+/// them.
+#[must_use]
+pub(crate) const fn min_volume_sectors(bytes_per_sector: u64) -> u64 {
+    MIN_VOLUME_BYTES / bytes_per_sector
+}
 
 /// The largest allocation unit the format defines, in bytes.
 ///
@@ -153,7 +161,7 @@ pub enum GeometryError {
     VolumeTooSmall {
         /// Sectors the volume spans.
         sectors: u64,
-        /// [`MIN_VOLUME_SECTORS`].
+        /// The fewest sectors a volume of its sector size spans: [`MIN_VOLUME_BYTES`] of them.
         minimum: u64,
     },
     /// The regions ahead of the cluster heap leave no room for the heap.
@@ -445,10 +453,11 @@ pub fn plan_layout(request: &PlanRequest) -> Result<ExfatLayout, GeometryError> 
 
     // A partial sector is not addressable, so the volume is what its whole sectors span.
     let volume_length = request.volume_bytes / sector;
-    if volume_length < MIN_VOLUME_SECTORS {
+    let minimum = min_volume_sectors(sector);
+    if volume_length < minimum {
         return Err(GeometryError::VolumeTooSmall {
             sectors: volume_length,
-            minimum: MIN_VOLUME_SECTORS,
+            minimum,
         });
     }
     let volume_bytes = volume_length * sector;
@@ -732,7 +741,7 @@ pub(crate) fn layout_from_boot(
     let sector = u64::from(bytes_per_sector);
 
     let volume_length = boot.volume_length;
-    if volume_length < MIN_VOLUME_SECTORS {
+    if volume_length < min_volume_sectors(sector) {
         return Err(BootDefect::VolumeLength {
             sectors: volume_length,
             why: "fewer sectors than two boot regions and a filesystem need",
@@ -1205,7 +1214,7 @@ mod tests {
     fn a_volume_that_cannot_hold_a_filesystem_is_refused_rather_than_planned() {
         // Below the minimum a volume has no room for two boot regions and a filesystem.
         assert!(matches!(
-            plan_layout(&PlanRequest::new(512 * (MIN_VOLUME_SECTORS - 1))),
+            plan_layout(&PlanRequest::new(MIN_VOLUME_BYTES - 512)),
             Err(GeometryError::VolumeTooSmall { .. })
         ));
 

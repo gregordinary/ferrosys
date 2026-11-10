@@ -860,10 +860,14 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
     // asked for. `Auto` and a bytes-per-inode override scale with the size; an absolute
     // count does not. The floor of sixteen holds even a tiny filesystem to one inode-table
     // block's worth, matching how a small `-N`-style request rounds up to a full block.
+    //
+    // A ratio counts the blocks the groups hold, past the first data block; `Auto` takes its
+    // ratio from the size class of the whole filesystem, as the size it was asked for names.
     let inode_count_for = |blocks: u64| -> u64 {
+        let held = blocks.saturating_sub(fdb);
         match inodes {
-            InodeCount::Auto => blocks * u64::from(block_size) / inode_ratio(blocks, block_size),
-            InodeCount::BytesPerInode(bytes) => blocks * u64::from(block_size) / bytes.get(),
+            InodeCount::Auto => held * u64::from(block_size) / inode_ratio(blocks, block_size),
+            InodeCount::BytesPerInode(bytes) => held * u64::from(block_size) / bytes.get(),
             InodeCount::Count(count) => u64::from(count),
         }
         .max(16)
@@ -950,10 +954,12 @@ pub fn plan_layout(request: &PlanRequest) -> Result<Layout, GeometryError> {
         // Spread the inode count for the current block count across the groups. A group's
         // inodes are indexed by a one-block bitmap, so it holds at most `inode_cap` of
         // them; a density that needs more is refused rather than silently capped to fewer
-        // inodes than were asked for. `Auto` and a bytes-per-inode ratio never trip this,
-        // because the count is recomputed from the kept block count and a whole number of
-        // groups holds its own size-derived inodes; only an explicit count that overflows
-        // a group reaches it.
+        // inodes than were asked for. A ratio counts the blocks the groups hold, which at a
+        // one-kibibyte block leaves out block 0, so `Auto` and a ratio of one inode per
+        // block never trip this: a whole number of groups holds its own blocks' inodes.
+        // Observed: the pinned `mke2fs -b 1024 -i 1024` gives a filesystem of a whole
+        // number of groups 8192 inodes in each. Only an explicit count that overflows a
+        // group, or a ratio denser than one inode per block, reaches it.
         let num_inodes = inode_count_for(total_blocks);
         let mut ipg = num_inodes.div_ceil(group_count);
         if ipg > inode_cap {
@@ -1920,6 +1926,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(too_dense, GeometryError::InodesTooDense { .. }));
+    }
+
+    #[test]
+    fn one_inode_per_block_fills_each_groups_bitmap_at_a_one_kibibyte_block() {
+        // At a 1024-byte block, block 0 precedes the groups, so a filesystem of whole groups
+        // holds one block more than its groups do. A ratio of one inode per block counts the
+        // groups' blocks and gives each its bitmap's 8192, as the pinned `mke2fs -b 1024
+        // -i 1024` does at each of these sizes.
+        let fs = FeatureSet {
+            block_size: 1024,
+            ..FeatureSet::default()
+        };
+        for kib in [16_385u64, 24_577, 24_600, 32_769] {
+            let layout = plan_layout(
+                &PlanRequest::new(kib * 1024, fs)
+                    .grow(GrowReservation::None)
+                    .inodes(InodeCount::BytesPerInode(NonZeroU64::new(1024).unwrap())),
+            )
+            .unwrap_or_else(|e| panic!("{kib} KiB: {e}"));
+            assert!(layout.inodes_per_group <= 8192, "{kib} KiB");
+        }
     }
 
     #[test]

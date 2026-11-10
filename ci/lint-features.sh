@@ -26,7 +26,7 @@ cd "$root" || exit 1
 # compile.
 CONFIGS=(
     "no family, no source, no sink|--no-default-features"
-    "the default: five families, six decoders|"
+    "the default: four families, three decoders|"
     "ext alone|--no-default-features --features ext"
     "FAT alone|--no-default-features --features fat"
     "a family with a classifier and a reader|--no-default-features --features exfat"

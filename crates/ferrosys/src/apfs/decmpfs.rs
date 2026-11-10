@@ -123,6 +123,15 @@ impl Encoding {
             Encoding::Stored => true,
         }
     }
+
+    /// The algorithm a decoder must undo for chunks of this encoding, or `None` for chunks
+    /// that are the content itself.
+    pub(crate) const fn algorithm(self) -> Option<Algorithm> {
+        match self {
+            Encoding::Compressed(algorithm) => Some(algorithm),
+            Encoding::Stored => None,
+        }
+    }
 }
 
 /// Where compression type `method` keeps its chunks and the encoding each is in, for the types

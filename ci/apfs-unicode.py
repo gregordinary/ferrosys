@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate the Unicode tables the APFS reader compares names with.
+"""Generate the Unicode tables APFS names are compared with: the `ferrosys-ucd` crate's root.
 
-    ci/apfs-unicode.py UCD-DIR > crates/ferrosys/src/apfs/unicode_tables.rs
+    ci/apfs-unicode.py UCD-DIR > crates/ferrosys-ucd/src/lib.rs
 
 UCD-DIR holds UnicodeData.txt, CaseFolding.txt and DerivedAge.txt of one Unicode version, as
 unicode.org publishes them under https://www.unicode.org/Public/<version>/ucd/. The output is
@@ -19,8 +19,8 @@ Every input is held to the SHA-256 of the file the tables were made from, pinned
 the tables regenerate from the same data rather than from whatever happens to be downloaded; a
 new Unicode version is a change to the pins. The generated file records the version and every
 digest. Its header carries
-the Unicode License v3's copyright and permission notice whole, read from LICENSE-UNICODE at the
-workspace root, since the notice is the one condition the license sets on copies of its data.
+the Unicode License v3's copyright and permission notice whole, read from the crate's
+LICENSE-UNICODE, since the notice is the one condition the license sets on copies of its data.
 """
 
 import hashlib
@@ -47,7 +47,7 @@ def main(argv):
         raise SystemExit(__doc__)
     ucd = argv[1]
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    notice, _ = read(os.path.join(root, "LICENSE-UNICODE"))
+    notice, _ = read(os.path.join(root, "crates", "ferrosys-ucd", "LICENSE-UNICODE"))
     unicode_data, unicode_digest = read(os.path.join(ucd, "UnicodeData.txt"))
     case_folding, folding_digest = read(os.path.join(ucd, "CaseFolding.txt"))
     derived_age, age_digest = read(os.path.join(ucd, "DerivedAge.txt"))
@@ -111,7 +111,19 @@ def main(argv):
     major, minor, update = version.groups()
     out = []
     w = out.append
-    w("//! The Unicode tables an APFS volume's names are compared with: generated, not written.")
+    w("//! The Unicode Character Database tables ferrosys compares APFS names with: generated, not")
+    w("//! written.")
+    w("//!")
+    w("//! An APFS volume compares two names as one when their canonical decompositions are equal,")
+    w("//! case-folded and decomposed again on a volume that folds case, and stores a directory entry")
+    w("//! under a hash of that form. The rules are in [`ferrosys`](https://crates.io/crates/ferrosys),")
+    w("//! whose `apfs` feature depends on this crate, and the data they are computed from is four")
+    w("//! tables, each sorted by code point for a binary search:")
+    w("//!")
+    w("//! - [`DECOMPOSITION`], every code point's full canonical decomposition;")
+    w("//! - [`COMBINING_CLASS`], every nonzero canonical combining class;")
+    w("//! - [`CASE_FOLDING`], every full case folding, statuses C and F;")
+    w("//! - [`ASSIGNED`], every range of assigned code points, with the version that assigned it.")
     w("//!")
     w(f"//! From the Unicode Character Database {major}.{minor}.{update}, by `ci/apfs-unicode.py`:")
     w(f"//! `UnicodeData.txt` (SHA-256 {unicode_digest}),")
@@ -123,25 +135,35 @@ def main(argv):
     for line in notice.rstrip("\n").split("\n"):
         w(f"//! {line}".rstrip())
     w("//!")
-    w("//! Regenerate rather than edit. This module is pure data.")
+    w("//! Regenerate rather than edit. This crate is pure data.")
+    w("")
+    w("#![no_std]")
+    w("#![forbid(unsafe_code)]")
+    w("#![warn(missing_docs)]")
+    w("")
+    w("/// The crate's README, compiled as a doctest so the example on its front page is the example")
+    w("/// this crate's tables answer. The item exists only while rustdoc is collecting doctests.")
+    w("#[cfg(doctest)]")
+    w('#[doc = include_str!("../README.md")]')
+    w("struct Readme;")
     w("")
     w("/// Every code point's full canonical decomposition, in code-point order. A code point")
     w("/// not listed is its own decomposition; Hangul syllables decompose by arithmetic.")
-    w("pub(super) const DECOMPOSITION: &[(u32, &[u32])] = &[")
+    w("pub const DECOMPOSITION: &[(u32, &[u32])] = &[")
     for cp in sorted(decomp):
         w(f"    (0x{cp:X}, &[{', '.join(f'0x{c:X}' for c in full(cp))}]),")
     w("];")
     w("")
     w("/// Every code point whose canonical combining class is not zero, with the class, in")
     w("/// code-point order.")
-    w("pub(super) const COMBINING_CLASS: &[(u32, u8)] = &[")
+    w("pub const COMBINING_CLASS: &[(u32, u8)] = &[")
     for cp in sorted(ccc):
         w(f"    (0x{cp:X}, {ccc[cp]}),")
     w("];")
     w("")
     w("/// Every code point's full case folding, statuses C and F, in code-point order. A code")
     w("/// point not listed folds to itself.")
-    w("pub(super) const CASE_FOLDING: &[(u32, &[u32])] = &[")
+    w("pub const CASE_FOLDING: &[(u32, &[u32])] = &[")
     for cp in sorted(fold):
         w(f"    (0x{cp:X}, &[{', '.join(f'0x{c:X}' for c in fold[cp])}]),")
     w("];")
@@ -149,7 +171,7 @@ def main(argv):
     w("/// Every range of assigned code points, first and last, with the major and minor version")
     w("/// of Unicode that assigned them, in code-point order. A code point in no range is")
     w("/// unassigned in every version these tables hold.")
-    w("pub(super) const ASSIGNED: &[(u32, u32, u8, u8)] = &[")
+    w("pub const ASSIGNED: &[(u32, u32, u8, u8)] = &[")
     for first, last, age_major, age_minor in assigned:
         w(f"    (0x{first:X}, 0x{last:X}, {age_major}, {age_minor}),")
     w("];")

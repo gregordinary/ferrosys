@@ -95,20 +95,6 @@ impl FsType {
             FsType::Apfs => APFS,
         }
     }
-
-    /// Whether this family can be asked for the smallest filesystem that holds its contents.
-    ///
-    /// A property of the family rather than of the command line: a filesystem's free room
-    /// follows from its size, so the size that just holds a tree is a fixed point that has to
-    /// be searched for by planning candidates and placing into them. Three families have that
-    /// search; the other two take the size they are given.
-    #[must_use]
-    pub fn has_fit(self) -> bool {
-        match self {
-            FsType::Ext(_) | FsType::Fat(_) | FsType::Apfs => true,
-            FsType::ExFat | FsType::Btrfs => false,
-        }
-    }
 }
 
 /// The one word the exFAT family answers to, as a family and as a format.
@@ -1526,7 +1512,6 @@ mod tests {
         );
         assert_eq!(fs_type(os("apfs")).unwrap(), FsType::Apfs);
         assert_eq!(FsType::Apfs.name(), "apfs");
-        assert!(FsType::Apfs.has_fit());
     }
 
     #[test]

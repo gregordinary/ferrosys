@@ -125,6 +125,10 @@ named_flags! {
     /// Features a reader may ignore only if it never writes: a filesystem carrying one this
     /// crate does not know is readable, and writing to it would corrupt whatever the feature
     /// records.
+    // A feature word serializes as the raw on-disk word it wraps, which is what `bits()`
+    // returns and what a superblock holds. The names are a projection of it, not a second
+    // encoding of the same fact.
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     CompatRoFlags: u64 {
         /// Free space is recorded in a tree of its own rather than in the extent tree.
         FREE_SPACE_TREE("free-space-tree") = 1 << 0,
@@ -147,6 +151,10 @@ named_flags! {
     /// This is the word that makes an unknown bit a hard failure rather than a remark. btrfs
     /// adds to it every few releases — three of the bits below arrived within two of them — so
     /// the list is what a reader is measured against, and a bit outside it is refused by name.
+    // A feature word serializes as the raw on-disk word it wraps, which is what `bits()`
+    // returns and what a superblock holds. The names are a projection of it, not a second
+    // encoding of the same fact.
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     IncompatFlags: u64 {
         /// Back-references carry the tree that owns them. Set on every filesystem in use.
         MIXED_BACKREF("mixed-backref") = 1 << 0,

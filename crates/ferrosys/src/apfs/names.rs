@@ -37,7 +37,7 @@
 //!
 //! This module is pure: it computes values and does no I/O.
 
-use super::unicode_tables::{ASSIGNED, CASE_FOLDING, COMBINING_CLASS, DECOMPOSITION};
+use ferrosys_ucd::{ASSIGNED, CASE_FOLDING, COMBINING_CLASS, DECOMPOSITION};
 
 /// The bits a directory entry's hash takes.
 pub(crate) const HASH_MASK: u32 = 0x3F_FFFF;

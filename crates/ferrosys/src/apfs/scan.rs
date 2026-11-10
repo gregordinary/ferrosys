@@ -133,9 +133,12 @@ impl Category {
     }
 }
 
+crate::naming::serialize_as_name!(Category);
+
 /// One deviation a scan found: where it was, how serious it is, and what it was.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Anomaly {
     /// The part of the container it was found in.
     pub category: Category,

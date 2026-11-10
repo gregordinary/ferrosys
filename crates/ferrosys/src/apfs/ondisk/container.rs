@@ -45,6 +45,7 @@ pub mod incompat {
 
 /// A run of blocks: a first block address and a count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct BlockRange {
     /// The first block.
     pub start: u64,

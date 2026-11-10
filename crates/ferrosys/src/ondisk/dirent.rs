@@ -34,14 +34,15 @@ pub fn min_rec_len(name_len: usize) -> u16 {
     (8 + name_len).next_multiple_of(4).min(u16::MAX as usize) as u16
 }
 
-/// Decode an on-disk `rec_len` for a directory block of `block_size` bytes
-/// (`ext4_rec_len_from_disk`).
+/// Decode an on-disk `rec_len` for a directory block of `block_size` bytes.
 ///
-/// Below 65536 bytes the field is the record length verbatim. At 65536 a record spanning
-/// the whole block is 65536 bytes, which does not fit the 16-bit field, so ext4 stores the
-/// sentinel `0xFFFF` (or `0`) for it and packs a length's two high bits into the field's
-/// low two bits for every other length. The decode is total: every value maps to a length
-/// that is a multiple of four, so a 64 KiB block never trips the multiple-of-four check.
+/// Below 65536 bytes the field is the record length verbatim, a multiple of four (the ext4
+/// documentation's Directory Entries page). At 65536 a record spanning the whole block is
+/// 65536 bytes, which the 16-bit field cannot hold, and the field's two low bits, unused by
+/// a multiple of four, are the length's bits 16 and 17. The pinned `debugfs` stores an empty
+/// whole-block record as `0xFFFF`, and the pinned `e2fsck` reads `0xFFFF`, `0` and `0x0001`
+/// there as a whole block and faults `0xFFFD` (observed). The decode is total: every value
+/// maps to a length that is a multiple of four.
 #[must_use]
 pub fn rec_len_from_disk(disk: u16, block_size: usize) -> usize {
     if block_size < 65536 {
@@ -53,12 +54,12 @@ pub fn rec_len_from_disk(disk: u16, block_size: usize) -> usize {
     (disk as usize & 0xfffc) | ((disk as usize & 3) << 16)
 }
 
-/// Encode a record length for a directory block of `block_size` bytes
-/// (`ext4_rec_len_to_disk`), the inverse of [`rec_len_from_disk`].
+/// Encode a record length for a directory block of `block_size` bytes, the inverse of
+/// [`rec_len_from_disk`].
 ///
 /// Below 65536 bytes the length is the field verbatim. At 65536 a record spanning the
 /// whole block is 65536 bytes, which does not fit the 16-bit field, so it is stored as
-/// the sentinel `0xFFFF` — the value [`rec_len_from_disk`] maps back to a full block.
+/// `0xFFFF`, as the pinned `debugfs` stores one (observed).
 /// Every shorter record is a multiple of four below 65536 and so encodes, and reads
 /// back, unchanged. A block size never exceeds 65536, so a record never does either,
 /// and no length reaches the high-bit packing that decode inverts on foreign input.

@@ -33,10 +33,13 @@ documentation = "https://docs.rs/ferrosys"
 # `detect` selector, and the source and extraction vocabulary — and `detect` recognizes
 # nothing.
 #
-# The default carries all five families and every decoder, so a default build reads what a
-# Linux kernel mounts, a compressed btrfs root included, and a Mac's compressed files. A
-# consumer that wants fewer turns the default off and names them.
-default = ["ext", "fat", "exfat", "btrfs", "apfs", "zlib", "lzo", "zstd", "lzvn", "lzfse", "lzbitmap"]
+# The default carries the four families a Linux kernel mounts and the three decoders they
+# read, so a default build reads a compressed btrfs root and compiles code under MIT OR
+# Apache-2.0 alone. APFS and the three decoders its files alone use are named, as
+# `features = ["apfs", "lzvn", "lzfse", "lzbitmap"]`, and two of them carry a license of their
+# own through the crate each depends on: `apfs` the Unicode License v3, and `lzvn` and `lzfse`
+# BSD-3-Clause. A consumer that wants fewer families turns the default off and names them.
+default = ["ext", "fat", "exfat", "btrfs", "zlib", "lzo", "zstd"]
 # The ext2/ext3/ext4 family: the formatter, the reader, and the byte-exact on-disk
 # structures, reached through the `ext` module.
 ext = []
@@ -57,8 +60,9 @@ exfat = []
 btrfs = []
 # The APFS family, reached through the `apfs` module: a container of volumes, each a tree of
 # records found through an object map, under a checkpoint. It shares no structure with any of
-# the four above.
-apfs = []
+# the four above. It depends on `ferrosys-ucd`, the Unicode Character Database tables a
+# volume's names are compared with, which are under the Unicode License v3.
+apfs = ["dep:ferrosys-ucd"]
 # The tar/PAX archive `Source` and `Sink`. Off by default; enabling it pulls in the `tar`
 # crate (no default features, so no host-side xattr writes) for parsing archives, their PAX
 # timestamps and xattrs, and SCHILY ACL records. It names no family: a source feeds
@@ -91,22 +95,26 @@ zlib = ["dep:miniz_oxide"]
 # `crc32c` and the directory hashes for the same reasons.
 lzo = []
 # Zstandard. The dependency decodes only, and carries `unsafe` in a ring buffer of its own —
-# the one place this crate's dependency graph departs from its own bar, taken because the
-# alternative for this format is a C library.
+# the one place the default build's dependency graph departs from this crate's own bar,
+# taken because the alternative for this format is a C library.
 zstd = ["dep:ruzstd"]
-# LZVN, an encoding an APFS compressed file keeps its content in. It takes no dependency: the
-# decoder is small and written here in safe Rust, from the format as Apple's own reference
-# implementation decodes it.
-lzvn = []
-# LZFSE, another, decoded the same way. A stream of it carries LZVN blocks among its own, so
-# it carries that decoder too.
+# LZVN, an encoding an APFS compressed file keeps its content in. The decoder is
+# `ferrosys-lzfse`'s, in safe Rust, derived from the one in Apple's lzfse project and under
+# its BSD-3-Clause license.
+lzvn = ["dep:ferrosys-lzfse"]
+# LZFSE, another, decoded by the same crate. A stream of it carries LZVN blocks among its own,
+# so it turns `lzvn` on.
 lzfse = ["lzvn"]
-# LZBITMAP, a third, decoded the same way.
+# LZBITMAP, a third. It takes no dependency: the decoder is small and written here in safe
+# Rust.
 lzbitmap = []
 # `Serialize` on the values a consumer embeds in a report of its own: the findings taxonomy
-# (`Finding`, `FindingReport`, `Severity`, `Coordinate`), each family's planned geometry
-# (`Layout`, `GroupLayout`, `BlockRange`; `FatLayout`, `Fat32Layout`, `FatType`), and the ext
-# feature model (`FeatureSet`, `Profile`).
+# (`Finding`, `FindingReport`, `Severity`, `Family`), the fidelity report (`FidelityReport`,
+# `FidelityRecord`, `Property`, `Direction`), and `Usage`; each family's scan report
+# (`ScanReport`, `Anomaly`, `Category`, and its coordinates); each family's planned geometry
+# (`Layout`, `FatLayout`, `ExfatLayout`, `BtrfsLayout`, `ApfsLayout`, and the types they hold);
+# and the ext feature model (`FeatureSet`, `Profile`). A closed set serializes as the word the
+# crate prints for it, and a flag word as the on-disk word it wraps.
 # Serialization only — nothing here is deserialized, since these values are read from an
 # image or produced by a planner, never reconstructed from a document. The crate's own
 # `to_json` / `to_sarif` emitters are unaffected: they stay the schema-versioned canonical
@@ -121,10 +129,15 @@ thiserror = { workspace = true }
 tar = { workspace = true, optional = true }
 # The `Serialize` derives, behind the `serde` feature.
 serde = { workspace = true, optional = true }
-# The DEFLATE and Zstandard decoders, behind the `zlib` and `zstd` features. LZO needs no
-# entry here: its decoder is in this crate.
+# The DEFLATE and Zstandard decoders, behind the `zlib` and `zstd` features. LZO and LZBITMAP
+# need no entry here: their decoders are in this crate.
 miniz_oxide = { workspace = true, optional = true }
 ruzstd = { workspace = true, optional = true }
+# The Unicode Character Database tables APFS names are compared with, behind the `apfs`
+# feature, under the Unicode License v3.
+ferrosys-ucd = { workspace = true, optional = true }
+# The LZVN and LZFSE decoders, behind the `lzvn` and `lzfse` features, under BSD-3-Clause.
+ferrosys-lzfse = { workspace = true, optional = true }
 
 # The host-directory source and sink's dependency, on the platform whose trees they walk
 # and create.
@@ -154,5 +167,6 @@ lzokay = { workspace = true }
 sha2 = { workspace = true }
 
 [package.metadata.docs.rs]
-# Document the archive and directory sources on docs.rs.
+# Document every family on docs.rs, APFS included, with the archive and directory sources and
+# `serde`.
 all-features = true

@@ -10,8 +10,10 @@
 //! # Purity
 //!
 //! The planner reads through a [`Log`] it is handed and nothing else, and it decides
-//! everything from what that returns. It allocates in proportion to the transactions in the
-//! log, and visits no more blocks than the journal spans however its fields are set.
+//! everything from what that returns. It visits no more blocks than the journal spans however
+//! its fields are set, and the reader bounds that span by the blocks its image holds. What it
+//! allocates follows the records it visits: a tag per log block, and a block a transaction
+//! revokes once however many of its revoke records name it.
 //!
 //! # Where the rules come from
 //!
@@ -38,7 +40,7 @@
 //! at: the v1 commit checksum, asynchronous commits, fast commits, a deleted-block tag, both
 //! checksum versions at once, and any journal feature this module does not name.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::bytes::{get_u32_be, get_u64_be};
 use crate::crc32c::crc32c;
@@ -170,7 +172,9 @@ struct Tag {
 struct Transaction {
     sequence: u32,
     tags: Vec<Tag>,
-    revokes: Vec<u64>,
+    /// Each block the transaction revokes, once. A revoke block the log maps at many
+    /// positions is read at each, and its records name the same blocks every time.
+    revokes: HashSet<u64>,
 }
 
 /// Decide what recovering the log whose superblock is `superblock` would apply.
@@ -314,7 +318,7 @@ fn scan(
     let mut current = Transaction {
         sequence,
         tags: Vec::new(),
-        revokes: Vec::new(),
+        revokes: HashSet::new(),
     };
     let mut at = start;
     loop {
@@ -354,7 +358,7 @@ fn scan(
                     Transaction {
                         sequence: next,
                         tags: Vec::new(),
-                        revokes: Vec::new(),
+                        revokes: HashSet::new(),
                     },
                 ));
             }
@@ -751,6 +755,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_revoke_block_read_many_times_revokes_each_block_once() {
+        // One revoke block the log reaches at every position names the same blocks each time,
+        // so the transaction holds each of them once, not once per visit.
+        let mut j = journal(64);
+        let mut b = vec![0u8; BS];
+        header(&mut b, BLOCKTYPE_REVOKE, 7);
+        let records = (BS - REVOKE_RECORDS) / 4;
+        put_u32_be(&mut b, REVOKE_COUNT, (REVOKE_RECORDS + records * 4) as u32);
+        for k in 0..records {
+            put_u32_be(&mut b, REVOKE_RECORDS + k * 4, 2000 + k as u32);
+        }
+        for at in 1..40 {
+            j.0[at] = b.clone();
+        }
+        header(&mut j.0[40], BLOCKTYPE_COMMIT, 7);
+        let sb = j.0[0].clone();
+        let layout = layout(&sb, BS, 64).expect("a layout");
+        let committed = scan(&layout, 1, 7, BS, &mut j).expect("a log");
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].revokes.len(), records);
     }
 
     #[test]

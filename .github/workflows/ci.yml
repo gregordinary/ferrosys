@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# The jobs read the repository and write nothing to it, so the token holds that and no more.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: fmt / clippy / test / doc
@@ -549,6 +553,11 @@ jobs:
           # every on-disk length an image claims is added under a checked width), and
           # nothing else in this workflow compiles it.
           - target: i686-unknown-linux-gnu
+            flags: --all-targets
+          # A third 64-bit instruction set beside the two the runners are, x86_64 and
+          # aarch64. Nothing in the crate selects code by architecture, and this is where
+          # that holds for every dependency too rather than being assumed.
+          - target: riscv64gc-unknown-linux-gnu
             flags: --all-targets
     steps:
       - uses: actions/checkout@v5

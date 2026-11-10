@@ -21,8 +21,9 @@
 //! not to be — which is the guarantee worth stating whether or not the function is
 //! monotone.
 
+use crate::extent::ExtentError;
 use crate::geometry::{
-    GeometryError, GrowReservation, Layout, MAX_32BIT_BLOCKS, MAX_EXTENT_BLOCKS,
+    GeometryError, GrowReservation, InodeCount, Layout, MAX_32BIT_BLOCKS, MAX_EXTENT_BLOCKS,
 };
 use crate::materialize::{FormatError, FormatOptions, free_after_placing, plan_geometry};
 use crate::model::{Content, FsModel};
@@ -121,12 +122,26 @@ fn probe(
         Ok(planned) => planned,
         // Planning is the one step whose refusals say which way they point.
         Err(FormatError::Geometry(e)) => return classify(e),
+        // A count the caller fixed is answered at every size by the same count, so a
+        // tree with more nodes than it is refused once rather than climbed past: the
+        // per-group rounding grows a little with the groups, and climbing would find the
+        // size whose groups round up to it.
+        Err(e @ FormatError::TooManyInodes { .. })
+            if matches!(options.inodes, InodeCount::Count(_)) =>
+        {
+            return Probe::Impossible(e);
+        }
         Err(e) => return Probe::TooSmall(e),
     };
     // Placing refuses for want of room — the allocator running dry, or a journal with
-    // nowhere to go — and a larger filesystem is what answers that.
+    // nowhere to go — and a larger filesystem is what answers that. A directory that cannot
+    // be laid out in blocks of this size, and a file longer than an extent tree maps, are
+    // refused at every size alike.
     let free = match free_after_placing(&layout, options, journal_blocks, model) {
         Ok(free) => free,
+        Err(e @ (FormatError::Dir(_) | FormatError::Extent(ExtentError::FileTooLarge { .. }))) => {
+            return Probe::Impossible(e);
+        }
         Err(e) => return Probe::TooSmall(e),
     };
     if free < slack.required_free(layout.total_blocks, block_size) {
@@ -466,6 +481,18 @@ mod tests {
             Slack::Share(Slack::MAX_SHARE),
         );
         assert!(matches!(err, FormatError::DoesNotFit { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_fixed_inode_count_too_small_for_the_tree_fails_at_once() {
+        // A count the caller fixed is the same count at every size. A larger filesystem
+        // rounds each group's share up a little, so a climb would eventually find a size
+        // whose groups hold the tree: twenty-five gibibytes for three thousand names. The
+        // tree does not fit the count, which is the answer.
+        let mut options = opts();
+        options.inodes = InodeCount::Count(16);
+        let err = fit_err(tree(100, 1), options, Slack::None);
+        assert!(matches!(err, FormatError::TooManyInodes { .. }), "{err}");
     }
 
     #[test]

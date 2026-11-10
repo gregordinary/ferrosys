@@ -3,7 +3,8 @@
 `ferrosys` has two halves: a formatter that writes a filesystem image, and a reader
 that parses one back. Each filesystem family lives in a module of its own. `ext` covers
 ext2, ext3, and ext4, `fat` FAT12, FAT16, and FAT32, `exfat` exFAT, and `btrfs` btrfs, and
-each writes and reads its formats. `apfs` reads and writes an APFS container.
+each writes and reads its formats. `apfs` reads and writes an APFS container, behind the
+`apfs` feature, which the default build leaves out.
 
 A third vocabulary belongs to neither half and lives at the crate root. It describes a
 directory tree, reports what a format could not hold, and says what an image is.
@@ -249,13 +250,13 @@ let source = LayeredSource::new()
 A path nothing composed holds is `RemovalError::NotHeld`, so a misspelled removal is an
 error. A name is what goes, and a file with another name keeps it. Take a file whose own name
 is removed while a hard link elsewhere names it. The first of its remaining names in path order
-holds the file, and the other names link to that one. A layer replacing a directory treats the
-names beneath it the same way.
+holds the file, and the other names link to that one. A layer replacing a file's name, or a
+directory, treats the names it displaces the same way.
 
-A file's contents are a `FileContent`: `Owned` bytes, a `Range` of a host file, or an `Image`
-file in an image this crate reads. All three coexist in one entry list. That is what lets a caller take an archive-backed
-list and replace one entry's contents with bytes it computed. Every other entry stays on
-disk.
+A file's contents are a `FileContent`: `Owned` bytes, a `Range` of a host file, or an
+`Image` file in an image this crate reads. All three coexist in one entry list. That is what
+lets a caller take an archive-backed list and replace one entry's contents with bytes it
+computed. Every other entry stays on disk.
 
 `TreeBuilder::file` takes anything that converts into one. A `Vec<u8>`, a `String`, a
 borrowed `&[u8]`, `&[u8; N]`, or `&str` is copied into the entry. A `FileRange` names host
@@ -329,14 +330,17 @@ feature is silently added.
 ### Pinning the bytes across versions
 
 Images are byte-reproducible. The UUID, the timestamps, and the hash seed are inputs, so
-the same source and the same options write the same bytes, always. That holds across
-versions of this crate too, for a feature set that is itself fixed.
+the same source and the same options write the same bytes within a release.
 
 `FeatureSet::DEFAULT`, `EXT2`, and `EXT3` are fixed and stay fixed, so pinning to one of
-them pins the layout. `FeatureSet::LATEST` deliberately does not. It tracks what a
-current `mke2fs` writes for ext4, so it can gain a feature in any release. The bytes
-under it change with it. Name `LATEST` when parity with the current tool is what you
+them pins the feature words across releases. `FeatureSet::LATEST` deliberately does not. It
+tracks what a current `mke2fs` writes for ext4, so it can gain a feature in any release. The
+bytes under it change with it. Name `LATEST` when parity with the current tool is what you
 want, and `DEFAULT` when reproducible bytes are.
+
+A release can still correct a formula under a fixed feature set to match `mke2fs`, which
+moves the bytes that formula governs. The changelog names each such correction, and
+[a reference geometry pin](#pinning-what-a-name-means-not-just-the-name) catches one.
 
 To record exactly what a build resolved to, `FeatureSet::pin` emits the whole set as one
 canonical document. It carries every feature word twice over, as exact bits and as readable
@@ -420,8 +424,9 @@ drift. An image is *meant* to have its own identity, and a filesystem sized to i
 partition is *meant* to have its own geometry. Recording them beside the contract would
 therefore make every comparison non-empty and worthless.
 
-The identity pin exists for a caller that wants them anyway. Every field in it is also a
-superblock field, so a caller that can open the image it built need not record it at all.
+The identity pin exists for a caller that wants them anyway. Every field in it but
+`fixed_time` is also a superblock field. A caller that can open the image it built need not
+record the rest.
 
 ### Pinning what a name means, not just the name
 
@@ -444,26 +449,27 @@ let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000)
 let reference = FormatPlan::new(TreeBuilder::new(), REFERENCE_SIZE, options)?;
 let pinned = reference.geometry_pin();
 assert!(pinned.starts_with("ferrosys-geometry-pin 1\n"));
+assert!(pinned.contains("\nreserved_gdt_blocks 1024\n"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ```text
 ferrosys-geometry-pin 1
 block_size 4096
-total_blocks 16384
+total_blocks 131072
 blocks_per_group 32768
 first_data_block 0
-group_count 1
-inodes_per_group 16384
-inode_table_blocks 1024
-total_inodes 16384
+group_count 4
+inodes_per_group 8192
+inode_table_blocks 512
+total_inodes 32768
 gdt_blocks 1
-reserved_gdt_blocks 256
+reserved_gdt_blocks 1024
 flex_bg_size 16
-max_grow_blocks 538968064
-reserved_blocks 819
-groups 1 crc32c 0x8a137015
-journal_blocks 1024
+max_grow_blocks 2149580800
+reserved_blocks 6553
+groups 4 crc32c 0xf3c00951
+journal_blocks 4096
 ```
 
 `reserved_gdt_blocks` is the line to notice. It is the descriptor headroom the grow
@@ -491,7 +497,7 @@ that then failed would have destroyed what was at that path for nothing.
 `FormatPlan` is the fallible half of a format as a value, and it is what makes that
 impossible. `FormatPlan::new` takes the source, the size, and the options, and does every
 piece of work that can fail. That is parsing the source, planning the geometry, building the
-inode model and checking it against that geometry, and sizing the journal. What it returns
+inode model and placing it into that geometry, and sizing the journal. What it returns
 can only be written:
 
 ```rust,ignore
@@ -704,16 +710,22 @@ assert_eq!(plan.layout().total_bytes(), 512 << 20);
 `FormatPlan::new` is the same work without the write. It is for a caller that wants to know
 whether a build will succeed, and what it will cost, before touching the destination.
 
-Six things about the format are worth knowing before choosing parameters.
+`FormatPlan::fit` sizes a volume to its source instead, with a `Slack` of free clusters
+left in it. `FormatOptions::hidden_sectors` records where a volume written into a partition
+starts, and `disk_geometry` the sectors per track and heads its boot sector states.
+
+Seven things about the format are worth knowing before choosing parameters.
 
 ### The volume label is a value, not a string
 
 It is stored twice, in the boot sector and as an entry in the root directory. It lives in a
-directory entry's name field, so it is eleven bytes, upper-cased, and cannot contain the
-separators DOS reserved. `VolumeLabel` holds those rules in one place.
+directory entry's name field, so it is one to eleven bytes and upper-cased. It cannot begin
+with a space or contain the separators DOS reserved. `VolumeLabel` holds those rules in one
+place.
 
-A volume with no label carries the `NO NAME` placeholder in its boot sector, and no entry
-at all. That is how a driver reports it as unnamed.
+A volume with no label leaves `FormatOptions::label` unset, and `VolumeLabel::new("")` is
+`LabelError::Empty`. Such a volume carries the `NO NAME` placeholder in its boot sector, and
+no entry at all. That is how a driver reports it as unnamed.
 
 ### Times are 1980 to 2107, at a two-second granularity
 
@@ -729,6 +741,18 @@ widely deployed driver holds a cluster's byte count in sixteen bits. A pinned cl
 that is refused, and `ClusterSize::Auto`'s search stops there. A volume that no type fits
 below the cap is therefore an error, rather than a cluster a driver will truncate. Reading
 has no such limit.
+
+### A directory holds 65,536 entries
+
+The format bounds a directory's own size at 2 MiB: 65,536 entries of 32 bytes. Every entry
+counts, so a long-name entry, `.`, `..` and the root's label each take one. A tree that puts
+more in one directory is refused with `ModelError::DirectoryTooLarge`, at any volume size.
+`--size auto` reports it rather than searching larger volumes. A FAT12 or FAT16 root is held
+to its smaller fixed region as well.
+
+A volume another tool wrote can hold a larger directory. The reader reads it whole, as a
+Linux kernel does, and reports `ReadError::DirectoryTooLong`. A strict read refuses it, and
+a scan names it.
 
 ### Two cluster counts cannot be written unambiguously
 
@@ -753,12 +777,14 @@ The two case bits Windows NT put in byte 12 of a directory entry are left zero. 
 format's own specification says that byte is reserved and must never be read. A name
 carried only there reads back upper-cased on a driver that takes it at its word.
 
-A name is a typed error in four cases:
+A name is a typed error in six cases:
 
 - It is not valid UTF-8.
+- It is empty.
 - It is longer than 255 code units.
 - It contains a path or wildcard separator.
 - It ends in a dot or a space.
+- Its directory has no numeric tail left to give its short name.
 
 Two names in one directory that differ only in case are refused as well. A FAT lookup
 ignores case, so they are one name to every driver that reads the volume.
@@ -863,8 +889,10 @@ the names reached and not yet visited, each a path and an inode number. What it 
 therefore follows the shape of the tree rather than its size.
 
 It is a frontier and not a fixed set, so a directory holding a million names puts a million
-paths on it. Those names answer to the same bound the visited ones do. `Limits::max_walk_entries`
-and the image's own storage therefore bound what a walk finds as well as what it yields.
+paths on it. Those names answer to the same bound the visited ones do.
+`Limits::max_walk_entries` and the image's own storage therefore bound what a walk finds as
+well as what it yields. A walk also stops at the first path longer than 4,096 bytes, as
+`ReadError::PathTooLong`.
 
 With the `tar` feature enabled, `ArchiveSink` is that loop already written.
 `ArchiveSink::new(writer).write_tree(&mut reader)` streams the whole filesystem out as a
@@ -935,12 +963,12 @@ let report = DirectorySink::new("unpacked")?.write_tree(&mut reader)?;
 println!("{} names written", report.written);
 ```
 
-The destination must exist and be empty. It takes the filesystem root's own mode,
-ownership, times, and extended attributes, and everything the filesystem holds appears
-beneath it. An ext filesystem's `/lost+found` is omitted, since the format makes it, so the
-tree is one `DirectorySource` reads straight back. On every other family a directory of that
-name is the volume's own and is written like any other. A file's bytes are streamed a window at a time, so a tree far larger than memory
-costs a working set.
+The destination must exist and be empty. It takes the filesystem root's own mode, ownership,
+times, and extended attributes, and everything the filesystem holds appears beneath it. An
+ext filesystem's `/lost+found` is omitted, since the format makes it, so the tree is one
+`DirectorySource` reads straight back. On every other family a directory of that name is the
+volume's own and is written like any other. A file's bytes are streamed a window at a time,
+so a tree far larger than memory costs a working set.
 
 **The image is untrusted, and a name in it is not a path to resolve**. Every directory is
 created and then opened. Everything beneath it is created through that open handle by its
@@ -975,28 +1003,34 @@ Four parts of a tree take privileges:
 By default a host that refuses any of them is `HostError::Unprivileged`, naming the entry.
 `skip_privileged` is the opt-in for an unprivileged extraction. What it left out comes back
 in the `ExtractReport` rather than in silence, as `skipped`, `ownership_dropped`, and
-`dropped_xattrs`.
+`dropped_xattrs`. A file whose recorded owner was not set loses its set-user-ID and
+set-group-ID bits. The report's `fidelity` records that drop as `Property::SpecialBits`.
 
-Two parts of a tree can have no place on the destination whatever privilege the process has:
+Some parts of a tree have no place on the destination whatever privilege the process has:
 
 - A name longer than the destination takes. A format storing up to 255 UTF-16 units holds
   names of as many as 765 bytes of UTF-8, and a Linux filesystem takes 255 bytes.
 - An extended attribute the destination will not hold. Another operating system names its
   attributes in no namespace this host knows. A destination can hold no attributes at all.
   And the kernel holds a `user` attribute only on a regular file or a directory.
+- A device number wider than this host's, as `HostError::UnrepresentableDevice`.
+- A time the destination holds as another time, before its earliest, past its latest, or
+  finer than its fraction, as `HostError::TimeNotHeld`.
+- The BSD flags a Darwin filesystem records, as `HostError::FlagsNotHeld`.
 
-Each limit is the destination's own, and the refusal is the one the destination gave:
-`HostError::NameTooLong` or `HostError::UnsupportedAttribute`, naming the entry.
-`skip_unsupported` is the opt-in that writes the rest. An entry whose name is refused is left
-out, a directory with everything under it, and its path is in `skipped`. An attribute the
-destination refuses is named once in `dropped_xattrs`.
+Each limit but the flags is the destination's own. The refusal names the entry, as
+`HostError::NameTooLong`, `HostError::UnsupportedAttribute`, or one of the three above.
+`skip_unsupported` is the opt-in that writes the rest. An entry whose name is refused
+is left out, a directory with everything under it, and its path is in `skipped`. An
+attribute the destination refuses is named once in `dropped_xattrs`. An entry whose time is
+held as another is named in `times_not_held`, and one whose flags are left off in `fidelity`.
 
 A file's contents are written as the filesystem reports them, and a hole reads as zeros. A
 sparse file therefore lands in the destination fully allocated.
 
 Two times no extraction can carry, because no host lets a caller set them. They are an
-inode's **change time** and its **creation time**. Access and modification times are set
-exactly, to the nanosecond.
+inode's **change time** and its **creation time**. Access and modification times are set to
+the nanosecond, and held to what the destination keeps.
 
 ### Filesystems other tools made
 
@@ -1023,10 +1057,36 @@ this crate wrote:
   at 800 GiB and above at 1 KiB blocks. A kernel converts a filesystem to it when growing
   one online past its reservation. Under `sparse_super2` the superblock copies are found in
   the two groups the superblock names.
+- **Clustered allocation** (`bigalloc`). A group's blocks are its bitmap's clusters times
+  the blocks a cluster holds, and `FsTree::usage` reports clusters. At a 1 KiB block the
+  layout is refused by name as `ReadError::UnsupportedLayout`.
+- **Uninitialized groups** (`uninit_bg`). The crc16 descriptor checksum is verified, and an
+  in-use inode in a group marked as holding none is `ReadError::InodeInUninitGroup`.
 - **A journal left needing recovery**, replayed as the filesystem opens, as the section
   above describes.
 - **A hash index another tool built**, a kernel growing a directory a name at a time or
   `e2fsck -fD` rebuilding one whole. A lookup follows it, as the next section describes.
+- **Content kept in the inode** (`inline_data`). A small file's bytes, or a small directory's
+  entries, sit in the inode's block area and its `system.data` attribute. That attribute is
+  the content, so it is not one of the file's attributes.
+- **Attribute values kept in inodes of their own** (`ea_inode`). A value too large for an
+  attribute block reads from the inode the entry names.
+- **Case-folded directories** (`casefold`). A name matches as it is stored. The directory is
+  read through its blocks, since its index is hashed over folded names, which needs Unicode
+  tables.
+- **Three-level directory indexes** (`large_dir`). A lookup follows an index with two
+  interior levels below its root.
+- **Multiple-mount protection** (`mmp`). The block a host keeps current while it has the
+  filesystem open is checked for its magic and checksum. A scan reports a record left by a
+  host or a running checker as `ReadError::MmpInUse`, cosmetic, as it reports an unclean
+  unmount.
+- **Encrypted directories** (`encrypt`). Everything stored in the clear reads as on any
+  other filesystem: inodes, sizes, times, attributes, and every directory entry's framing.
+  A scan holds that framing to the usual rules. What is ciphertext is refused by name with
+  `ReadError::Encrypted`: an encrypted file's data, an encrypted directory's names, and an
+  encrypted link's target. A path through an encrypted directory is refused the same way,
+  since a name cannot be matched against ciphertext. The CLI reports such a read as a
+  command it could not carry out, exit 8.
 
 ### Resolving a path
 
@@ -1200,10 +1260,10 @@ let mut reader = Reader::open_with(file, &options)?;
 ```
 
 The limits default to imposing nothing, so an image of any size this crate wrote reads
-back whole at the default settings. `max_file_bytes` bounds the logical-to-physical
-mapping a read builds as well as the buffer it returns. The mapping costs eight bytes per
-logical block against one byte per byte returned. On the crafted `i_size` the cap exists
-for, it is therefore the larger of the two.
+back whole at the default settings. `max_file_bytes` bounds the buffer a read returns. The
+logical-to-physical mapping a read builds costs eight bytes per logical block, and is built
+4,096 blocks at a time. It therefore stays a fixed 32 KiB however large `i_size` claims to
+be.
 
 A file past the cap is a `ReadError::FileTooLarge` naming the size and the bound, rather
 than a short read. A truncated file that looked like a whole one would be the worse outcome
@@ -1350,21 +1410,22 @@ for a caller to steer. A unit with no partner is replaced by U+FFFD and reported
 ### Checking a FAT volume
 
 `fat::Reader::scan` is the family's whole-volume pass, and what it audits is what a FAT
-volume has to audit. There are no checksums anywhere in the format, so the file allocation
+volume has to audit. No checksum covers a FAT volume's allocation, so the file allocation
 table's copies standing in for one is the closest thing. Two copies of one allocation record
 that disagree mean at least one is wrong, and nothing in the volume says which. That is
 reported at the same severity a failed ext checksum is. `verify_tables` is the strict
 counterpart, failing at the first entry two copies disagree about.
 
 Past that it checks the parameter block against itself, the backup boot sector against
-sector 0, and the information sector's hints. It checks every directory entry for five
-things:
+sector 0, and the information sector's hints. Among what it checks in every directory:
 
 - A long name whose checksum does not tie it to the entry it precedes.
 - A run that is not whole.
-- A name no directory could hold.
-- A first cluster outside the volume.
+- A name no directory could hold, and two names a driver cannot tell apart.
+- A first cluster outside the volume, and a size with no cluster to hold it.
 - A `.` or `..` that is not what the format requires.
+- A directory longer than the 2 MiB the format lets one be.
+- A volume label that begins with a space.
 
 It reports a volume a driver had mounted and did not put down, at the cosmetic severity, as
 `fat::ReadError::VolumeDirty`. The FAT specification records that state as the
@@ -1379,8 +1440,8 @@ without a scan.
 
 It checks every cluster chain for a loop, and for a cluster two chains both claim. It also
 checks for clusters that are marked allocated and reached by nothing at all. That last one
-needs the whole allocation rather than any single structure. A scan therefore carries one bit per
-cluster, which is a thirty-second of one copy of the table on any volume. The count is held
+needs the whole allocation rather than any single structure. A scan therefore carries one bit
+per cluster, a thirty-second of one copy of a FAT32 table. The count is held
 at open to what the type addresses, so that is 32 MiB at the very largest FAT32 there is.
 
 A `fat::ScanReport` is the same `ScanReport` an ext scan produces, over FAT's own anomaly.
@@ -1388,8 +1449,9 @@ The report itself, its cap, what truncation means, and the `to_report` projectio
 `FindingReport` are therefore one implementation rather than two that agree.
 
 What is FAT's own is the taxonomy inside it. Its `Category` is the boot sector, the
-information sector, the allocation table, or a directory. ext's vocabulary means nothing
-about a FAT and the reverse. Its `Location` is a cluster, a sector, and an entry.
+information sector, the allocation table, a directory, or the source the volume is read
+from. ext's vocabulary means nothing about a FAT and the reverse. Its `Location` is a
+cluster, a sector, and an entry.
 
 The same is true of the walk underneath both readers. The frontier, the cycle check, and the
 three bounds that keep a hostile tree from running a walk without end are one driver. Each
@@ -1420,14 +1482,15 @@ text.
 
 **A strict read accepts every volume this crate's own writer produces**, at every parameter
 set it accepts. That is the line the severities are drawn against. It is why an undersized
-FAT32, which the writer emits on request, is a cosmetic remark rather than a refusal.
+FAT32, which the writer emits on request, reads clean rather than being refused.
 
 ## Planning an exFAT volume
 
 Behind the `exfat` feature, `ferrosys::exfat` supplies the formatter, the geometry planner,
 the byte-exact on-disk structures, and the classifier that recognizes such a volume.
-`plan_layout` derives every field the format records from three inputs. Those are how large
-the volume is, how large a sector is, and how large an allocation unit is:
+`plan_layout` derives every field the format records from four inputs. Those are how large
+the volume is, how large a sector is, how large an allocation unit is, and the boundary the
+regions align to:
 
 ```rust
 # extern crate ferrosys;
@@ -1448,10 +1511,10 @@ assert!(entries >= u64::from(layout.cluster_count) + 2);
 ```
 
 The layout also says where the three residents a format writes land in the cluster heap.
-Those residents are the allocation bitmap, the up-case table, and the root directory. They
-are not fields the boot sector records. A volume's root directory is what names them, and
-where each sits is a function of the cluster size. That is why the root directory's own
-cluster number moves between two volumes of different shapes.
+Those residents are the allocation bitmap, the up-case table, and the root directory. The
+boot sector records where the root directory begins, and the root directory records where
+the other two are. Where each sits is a function of the cluster size. That is why the root
+directory's own cluster number moves between two volumes of different shapes.
 
 Pinning the allocation unit moves everything behind it:
 
@@ -1573,16 +1636,17 @@ format it shares a name with.
 
 A name is up to 255 UTF-16 code units, in the case it was given. There is no second
 shortened name to derive, and no numeric tail to resolve a collision with. A name the format
-cannot hold is a typed refusal naming the path, never a truncation. Such a name is too long,
-or carries one of the nine characters a driver interprets rather than stores.
+cannot hold is a typed refusal naming the path, never a truncation. Such a name is empty, is
+not UTF-8, is too long, or ends in a dot or a space. Or it carries a control code or one of
+the nine characters a driver interprets rather than stores.
 
 #### Every stream is contiguous, and says so
 
 A formatter builds a fresh filesystem in one pass with nothing to allocate around, so each
-stream sets `NoFatChain`. That flag tells a reader to follow its clusters in order and not
-consult the allocation table at all. The table therefore holds chains for three things only:
-the allocation bitmap, the up-case table, and the root directory. None of those has a flags
-field to declare anything with.
+stream that owns clusters sets `NoFatChain`. That flag tells a reader to follow its clusters
+in order and not consult the allocation table at all. The table therefore holds chains for
+three things only: the allocation bitmap, the up-case table, and the root directory. None of
+those has a flags field to declare anything with.
 
 The allocation *bitmap* is what records that a cluster is in use either way. Both come out
 of one planned allocation, rather than being maintained separately.
@@ -1663,11 +1727,18 @@ so.
 The one permission bit the format does carry is read-only. It clears the write bits of
 whatever mode a driver hands back, so a `0444` file survives too.
 
-A hard link is written as a *second copy* of its file rather than refused. The target is
-named inside the same source, so resolving it reads nothing this crate was not already
-given. What that costs is the file's size again, which is why `FormatPlan` exists. The
+A hard link is refused until `Property::Kind` is accepted. It is then written as a *second
+copy* of its file, and the report records the loss. The target is named inside the same
+source, so resolving it reads nothing this crate was not already given. What that costs is
+the file's size again, which is why `FormatPlan` exists. The
 report is readable before the destination is touched, so a caller finds out what a build
 will cost rather than discovering it.
+
+`FormatPlan::fit` finds the smallest volume that holds a source, with a `Slack` of free
+clusters left in it, where `FormatPlan::new` is told the size. Under `ClusterSize::Auto` it
+takes the conventional cluster for the size it settles on, and a pinned cluster size is kept.
+The sizes between two steps of that cluster are searched in turn, smallest first. A tree of
+small files that fits below a step is fitted there.
 
 ### Writing over what was there before
 
@@ -1690,8 +1761,9 @@ was there, partly zeroed.
 ### Doing the I/O yourself
 
 `FormatPlan::stages` hands the same write back as pieces, for a caller that writes the
-destination itself. A piece is bytes the plan holds, a run of zeros, a range of a host file,
-or a file declared by its length alone. Apply the stages in order, and make each durable
+destination itself. A piece is bytes the plan holds, a run of zeros, or a file's
+contents. Those are a range of a host file, a file in an image this crate reads, or a file
+declared by its length alone. Apply the stages in order, and make each durable
 before the next. Within a stage the pieces never share a sector, and they go down in any
 order.
 
@@ -1721,7 +1793,7 @@ for stage in plan.stages() {
         match piece? {
             // The declared file: stream its bytes to this offset, from wherever they are.
             Piece::Declared { offset, len, key, .. } => placed = Some((key, offset, len)),
-            // Bytes, zeros, and host ranges go down as they are.
+            // Bytes, zeros, host ranges, and image files go down as they are.
             _ => {}
         }
     }
@@ -1735,7 +1807,8 @@ assert_eq!(offset % u64::from(plan.layout().bytes_per_cluster), 0);
 ```
 
 `FormatPlan::write_to` is these stages applied to a seekable sink. It refuses a plan holding
-a declared file, before touching the sink, since it has no bytes to put there. Every other
+a declared file of one byte or more, before touching the sink, since it has no bytes to put
+there. Every other
 family's writer reads a file's bytes itself, so each refuses a declared file when the plan is
 made.
 
@@ -1766,10 +1839,10 @@ Three structures in an exFAT volume carry a checksum and a fourth carries a hash
 Every one is a rotate-right-and-add over bytes, at 32 bits for the first two and
 16 for the last two.
 
-Two bytes of the boot sector sit deliberately outside its checksum, which are the volume's
-state flags and how full it is. A mounted driver rewrites them in place, and would otherwise
-have to recompute a checksum over eleven sectors to do it. `BOOT_CHECKSUM_SKIPS` names those
-offsets.
+Three bytes of the boot sector sit outside its checksum: the two of the volume's state flags
+and the one recording how full it is. A mounted driver rewrites them in place, and would
+otherwise have to recompute a checksum over eleven sectors to do it. `BOOT_CHECKSUM_SKIPS`
+names those offsets.
 
 They are *stepped over* rather than summed as zero, which is a different answer on every
 volume. The accumulator rotates once per byte consumed. Three bytes skipped and three zero
@@ -1869,13 +1942,14 @@ the severity the fault deserves.
 
 | Field | What the format states | What a volume outside it reads as |
 |---|---|---|
-| `FileSystemRevision` | major 1; a minor above 0 is to be honored | a major other than 1 is refused where the boot sector is judged, so the classifier and the reader answer together; a minor this reader does not know is `UnknownMinorRevision` |
-| `DataLength` | at most the cluster heap; at most `MAX_DIRECTORY_BYTES` for a directory, and whole clusters | `StreamPastHeap`, `DirectoryTooLong`, `DirectoryLengthNotClusters` |
-| `FirstCluster` with a `DataLength` | a first cluster of zero means a length of zero | `StreamWithoutAllocation` |
+| `FileSystemRevision` | major 1, and a minor above 0 is to be honored | a major other than 1 is refused where the boot sector is judged, so the classifier and the reader answer together, and a minor this reader does not know is `UnknownMinorRevision` |
+| `DataLength` | at most the cluster heap, and for a directory at most `MAX_DIRECTORY_BYTES` and whole clusters | `StreamPastHeap`, `DirectoryTooLong`, `DirectoryLengthNotClusters` |
+| `FirstCluster` with a `DataLength` | a first cluster of zero means a length of zero, and the reverse | `StreamWithoutAllocation`, `AllocationWithoutLength`, and for a directory `DirectoryWithoutAllocation` |
 | `FileAttributes` | five bits defined, eleven reserved and zero | `ReservedAttributes` |
 | `AllocationPossible` | set on every stream extension | `AllocationNotPossible` |
 | The three times | a date the calendar has, and hundredths of 0 to 199 | `MalformedTimestamp`, naming which of the three |
-| `CharacterCount` | 0 to 11, and a label carries no `U+0000` | `LabelTooLong`; a label holding a NUL is `LabelNulUnit` and `volume_label` answers `None` rather than a name that is not one |
+| `CharacterCount` | 0 to 11, and a label carries no `U+0000` | `LabelTooLong` past 11, and `LabelNulUnit` for a label holding a NUL, for which `volume_label` answers `None` rather than a name that is not one |
+| The label's characters | only those a name holds | `LabelForbiddenCharacter`, and the label is still handed back |
 | `NameLength` | the set carries exactly the name entries it needs | `IncompleteEntrySet` short of them, `ExcessNameEntries` past them |
 | The root's own entries | one bitmap, one up-case table, one label | `DuplicateRootEntry` inside the root, `MisplacedRootEntry` outside it |
 | `PercentInUse` | 0 to 100, or 255 for "not known" | a value between the two is its own remark, distinct from a percentage that is merely stale |
@@ -1907,7 +1981,8 @@ every hash through it.
 
 A reader that folded through a table of its own would resolve names a driver does not, and
 miss names a driver finds. The difference is real rather than theoretical. A volume is free
-to carry a table that folds nothing, and its lookups are then case-sensitive.
+to fold every character past the first 128 its own way. The format fixes those 128, so a
+table folding ASCII otherwise is `UpcaseMandatoryMapping`, which a strict read refuses.
 
 A lookup reads a directory only as far as an exact match, as FAT's does, so
 `Limits::max_walk_entries` does not limit it. A name matched through the table reads on to
@@ -1950,6 +2025,8 @@ rather than stopping at the first. What it checks is this:
 - Both boot regions against their checksums, and the backup against the main one.
 - The allocation table's two reserved entries.
 - Every entry set's checksum, and every name's hash.
+- The up-case table and the allocation bitmap themselves, where they sit in the heap.
+- A cluster two streams both occupy.
 - Every cluster the tree occupies, held against the allocation bitmap **in both
   directions**.
 
@@ -2043,7 +2120,8 @@ stripe were the chunk.
 The format defines **three** locations, which are 64 KiB, 64 MiB, and 256 GiB. It writes a
 copy at each one the device holds *all* of. `Volume::mirrors` says what was found at each.
 Opening a volume chooses the copy at the highest generation, which is the filesystem's own
-rule for which is live.
+rule for which is live. Where the primary verifies, only copies of its own filesystem inside
+its device compete.
 
 Every copy is judged whether or not it is the one used, and the states are not one state:
 
@@ -2055,6 +2133,8 @@ Every copy is judged whether or not it is the one used, and the states are not o
 | `Damaged` | a superblock whose checksum does not cover it |
 | `Misplaced` | a superblock recording a different location as its own |
 | `Present` | a superblock, at the transaction it records |
+| `Diverged` | a superblock at the live transaction whose bytes differ from the live copy's |
+| `Foreign` | a superblock of another filesystem, as one written over a used device leaves |
 
 `Misplaced` is the one worth dwelling on. A superblock records where it lives, and that field
 is *inside* what its checksum covers. A copy written somewhere other than where it belongs
@@ -2116,9 +2196,10 @@ way of doing so has its own guard:
   within a leaf, with the offsets moved to match, leaves every item inside the block. It
   also leaves every item pointing at bytes that are not its own.
 - **A block reached twice** — every address a descent visits is remembered.
-- **A child at the wrong height** — a child is exactly one level below its parent. A descent
-  therefore has a decreasing measure independent of the visited set, and terminates whatever
-  the addresses say.
+- **A child at the wrong height** — a child is exactly one level below its parent, and no
+  block sits above level 7, the highest the format defines. A descent therefore has a
+  decreasing measure independent of the visited set, and terminates whatever the addresses
+  say.
 - **Keys out of order** — a tree that is not sorted is not a tree, and a search over one
   silently misses items rather than failing.
 - **A tree larger than the caller will hold** — `Limits::max_walk_entries` caps what one walk
@@ -2129,10 +2210,11 @@ the bytes that came off the device, rather than from a value re-serialized throu
 types. A structure whose coverage of a format is partial cannot reproduce a foreign tool's
 bytes. A verifier built on one would report every filesystem it did not write as damaged.
 
-A block also records its own logical address and the filesystem it belongs to. Both are
-held against what the reader believed when it went to fetch it. Those are checks no checksum
-can make, for the same reason `Misplaced` is: the fields are inside what the checksum
-covers.
+A block also records its own logical address, the filesystem it belongs to, and the
+transaction that wrote it. All three are held against what the reader believed when it went
+to fetch it, the transaction against the one its parent's pointer records. Those are checks
+no checksum can make, for the same reason `Misplaced` is: the fields are inside what the
+checksum covers.
 
 A tree block in a mirrored block group has a copy in each stripe. A strict read refuses a
 block whose first copy fails those checks. A lenient read takes the next copy, failing only
@@ -2145,17 +2227,19 @@ name saying what it would take, rather than by an unexpected value:
 
 - An `incompat` feature bit outside `SUPPORTED_INCOMPAT`, named. One the format grew after
   this release is given as its bit position instead.
-- A checksum algorithm this crate does not compute. Comparing bytes against a digest it did
-  not produce would report every block of a healthy filesystem as damaged.
+- A checksum algorithm outside the four the format defines, named by its number. Comparing
+  bytes against a digest this reader cannot produce would report every block of a healthy
+  filesystem as damaged.
 - A filesystem spanning more than one device. The image in hand is then a part of it rather
   than the whole.
 - A chunk profile whose stripes are not copies.
-- A file whose bytes are stored in an encoding this build has no decoder for, named by the
-  algorithm.
+- A file whose bytes are stored in an encoding this build has no decoder for. The refusal
+  names the algorithm and the Cargo feature that compiles its decoder.
 
 ### Compressed extents
 
-The format stores a file's bytes as DEFLATE, LZO1X, or Zstandard where a mount was told to.
+The format stores a file's bytes as DEFLATE, LZO1X, or Zstandard where a mount or
+`mkfs.btrfs --compress` asks for it.
 Each is a Cargo feature: `zlib`, `lzo`, `zstd`. What a build carries decides two different
 things, and the difference is the format's rather than this crate's:
 
@@ -2171,8 +2255,10 @@ bytes **on the volume**, so `verify_data` checks a compressed extent without exp
 
 A record's declared expansion is a number the image supplied, and it is the size of a buffer.
 It is held to what the format compresses in, which is 128 KiB, before a byte is allocated for
-it. A record claiming more is refused, and so is a stream that expands to a different length
-than its record declares.
+it. A record claiming more is refused. An inline record's stream is undone into a whole sector's
+room, as a kernel compresses one, and the file is its first `ram_bytes`. A regular extent's
+stream needs to reach only the file's end, which is where `mkfs.btrfs --compress` stops one.
+A stream that stops before a byte the file reads is refused.
 
 ### The filesystem view
 
@@ -2198,19 +2284,21 @@ reader.verify_data(&node)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-An inode is **a subvolume and a number together**, which is what `Node` carries. Inode 257
-exists in every subvolume, and they are different files. A reader keyed on the number alone
-would therefore hand back one for the other.
+An inode is **a subvolume and a number together**, which is what `Node` carries. Inode 256,
+a subvolume's root directory, exists in every subvolume, and they are different directories.
+A reader keyed on the number alone would therefore hand back one for the other.
 
 A directory holds every entry twice on purpose. One is a `DIR_ITEM` keyed by the hash of the
 name, which is what `lookup` descends to. The other is a `DIR_INDEX` keyed by the entry's
 sequence number, which is the order `read_dir` lists in. Each is used for what it is keyed
 for. There is no `.` or `..` entry to filter out, because btrfs stores neither.
 
-A directory entry whose location names a `ROOT_ITEM` rather than an inode is **where a
-subvolume is mounted**. Stepping through it continues in another tree entirely. A walk
-crosses those seams, so what it yields is every name in the filesystem rather than every name
-in one tree.
+A directory entry whose location names a `ROOT_ITEM` rather than an inode, and which the
+subvolume's backref names, is **where a subvolume is mounted**. Stepping through it
+continues in another tree entirely. A walk crosses those seams, so what it yields is every
+name in the filesystem rather than every name in one tree. Any other entry naming a
+subvolume is the one a snapshot keeps for a nested subvolume. It reads as an empty directory
+whose `Node::stub` is true.
 
 A run of a file that was never written reads back as zeros, and the format spells that two
 ways. With `no-holes` there is no extent record at all, and a reader has to notice the
@@ -2220,16 +2308,19 @@ back another file's deleted bytes.
 
 ### What data checksums buy
 
-btrfs keeps a crc32c per sector of every data extent in a tree of its own.
-`Reader::verify_data` is what holds a file's bytes against them.
+btrfs keeps a checksum per sector of every data extent in a tree of its own.
+`Reader::verify_data` is what holds a file's bytes against them. The algorithm is the one
+the filesystem was formatted with: crc32c, xxhash64, SHA-256, or BLAKE2b. The reader
+computes all four, for its metadata and its data alike.
 
 **No other family in this crate can make this check**. ext4 checksums its metadata and not
 its data, and neither FAT nor exFAT checksums anything. A file whose bytes decayed on the
 medium sits under trees that are entirely well-formed, and verifies perfectly at every level
 but this one.
 
-Three kinds of run are skipped, each for a reason the format states. A hole and a
-preallocated extent hold nothing to check, and a file whose inode carries `NODATASUM` has no
+Four kinds of run are skipped, each for a reason the format states. An inline record's bytes
+sit in a leaf, whose own checksum covers them. A hole and a preallocated extent hold nothing
+to check, and a file whose inode carries `NODATASUM` has no
 checksums recorded at all. A run with no checksum recorded is reported rather than passed.
 Treating a missing record as a pass would make the whole check vacuous on the one image it
 most matters for.
@@ -2374,6 +2465,15 @@ destination stays sparse. An empty btrfs is a few hundred kibibytes of metadata 
 volume's length. What a format costs beyond the file data therefore does not grow with the
 volume at all.
 
+`FormatPlan::fit` finds the smallest filesystem that holds a source instead, never below its
+profiles' minimum. Its `Slack` is room for file data. That is the space left in the data
+chunks, and the device space no chunk claims shared out between the data profile's copies.
+
+A source holding what `btrfs check` refuses is refused before the destination opens. That is
+a link target that is empty, holds a NUL, or is a sector or longer. It is also a name
+holding a NUL, or an attribute name past 255 bytes. So is a device number wider than its
+field, and more names sharing a hash than one record joins.
+
 **One transaction, and nothing is ever rewritten**. A filesystem written here is at
 `btrfs::GENERATION` and stops, which is what makes the whole of it decidable before the first
 byte is placed. Two consequences are visible in the result, and are properties rather than
@@ -2425,6 +2525,7 @@ written as a copy.
 
 ## Reading an APFS container
 
+Behind the `apfs` feature, which the default build leaves out, `ferrosys::apfs` reads APFS.
 An APFS partition holds one container, and the container lists up to a hundred volumes.
 Each volume is a filesystem of its own, with its own tree of files and its own inode
 numbers, and none is inside another. So the family has two entry points. `Container` is the
@@ -2453,9 +2554,10 @@ for entry in reader.walk()? {
 
 Every object the read reaches is verified by its checksum. It is held to the reference that
 reached it: its type, the identifier it records as its own, and the transaction that wrote
-it. A tree node's first key is held to its parent's key for it. Four things are refused: an
-incompatible feature this crate does not read, an encrypted volume, a sealed one, and a
-Fusion container. Each refusal names what it would take to read it.
+it. A tree node's first key is held to its parent's key for it. An incompatible feature this
+crate does not read is refused, a sealed volume and a Fusion container among them. So are an
+encrypted volume, one whose encryption is changing, a pending revert, and names keyed without
+a hash. Each refusal names what it would take to read it.
 
 A path component finds the entry whose stored name is exactly it, or else the one the volume
 takes to be the same name. Two names are the same where their canonical decompositions are,
@@ -2464,12 +2566,13 @@ case-folded on a volume whose names fold case.
 A file's content is its data stream's extents. A hole is an extent at block zero and reads as
 zeros, and a window no extent covers is refused.
 
-A file macOS compressed keeps its content
-after its compression header or in its resource fork instead, and is read through that. The
-header is followed by one chunk, or the fork by a chunk table and then each 64 KiB chunk. Each
-chunk is a zlib, LZVN, LZFSE or LZBITMAP stream, read under that algorithm's feature. Or it is
-the content itself after the marker byte `0xCC`, which every build reads. A compression type the crate does not decode is refused
-by its number rather than read as the file's empty data stream.
+A file macOS compressed keeps its content after its compression header or in its resource
+fork instead, and is read through that. The header is followed by one chunk, or the fork by a
+chunk table and then each 64 KiB chunk. Each chunk is a zlib, LZVN, LZFSE or LZBITMAP stream,
+read under that algorithm's feature. Or it is the content itself after the marker byte `0xCC`,
+which every build reads. A compression type this build does not decode is refused by its
+number rather than read as the file's empty data stream. Where a feature compiles its decoder,
+the refusal names that feature.
 
 A volume's snapshots are views of it. `snapshots` lists them, and a volume opened at one
 reads as that snapshot keeps it:
@@ -2546,10 +2649,11 @@ A volume holds every property a source states. That is owners, modes, four times
 nanosecond, hard links, device nodes, pipes, sockets and extended attributes.
 
 An attribute of up to 3,800 bytes is held in its record, and a larger one in a stream of its
-own. A name is at most 127 bytes, the longest `setxattr` sets on macOS (`MAX_XATTR_NAME`). The writer refuses a
-longer one, which macOS lists and refuses to read. An entry naming one attribute twice is
-refused. Attributes of every namespace are stored as given, `security.*` and the POSIX ACLs of
-`system.posix_acl_*` among them, which macOS keeps and does not interpret.
+own. A name is at most 127 bytes, the longest `setxattr` sets on macOS (`MAX_XATTR_NAME`).
+The writer refuses a longer one, which macOS lists and refuses to read. An entry naming one
+attribute twice is refused. Attributes of every namespace are stored as given, `security.*`
+and the POSIX ACLs of `system.posix_acl_*` among them, which macOS keeps and does not
+interpret.
 
 A name is held to what macOS creates under the profile's Unicode version. It is UTF-8, at most
 255 UTF-16 code units, and every code point in it is one the version assigns. Two names a
@@ -2571,11 +2675,12 @@ Both compare a name by its canonical decomposition, so two spellings of one acce
 are one name on either.
 
 The release profile fixes the two words of a volume superblock that differ between releases.
-It also fixes the Unicode version names are held to, and it is macOS 26 by default. `format_to` writes to a
-seekable destination instead, touching only the blocks the container occupies and reading a
-file's bytes a window at a time. A 16 TiB container is a sparse file of a few megabytes of
-writes and what its volume holds. A second volume and more take the next places and
-identifiers, each holding what `VolumeRequest::contents` gives it, or nothing.
+It also fixes the Unicode version names are held to, and it is macOS 26 by default.
+`format_to` writes to a seekable destination instead, touching only the blocks the container
+occupies and reading a file's bytes a window at a time. A 16 TiB container is a sparse file
+of a few megabytes of writes and what its volume holds. A second volume and more take the
+next places and identifiers, each holding what `VolumeRequest::contents` gives it, or
+nothing.
 
 A `VolumeGroup` joins a System volume and a Data volume as macOS joins the two it boots from.
 Each records its role, and both record the Data volume's identifier as the group's. The System
@@ -2660,7 +2765,7 @@ assert_eq!(plan.container_bytes() % 4096, 0);
 `open` classifies a source and hands back the reader for whichever family claimed it,
 already open over the same bytes at the same offset. The result is an enum of concrete
 family readers rather than a common trait, because the readers are genuinely not
-interchangeable. Two of them have inodes, link counts, owners, modes, symbolic links, and
+interchangeable. Three of them have inodes, link counts, owners, modes, symbolic links, and
 extended attributes. The other two have none of the six:
 
 ```rust,ignore
@@ -2682,6 +2787,22 @@ What every variant does share is `FsTree`, which walks a directory, stats an ent
 a file's bytes, and resolves a link. An extraction therefore needs no `match` at all.
 `ArchiveSink` and `DirectorySink` are written once against it, and drain whichever family
 answered.
+
+`FsTree` also answers one request at a time, which is what a server holding a volume open
+needs. `find` resolves a path to the node it names, following symbolic links. `list` gives a
+directory's names in byte order, each with its kind and its node, held to the same rule as a
+walk. `usage` reports the filesystem's room as an allocation unit, a total, and a count free,
+by the format's own account. A missing path is `TreeError::NotFound`.
+
+```rust
+# extern crate ferrosys;
+use ferrosys::{FsTree, TreeError};
+
+fn names_in<T: FsTree>(tree: &mut T, path: &[u8]) -> Result<Vec<Vec<u8>>, TreeError> {
+    let dir = tree.find(path)?;
+    Ok(tree.list(&dir.node)?.into_iter().map(|child| child.name).collect())
+}
+```
 
 `open_with` takes the crate's own `OpenOptions`, which carries the inputs every family takes.
 Those are where the filesystem begins and ends, how strictly it is read, and what one read
@@ -2721,7 +2842,9 @@ assert!(matches!(what, Filesystem::Ext(Profile::Ext4)));
 ```
 
 A build answers with the families it compiles in, so the enum is `#[non_exhaustive]` and a
-`match` over it carries a wildcard arm.
+`match` over it carries a wildcard arm. An image no compiled family claims is
+`DetectError::Unrecognized`, whose message names the feature that compiles each family the
+build leaves out.
 
 Families are tried in a fixed order, and the rule behind the order is worth knowing because
 it decides what detection can get wrong. A family whose images carry a distinctive

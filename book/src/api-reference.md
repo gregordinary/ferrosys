@@ -8,5 +8,5 @@ guide:
 To build it locally from the workspace root:
 
 ```sh
-cargo doc --no-deps --open
+cargo doc --no-deps --all-features --open
 ```

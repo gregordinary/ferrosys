@@ -4146,3 +4146,109 @@ fn a_populated_volume_over_any_destination_is_one_the_checker_accepts_and_reads_
         }
     }
 }
+
+/// The smallest volume is a mebibyte whatever its sectors: 256 sectors of 4096 bytes and 2048 of
+/// 512. The pinned `mkfs.exfat` formats one of 4096-byte sectors at a mebibyte, and this crate
+/// reads it, detects it, and writes one `fsck.exfat` accepts.
+#[test]
+fn a_mebibyte_volume_of_large_sectors_is_read_and_written() {
+    if !available("mkfs.exfat") || !available("fsck.exfat") {
+        return;
+    }
+    for mib in [1u64, 2, 4] {
+        let image = blank(mib << 20);
+        mkfs(
+            image.path(),
+            &["-s", "4096", "-c", "4K", "-b", "4K", "-P", "none"],
+        )
+        .unwrap_or_else(|e| panic!("{mib} MiB: {e}"));
+        fsck_exfat_clean(image.path()).unwrap_or_else(|e| panic!("{mib} MiB: {e}"));
+        let bytes = std::fs::read(image.path()).expect("read the image");
+        assert!(
+            matches!(
+                ferrosys::detect(Cursor::new(&bytes)),
+                Ok(ferrosys::Filesystem::ExFat)
+            ),
+            "{mib} MiB is detected"
+        );
+        let mut reader =
+            ferrosys::exfat::Reader::open(Cursor::new(bytes)).expect("a mebibyte volume opens");
+        // The baseline records a fresh volume as 0% in use, which a volume this small, where
+        // its four resident clusters are more than one in a hundred, reads as a cosmetic
+        // remark; nothing about the volume is wrong.
+        let report = reader.scan();
+        assert!(
+            report
+                .anomalies()
+                .iter()
+                .all(|a| a.severity == ferrosys::Severity::Cosmetic),
+            "{mib} MiB scans clean: {:?}",
+            report.anomalies()
+        );
+    }
+    let out = blank(1 << 20);
+    let options = FormatOptions::new(0x1234_5678).plan(
+        PlanRequest::new(1 << 20)
+            .bytes_per_sector(4096)
+            .cluster_size(ClusterSize::Bytes(4096))
+            .boundary_align(ferrosys::exfat::BoundaryAlign::Bytes(4096)),
+    );
+    format_to(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(out.path())
+            .expect("open"),
+        TreeBuilder::new().file(
+            "/f",
+            b"data".to_vec(),
+            Metadata::new(0o644, Timestamp::from_secs(1_700_000_000)),
+        ),
+        1 << 20,
+        options,
+    )
+    .expect("a mebibyte of 4096-byte sectors formats");
+    fsck_exfat_clean(out.path()).expect("fsck.exfat accepts it");
+}
+
+/// Names that leave ASCII are the names the pinned checker reads: it recomputes every entry
+/// set's name hash through the volume's up-case table, so a name folded wrongly is a fault it
+/// reports.
+#[test]
+fn names_beyond_ascii_are_the_names_the_checker_reads() {
+    if !available("fsck.exfat") {
+        return;
+    }
+    let names = util::names_beyond_ascii();
+    let time = Timestamp::from_secs(1_700_000_000);
+    let m = |mode| Metadata::new(mode, time);
+    let mut tree = TreeBuilder::new()
+        .directory(b"/lower".to_vec(), m(0o755))
+        .directory(b"/upper".to_vec(), m(0o755));
+    for (path, bytes) in &names {
+        tree = tree.file(path.as_bytes().to_vec(), bytes.clone(), m(0o644));
+    }
+    let image = tempfile::NamedTempFile::new().expect("create a temporary image");
+    let options = FormatOptions::new(0x1234_abcd).accepted_loss(ferrosys::AcceptedLoss::ALL);
+    format_to(image.as_file(), tree, 64 << 20, options).expect("format");
+    fsck_exfat_clean(image.path()).expect("fsck.exfat accepts the names");
+
+    let mut r = ferrosys::exfat::Reader::open(std::fs::File::open(image.path()).expect("open"))
+        .expect("a strict open");
+    for (path, bytes) in &names {
+        let node = r
+            .lookup(path.as_bytes())
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(&r.read_data(&node).expect("read"), bytes, "{path}");
+    }
+
+    // A case pair in one directory is one name to the up-case table, and is refused.
+    let twins = TreeBuilder::new()
+        .file(
+            b"/\xce\xa9\xce\xbc\xce\xad\xce\xb3\xce\xb1".to_vec(),
+            b"a".to_vec(),
+            m(0o644),
+        )
+        .file("/ΩΜΈΓΑ".as_bytes().to_vec(), b"b".to_vec(), m(0o644));
+    let options = FormatOptions::new(1).accepted_loss(ferrosys::AcceptedLoss::ALL);
+    assert!(FormatPlan::new(twins, 64 << 20, options).is_err());
+}

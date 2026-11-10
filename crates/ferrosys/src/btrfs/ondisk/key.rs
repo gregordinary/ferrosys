@@ -321,7 +321,7 @@ pub fn uuid_key(uuid: [u8; 16]) -> (u64, u64) {
 /// The three fields are compared in the order they are declared, unsigned, which is the
 /// on-disk sort — so the derived [`Ord`] is the format's own and a search may rely on it. What
 /// [`offset`](Self::offset) means is decided by [`kind`](Self::kind): a byte offset within a
-/// file for an `EXTENT_DATA`, the hash of a name for a `DIR_ITEM`, a length for a
+/// file for an `EXTENT_DATA`, the hash of a name for a `DIR_ITEM`, the tree block's level for a
 /// `METADATA_ITEM`, and nothing at all for a `ROOT_ITEM`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DiskKey {

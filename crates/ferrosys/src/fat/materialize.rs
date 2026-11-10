@@ -18,6 +18,7 @@
 //! conversion is UTC, so nothing about the machine reaches the image.
 
 use std::io::{Seek, Write};
+use std::num::NonZeroU16;
 
 use crate::fidelity::{AcceptedLoss, FidelityReport, LossPolicy, Property, Synthesis};
 use crate::io::ByteSink;
@@ -99,8 +100,9 @@ impl VolumeLabel {
     ///
     /// # Errors
     ///
-    /// [`LabelError::TooLong`] beyond eleven bytes, and [`LabelError::InvalidByte`] for a
-    /// byte a directory entry's name field cannot hold.
+    /// [`LabelError::TooLong`] beyond eleven bytes, [`LabelError::Empty`] for no bytes at all,
+    /// and [`LabelError::InvalidByte`] for a byte a directory entry's name field cannot hold,
+    /// a space first among them.
     pub fn new(name: &str) -> Result<Self, LabelError> {
         Self::from_bytes(name.as_bytes())
     }
@@ -112,6 +114,9 @@ impl VolumeLabel {
     ///
     /// As [`new`](Self::new).
     pub fn from_bytes(name: &[u8]) -> Result<Self, LabelError> {
+        if name.is_empty() {
+            return Err(LabelError::Empty);
+        }
         if name.len() > Self::LEN {
             return Err(LabelError::TooLong {
                 bytes: name.len(),
@@ -140,12 +145,14 @@ impl VolumeLabel {
 /// Whether `byte` may appear at position `at` of a label.
 ///
 /// The rules are the directory entry's, because that is where the label lives. A trailing
-/// space is padding and an interior one is legal, so spaces are allowed anywhere; the
-/// control characters, the separators DOS reserved, and the byte marking an entry deleted
-/// are not.
+/// space is padding and an interior one is legal, so spaces are allowed past the first byte;
+/// the control characters, the separators DOS reserved, the byte marking an entry deleted,
+/// and a space first are not. Documented: a name field's first byte may not be a space.
+/// Observed: the pinned `mkfs.fat` refuses a label that starts with one, and `fsck.fat`
+/// removes a label entry that does.
 fn byte_is_allowed(byte: u8, at: usize) -> bool {
     const RESERVED: &[u8] = b"\"*+,./:;<=>?[\\]|";
-    if byte < 0x20 || RESERVED.contains(&byte) {
+    if byte < 0x20 || RESERVED.contains(&byte) || (at == 0 && byte == b' ') {
         return false;
     }
     // A first byte of 0xE5 marks a directory entry deleted. A short name encodes a genuine
@@ -178,6 +185,10 @@ pub enum LabelError {
         /// Bytes the format holds.
         limit: usize,
     },
+    /// No label at all: a volume without one has no label entry, which is
+    /// [`FormatOptions::label`] left unset.
+    #[error("a volume label of no bytes is no label: leave the label unset")]
+    Empty,
     /// A byte a directory entry's name field cannot hold, which is where the label is
     /// stored.
     #[error("byte {byte:#04x} at position {at} is not one a volume label may contain")]
@@ -313,6 +324,9 @@ pub struct FormatOptions {
     /// Sectors of the medium before this volume begins — a partition's start offset, or zero
     /// for a volume that is the whole medium. Defaults to zero.
     pub hidden_sectors: u32,
+    /// The legacy disk geometry the boot sector records. Defaults to
+    /// [`DiskGeometry::Auto`], derived from the volume's size.
+    pub disk_geometry: DiskGeometry,
     /// The boot loader's bytes, laid between the fields and the signature. Defaults to
     /// [`BootCode::NONE`], which leaves the region zero.
     pub boot_code: BootCode,
@@ -351,6 +365,7 @@ impl FormatOptions {
             oem_name: DEFAULT_OEM_NAME,
             media: MEDIA_FIXED,
             hidden_sectors: 0,
+            disk_geometry: DiskGeometry::Auto,
             boot_code: BootCode::NONE,
             // Replaced with the size the format is asked for, so the placeholder here is
             // never the size anything is planned against.
@@ -421,6 +436,13 @@ impl FormatOptions {
     #[must_use]
     pub const fn boot_code(mut self, boot_code: BootCode) -> Self {
         self.boot_code = boot_code;
+        self
+    }
+
+    /// These options with the disk geometry the boot sector records replaced.
+    #[must_use]
+    pub const fn disk_geometry(mut self, disk_geometry: DiskGeometry) -> Self {
+        self.disk_geometry = disk_geometry;
         self
     }
 
@@ -532,9 +554,10 @@ pub enum FormatError {
         /// The largest volume the search could have tried, in bytes.
         ceiling: u64,
     },
-    /// The image is larger than this platform addresses in memory. Only [`format()`] can
-    /// reach this; [`format_to`] never holds an image.
-    #[error("an image of {bytes} bytes is larger than this platform addresses in memory")]
+    /// The image is larger than this machine can hold in memory: past what a `usize`
+    /// addresses, or more than the allocator will provide. Only [`format()`] can reach this;
+    /// [`format_to`] never holds an image.
+    #[error("an image of {bytes} bytes cannot be held in memory on this machine")]
     #[non_exhaustive]
     ImageTooLargeInMemory {
         /// Bytes the image needs.
@@ -792,7 +815,7 @@ impl FormatPlan {
 ///
 /// A [`FormatError`] if the geometry cannot be realized, an option is outside what the format
 /// holds, the source names something the volume cannot hold, or the image is larger than this
-/// platform addresses.
+/// machine can hold in memory.
 ///
 /// # Example
 ///
@@ -826,8 +849,9 @@ pub fn format(
     // The whole image is one buffer, so its size must be one this platform can address: a
     // cast would silently size the buffer to the low bits of the count and write a filesystem
     // into the wrong number of bytes.
-    let len = usize::try_from(bytes).map_err(|_| FormatError::ImageTooLargeInMemory { bytes })?;
-    let mut sink = std::io::Cursor::new(vec![0u8; len]);
+    let buffer =
+        crate::io::image_buffer(bytes).ok_or(FormatError::ImageTooLargeInMemory { bytes })?;
+    let mut sink = std::io::Cursor::new(buffer);
     let layout = plan.write_to(&mut sink)?;
     Ok(Image {
         bytes: sink.into_inner(),
@@ -926,6 +950,44 @@ fn plan(volume_bytes: u64, options: &FormatOptions) -> Result<FatLayout, FormatE
         });
     }
     Ok(layout)
+}
+
+/// The legacy disk geometry a boot sector records: the sectors per track and the heads a
+/// BIOS addresses the medium by (`BPB_SecPerTrk` and `BPB_NumHeads`).
+///
+/// No placement depends on it, and no cluster moves when it changes. Boot code that reads
+/// the volume through BIOS calls uses it, so a volume written into a partition of a disk
+/// whose geometry is known can record that geometry, beside the partition's start in
+/// [`FormatOptions::hidden_sectors`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
+pub enum DiskGeometry {
+    /// Derived from the volume's sector count, by the two published tables convention
+    /// follows: the SD Card File System specification's recommendation up to 256 MiB of
+    /// 512-byte sectors, and 63 sectors a track with the heads that keep a cylinder count
+    /// within 1,024 above it.
+    #[default]
+    Auto,
+    /// These values, as given. Each is at least one, as `mkfs.fat -g` requires (observed).
+    Exactly {
+        /// Sectors per track.
+        sectors_per_track: NonZeroU16,
+        /// Heads.
+        heads: NonZeroU16,
+    },
+}
+
+impl DiskGeometry {
+    /// The sectors per track and heads a volume of `total_sectors` records.
+    const fn resolve(self, total_sectors: u32) -> (u16, u16) {
+        match self {
+            DiskGeometry::Auto => chs(total_sectors),
+            DiskGeometry::Exactly {
+                sectors_per_track,
+                heads,
+            } => (sectors_per_track.get(), heads.get()),
+        }
+    }
 }
 
 /// The sector count at or below which the small-media recommendation applies. It is 256 MiB
@@ -1308,7 +1370,7 @@ fn boot_sector(layout: &FatLayout, options: &FormatOptions) -> BootSector {
             && (layout.fat32.is_some() || u16::try_from(layout.fat_sectors).is_ok()),
         "a planned field does not fit the boot sector field that records it: {layout:?}"
     );
-    let (sectors_per_track, heads) = chs(layout.total_sectors);
+    let (sectors_per_track, heads) = options.disk_geometry.resolve(layout.total_sectors);
     let volume = VolumeInfo {
         drive_number: options.drive_number(),
         reserved: 0,
@@ -2361,9 +2423,15 @@ mod tests {
         // The same byte anywhere else is a code page's business rather than this crate's, and
         // is carried through.
         assert!(VolumeLabel::from_bytes(&[b'A', 0xE5]).is_ok());
-        // An empty label is all padding, which is a name a driver reads as blank rather than
-        // an error to report.
-        assert_eq!(VolumeLabel::new("").unwrap().as_bytes(), b"           ");
+        // A name field may not begin with a space, and `fsck.fat` removes a label entry that
+        // does; an interior space is part of the name.
+        assert!(matches!(
+            VolumeLabel::new(" AB"),
+            Err(LabelError::InvalidByte { byte: b' ', at: 0 })
+        ));
+        assert_eq!(VolumeLabel::new("A B").unwrap().as_bytes(), b"A B        ");
+        // No bytes is no label, which is a label left unset.
+        assert_eq!(VolumeLabel::new(""), Err(LabelError::Empty));
     }
 
     #[test]

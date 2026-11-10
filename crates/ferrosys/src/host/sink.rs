@@ -187,9 +187,11 @@ pub struct ExtractReport {
     ///
     /// This is separate from [`skipped`](Self::skipped) and the fields above, which are about
     /// what *this host* refused. A property the image never held is not something the
-    /// host declined to write. The one property recorded here as dropped is an entry's BSD
-    /// flags, which a Darwin filesystem records and no destination holds, under
-    /// [`skip_unsupported`](DirectorySink::skip_unsupported).
+    /// host declined to write. Two properties are recorded here as dropped. One is an entry's
+    /// BSD flags, which a Darwin filesystem records and no destination holds, under
+    /// [`skip_unsupported`](DirectorySink::skip_unsupported). The other is the set-user-ID and
+    /// set-group-ID bits of a file whose recorded owner was not set, as
+    /// [`Property::SpecialBits`].
     pub fidelity: FidelityReport,
 }
 
@@ -351,6 +353,13 @@ impl DirectorySink {
     /// and [`HostError::Acl`] if a
     /// stored POSIX ACL does not decode.
     pub fn write_tree<T: FsTree>(self, tree: &mut T) -> Result<ExtractReport, HostError> {
+        // A default ACL on the destination is inherited by everything created beneath it,
+        // and by everything beneath that, as an access ACL the image does not record. The
+        // image's own directories take their ACLs once their children are written, so the
+        // destination's is the only one anything inherits.
+        let inherits_acls =
+            rustix::fs::fgetxattr(&self.root, crate::acl::Acl::DEFAULT_NAME, &mut [0u8; 0][..])
+                .is_ok();
         let mut state = Extraction {
             sink: &self,
             report: ExtractReport::default(),
@@ -358,6 +367,7 @@ impl DirectorySink {
             open: Vec::new(),
             held: Vec::new(),
             left_out: None,
+            inherits_acls,
         };
         let synthesis = self.synthesis;
 
@@ -464,6 +474,9 @@ struct Extraction<'a> {
     /// The directory most recently left out because the destination refused its name. The
     /// walk reaches everything under it next, and there is no directory to create it in.
     left_out: Option<Vec<u8>>,
+    /// Whether the destination carries a default ACL, so every node created beneath it may
+    /// carry ACLs it inherited rather than ones the image records.
+    inherits_acls: bool,
 }
 
 impl Extraction<'_> {
@@ -584,7 +597,9 @@ impl Extraction<'_> {
         // is finished the moment it exists.
         match (entry.kind, &handle) {
             (NodeKind::Directory, _) => {}
-            (_, Some(fd)) => self.finish_fd(fd, &attrs.meta, &attrs.xattrs, &entry.path)?,
+            (_, Some(fd)) => {
+                self.finish_fd(fd, &attrs.meta, &attrs.xattrs, &entry.path, false)?;
+            }
             (_, None) => self.finish_name(
                 name,
                 &attrs.meta,
@@ -710,7 +725,7 @@ impl Extraction<'_> {
         // The path a failure names: the image path this directory holds, or the destination
         // itself for the root, whose path inside the image is empty.
         let path: &[u8] = if dir.path.is_empty() { b"/" } else { &dir.path };
-        self.finish_fd(&dir.fd, &dir.meta, &dir.xattrs, path)
+        self.finish_fd(&dir.fd, &dir.meta, &dir.xattrs, path, true)
     }
 
     /// Create a regular file and stream its contents into it, returning the handle its
@@ -979,10 +994,15 @@ impl Extraction<'_> {
         meta: &Metadata,
         xattrs: &[Xattr],
         path: &[u8],
+        directory: bool,
     ) -> Result<(), HostError> {
-        self.chown_fd(fd, meta, path)?;
-        rustix::fs::fchmod(fd, mode_of(meta)).map_err(|e| self.io(path, e.into()))?;
-        self.set_xattrs_on_fd(fd, xattrs, path)?;
+        let owned = self.chown_fd(fd, meta, path)?;
+        let (acls, others) = split_acls(xattrs);
+        self.drop_inherited_acls_on_fd(fd, &acls, directory, path)?;
+        self.set_xattrs_on_fd(fd, &others, path)?;
+        let mode = self.applied_mode(meta, owned, directory, path);
+        rustix::fs::fchmod(fd, mode).map_err(|e| self.io(path, e.into()))?;
+        self.set_xattrs_on_fd(fd, &acls, path)?;
         rustix::fs::futimens(fd, &times_of(meta)).map_err(|e| self.io(path, e.into()))?;
         let held = rustix::fs::fstat(fd).map_err(|e| self.io(path, e.into()))?;
         self.took_times(meta, held_times(&held), path)
@@ -1001,20 +1021,25 @@ impl Extraction<'_> {
         path: &[u8],
         symlink: bool,
     ) -> Result<(), HostError> {
-        let flags = if symlink {
-            AtFlags::SYMLINK_NOFOLLOW
-        } else {
-            AtFlags::empty()
-        };
-        self.chown_at(name, meta, path, flags)?;
+        // Every call that takes one is told not to follow a symbolic link, whatever the node
+        // is: the name is one this run created a moment ago, and a name swapped for a link
+        // in between is then changed itself rather than what it points at.
+        let flags = AtFlags::SYMLINK_NOFOLLOW;
+        let owned = self.chown_at(name, meta, path, flags)?;
+        let (acls, others) = split_acls(xattrs);
         if !symlink {
-            // No `SYMLINK_NOFOLLOW` here, and none is needed: Linux has no `fchmodat` that
-            // takes it — the call fails outright — and the name being changed is one this
-            // run created a moment ago, which is not a symbolic link.
-            rustix::fs::chmodat(self.dir(), name, mode_of(meta), AtFlags::empty())
+            self.drop_inherited_acls_by_name(name, &acls, path)?;
+        }
+        self.set_xattrs_by_name(name, &others, path)?;
+        if !symlink {
+            // No `SYMLINK_NOFOLLOW` here: Linux has no `fchmodat` that takes it — the call
+            // fails outright — and the name being changed is one this run created a moment
+            // ago, which is not a symbolic link.
+            let mode = self.applied_mode(meta, owned, false, path);
+            rustix::fs::chmodat(self.dir(), name, mode, AtFlags::empty())
                 .map_err(|e| self.io(path, e.into()))?;
         }
-        self.set_xattrs_by_name(name, xattrs, path)?;
+        self.set_xattrs_by_name(name, &acls, path)?;
         rustix::fs::utimensat(self.dir(), name, &times_of(meta), flags)
             .map_err(|e| self.io(path, e.into()))?;
         let held =
@@ -1069,37 +1094,109 @@ impl Extraction<'_> {
         }
     }
 
-    /// Set a name's recorded owner, honouring the skip policy.
+    /// Set a name's recorded owner, honouring the skip policy. Answers whether it was set.
     fn chown_at(
         &mut self,
         name: &[u8],
         meta: &Metadata,
         path: &[u8],
         flags: AtFlags,
-    ) -> Result<(), HostError> {
+    ) -> Result<bool, HostError> {
         let (uid, gid) = owner_of(meta, path)?;
         let result = rustix::fs::chownat(self.dir(), name, Some(uid), Some(gid), flags);
         self.took_ownership(result, path)
     }
 
     /// The same for something already open, which is every regular file and directory.
-    fn chown_fd(&mut self, fd: &OwnedFd, meta: &Metadata, path: &[u8]) -> Result<(), HostError> {
+    fn chown_fd(&mut self, fd: &OwnedFd, meta: &Metadata, path: &[u8]) -> Result<bool, HostError> {
         let (uid, gid) = owner_of(meta, path)?;
         let result = rustix::fs::fchown(fd, Some(uid), Some(gid));
         self.took_ownership(result, path)
     }
 
-    /// Judge one ownership call: a refusal is the whole extraction's failure, or a recorded
-    /// omission under [`DirectorySink::skip_privileged`].
-    fn took_ownership(
+    /// The mode a node takes: the recorded one, less the set-user-ID and set-group-ID bits
+    /// where the recorded owner was not applied.
+    ///
+    /// Those bits make a program run as its owner and its group. A node whose recorded owner
+    /// was not set is owned by this process instead, so with them kept, a set-user-ID-root
+    /// program would run as whoever extracted it — and from a crafted image, as the victim of
+    /// whoever can reach the tree. So they are cleared, on anything but a directory, where
+    /// set-group-ID says new entries take its group and runs nothing, and the drop is
+    /// recorded as [`Property::SpecialBits`] in the report's fidelity.
+    fn applied_mode(&mut self, meta: &Metadata, owned: bool, directory: bool, path: &[u8]) -> Mode {
+        let mode = mode_of(meta);
+        let set_id = Mode::SUID | Mode::SGID;
+        if owned || directory || !mode.intersects(set_id) {
+            return mode;
+        }
+        self.report
+            .fidelity
+            .record(Direction::Dropped, path, Property::SpecialBits);
+        mode.difference(set_id)
+    }
+
+    /// Remove the ACLs a node inherited from the destination where the image records none of
+    /// its own, so the node holds what the image says rather than what its parent passed on:
+    /// the access ACL, and on a directory the default ACL. `acls` is what the image records.
+    fn drop_inherited_acls_on_fd(
+        &mut self,
+        fd: &OwnedFd,
+        acls: &[&Xattr],
+        directory: bool,
+        path: &[u8],
+    ) -> Result<(), HostError> {
+        if !self.inherits_acls {
+            return Ok(());
+        }
+        for name in inherited(acls, directory) {
+            let result = rustix::fs::fremovexattr(fd, name);
+            self.took_removal(result, path)?;
+        }
+        Ok(())
+    }
+
+    /// The same for a node that cannot be opened: a device node, a FIFO, or a socket.
+    fn drop_inherited_acls_by_name(
+        &mut self,
+        name: &[u8],
+        acls: &[&Xattr],
+        path: &[u8],
+    ) -> Result<(), HostError> {
+        if !self.inherits_acls {
+            return Ok(());
+        }
+        let at_dir = fd_path(self.dir(), name);
+        for acl in inherited(acls, false) {
+            let result = rustix::fs::lremovexattr(&at_dir, acl);
+            self.took_removal(result, path)?;
+        }
+        Ok(())
+    }
+
+    /// Judge one removal of an inherited ACL: one that is not there, and a destination that
+    /// holds none, leave nothing to remove.
+    fn took_removal(
         &mut self,
         result: rustix::io::Result<()>,
         path: &[u8],
     ) -> Result<(), HostError> {
+        match result {
+            Ok(()) | Err(rustix::io::Errno::NODATA | rustix::io::Errno::OPNOTSUPP) => Ok(()),
+            Err(e) => Err(self.io(path, e.into())),
+        }
+    }
+
+    /// Judge one ownership call: a refusal is the whole extraction's failure, or a recorded
+    /// omission under [`DirectorySink::skip_privileged`]. Answers whether the owner was set.
+    fn took_ownership(
+        &mut self,
+        result: rustix::io::Result<()>,
+        path: &[u8],
+    ) -> Result<bool, HostError> {
         // Root in a user namespace holds CAP_CHOWN and still cannot give a node an owner the
         // namespace maps to no id, which the kernel answers with EINVAL.
         let what = match result {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(e) if forbidden(e) => "an owner other than this process's needs CAP_CHOWN to set",
             Err(rustix::io::Errno::INVAL) => {
                 "an owner this user namespace maps to no id cannot be set"
@@ -1113,7 +1210,7 @@ impl Extraction<'_> {
             });
         }
         self.report.ownership_dropped = true;
-        Ok(())
+        Ok(false)
     }
 
     /// Set the extended attributes of a name in the current directory.
@@ -1131,7 +1228,7 @@ impl Extraction<'_> {
     fn set_xattrs_by_name(
         &mut self,
         name: &[u8],
-        xattrs: &[Xattr],
+        xattrs: &[&Xattr],
         path: &[u8],
     ) -> Result<(), HostError> {
         if xattrs.is_empty() {
@@ -1154,7 +1251,7 @@ impl Extraction<'_> {
     fn set_xattrs_on_fd(
         &mut self,
         fd: &OwnedFd,
-        xattrs: &[Xattr],
+        xattrs: &[&Xattr],
         path: &[u8],
     ) -> Result<(), HostError> {
         for xattr in xattrs {
@@ -1378,6 +1475,30 @@ fn under_root(root: &Path, path: &[u8]) -> PathBuf {
     out
 }
 
+/// A node's attributes split into its POSIX ACLs and the rest, in the order each keeps.
+///
+/// A node takes its other attributes before its mode and its ACLs after. The kernel requires
+/// write permission on a node to set a `user.*` attribute, which a node created writable has
+/// and a recorded mode of `0444` takes away. A `chmod` rewrites an access ACL's mask entry,
+/// so an ACL set before the mode would not be the one the image records. And
+/// `security.capability` is set after the owner, since a change of owner clears it.
+fn split_acls(xattrs: &[Xattr]) -> (Vec<&Xattr>, Vec<&Xattr>) {
+    xattrs.iter().partition(|x| {
+        x.name == crate::acl::Acl::ACCESS_NAME || x.name == crate::acl::Acl::DEFAULT_NAME
+    })
+}
+
+/// The ACL names a node may have inherited that `recorded`, the ACLs the image records for
+/// it, does not hold: the access ACL, and on a directory the default ACL.
+fn inherited<'a>(recorded: &[&Xattr], directory: bool) -> Vec<&'a [u8]> {
+    let mut names: Vec<&'a [u8]> = vec![crate::acl::Acl::ACCESS_NAME];
+    if directory {
+        names.push(crate::acl::Acl::DEFAULT_NAME);
+    }
+    names.retain(|name| !recorded.iter().any(|x| x.name == *name));
+    names
+}
+
 /// The permission and set-user/group/sticky bits of a recorded mode.
 fn mode_of(meta: &Metadata) -> Mode {
     Mode::from_bits_retain(u32::from(meta.mode & 0o7777))
@@ -1463,6 +1584,7 @@ mod tests {
             open: Vec::new(),
             held: Vec::new(),
             left_out: None,
+            inherits_acls: false,
         }
     }
 

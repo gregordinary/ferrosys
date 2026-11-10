@@ -40,10 +40,12 @@ set's position in its directory) is sorted or otherwise fixed into a determinate
 ## The scope of the guarantee
 
 ferrosys guarantees identical bytes for one version, one feature set, and identical
-inputs. Across versions the guarantee holds where the on-disk feature set is pinned
-exactly. `ext::FeatureSet::DEFAULT` is frozen and safe to pin, and
-`ext::FeatureSet::LATEST` tracks current `mke2fs` and moves between releases by design.
+inputs. Across versions, a pinned feature set keeps its feature words. A release can still
+correct a formula under one to match `mke2fs`, and its changelog names each such correction.
+`ext::FeatureSet::DEFAULT` is frozen and safe to pin, and `ext::FeatureSet::LATEST` tracks
+current `mke2fs` and moves between releases by design.
 
 A consumer pinning an on-disk contract records the whole resolved feature set, which
 `ext::FeatureSet::pin` emits. A feature-name list is not enough, because it omits the
-block and inode sizes.
+block and inode sizes. A geometry pin planned at a fixed reference size is what catches a
+corrected formula.

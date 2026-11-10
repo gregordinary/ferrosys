@@ -35,7 +35,7 @@
 //!
 //! This module does I/O, through the container it owns.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek, Write};
 
 use crate::bytes::{get_u32, get_u32_be};
@@ -44,7 +44,7 @@ use crate::finding::{Family, Severity};
 use crate::policy::MAX_PATH;
 use crate::source::{Darwin, Metadata};
 use crate::time::Timestamp;
-use crate::tree::{Attributes, FsTree, NodeKind, TreeEntry, TreeError};
+use crate::tree::{Attributes, Bound, Child, FsTree, NodeKind, TreeEntry, TreeError, Usage};
 use crate::xattr::Xattr;
 use crate::{Limits, ReadPolicy};
 
@@ -349,6 +349,11 @@ pub struct Reader<R> {
     /// file's resource fork to its extents whole, and a file is read a window at a time.
     /// Boxed, as the volume is.
     last_table: Option<Box<(u64, ChunkTable)>>,
+    /// The data stream last held to using no block twice across all of its extents. A read a
+    /// window at a time asks for the extents its window meets, and a block two extents of a
+    /// stream both use is a fault a window may meet one half of; so the first window of a
+    /// stream asks it of every extent, and the rest of its windows need not.
+    whole_stream: Option<u64>,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -426,6 +431,7 @@ impl<R: Read + Seek> Reader<R> {
             map_tree,
             fs_tree,
             last_table: None,
+            whole_stream: None,
         })
     }
 
@@ -501,6 +507,7 @@ impl<R: Read + Seek> Reader<R> {
         };
         self.view = Some(Box::new((snapshot, copy)));
         self.last_table = None;
+        self.whole_stream = None;
         Ok(self)
     }
 
@@ -1584,7 +1591,15 @@ impl<R: Read + Seek> Reader<R> {
         let end = offset + want;
         let bs = u64::from(self.container.block_size());
         let runs = match holes {
-            Holes::Zeros => self.stream_runs(stream, offset, end)?,
+            Holes::Zeros => {
+                // Once per stream: a block two of its extents use is refused by every read of
+                // it, whichever window meets which of the two.
+                if self.whole_stream != Some(stream) {
+                    self.refuse_reused_blocks(stream)?;
+                    self.whole_stream = Some(stream);
+                }
+                self.stream_runs(stream, offset, end)?
+            }
             Holes::Refused => self.attribute_runs(stream, offset, end)?,
         };
         for extent in runs {
@@ -1600,6 +1615,45 @@ impl<R: Read + Seek> Reader<R> {
                 .read_within(extent.physical_block + within / bs, within % bs, dest)?;
         }
         Ok(want as usize)
+    }
+
+    /// Refuse data stream `stream` where two of its extents, anywhere in it, use one block.
+    ///
+    /// Clones share blocks between streams and never within one, so a block two of a stream's
+    /// extents use is a byte the stream holds twice. [`stream_runs`](Self::stream_runs) asks
+    /// it of the extents a range meets; this asks it of all of them, so a read of one window
+    /// refuses what a read of the whole stream refuses. What else an extent may get wrong is
+    /// the range's to find, where a read meets it.
+    fn refuse_reused_blocks(&mut self, stream: u64) -> Result<(), ReadError> {
+        let bs = u64::from(self.container.block_size());
+        let limit = self.limits().max_walk_entries;
+        let mut runs = Vec::new();
+        btree::for_each_from(
+            &mut self.container,
+            &self.fs_tree,
+            &btree::extent_at(stream, 0),
+            limit,
+            &mut |key, value| {
+                let header = KeyHeader::read_from(key)?;
+                if (header.id, header.kind) != (stream, record_kind::FILE_EXTENT) {
+                    return Ok(false);
+                }
+                let extent = btree::extent(key, value)?;
+                if extent.physical_block != 0 && extent.length % bs == 0 {
+                    runs.push(extent);
+                }
+                Ok(true)
+            },
+        )?;
+        match reused_block(&runs, bs) {
+            Some(logical) => Err(ReadError::BadExtent {
+                stream,
+                logical,
+                block: None,
+                fault: REUSED,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// The extents of data stream `stream` that hold bytes of `offset..end`.
@@ -2435,9 +2489,13 @@ impl<R: Read + Seek> Reader<R> {
         self.container.set_policy(ReadPolicy::Lenient);
         let mut visit = |walk: &mut Namespace<'_, R>, named: Named| -> Result<(), ReadError> {
             let reader = &mut *walk.reader;
-            let Named { path, node, entry } = named;
-            let path = if path.is_empty() { b"/".to_vec() } else { path };
-            let at = || crate::escape::printable(&path);
+            let Named { label, node, entry } = named;
+            let label = if label.is_empty() {
+                b"/".to_vec()
+            } else {
+                label
+            };
+            let at = || crate::escape::printable(&label);
             if let Some((named_in, entry_type)) = entry {
                 let want = (node.file_type() >> 12) as u8;
                 if entry_type != want {
@@ -2546,7 +2604,7 @@ impl<R: Read + Seek> Reader<R> {
             visit(
                 &mut walk,
                 Named {
-                    path: Vec::new(),
+                    label: Vec::new(),
                     node: root,
                     entry: None,
                 },
@@ -2672,17 +2730,31 @@ impl<R: Read + Seek> Reader<R> {
     /// The names below `dir`, at `path`, as frontier elements in reverse listing order: each
     /// path, with the inode it names, the directory that names it, and the entry's type.
     fn pending_children(&mut self, dir: &Node, path: &[u8]) -> Result<Vec<Unvisited>, ReadError> {
-        let named_in = dir.inode;
-        let entries = self
-            .read_dir(dir)?
-            .into_iter()
-            .map(|e| (e.name, (e.file_id, named_in, e.entry_type)));
+        let entries = self.listed(dir)?;
         crate::walk::frontier(
             path,
             entries,
             |name| ReadError::HostileName { name },
             |path| ReadError::PathTooLong { path },
         )
+    }
+
+    /// [`pending_children`](Self::pending_children) for a scan, which names each by a label
+    /// rather than a path, below the directory it calls `label`.
+    fn labelled_children(&mut self, dir: &Node, label: &[u8]) -> Result<Vec<Unvisited>, ReadError> {
+        let entries = self.listed(dir)?;
+        crate::walk::labelled_frontier(label, entries, |name| ReadError::HostileName { name })
+    }
+
+    /// The names below `dir` in listing order, each with the inode it names, `dir` itself as
+    /// the directory naming it, and the entry's type.
+    fn listed(&mut self, dir: &Node) -> Result<Vec<(Vec<u8>, Entered)>, ReadError> {
+        let named_in = dir.inode;
+        Ok(self
+            .read_dir(dir)?
+            .into_iter()
+            .map(|e| (e.name, (e.file_id, named_in, e.entry_type)))
+            .collect())
     }
 }
 
@@ -2803,7 +2875,10 @@ struct Held {
 struct HashGroup {
     dir: u64,
     hash: u32,
-    met: Vec<(Vec<u32>, Vec<u8>)>,
+    /// Each form met, with the first name stored in it, so a name is checked by a lookup
+    /// rather than against every name before it: names chosen to share a hash cost no more
+    /// than any others.
+    met: HashMap<Vec<u32>, Vec<u8>>,
 }
 
 /// How far a stream's extents cover it from its first byte, each beginning where the one
@@ -3169,7 +3244,7 @@ impl Held {
                 (group.dir, group.hash) = (parent, key.hash);
                 group.met.clear();
             }
-            if let Some((_, other)) = group.met.iter().find(|(seen, _)| seen == form) {
+            if let Some(other) = group.met.get(form) {
                 fault(
                     Severity::Integrity,
                     file_id,
@@ -3180,7 +3255,10 @@ impl Held {
                     ),
                 );
             }
-            group.met.push((form.clone(), key.name.to_vec()));
+            group
+                .met
+                .entry(form.clone())
+                .or_insert_with(|| key.name.to_vec());
         }
         if let Some((severity, problem)) = name_fault(key.hash, form.as_deref()) {
             fault(
@@ -3424,20 +3502,25 @@ fn field_faults(
 /// One attribute record as it is stored: its name, its flags, and its record's data.
 type XattrRecord = (Vec<u8>, u16, Vec<u8>);
 
-/// A name a walk has reached and not yet visited: its path, the inode it names, the directory
-/// that names it, and the entry's type.
-type Unvisited = (Vec<u8>, (u64, u64, u8));
+/// A name a walk has reached and not yet visited: its path (a scan's label, in a scan), and
+/// what the walk keeps to visit it.
+type Unvisited = (Vec<u8>, Entered);
 
-/// One name the namespace scan reaches: the path and node a walk yields, with the directory
-/// naming it and the entry's type, which the root has none of.
+/// What a walk keeps of a name to visit it later: the inode it names, the directory that names
+/// it, and the entry's type.
+type Entered = (u64, u64, u8);
+
+/// One name the namespace scan reaches: its label and its node, with the directory naming it
+/// and the entry's type, which the root has none of.
 struct Named {
-    path: Vec<u8>,
+    label: Vec<u8>,
     node: Node,
     entry: Option<(u64, u8)>,
 }
 
 /// The walk the namespace scan drives: the reader's own, keeping each entry's type and the
-/// directory that names it, so each directory is listed and each name's inode read once.
+/// directory that names it, so each directory is listed and each name's inode read once, and
+/// naming each by a label, so a tree of any depth is read whole.
 struct Namespace<'a, R> {
     reader: &'a mut Reader<R>,
 }
@@ -3453,13 +3536,15 @@ impl<R: Read + Seek> crate::walk::Walk for Namespace<'_, R> {
     }
 
     fn seed(&mut self) -> Result<crate::walk::Seed<Self>, ReadError> {
-        crate::walk::Walk::seed(self.reader)
+        let root = self.reader.root()?;
+        let children = self.reader.labelled_children(&root, b"")?;
+        Ok((children, vec![root.inode]))
     }
 
-    fn resolve(&mut self, (path, (inode, named_in, kind)): Unvisited) -> Result<Named, ReadError> {
-        let entry = crate::walk::Walk::resolve(self.reader, (path, (inode, named_in, kind)))?;
+    fn resolve(&mut self, (label, (inode, named_in, kind)): Unvisited) -> Result<Named, ReadError> {
+        let entry = crate::walk::Walk::resolve(self.reader, (label, (inode, named_in, kind)))?;
         Ok(Named {
-            path: entry.path,
+            label: entry.path,
             node: entry.node,
             entry: Some((named_in, kind)),
         })
@@ -3470,7 +3555,7 @@ impl<R: Read + Seek> crate::walk::Walk for Namespace<'_, R> {
     }
 
     fn children(&mut self, entry: &Named) -> Result<Vec<Unvisited>, ReadError> {
-        self.reader.pending_children(&entry.node, &entry.path)
+        self.reader.labelled_children(&entry.node, &entry.label)
     }
 
     fn repeated(&mut self, entry: &Named) -> Result<(), ReadError> {
@@ -3857,13 +3942,13 @@ impl From<ReadError> for TreeError {
     fn from(err: ReadError) -> Self {
         match err {
             ReadError::Io { kind, message } => TreeError::Io { kind, message },
-            ReadError::FileTooLarge { .. }
-            | ReadError::AttributeTooLarge { .. }
-            | ReadError::TooManyEntries { .. }
-            | ReadError::WalkTooLarge { .. } => TreeError::LimitExceeded {
-                family: Family::Apfs,
-                detail: err.to_string(),
-            },
+            ReadError::FileTooLarge { .. } | ReadError::AttributeTooLarge { .. } => {
+                TreeError::limit(Family::Apfs, Bound::FileBytes, &err)
+            }
+            ReadError::TooManyEntries { .. } | ReadError::WalkTooLarge { .. } => {
+                TreeError::limit(Family::Apfs, Bound::Entries, &err)
+            }
+            ReadError::PathTooLong { .. } => TreeError::limit(Family::Apfs, Bound::PathBytes, &err),
             // A volume that is entirely well-formed and beyond this build. Each names what it
             // would take to read it, which is what the shared frame calls unsupported rather
             // than malformed.
@@ -3946,6 +4031,50 @@ impl<R: Read + Seek> FsTree for Reader<R> {
 
     fn bsd_flags(&mut self, node: &Node) -> Result<u32, TreeError> {
         Ok(node.value.bsd_flags)
+    }
+
+    fn find(&mut self, path: &[u8]) -> Result<Child<Node>, TreeError> {
+        let node = self.lookup(path).map_err(|e| match e {
+            ReadError::NotFound { .. }
+            | ReadError::NotADirectory { .. }
+            | ReadError::SymlinkLoop { .. } => TreeError::NotFound {
+                family: Family::Apfs,
+                path: path.to_vec(),
+            },
+            other => TreeError::from(other),
+        })?;
+        let kind = node_kind(&node)?;
+        Ok(Child::new(crate::tree::last_name(path), kind, node))
+    }
+
+    fn list(&mut self, dir: &Node) -> Result<Vec<Child<Node>>, TreeError> {
+        if !dir.is_dir() {
+            return Err(crate::tree::not_a_directory(Family::Apfs));
+        }
+        let entries = self.read_dir(dir)?.into_iter().map(|e| (e.name, e.file_id));
+        let mut out = Vec::new();
+        for (name, file_id) in crate::tree::listed(Family::Apfs, entries)? {
+            // As a walk reaches a name: the inode it names, held to recording this directory as
+            // its parent.
+            let node = self.inode(file_id)?;
+            self.hold_parent(&node, dir.inode)?;
+            let kind = node_kind(&node)?;
+            out.push(Child::new(name, kind, node));
+        }
+        Ok(out)
+    }
+
+    /// In blocks: the container's block count, and the blocks its space manager counts free on
+    /// the main device. Every volume of a container shares its blocks, so this is the
+    /// container's account whichever volume was opened.
+    fn usage(&mut self) -> Result<Usage, TreeError> {
+        let manager = self.container.space_manager()?;
+        let sb = self.container.superblock();
+        Ok(Usage::new(
+            u64::from(sb.block_size),
+            sb.block_count,
+            manager.devices[super::ondisk::SpaceManager::MAIN].free_count,
+        ))
     }
 }
 
@@ -7505,6 +7634,60 @@ mod tests {
             "{walked:?}"
         );
         assert_eq!(reached, [0, 1001, 2002, 3003]);
+        // The tree is well-formed, so the shared surface reports the bound as a limit.
+        let shared = walked.map_err(TreeError::from);
+        assert!(
+            matches!(
+                shared,
+                Err(TreeError::LimitExceeded {
+                    bound: Bound::PathBytes,
+                    ..
+                })
+            ),
+            "{shared:?}"
+        );
+    }
+
+    #[test]
+    fn a_scan_reads_a_tree_deeper_than_a_walk_builds_whole() {
+        // Seventeen directories of 255-byte names, the longest macOS makes, are past the
+        // longest path a walk builds, with an entry below them whose type is not its inode's.
+        // A scan names each name by a label and reads on, so it reaches that entry, reports it
+        // by the end of its path, and reports nothing for the depth.
+        let mut forge = Forge::new();
+        let name = vec![b'a'; 255];
+        let mut parent = inode_number::ROOT;
+        for id in 100..117 {
+            forge.entry(parent, &name, id, forge::DT_DIR, None);
+            forge.add(forge::inode(id, parent, 0o040_755, 0, None, &[]));
+            parent = id;
+        }
+        forge.entry(parent, b"typed", 200, forge::DT_REG, None);
+        forge.add(forge::inode(200, parent, 0o010_644, 0, None, &[]));
+        forge.settle();
+        forge.per_leaf = Some(3);
+        assert!(matches!(
+            open(&forge).walk(),
+            Err(ReadError::PathTooLong { path }) if path.len() == 17 * 256
+        ));
+        assert_eq!(
+            namespace_findings(&forge),
+            [(Category::Record, Severity::Integrity, Some(200), "type")]
+        );
+        let report = open(&forge).scan();
+        let detail = &report.anomalies()[0].detail;
+        let mut tail = vec![b'/'];
+        tail.extend_from_slice(&name);
+        tail.extend_from_slice(b"/typed: ");
+        let tail = String::from_utf8(tail).expect("ASCII");
+        assert!(
+            detail.starts_with('\u{2026}') && detail.contains(&tail),
+            "{detail}"
+        );
+        assert!(
+            detail.find(": ").is_some_and(|end| end <= MAX_PATH),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -7722,9 +7905,20 @@ mod tests {
                 fault: REUSED
             })
         );
-        // A window that meets one of the two reads; the scan reads the stream whole.
+        // A window meeting one of the two is refused as the whole read is: a stream is held to
+        // the rules whole before a window of it is read, so which window a caller asks for
+        // cannot decide the answer. Streaming it is refused the same way.
         let mut window = vec![0u8; BLOCK];
-        assert_eq!(reader.read_into(&twice, 0, &mut window).ok(), Some(BLOCK));
+        assert_eq!(
+            reader.read_into(&twice, 0, &mut window).err(),
+            Some(ReadError::BadExtent {
+                stream: 60,
+                logical: BLOCK as u64,
+                block: None,
+                fault: REUSED
+            })
+        );
+        assert!(reader.read_data_to(&twice, std::io::sink()).is_err());
         let report = reader.scan();
         let found: Vec<_> = report
             .anomalies()

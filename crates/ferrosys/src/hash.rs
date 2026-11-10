@@ -32,7 +32,7 @@
 /// through the algorithm it names and the signedness it records. Code 6 is siphash, used
 /// only by `casefold`, which this crate does not write. [`from_u8`](Self::from_u8)
 /// answers `None` for all four.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[non_exhaustive]
 pub enum HashVersion {
     /// The original ext2 directory hash. It has no minor hash and ignores the seed.
@@ -87,7 +87,7 @@ impl core::fmt::Display for HashVersion {
 /// Recorded in `s_flags`. [`Unsigned`](Self::Unsigned) treats each byte as its
 /// numeric value; [`Signed`](Self::Signed) treats a byte at or above `0x80` as
 /// negative. Names of pure ASCII hash identically under both.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum HashSignedness {
     /// Bytes are unsigned. Byte-reproducible across architectures.
     #[default]

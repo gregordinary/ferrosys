@@ -250,14 +250,14 @@ fn first_read(container: &Container<File>, said: &Cell<bool>) -> Result<VolumeEn
             }
             for passed in &slots[..at] {
                 let why = passed.why().map(|e| e.to_string()).unwrap_or_default();
-                eprintln!(
+                noteln!(
                     "{}: {} is not read here: {why}",
                     crate::args::TOOL,
                     passed.shown()
                 );
             }
             if at > 0 {
-                eprintln!(
+                noteln!(
                     "{}: reading {}; --volume names another",
                     crate::args::TOOL,
                     slots[at].shown()

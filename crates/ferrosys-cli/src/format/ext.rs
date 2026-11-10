@@ -14,8 +14,6 @@ use crate::{Error, emit, render};
 impl Plan for FormatPlan {
     type Options = FormatOptions;
 
-    const FAMILY: &'static str = "ext";
-
     fn sized(source: impl Source, bytes: u64, options: FormatOptions) -> Result<Self, Error> {
         Ok(FormatPlan::new(source, bytes, options)?)
     }
@@ -65,7 +63,7 @@ fn report(
     if args.json {
         emit(receipt(args, target, layout, usage).as_bytes())
     } else {
-        eprint!("{}", summary(args, target, layout, usage));
+        note!("{}", summary(args, target, layout, usage));
         Ok(())
     }
 }

@@ -1,4 +1,5 @@
 #[non_exhaustive] pub enum ferrosys::AclError
+#[non_exhaustive] pub enum ferrosys::Bound
 #[non_exhaustive] pub enum ferrosys::DetectError
 #[non_exhaustive] pub enum ferrosys::Direction
 #[non_exhaustive] pub enum ferrosys::EntryKind
@@ -16,6 +17,7 @@
 #[non_exhaustive] pub enum ferrosys::TreeError
 #[non_exhaustive] pub enum ferrosys::fat::Category
 #[non_exhaustive] pub enum ferrosys::fat::ClusterSize
+#[non_exhaustive] pub enum ferrosys::fat::DiskGeometry
 #[non_exhaustive] pub enum ferrosys::fat::FatTypeRequest
 #[non_exhaustive] pub enum ferrosys::fat::FormatError
 #[non_exhaustive] pub enum ferrosys::fat::GeometryError
@@ -59,6 +61,7 @@
 #[non_exhaustive] pub ferrosys::TreeError::Io
 #[non_exhaustive] pub ferrosys::TreeError::LimitExceeded
 #[non_exhaustive] pub ferrosys::TreeError::Malformed
+#[non_exhaustive] pub ferrosys::TreeError::NotFound
 #[non_exhaustive] pub ferrosys::TreeError::Unsupported
 #[non_exhaustive] pub ferrosys::fat::FormatError::BootCodeTooLong
 #[non_exhaustive] pub ferrosys::fat::FormatError::DirectoryOverflowsItsClusters
@@ -83,6 +86,7 @@
 #[non_exhaustive] pub ferrosys::fat::LabelError::InvalidByte
 #[non_exhaustive] pub ferrosys::fat::LabelError::TooLong
 #[non_exhaustive] pub ferrosys::fat::ModelError::ContentsNotHeld
+#[non_exhaustive] pub ferrosys::fat::ModelError::DirectoryTooLarge
 #[non_exhaustive] pub ferrosys::fat::ModelError::Duplicate
 #[non_exhaustive] pub ferrosys::fat::ModelError::FileTooLarge
 #[non_exhaustive] pub ferrosys::fat::ModelError::HardlinkCycle
@@ -111,6 +115,7 @@
 #[non_exhaustive] pub ferrosys::fat::ReadError::ChainTooLong
 #[non_exhaustive] pub ferrosys::fat::ReadError::ChainTooShort
 #[non_exhaustive] pub ferrosys::fat::ReadError::ClusterOutOfRange
+#[non_exhaustive] pub ferrosys::fat::ReadError::DirectoryTooLong
 #[non_exhaustive] pub ferrosys::fat::ReadError::DirectoryWithSize
 #[non_exhaustive] pub ferrosys::fat::ReadError::DotEntryTarget
 #[non_exhaustive] pub ferrosys::fat::ReadError::EntriesAfterEnd
@@ -121,6 +126,7 @@
 #[non_exhaustive] pub ferrosys::fat::ReadError::IllFormedLongName
 #[non_exhaustive] pub ferrosys::fat::ReadError::IndistinguishableNames
 #[non_exhaustive] pub ferrosys::fat::ReadError::Io
+#[non_exhaustive] pub ferrosys::fat::ReadError::LabelBeginsWithSpace
 #[non_exhaustive] pub ferrosys::fat::ReadError::LabelWithDirectoryAttribute
 #[non_exhaustive] pub ferrosys::fat::ReadError::LargeCluster
 #[non_exhaustive] pub ferrosys::fat::ReadError::LongNameChecksum
@@ -145,6 +151,7 @@
 #[non_exhaustive] pub ferrosys::fat::ondisk::ParseError::BadMagic
 #[non_exhaustive] pub ferrosys::fat::ondisk::ParseError::TooShort
 #[non_exhaustive] pub struct ferrosys::Attributes
+#[non_exhaustive] pub struct ferrosys::Child<N>
 #[non_exhaustive] pub struct ferrosys::Civil
 #[non_exhaustive] pub struct ferrosys::CompressedFile
 #[non_exhaustive] pub struct ferrosys::Darwin
@@ -158,6 +165,7 @@
 #[non_exhaustive] pub struct ferrosys::SourceEntry
 #[non_exhaustive] pub struct ferrosys::Synthesis
 #[non_exhaustive] pub struct ferrosys::TreeEntry<N>
+#[non_exhaustive] pub struct ferrosys::Usage
 #[non_exhaustive] pub struct ferrosys::fat::Anomaly
 #[non_exhaustive] pub struct ferrosys::fat::Entry
 #[non_exhaustive] pub struct ferrosys::fat::Fat32Layout
@@ -177,6 +185,8 @@ impl Clone for ferrosys::AclEntry
 impl Clone for ferrosys::AclError
 impl Clone for ferrosys::AclQualifier
 impl Clone for ferrosys::Attributes
+impl Clone for ferrosys::Bound
+impl Clone for ferrosys::Child
 impl Clone for ferrosys::Civil
 impl Clone for ferrosys::CompressedFile
 impl Clone for ferrosys::Darwin
@@ -213,11 +223,13 @@ impl Clone for ferrosys::Timestamp
 impl Clone for ferrosys::TreeBuilder
 impl Clone for ferrosys::TreeEntry
 impl Clone for ferrosys::TreeError
+impl Clone for ferrosys::Usage
 impl Clone for ferrosys::Xattr
 impl Clone for ferrosys::fat::Anomaly
 impl Clone for ferrosys::fat::BootCode
 impl Clone for ferrosys::fat::Category
 impl Clone for ferrosys::fat::ClusterSize
+impl Clone for ferrosys::fat::DiskGeometry
 impl Clone for ferrosys::fat::Entry
 impl Clone for ferrosys::fat::Fat32Layout
 impl Clone for ferrosys::fat::FatLayout
@@ -254,6 +266,7 @@ impl Clone for ferrosys::fat::ondisk::VolumeInfo
 impl Copy for ferrosys::AcceptedLoss
 impl Copy for ferrosys::AclEntry
 impl Copy for ferrosys::AclQualifier
+impl Copy for ferrosys::Bound
 impl Copy for ferrosys::Civil
 impl Copy for ferrosys::DetectOptions
 impl Copy for ferrosys::Direction
@@ -270,9 +283,11 @@ impl Copy for ferrosys::Severity
 impl Copy for ferrosys::Slack
 impl Copy for ferrosys::Synthesis
 impl Copy for ferrosys::Timestamp
+impl Copy for ferrosys::Usage
 impl Copy for ferrosys::fat::BootCode
 impl Copy for ferrosys::fat::Category
 impl Copy for ferrosys::fat::ClusterSize
+impl Copy for ferrosys::fat::DiskGeometry
 impl Copy for ferrosys::fat::Fat32Layout
 impl Copy for ferrosys::fat::FatLayout
 impl Copy for ferrosys::fat::FatType
@@ -307,6 +322,8 @@ impl Debug for ferrosys::AclEntry
 impl Debug for ferrosys::AclError
 impl Debug for ferrosys::AclQualifier
 impl Debug for ferrosys::Attributes
+impl Debug for ferrosys::Bound
+impl Debug for ferrosys::Child
 impl Debug for ferrosys::Civil
 impl Debug for ferrosys::CompressedFile
 impl Debug for ferrosys::Darwin
@@ -344,11 +361,13 @@ impl Debug for ferrosys::Timestamp
 impl Debug for ferrosys::TreeBuilder
 impl Debug for ferrosys::TreeEntry
 impl Debug for ferrosys::TreeError
+impl Debug for ferrosys::Usage
 impl Debug for ferrosys::Xattr
 impl Debug for ferrosys::fat::Anomaly
 impl Debug for ferrosys::fat::BootCode
 impl Debug for ferrosys::fat::Category
 impl Debug for ferrosys::fat::ClusterSize
+impl Debug for ferrosys::fat::DiskGeometry
 impl Debug for ferrosys::fat::Entry
 impl Debug for ferrosys::fat::Fat32Layout
 impl Debug for ferrosys::fat::FatLayout
@@ -401,6 +420,7 @@ impl Default for ferrosys::Timestamp
 impl Default for ferrosys::TreeBuilder
 impl Default for ferrosys::fat::BootCode
 impl Default for ferrosys::fat::ClusterSize
+impl Default for ferrosys::fat::DiskGeometry
 impl Default for ferrosys::fat::FatTypeRequest
 impl Default for ferrosys::fat::Location
 impl Default for ferrosys::fat::OpenOptions
@@ -432,6 +452,8 @@ impl Eq for ferrosys::AclEntry
 impl Eq for ferrosys::AclError
 impl Eq for ferrosys::AclQualifier
 impl Eq for ferrosys::Attributes
+impl Eq for ferrosys::Bound
+impl Eq for ferrosys::Child
 impl Eq for ferrosys::Civil
 impl Eq for ferrosys::CompressedFile
 impl Eq for ferrosys::Darwin
@@ -466,11 +488,13 @@ impl Eq for ferrosys::Synthesis
 impl Eq for ferrosys::Timestamp
 impl Eq for ferrosys::TreeEntry
 impl Eq for ferrosys::TreeError
+impl Eq for ferrosys::Usage
 impl Eq for ferrosys::Xattr
 impl Eq for ferrosys::fat::Anomaly
 impl Eq for ferrosys::fat::BootCode
 impl Eq for ferrosys::fat::Category
 impl Eq for ferrosys::fat::ClusterSize
+impl Eq for ferrosys::fat::DiskGeometry
 impl Eq for ferrosys::fat::Entry
 impl Eq for ferrosys::fat::Fat32Layout
 impl Eq for ferrosys::fat::FatLayout
@@ -558,6 +582,8 @@ impl PartialEq for ferrosys::AclEntry
 impl PartialEq for ferrosys::AclError
 impl PartialEq for ferrosys::AclQualifier
 impl PartialEq for ferrosys::Attributes
+impl PartialEq for ferrosys::Bound
+impl PartialEq for ferrosys::Child
 impl PartialEq for ferrosys::Civil
 impl PartialEq for ferrosys::CompressedFile
 impl PartialEq for ferrosys::Darwin
@@ -592,11 +618,13 @@ impl PartialEq for ferrosys::Synthesis
 impl PartialEq for ferrosys::Timestamp
 impl PartialEq for ferrosys::TreeEntry
 impl PartialEq for ferrosys::TreeError
+impl PartialEq for ferrosys::Usage
 impl PartialEq for ferrosys::Xattr
 impl PartialEq for ferrosys::fat::Anomaly
 impl PartialEq for ferrosys::fat::BootCode
 impl PartialEq for ferrosys::fat::Category
 impl PartialEq for ferrosys::fat::ClusterSize
+impl PartialEq for ferrosys::fat::DiskGeometry
 impl PartialEq for ferrosys::fat::Entry
 impl PartialEq for ferrosys::fat::Fat32Layout
 impl PartialEq for ferrosys::fat::FatLayout
@@ -665,6 +693,8 @@ pub const ferrosys::fat::MAX_BYTES_PER_CLUSTER: u32
 pub const ferrosys::fat::MAX_CLUSTERS_FAT12: u32
 pub const ferrosys::fat::MAX_CLUSTERS_FAT16: u32
 pub const ferrosys::fat::MAX_CLUSTERS_FAT32: u32
+pub const ferrosys::fat::MAX_DIRECTORY_BYTES: u64
+pub const ferrosys::fat::MAX_DIRECTORY_ENTRIES: u64
 pub const ferrosys::fat::MAX_FILE_BYTES: u64
 pub const ferrosys::fat::MAX_NAME_UNITS: usize
 pub const ferrosys::fat::MEDIA_FIXED: u8
@@ -762,6 +792,7 @@ pub const fn ferrosys::fat::FatType::of_cluster_count(clusters: u32) -> FatType
 pub const fn ferrosys::fat::FormatOptions::accept_all_loss(self) -> Self
 pub const fn ferrosys::fat::FormatOptions::accept_loss(self, property: Property) -> Self
 pub const fn ferrosys::fat::FormatOptions::boot_code(self, boot_code: BootCode) -> Self
+pub const fn ferrosys::fat::FormatOptions::disk_geometry(self, disk_geometry: DiskGeometry) -> Self
 pub const fn ferrosys::fat::FormatOptions::label(self, label: VolumeLabel) -> Self
 pub const fn ferrosys::fat::FormatOptions::new(volume_id: u32, time: Timestamp) -> Self
 pub const fn ferrosys::fat::FormatOptions::plan(self, plan: PlanRequest) -> Self
@@ -838,6 +869,12 @@ pub ferrosys::AclQualifier::UserObj
 pub ferrosys::Attributes::meta: crate::source::Metadata
 pub ferrosys::Attributes::synthesized: Vec<crate::fidelity::Property>
 pub ferrosys::Attributes::xattrs: Vec<crate::xattr::Xattr>
+pub ferrosys::Bound::Entries
+pub ferrosys::Bound::FileBytes
+pub ferrosys::Bound::PathBytes
+pub ferrosys::Child::kind: NodeKind
+pub ferrosys::Child::name: Vec<u8>
+pub ferrosys::Child::node: N
 pub ferrosys::Civil::day: u32
 pub ferrosys::Civil::hour: u32
 pub ferrosys::Civil::minute: u32
@@ -1005,12 +1042,18 @@ pub ferrosys::TreeEntry::path: Vec<u8>
 pub ferrosys::TreeEntry::shared: Option<u64>
 pub ferrosys::TreeError::Io::kind: std::io::ErrorKind
 pub ferrosys::TreeError::Io::message: String
+pub ferrosys::TreeError::LimitExceeded::bound: Bound
 pub ferrosys::TreeError::LimitExceeded::detail: String
 pub ferrosys::TreeError::LimitExceeded::family: crate::finding::Family
 pub ferrosys::TreeError::Malformed::detail: String
 pub ferrosys::TreeError::Malformed::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::family: crate::finding::Family
+pub ferrosys::TreeError::NotFound::path: Vec<u8>
 pub ferrosys::TreeError::Unsupported::detail: String
 pub ferrosys::TreeError::Unsupported::family: crate::finding::Family
+pub ferrosys::Usage::free: u64
+pub ferrosys::Usage::total: u64
+pub ferrosys::Usage::unit: u64
 pub ferrosys::Xattr::name: Vec<u8>
 pub ferrosys::Xattr::value: Vec<u8>
 pub ferrosys::fat::Anomaly::category: Category
@@ -1024,6 +1067,10 @@ pub ferrosys::fat::Category::InfoSector
 pub ferrosys::fat::Category::Source
 pub ferrosys::fat::ClusterSize::Auto
 pub ferrosys::fat::ClusterSize::Sectors(u32)
+pub ferrosys::fat::DiskGeometry::Auto
+pub ferrosys::fat::DiskGeometry::Exactly
+pub ferrosys::fat::DiskGeometry::Exactly::heads: std::num::NonZeroU16
+pub ferrosys::fat::DiskGeometry::Exactly::sectors_per_track: std::num::NonZeroU16
 pub ferrosys::fat::Entry::has_long_name: bool
 pub ferrosys::fat::Entry::name: Vec<u8>
 pub ferrosys::fat::Entry::node: Node
@@ -1069,6 +1116,7 @@ pub ferrosys::fat::FormatError::TimeOutOfRange::min: i64
 pub ferrosys::fat::FormatError::TimeOutOfRange::secs: i64
 pub ferrosys::fat::FormatOptions::accepted_loss: crate::fidelity::AcceptedLoss
 pub ferrosys::fat::FormatOptions::boot_code: BootCode
+pub ferrosys::fat::FormatOptions::disk_geometry: DiskGeometry
 pub ferrosys::fat::FormatOptions::hidden_sectors: u32
 pub ferrosys::fat::FormatOptions::label: Option<VolumeLabel>
 pub ferrosys::fat::FormatOptions::media: u8
@@ -1103,6 +1151,7 @@ pub ferrosys::fat::GeometryError::RootEntriesUnsupported::root_entries: u32
 pub ferrosys::fat::GeometryError::SectorSizeUnsupported::bytes_per_sector: u32
 pub ferrosys::fat::GeometryError::VolumeTooLarge::limit: u64
 pub ferrosys::fat::GeometryError::VolumeTooLarge::sectors: u64
+pub ferrosys::fat::LabelError::Empty
 pub ferrosys::fat::LabelError::InvalidByte::at: usize
 pub ferrosys::fat::LabelError::InvalidByte::byte: u8
 pub ferrosys::fat::LabelError::TooLong::bytes: usize
@@ -1111,6 +1160,9 @@ pub ferrosys::fat::Location::cluster: Option<u32>
 pub ferrosys::fat::Location::entry: Option<u32>
 pub ferrosys::fat::Location::sector: Option<u32>
 pub ferrosys::fat::ModelError::ContentsNotHeld::path: Vec<u8>
+pub ferrosys::fat::ModelError::DirectoryTooLarge::limit: u64
+pub ferrosys::fat::ModelError::DirectoryTooLarge::needed: u64
+pub ferrosys::fat::ModelError::DirectoryTooLarge::path: Vec<u8>
 pub ferrosys::fat::ModelError::Duplicate::path: Vec<u8>
 pub ferrosys::fat::ModelError::FileTooLarge::bytes: u64
 pub ferrosys::fat::ModelError::FileTooLarge::limit: u64
@@ -1177,6 +1229,8 @@ pub ferrosys::fat::ReadError::ChainTooShort::read: u64
 pub ferrosys::fat::ReadError::ChainTooShort::size: u64
 pub ferrosys::fat::ReadError::ChainTooShort::start: u32
 pub ferrosys::fat::ReadError::ClusterOutOfRange::cluster: u32
+pub ferrosys::fat::ReadError::DirectoryTooLong::index: u32
+pub ferrosys::fat::ReadError::DirectoryTooLong::limit: u64
 pub ferrosys::fat::ReadError::DirectoryWithSize::index: u32
 pub ferrosys::fat::ReadError::DirectoryWithSize::size: u32
 pub ferrosys::fat::ReadError::DotEntryTarget::expected: u32
@@ -1196,6 +1250,7 @@ pub ferrosys::fat::ReadError::IndistinguishableNames::first: u32
 pub ferrosys::fat::ReadError::IndistinguishableNames::index: u32
 pub ferrosys::fat::ReadError::Io::kind: std::io::ErrorKind
 pub ferrosys::fat::ReadError::Io::message: String
+pub ferrosys::fat::ReadError::LabelBeginsWithSpace::index: u32
 pub ferrosys::fat::ReadError::LabelWithDirectoryAttribute::index: u32
 pub ferrosys::fat::ReadError::LargeCluster::bytes: u32
 pub ferrosys::fat::ReadError::LongNameChecksum::expected: u8
@@ -1250,7 +1305,7 @@ pub ferrosys::fat::Storage::RootRegion
 pub ferrosys::fat::TimeField::Access
 pub ferrosys::fat::TimeField::Birth
 pub ferrosys::fat::TimeField::Modification
-pub ferrosys::fat::Times::access: crate::time::Timestamp
+pub ferrosys::fat::Times::access: Option<crate::time::Timestamp>
 pub ferrosys::fat::Times::create: Option<crate::time::Timestamp>
 pub ferrosys::fat::Times::modify: crate::time::Timestamp
 pub ferrosys::fat::Timestamp::nanos: u32
@@ -1317,6 +1372,7 @@ pub fn ferrosys::Acl::encode(&self) -> Vec<u8>
 pub fn ferrosys::Acl::entries(&self) -> &[AclEntry]
 pub fn ferrosys::Acl::new(entries: Vec<AclEntry>) -> Result<Self, AclError>
 pub fn ferrosys::Attributes::read(meta: Metadata, xattrs: Vec<Xattr>) -> Self
+pub fn ferrosys::Child::new(name: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::Darwin::compressed(self, form: CompressedFile) -> Self
 pub fn ferrosys::Deviation::is_source_failure(&self) -> bool /* required */
 pub fn ferrosys::Deviation::severity(&self) -> Severity /* required */
@@ -1365,10 +1421,13 @@ pub fn ferrosys::FsTree::bsd_flags(&mut self, node: &<Self as >::Node) -> Result
 pub fn ferrosys::FsTree::check_file_size(&self, path: &[u8], size: u64) -> Result<(), TreeError>
 pub fn ferrosys::FsTree::darwin(&mut self, node: &<Self as >::Node) -> Result<Option<Darwin>, TreeError>
 pub fn ferrosys::FsTree::family(&self) -> Family /* required */
+pub fn ferrosys::FsTree::find(&mut self, path: &[u8]) -> Result<Child<<Self as >::Node>, TreeError> /* required */
 pub fn ferrosys::FsTree::link_target(&mut self, node: &<Self as >::Node) -> Result<Vec<u8>, TreeError> /* required */
+pub fn ferrosys::FsTree::list(&mut self, dir: &<Self as >::Node) -> Result<Vec<Child<<Self as >::Node>>, TreeError> /* required */
 pub fn ferrosys::FsTree::max_file_bytes(&self) -> u64 /* required */
 pub fn ferrosys::FsTree::read_bytes(&mut self, node: &<Self as >::Node, offset: u64, buf: &mut [u8]) -> Result<usize, TreeError> /* required */
 pub fn ferrosys::FsTree::stat(&mut self, node: &<Self as >::Node, synthesis: &Synthesis) -> Result<Attributes, TreeError> /* required */
+pub fn ferrosys::FsTree::usage(&mut self) -> Result<Usage, TreeError> /* required */
 pub fn ferrosys::FsTree::walk_tree<E, F>(&mut self, visit: F) -> Result<(), E> where E: From<TreeError>, F: FnMut(&mut Self, TreeEntry<<Self as >::Node>) -> Result<(), E> /* required */
 pub fn ferrosys::ImageFile::read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()>
 pub fn ferrosys::ImageSource::entries(&self) -> &[SourceEntry]
@@ -1410,6 +1469,7 @@ pub fn ferrosys::TreeBuilder::symlink(self, path: impl Into<Vec<u8>>, target: im
 pub fn ferrosys::TreeBuilder::xattr(self, name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self
 pub fn ferrosys::TreeEntry::new(path: Vec<u8>, kind: NodeKind, node: N) -> Self
 pub fn ferrosys::TreeEntry::shared(self, id: u64) -> Self
+pub fn ferrosys::Usage::new(unit: u64, total: u64, free: u64) -> Self
 pub fn ferrosys::crc32c(seed: u32, data: &[u8]) -> u32
 pub fn ferrosys::detect<R: Read + Seek>(src: R) -> Result<Filesystem, DetectError>
 pub fn ferrosys::detect_with<R: Read + Seek>(src: R, options: &DetectOptions) -> Result<Filesystem, DetectError>

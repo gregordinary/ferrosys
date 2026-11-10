@@ -18,7 +18,7 @@
 //!
 //! This module is pure and allocates nothing.
 
-use crate::bytes::{get_u32, put_u32};
+use crate::bytes::{get_u32, put_u32, put_u64};
 use crate::crc32c;
 
 /// Bytes the checksum field occupies, whatever algorithm fills it.
@@ -37,9 +37,8 @@ pub const CHECKSUM_COVERED_FROM: usize = CSUM_FIELD_LEN;
 /// Which algorithm fills the checksum field of every object in one filesystem.
 ///
 /// The choice is made at format time, recorded in the superblock, and never mixed within a
-/// filesystem. Only [`CRC32C`](Self::CRC32C) is computed here; the rest are named so a reader
-/// meeting one reports the algorithm it cannot verify rather than comparing bytes against a
-/// digest it did not produce.
+/// filesystem. Every algorithm the format defines is computed here, by
+/// [`field`](Self::field); a value it does not define is named by its number.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChecksumType(u16);
 
@@ -90,6 +89,50 @@ impl ChecksumType {
             Self::SHA256 | Self::BLAKE2B => 32,
             _ => return None,
         })
+    }
+
+    /// The checksum field this algorithm writes for `covered`, or [`None`] where the value is
+    /// undefined.
+    ///
+    /// The digest sits at the front of the field and zeros fill the rest, so one comparison of
+    /// the whole field holds an object to its digest and to its padding at once. Observed on
+    /// what the pinned baseline wrote, and on what a kernel wrote:
+    ///
+    /// - crc32c: the standalone CRC-32C, little-endian, four bytes ([`crc32c_over`]).
+    /// - xxhash64: XXH64 with a seed of zero, little-endian, eight bytes.
+    /// - sha256: SHA-256, all thirty-two.
+    /// - blake2b: unkeyed BLAKE2b with a thirty-two-byte digest, all thirty-two.
+    ///
+    /// For a metadata object `covered` is everything past its own field; for a sector of file
+    /// data it is the sector.
+    #[must_use]
+    pub fn field(self, covered: &[u8]) -> Option<[u8; CSUM_FIELD_LEN]> {
+        let mut field = [0u8; CSUM_FIELD_LEN];
+        match self {
+            Self::CRC32C => put_u32(&mut field, 0, crc32c_over(covered)),
+            Self::XXHASH64 => put_u64(&mut field, 0, crate::digest::xxh64(0, covered)),
+            Self::SHA256 => field = crate::digest::sha256(covered),
+            Self::BLAKE2B => field = crate::digest::blake2b::<CSUM_FIELD_LEN>(covered),
+            _ => return None,
+        }
+        Some(field)
+    }
+
+    /// Whether `object`'s own checksum field is the one this algorithm writes for everything
+    /// past it: the digest, and the zeros behind it. An undefined algorithm holds nothing.
+    ///
+    /// # Panics
+    ///
+    /// Where `object` is not longer than the checksum field it begins with.
+    #[must_use]
+    pub fn holds(self, object: &[u8]) -> bool {
+        assert!(
+            object.len() > CHECKSUM_COVERED_FROM,
+            "a checksummed object is longer than the field holding its checksum: got {} bytes",
+            object.len()
+        );
+        self.field(&object[CHECKSUM_COVERED_FROM..])
+            .is_some_and(|field| object[..CSUM_FIELD_LEN] == field)
     }
 }
 

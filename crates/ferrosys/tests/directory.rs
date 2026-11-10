@@ -1318,6 +1318,170 @@ fn own_ids() -> (u32, u32) {
 }
 
 #[test]
+fn set_id_bits_go_with_an_owner_that_was_not_applied() {
+    // A set-user-ID program runs as its owner. One extracted without its recorded owner is
+    // owned by whoever extracted it, so the bit would make it run as them; the bits are
+    // cleared instead, and the drop recorded. A directory's set-group-ID runs nothing and
+    // stays. Under a process that can set owners, nothing is dropped and the bits stay.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+    use ferrosys::{Direction, Property};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/bin".to_vec(), Metadata::new(0o2755, time).owned_by(0, 0))
+        .file(
+            b"/bin/suid".to_vec(),
+            b"elf".to_vec(),
+            Metadata::new(0o4755, time).owned_by(0, 0),
+        )
+        .file(
+            b"/bin/sgid".to_vec(),
+            b"elf".to_vec(),
+            Metadata::new(0o2755, time).owned_by(0, 0),
+        );
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("write the tree");
+    let mode = |p: &str| {
+        std::fs::symlink_metadata(out.join(p))
+            .expect("the entry")
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode("bin"), 0o2755, "a directory keeps its set-group-ID");
+    let dropped = report
+        .fidelity
+        .count(Direction::Dropped, Property::SpecialBits);
+    if report.ownership_dropped {
+        assert_eq!((mode("bin/suid"), mode("bin/sgid")), (0o755, 0o755));
+        assert_eq!(dropped, 2, "both drops are recorded");
+    } else {
+        assert_eq!((mode("bin/suid"), mode("bin/sgid")), (0o4755, 0o2755));
+        assert_eq!(dropped, 0);
+    }
+}
+
+#[test]
+fn attributes_reach_a_node_whose_mode_denies_its_owner_write() {
+    // The kernel requires write permission on a node to set a `user.*` attribute, which a
+    // recorded mode of 0444 or 0555 takes away. So the attributes are set before the mode,
+    // and an unprivileged extraction of an unprivileged user's own tree carries them across.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+
+    let (uid, gid) = own_ids();
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .root(Metadata::new(0o755, time).owned_by(uid, gid))
+        .file(
+            b"/ro.txt".to_vec(),
+            b"read only\n".to_vec(),
+            Metadata::new(0o444, time).owned_by(uid, gid),
+        )
+        .xattr(b"user.note".to_vec(), b"on-the-file".to_vec())
+        .directory(
+            b"/d".to_vec(),
+            Metadata::new(0o555, time).owned_by(uid, gid),
+        )
+        .xattr(b"user.dnote".to_vec(), b"on-the-directory".to_vec());
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    let report = DirectorySink::new(&out)
+        .expect("open the destination")
+        .write_tree(&mut reader)
+        .expect("an unprivileged user's own tree extracts without any opt-in");
+    let mut value = [0u8; 32];
+    let len = rustix::fs::lgetxattr(out.join("ro.txt"), "user.note", &mut value)
+        .expect("the file's attribute");
+    assert_eq!(&value[..len], b"on-the-file");
+    let len = rustix::fs::lgetxattr(out.join("d"), "user.dnote", &mut value)
+        .expect("the directory's attribute");
+    assert_eq!(&value[..len], b"on-the-directory");
+    assert!(report.dropped_xattrs.is_empty());
+    // Restored so the temporary directory can be removed.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(out.join("d"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[test]
+fn acls_the_destination_passes_down_do_not_reach_the_tree() {
+    // A default ACL on the destination is inherited by everything created beneath it, as an
+    // access ACL and, on a directory, a default ACL of its own. The image records none, so
+    // the tree holds none: a round trip would otherwise write them into the next image.
+    use ferrosys::ext::{Metadata, TreeBuilder};
+    use ferrosys::{Acl, AclEntry, AclQualifier};
+
+    let host = tempfile::tempdir().expect("temp dir");
+    let out = destination(&host, "unpacked");
+    let default = Acl::new(vec![
+        AclEntry {
+            who: AclQualifier::UserObj,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
+        },
+        AclEntry {
+            who: AclQualifier::User(54_321),
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
+        },
+        AclEntry {
+            who: AclQualifier::GroupObj,
+            perm: Acl::READ | Acl::EXEC,
+        },
+        AclEntry {
+            who: AclQualifier::Mask,
+            perm: Acl::READ | Acl::WRITE | Acl::EXEC,
+        },
+        AclEntry {
+            who: AclQualifier::Other,
+            perm: Acl::READ | Acl::EXEC,
+        },
+    ])
+    .expect("a valid ACL");
+    if rustix::fs::setxattr(
+        &out,
+        Acl::DEFAULT_NAME,
+        &default.encode(),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .is_err()
+    {
+        // A destination holding no POSIX ACLs passes none down.
+        return;
+    }
+    let time = Timestamp::from_secs(FAKE);
+    let source = TreeBuilder::new()
+        .directory(b"/d".to_vec(), Metadata::new(0o755, time))
+        .file(b"/d/f".to_vec(), b"x".to_vec(), Metadata::new(0o644, time))
+        .file(b"/g".to_vec(), b"y".to_vec(), Metadata::new(0o644, time));
+    let image = format(source, 16 * MIB, opts()).expect("format the image");
+    let mut reader = Reader::open(io::Cursor::new(image.as_bytes())).expect("open");
+    DirectorySink::new(&out)
+        .expect("open the destination")
+        .skip_privileged()
+        .write_tree(&mut reader)
+        .expect("write the tree");
+    let held = |path: &str, name: &[u8]| {
+        rustix::fs::lgetxattr(out.join(path), name, &mut [0u8; 256][..]).is_ok()
+    };
+    for path in ["d", "d/f", "g"] {
+        assert!(!held(path, Acl::ACCESS_NAME), "{path} holds an access ACL");
+    }
+    assert!(!held("d", Acl::DEFAULT_NAME), "d holds a default ACL");
+    assert!(
+        !held(".", Acl::DEFAULT_NAME),
+        "the root takes the image's ACLs too"
+    );
+}
+
+#[test]
 fn a_directory_carries_its_extended_attributes_across() {
     // A directory's attributes are applied with the rest of its metadata, once its children
     // are written — the same wait its mode takes, for the same reason. Nothing about being a

@@ -396,6 +396,45 @@ fn a_pax_global_header_that_would_change_a_member_is_refused_rather_than_dropped
 }
 
 #[test]
+fn a_time_before_1970_in_a_gnu_header_is_read_as_that_time() {
+    // GNU tar writes a negative time in the binary form a numeric field takes, the twelve
+    // bytes one two's-complement number: 1960-01-01T00:00:00Z as GNU tar 1.35 wrote it, and
+    // the second before 1970.
+    for (field, secs) in [
+        (
+            [
+                0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xED, 0x30, 0x08, 0x80,
+            ],
+            -315_619_200i64,
+        ),
+        ([0xFF; 12], -1),
+    ] {
+        let mut b = Builder::new(Vec::new());
+        let data = b"old\n";
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Regular);
+        h.set_mode(0o644);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_size(data.len() as u64);
+        h.set_path("old").unwrap();
+        h.as_old_mut().mtime = field;
+        h.set_cksum();
+        b.append(&h, &data[..]).unwrap();
+        let tar_bytes = b.into_inner().unwrap();
+
+        let entries = ArchiveSource::from_reader(&tar_bytes[..])
+            .expect("a time before 1970 is a time")
+            .into_entries();
+        let old = entries
+            .iter()
+            .find(|e| e.path == b"/old")
+            .expect("the file");
+        assert_eq!(old.meta.mtime, Timestamp::from_secs(secs));
+    }
+}
+
+#[test]
 fn a_gnu_volume_label_is_skipped_not_rejected() {
     // `tar --label=NAME` writes a `V` member whose name field holds the label. It
     // names the archive itself, not a file in it, so it must be passed over the way

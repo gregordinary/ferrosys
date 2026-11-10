@@ -1,4 +1,16 @@
-//! The Unicode tables an APFS volume's names are compared with: generated, not written.
+//! The Unicode Character Database tables ferrosys compares APFS names with: generated, not
+//! written.
+//!
+//! An APFS volume compares two names as one when their canonical decompositions are equal,
+//! case-folded and decomposed again on a volume that folds case, and stores a directory entry
+//! under a hash of that form. The rules are in [`ferrosys`](https://crates.io/crates/ferrosys),
+//! whose `apfs` feature depends on this crate, and the data they are computed from is four
+//! tables, each sorted by code point for a binary search:
+//!
+//! - [`DECOMPOSITION`], every code point's full canonical decomposition;
+//! - [`COMBINING_CLASS`], every nonzero canonical combining class;
+//! - [`CASE_FOLDING`], every full case folding, statuses C and F;
+//! - [`ASSIGNED`], every range of assigned code points, with the version that assigned it.
 //!
 //! From the Unicode Character Database 17.0.0, by `ci/apfs-unicode.py`:
 //! `UnicodeData.txt` (SHA-256 2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c),
@@ -47,11 +59,21 @@
 //! dealings in these Data Files or Software without prior written
 //! authorization of the copyright holder.
 //!
-//! Regenerate rather than edit. This module is pure data.
+//! Regenerate rather than edit. This crate is pure data.
+
+#![no_std]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+/// The crate's README, compiled as a doctest so the example on its front page is the example
+/// this crate's tables answer. The item exists only while rustdoc is collecting doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct Readme;
 
 /// Every code point's full canonical decomposition, in code-point order. A code point
 /// not listed is its own decomposition; Hangul syllables decompose by arithmetic.
-pub(super) const DECOMPOSITION: &[(u32, &[u32])] = &[
+pub const DECOMPOSITION: &[(u32, &[u32])] = &[
     (0xC0, &[0x41, 0x300]),
     (0xC1, &[0x41, 0x301]),
     (0xC2, &[0x41, 0x302]),
@@ -2137,7 +2159,7 @@ pub(super) const DECOMPOSITION: &[(u32, &[u32])] = &[
 
 /// Every code point whose canonical combining class is not zero, with the class, in
 /// code-point order.
-pub(super) const COMBINING_CLASS: &[(u32, u8)] = &[
+pub const COMBINING_CLASS: &[(u32, u8)] = &[
     (0x300, 230),
     (0x301, 230),
     (0x302, 230),
@@ -3110,7 +3132,7 @@ pub(super) const COMBINING_CLASS: &[(u32, u8)] = &[
 
 /// Every code point's full case folding, statuses C and F, in code-point order. A code
 /// point not listed folds to itself.
-pub(super) const CASE_FOLDING: &[(u32, &[u32])] = &[
+pub const CASE_FOLDING: &[(u32, &[u32])] = &[
     (0x41, &[0x61]),
     (0x42, &[0x62]),
     (0x43, &[0x63]),
@@ -4701,7 +4723,7 @@ pub(super) const CASE_FOLDING: &[(u32, &[u32])] = &[
 /// Every range of assigned code points, first and last, with the major and minor version
 /// of Unicode that assigned them, in code-point order. A code point in no range is
 /// unassigned in every version these tables hold.
-pub(super) const ASSIGNED: &[(u32, u32, u8, u8)] = &[
+pub const ASSIGNED: &[(u32, u32, u8, u8)] = &[
     (0x0, 0x1F5, 1, 1),
     (0x1F6, 0x1F9, 3, 0),
     (0x1FA, 0x217, 1, 1),

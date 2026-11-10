@@ -195,6 +195,12 @@ impl LevelEntries {
 /// Which records each node of a tree holds, with nodes of `node_size` bytes and entries sized
 /// as `entries` says.
 ///
+/// Each level fills its nodes in order. A level too large for a root, which keeps room for
+/// the tree's information, and small enough for one node below it, is that one node under a
+/// root of one entry. macOS 15, 26 and 27 mount, check and write to a tree of that shape,
+/// whether its root is over one leaf or over one index node and whether it is a file-system
+/// tree or an object map (observed).
+///
 /// # Panics
 ///
 /// Where a record of entries that vary in size is longer than [`largest_entry`], or its key

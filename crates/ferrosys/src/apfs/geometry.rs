@@ -61,6 +61,9 @@ use super::ondisk::{
     NODE_DATA_START, TREE_INFO_SIZE,
 };
 
+#[cfg(feature = "serde")]
+use serde::Serialize;
+
 /// The fewest blocks a container is planned with.
 ///
 /// `fsck_apfs` on macOS 14, 15 and 26 opens a container of 1,024 blocks of 4 KiB and refuses
@@ -284,6 +287,7 @@ pub enum GeometryError {
 /// chunk-info blocks than one address block can list, address blocks list them in turn. The
 /// space manager records each count, and the scan holds a container read back to them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct ChunkGeometry {
     /// Blocks in a chunk: eight per byte of a bitmap block.
@@ -439,6 +443,7 @@ pub(crate) const fn second_list_offset(addresses: u64, listed: u64) -> u64 {
 
 /// The space manager's size and where its arrays begin.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct SpaceManagerShape {
     /// Blocks the object takes: its structure and its arrays, rounded up to the block. Two at
@@ -458,6 +463,7 @@ pub struct SpaceManagerShape {
 
 /// How many nodes each free queue's tree may grow to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct QueueNodeLimits {
     /// The internal pool's queue.
@@ -509,6 +515,7 @@ impl QueueNodeLimits {
 
 /// An object map's two blocks: the object, and its tree's one node.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct MapPlace {
     /// The object map.
@@ -519,6 +526,7 @@ pub struct MapPlace {
 
 /// Where one volume's objects are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct VolumePlace {
     /// The volume's object map.
@@ -549,6 +557,7 @@ impl VolumePlace {
 
 /// The free queues' root nodes, in the checkpoint data area.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct QueueRoots {
     /// The internal pool's queue.
@@ -559,6 +568,7 @@ pub struct QueueRoots {
 
 /// A chunk's bitmap block, in the internal pool.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct ChunkBitmap {
     /// The chunk.
@@ -569,6 +579,7 @@ pub struct ChunkBitmap {
 
 /// Where everything one checkpoint writes or keeps is.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct Checkpoint {
     /// The transaction that writes it: 1 for the container alone, 2 for its volumes.
@@ -614,6 +625,7 @@ pub struct Checkpoint {
 
 /// Everything about a container that is decided before a byte of it is written.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct ApfsLayout {
     /// The size of every block.

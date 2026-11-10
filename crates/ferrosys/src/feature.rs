@@ -281,6 +281,17 @@ pub enum FeatureError {
         /// The size that resize inode declares.
         size: u64,
     },
+    /// `resize_inode` was requested without `sparse_super`. The resize inode maps the
+    /// descriptor table's reserved blocks in every group carrying a backup, through one
+    /// block of pointers per reserved block; without `sparse_super` every group carries a
+    /// backup, more than such a block holds once the filesystem is large. Observed: the
+    /// pinned `mke2fs` refuses the pair, "reserved online resize blocks not supported on
+    /// non-sparse filesystem".
+    #[error(
+        "resize_inode requires sparse_super: without it every group keeps a backup, and \
+         the resize inode's reserved blocks are kept in the sparse backup groups"
+    )]
+    ResizeInodeRequiresSparseSuper,
     /// The block size is not a supported power-of-two byte count.
     #[error("unsupported block size {block_size}: expected 1024, 2048, or 4096")]
     #[non_exhaustive]
@@ -340,10 +351,11 @@ impl FeatureSet {
     /// 64-byte form. The block size is the default 4096; 1024 and 2048 are also valid.
     ///
     /// **This value is fixed.** It names one exact set of feature words and sizes, and it
-    /// keeps naming them: a filesystem formatted from `DEFAULT` at one version of this
-    /// crate is byte-identical to one formatted from `DEFAULT` at any other, given the
-    /// same inputs. That is what makes it safe to pin an on-disk contract to. Callers who
-    /// want the features a current `mke2fs` writes, whatever those become, name
+    /// keeps naming them at every version of this crate. That is what makes it safe to pin an
+    /// on-disk contract to. A release can still correct a formula under it to match
+    /// `mke2fs`, which moves the bytes that formula governs: the changelog names each such
+    /// correction, and a geometry pin planned at a fixed reference size catches one. Callers
+    /// who want the features a current `mke2fs` writes, whatever those become, name
     /// [`LATEST`](Self::LATEST) instead.
     pub const DEFAULT: Self = Self {
         compat: Compat(
@@ -380,9 +392,9 @@ impl FeatureSet {
     /// point of it: a caller who wants parity with whatever `mke2fs` currently produces
     /// names this, and accepts that the answer changes when `mke2fs` does.
     ///
-    /// It is **unsuitable for pinning an on-disk contract.** A caller who needs
-    /// reproducible bytes across versions of this crate names [`DEFAULT`](Self::DEFAULT),
-    /// which is fixed, and records the resolved set with [`pin`](Self::pin).
+    /// It is **unsuitable for pinning an on-disk contract.** A caller who needs one names
+    /// [`DEFAULT`](Self::DEFAULT), which is fixed, and records the resolved set with
+    /// [`pin`](Self::pin).
     pub const LATEST: Self = Self::DEFAULT;
 
     /// The ext2 baseline: the feature words `mke2fs -t ext2` writes, and the baseline
@@ -725,6 +737,8 @@ impl FeatureSet {
     /// - [`FeatureError::BlockSize`] if the block size is unsupported.
     /// - [`FeatureError::InodeSize`] if the inode size is unsupported or does not
     ///   divide the block size.
+    /// - [`FeatureError::ResizeInodeRequiresSparseSuper`] if `resize_inode` is set without
+    ///   `sparse_super`.
     /// - [`FeatureError::ResizeInodeRequiresLargeFile`] if `resize_inode` is set without
     ///   `large_file` at a block size whose resize inode reaches
     ///   [`LARGE_FILE_MIN_SIZE`].
@@ -767,6 +781,9 @@ impl FeatureSet {
         // file that large is what `large_file` exists to describe. The feature is required
         // exactly where the size crosses the bound, so the smaller block sizes — whose
         // resize inodes stay well under it — are left free of it.
+        if self.has_resize_inode() && !self.is_sparse_super() {
+            return Err(FeatureError::ResizeInodeRequiresSparseSuper);
+        }
         let resize_size = resize_inode_size(self.block_size);
         if self.has_resize_inode() && !self.has_large_file() && resize_size >= LARGE_FILE_MIN_SIZE {
             return Err(FeatureError::ResizeInodeRequiresLargeFile {
@@ -1326,6 +1343,29 @@ mod tests {
         assert!(resize_inode_size(1024) < LARGE_FILE_MIN_SIZE);
         assert!(resize_inode_size(2048) < LARGE_FILE_MIN_SIZE);
         assert!(resize_inode_size(4096) >= LARGE_FILE_MIN_SIZE);
+    }
+
+    #[test]
+    fn the_resize_inode_requires_sparse_super() {
+        // Without `sparse_super` every group keeps a backup, and the resize inode's one block
+        // of pointers per reserved block runs out once the groups outnumber it: at a
+        // 1024-byte block, past 2 GiB. The pinned `mke2fs` refuses the pair whatever the
+        // size, and so does this.
+        let fs = FeatureSet::EXT2
+            .with_feature("sparse_super", false)
+            .expect("a known name");
+        assert_eq!(
+            fs.validate(),
+            Err(FeatureError::ResizeInodeRequiresSparseSuper)
+        );
+        let without = fs
+            .with_feature("resize_inode", false)
+            .expect("a known name");
+        assert_eq!(
+            without.validate(),
+            Ok(()),
+            "with no resize inode, nothing needs it"
+        );
     }
 
     #[test]

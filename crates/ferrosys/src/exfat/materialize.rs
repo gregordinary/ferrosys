@@ -38,12 +38,13 @@ use std::io::{Cursor, Seek, Write};
 use crate::fidelity::{AcceptedLoss, FidelityReport, LossPolicy, Synthesis};
 use crate::image_source::ImageFile;
 use crate::io::ByteSink;
+use crate::sizing::Slack;
 use crate::source::{FileContent, FileRange, Source};
 
 use super::geometry::{ExfatLayout, GeometryError, PlanRequest, plan_layout};
 use super::model::{
     ClusterRun, ExfatModel, ModelConfig, ModelEntry, ModelError, Node, ROOT_DIR,
-    ROOT_LEADING_SLOTS, build_model,
+    ROOT_LEADING_SLOTS, build_model, place_tree,
 };
 use super::ondisk::{
     AllocationBitmapEntry, BOOT_CODE_LEN, BOOT_REGION_SECTORS, CHECKSUM_SECTOR, DIR_ENTRY_SIZE,
@@ -398,9 +399,31 @@ pub enum FormatError {
         /// The key the file was declared with.
         key: u64,
     },
-    /// The image is larger than this platform addresses in memory. Only [`format()`] can reach
-    /// this; [`format_to`] never holds an image.
-    #[error("an image of {bytes} bytes is larger than this platform addresses in memory")]
+    /// A fit search was asked to leave a larger share of the volume free than it will look
+    /// for.
+    ///
+    /// At the limit the volume is ten times the tree it holds, and each further step toward
+    /// an empty one multiplies the size again. A volume that far from what its contents need
+    /// is a size to name rather than to search for.
+    #[error("slack of {hundredths} hundredths of a percent is past the limit of {limit}")]
+    #[non_exhaustive]
+    SlackShareTooLarge {
+        /// The share asked for, in hundredths of one percent.
+        hundredths: u16,
+        /// The largest share a search will look for.
+        limit: u16,
+    },
+    /// No volume this family accepts holds the tree with the room the slack asked for.
+    #[error("no volume up to {ceiling} bytes holds the tree with the room asked for")]
+    #[non_exhaustive]
+    DoesNotFit {
+        /// The largest volume the search could have tried, in bytes.
+        ceiling: u64,
+    },
+    /// The image is larger than this machine can hold in memory: past what a `usize`
+    /// addresses, or more than the allocator will provide. Only [`format()`] can reach this;
+    /// [`format_to`] never holds an image.
+    #[error("an image of {bytes} bytes cannot be held in memory on this machine")]
     #[non_exhaustive]
     ImageTooLargeInMemory {
         /// Bytes the image needs.
@@ -556,6 +579,40 @@ impl FormatPlan {
         })
     }
 
+    /// The smallest volume that holds `source` with `slack` free, planned and ready to write.
+    ///
+    /// The size is searched for rather than computed: a candidate is planned and the tree
+    /// allocated into it, and what that leaves free judges the candidate. The tree is placed
+    /// once and re-allocated against each candidate, so a search costs arithmetic per
+    /// candidate and reads no file, and the candidate it settles on is allocated last.
+    ///
+    /// Where the cluster size is automatic, the sizes between two steps of the conventional
+    /// cluster are searched in turn, smallest first, so a tree that fits below a step is not
+    /// answered with a volume past it.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::SlackShareTooLarge`] for a share past the limit,
+    /// [`FormatError::DoesNotFit`] when no volume holds the tree with the room asked for, and
+    /// otherwise the failure the search met: an input no size makes valid, or a tree this
+    /// family cannot carry.
+    pub fn fit(
+        source: impl Source,
+        options: FormatOptions,
+        slack: Slack,
+    ) -> Result<Self, FormatError> {
+        let upcase = UpcaseTable::recommended();
+        let mut tree = place_tree(source.into_entries(), &options.model_config(&upcase))?;
+        let fitted = crate::exfat::fit::search(&mut tree, &options, slack)?;
+        let volume_bytes = fitted.layout.volume_length * u64::from(fitted.layout.bytes_per_sector);
+        Ok(Self {
+            layout: fitted.layout,
+            volume_bytes,
+            options,
+            model: tree.finish(fitted.used_clusters),
+        })
+    }
+
     /// The clusters the volume has that nothing occupies.
     #[must_use]
     pub const fn free_clusters(&self) -> u32 {
@@ -569,7 +626,8 @@ impl FormatPlan {
         &self.layout
     }
 
-    /// Bytes the destination will hold, which is the size the format was asked for.
+    /// Bytes the destination will hold: the size the format was asked for, or for a
+    /// [`fit`](Self::fit) plan the size the search settled on.
     #[must_use]
     pub const fn volume_bytes(&self) -> u64 {
         self.volume_bytes
@@ -728,7 +786,7 @@ impl FormatPlan {
 /// # Errors
 ///
 /// A [`FormatError`] if the geometry cannot be realized, the source names something the volume
-/// cannot hold, or the image is larger than this platform addresses.
+/// cannot hold, or the image is larger than this machine can hold in memory.
 ///
 /// # Example
 ///
@@ -760,10 +818,11 @@ pub fn format(
     // Planned before the buffer is allocated, so a geometry or a source that cannot be
     // realized fails without first asking for the volume's worth of memory.
     let plan = FormatPlan::new(source, volume_bytes, options)?;
-    let size = usize::try_from(volume_bytes).map_err(|_| FormatError::ImageTooLargeInMemory {
-        bytes: volume_bytes,
-    })?;
-    let mut image = Cursor::new(vec![0u8; size]);
+    let buffer =
+        crate::io::image_buffer(volume_bytes).ok_or(FormatError::ImageTooLargeInMemory {
+            bytes: volume_bytes,
+        })?;
+    let mut image = Cursor::new(buffer);
     let layout = plan.write_to(&mut image)?;
     Ok(Image {
         bytes: image.into_inner(),

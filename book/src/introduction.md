@@ -10,9 +10,10 @@ runs anywhere Rust runs. It carries five families:
 - btrfs, behind the `btrfs` feature
 - APFS, behind the `apfs` feature
 
-A default build carries all five. Every reader is held to a never-panic contract on any
-input. The families it writes share two more properties: the output is byte-reproducible,
-and the whole layout is decided before a byte is written.
+A default build carries the first four, and the `apfs` feature adds the fifth. Every reader
+is held to a never-panic contract on any input. The families it writes share two more
+properties: the output is byte-reproducible, and the whole layout is decided before a byte
+is written.
 
 ## What the crate is
 
@@ -22,7 +23,7 @@ and the whole layout is decided before a byte is written.
   and the BSDs.
 - **Deterministic.** The default output is byte-reproducible, because the values a
   filesystem would draw from its environment are inputs the caller supplies.
-  [Deterministic output](./design/determinism.md) lists all four sets.
+  [Deterministic output](./design/determinism.md) lists all five sets.
 - **Resize-safe** in the on-disk geometry it writes for ext.
 - **Unbounded by memory.** `format_to` streams an image to a seekable destination and
   writes only the blocks the filesystem uses. A read moves a window through a file rather
@@ -89,8 +90,8 @@ filesystem on Fedora and openSUSE, and the one image-based Linux tooling increas
 assumes.
 
 Every address in a btrfs is logical, and one map translates all of them. That is the
-structural difference from the three families here, and the reason this one has a layer
-they do not.
+structural difference from ext, FAT, and exFAT, and the reason this one has a layer they do
+not.
 
 Reading covers both layers the format has. The lower layer is three things:
 
@@ -115,8 +116,8 @@ mount that names none lands in. It goes down in one transaction, and nothing is 
 rewritten. The whole layout is therefore decided before a byte is placed.
 
 The output is byte-reproducible on the same terms as the other three writers', and costs
-five inputs to be so. btrfs has a field for every property a source states, so this is the
-one family here whose fidelity report is empty in both directions.
+five inputs to be so. btrfs has a field for every property a source states, so its fidelity
+report is empty in both directions.
 [Reading a btrfs](./formatting.md#reading-a-btrfs) and
 [writing one](./formatting.md#writing-one) are the two halves.
 
@@ -145,10 +146,11 @@ An encrypted volume, a sealed one, a Fusion container, and a feature bit this cr
 read are each refused by name.
 
 `ferrosys` also writes a container, each volume holding a source tree of its own. Two of them
-can be joined as a System and Data volume group. Empty, one
-volume is block for block what `newfs_apfs` writes into a file on macOS 14, 15, 26 and 27. The identifiers and the
-one instant it records are inputs, and so is how each volume compares names. [Formatting an APFS container](./formatting.md#formatting-an-apfs-container) shows
-the call.
+can be joined as a System and Data volume group. A volume has a field for every property a
+source states, so its fidelity report is empty, as a btrfs's is. Empty, one volume is block
+for block what `newfs_apfs` writes into a file on macOS 14, 15, 26 and 27. The identifiers
+and the one instant it records are inputs, and so is how each volume compares names.
+[Formatting an APFS container](./formatting.md#formatting-an-apfs-container) shows the call.
 
 ## This guide
 

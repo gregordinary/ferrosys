@@ -201,12 +201,43 @@ pub(crate) fn group_descriptor(csum: &dyn Checksummer, group: u32, bytes: &[u8])
     (csum.crc32c(c, bytes) & 0xffff) as u16
 }
 
+/// The crc16 a group descriptor carries in `bg_checksum` under `uninit_bg`, the scheme
+/// `metadata_csum` supersedes: over the filesystem's UUID, the group number, and the
+/// descriptor's own bytes with `bg_checksum` left out.
+///
+/// Documented: `uninit_bg` checksums a descriptor with a crc16 over the UUID, the group
+/// number, and the descriptor. Observed on every descriptor the pinned `mke2fs` 1.47.0 wrote
+/// under `uninit_bg`, in the 32-byte and the 64-byte form: the CRC-16 whose reflected
+/// polynomial is `0xA001`, started at `0xFFFF`, with the two checksum bytes skipped rather
+/// than zeroed and the group number four bytes little-endian.
+pub(crate) fn group_descriptor_crc16(uuid: &[u8; 16], group: u32, desc: &[u8]) -> u16 {
+    let field = crate::ondisk::GroupDescriptor::CHECKSUM_OFFSET;
+    let after = desc.get(field + 2..).unwrap_or_default();
+    [
+        uuid.as_slice(),
+        &group.to_le_bytes(),
+        &desc[..field.min(desc.len())],
+        after,
+    ]
+    .iter()
+    .flat_map(|part| part.iter())
+    .fold(0xFFFF_u16, |crc, &byte| {
+        (0..8).fold(crc ^ u16::from(byte), |c, _| {
+            if c & 1 == 0 {
+                c >> 1
+            } else {
+                (c >> 1) ^ 0xA001
+            }
+        })
+    })
+}
+
 /// The crc32c an inode carries: the filesystem seed folded with the inode's number and
 /// generation, then the inode's own bytes with its checksum fields zeroed.
 ///
 /// `has_hi` is whether the inode is large enough for `i_checksum_hi`. Without it the result
-/// is sixteen bits wide — the kernel's `calculated &= 0xFFFF` — because there is no high half
-/// stored to compare a full-width value against. `mke2fs` leaves the reserved inodes in
+/// is sixteen bits wide, because there is no high half stored to compare a full-width value
+/// against (the ext4 documentation's Checksums page). `mke2fs` leaves the reserved inodes in
 /// exactly that state, so on any filesystem it formatted, checking them at full width rejects
 /// seven healthy inodes.
 pub(crate) fn inode(
@@ -220,6 +251,16 @@ pub(crate) fn inode(
     if has_hi { c } else { c & 0xffff }
 }
 
+/// The crc32c a multiple-mount protection block carries: the filesystem seed folded with every
+/// byte of the block's record before the checksum's own word (observed on the pinned `mke2fs`,
+/// whose blocks carry exactly this).
+pub(crate) fn mmp_block(csum: &dyn Checksummer, record: &[u8]) -> u32 {
+    csum.crc32c(
+        csum.base_seed(),
+        &record[..crate::ondisk::MMP_CHECKSUM_OFFSET],
+    )
+}
+
 /// The crc32c a block or inode bitmap carries: the filesystem seed folded with the bytes the
 /// kernel counts as covered.
 ///
@@ -229,20 +270,21 @@ pub(crate) fn bitmap(csum: &dyn Checksummer, covered: &[u8]) -> u32 {
     csum.crc32c(csum.base_seed(), covered)
 }
 
-/// The bytes of a block bitmap its checksum covers, as `ext4_block_bitmap_csum_set` measures
-/// them: one bit per block, exactly, because a group's block count is always a multiple of
-/// eight.
+/// The bytes of a block bitmap its checksum covers: the whole bitmap (the ext4 documentation's
+/// Checksums page), one bit per block. A group's block count is a multiple of eight on every
+/// filesystem the planner or `mke2fs` writes, so that is exactly `blocks_per_group / 8` bytes.
 pub(crate) const fn block_bitmap_len(blocks_per_group: u32) -> usize {
     (blocks_per_group / 8) as usize
 }
 
-/// The bytes of an inode bitmap its checksum covers, as `ext4_inode_bitmap_csum_set` measures
-/// them: one bit per inode, **rounded up**, so a count that is not a multiple of eight still
-/// has its final partial byte covered.
+/// The bytes of an inode bitmap its checksum covers: one bit per inode, **rounded up**, so a
+/// count that is not a multiple of eight still has its final partial byte covered.
 ///
-/// The planner and `mke2fs` both round the inode count down to a multiple of eight, so this
-/// and the exact form agree on every image either writes. The kernel's is used so that they
-/// also agree on one that does not.
+/// The planner and `mke2fs` both round the inode count down to a multiple of eight, so the
+/// rounding decides nothing on any image either writes, and the pinned tools' checksum of
+/// each inode bitmap is the one this computes (the full-dump differential). Rounding up is
+/// this crate's choice for a count that is not a multiple of eight: it covers every bit the
+/// bitmap holds.
 pub(crate) const fn inode_bitmap_len(inodes_per_group: u32) -> usize {
     inodes_per_group.div_ceil(8) as usize
 }
@@ -370,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bitmap_is_covered_the_way_the_kernel_measures_it() {
+    fn a_block_bitmap_is_covered_whole_and_an_inode_bitmap_rounded_up() {
         // The block bitmap divides exactly; the inode bitmap rounds up, so a count that is
         // not a multiple of eight still has its final partial byte covered.
         assert_eq!(block_bitmap_len(32_768), 4096);

@@ -176,9 +176,11 @@ pub struct FormatOptions {
     /// The algorithm a hash-indexed directory orders its names by
     /// (`s_def_hash_version`). Defaults to [`HashVersion::HalfMd4`].
     pub hash_version: HashVersion,
-    /// Whether a name's bytes are read as signed or unsigned when hashed
-    /// (`s_flags`). Defaults to [`HashSignedness::Unsigned`], which makes a name's
-    /// hash — and so the image's bytes — independent of the machine that wrote it.
+    /// Whether a name's bytes are read as signed or unsigned when a hash-indexed directory
+    /// hashes it (`s_flags`). Defaults to [`HashSignedness::Unsigned`], which makes a name's
+    /// hash — and so the image's bytes — independent of the machine that wrote it. An
+    /// extended attribute's hash reads its name's bytes as unsigned either way, as `mke2fs`
+    /// writes it.
     ///
     /// Set it to [`HashSignedness::Signed`] to match an image built by a tool that
     /// takes its signedness from the host's `char`, which is signed on x86 and
@@ -441,11 +443,12 @@ pub enum FormatError {
         /// The contested inode number.
         inode: u32,
     },
-    /// The image does not fit in memory on this platform: its byte count exceeds what a
-    /// `usize` addresses, which a 32-bit target reaches at 4 GiB. [`format_to`] streams an
-    /// image of any size to a seekable destination and is the path for one this large.
+    /// The image is larger than this machine can hold in memory: past what a `usize`
+    /// addresses, which a 32-bit target reaches at 4 GiB, or more than the allocator will
+    /// provide. [`format_to`] streams an image of any size to a seekable destination and is
+    /// the path for one this large.
     #[error(
-        "an image of {bytes} bytes exceeds what this platform addresses in memory; \
+        "an image of {bytes} bytes cannot be held in memory on this machine; \
          stream it with format_to"
     )]
     #[non_exhaustive]
@@ -573,7 +576,7 @@ impl Image {
 ///
 /// A [`FormatError`] if the geometry, model, allocation, or serialization cannot be
 /// realized, or [`FormatError::ImageTooLargeInMemory`] if the image is larger than this
-/// platform addresses.
+/// machine can hold in memory.
 pub fn format(
     source: impl Source,
     size_bytes: u64,
@@ -585,9 +588,9 @@ pub fn format(
     // a 32-bit target holds no 4 GiB image, and a cast would silently size the buffer to
     // the low bits of the count and write a filesystem into the wrong number of bytes.
     let image_bytes = plan.layout.total_blocks * u64::from(plan.layout.block_size);
-    let len = usize::try_from(image_bytes)
-        .map_err(|_| FormatError::ImageTooLargeInMemory { bytes: image_bytes })?;
-    let mut sink = std::io::Cursor::new(vec![0u8; len]);
+    let buffer = crate::io::image_buffer(image_bytes)
+        .ok_or(FormatError::ImageTooLargeInMemory { bytes: image_bytes })?;
+    let mut sink = std::io::Cursor::new(buffer);
     let layout = plan.write_to(&mut sink)?;
     Ok(Image {
         bytes: sink.into_inner(),
@@ -691,8 +694,14 @@ impl FormatPlan {
     /// # Errors
     ///
     /// A [`FormatError`] if the geometry cannot be realized, the source cannot be modelled,
-    /// or the model needs more inodes than the geometry provides. Every failure a format has
-    /// that is not an I/O failure of the destination is here.
+    /// the model needs more inodes than the geometry provides, or the model does not fit
+    /// the blocks the geometry leaves. Every failure a format has that is not an I/O failure
+    /// of the destination is here.
+    ///
+    /// The model is placed into the geometry here, through the same placement a format
+    /// performs, writing nothing: that is what finds a source too large for the size before
+    /// a destination is opened, so a plan that is returned is one that writes. It costs the
+    /// allocator's bitmap, one bit per block, and reads no file's bytes.
     pub fn new(
         source: impl Source,
         size_bytes: u64,
@@ -701,6 +710,7 @@ impl FormatPlan {
         options.validate_format_time()?;
         let model = model_of(source, &options)?;
         let (layout, journal_blocks) = plan_geometry(&model, &options, size_bytes)?;
+        free_after_placing(&layout, &options, journal_blocks, &model)?;
         Ok(Self {
             layout,
             model,
@@ -1604,10 +1614,7 @@ impl<'a, S: Sink> Writer<'a, S> {
                 .expect("the inline side of the split fits the region by construction");
         }
         if !spilled.is_empty() {
-            // The per-entry name hash follows the image's directory-hash signedness, so
-            // one choice governs every name hash the image carries.
-            let signed = matches!(self.options.hash_signedness, HashSignedness::Signed);
-            let mut block = encode_block(&spilled, self.block_size, signed);
+            let mut block = encode_block(&spilled, self.block_size);
             let phys = self.alloc.allocate_one()?;
             if self.csum.scheme().writes_object_checksums() {
                 // `h_checksum` is zero in the encoded block, which is how it participates
@@ -2183,14 +2190,9 @@ impl<'a, S: Sink> Writer<'a, S> {
 
         let uninit_bg = self.csum.scheme().uninit_bg_semantics();
         let last_group = self.layout.group_count - 1;
-        // The bytes of each bitmap the checksum covers, as the kernel measures them:
-        // `ext4_block_bitmap_csum_set` takes `clusters_per_group / 8`, which is exact
-        // because a group's block count is always a multiple of eight, while
-        // `ext4_inode_bitmap_csum_set` takes `(inodes_per_group + 7) / 8` — rounding up,
-        // so a count that is not a multiple of eight still has its final partial byte
-        // covered. The planner and `mke2fs` both round the inode count down to a multiple
-        // of eight, so the two forms agree on every image either writes; the kernel's is
-        // used so they also agree on one that does not.
+        // The bytes of each bitmap the checksum covers: the whole block bitmap, and the
+        // inode bitmap rounded up to whole bytes (`recipe::block_bitmap_len` and
+        // `recipe::inode_bitmap_len` say why each is that long).
         let bb_len = recipe::block_bitmap_len(self.layout.blocks_per_group);
         let ib_len = recipe::inode_bitmap_len(ipg);
 
@@ -2354,12 +2356,10 @@ impl<'a, S: Sink> Writer<'a, S> {
             // own group number — the one field that differs from the primary, so its
             // checksum is computed over the backup's own bytes.
             //
-            // `s_block_group_nr` is sixteen bits, so a backup group past 65535 keeps
-            // only the low sixteen. e2fsprogs truncates the same field identically, so
-            // the backups this writes stay byte-compatible with it; the truncation is
-            // deliberate parity, not a defect.
+            // `s_block_group_nr` is sixteen bits. A backup in a group past 65535 records
+            // 65535, as the pinned `mke2fs` does (observed at groups 78,125 and 117,649).
             let mut backup = sb.clone();
-            backup.block_group_nr = g as u16;
+            backup.block_group_nr = u16::try_from(g).unwrap_or(u16::MAX);
             let mut bytes = backup.to_bytes();
             self.finalize_sb_csum(&mut bytes);
             self.write_at(start, &bytes)?;
@@ -2456,23 +2456,23 @@ impl<'a, S: Sink> Writer<'a, S> {
             CsumScheme::None => 0,
             CsumScheme::Crc32c => 1,
         };
-        // The filesystem's own bookkeeping as the kernel's ext4_calculate_overhead()
-        // accounts it: the per-group metadata plus the internal journal's full footprint
-        // (the orphan file is ordinary file data to that accounting). That footprint is
-        // the log blocks plus the metadata its own block map costs — the extent-tree
-        // nodes on ext4, the indirect blocks on ext3 — which the materialized journal
-        // inode already totals in `i_blocks`, so it is read from there rather than
-        // re-derived as the log size alone. A recomputable hint (e2fsck ignores it), so
-        // saturate rather than wrap at the exabyte scale where the count exceeds a u32.
+        // The filesystem's own bookkeeping, as the pinned `mke2fs` records it at every profile
+        // and block size (the overhead gate): the per-group metadata plus the internal
+        // journal's log blocks, with the orphan file counted as ordinary file data. The log is counted and not
+        // the blocks that map it: observed, the pinned `mke2fs` counts a 4096-block
+        // journal as 4096 on ext3, whose 1 KiB block map adds seventeen indirect blocks. A
+        // recomputable hint (e2fsck ignores it), so saturate rather than wrap at the
+        // exabyte scale where the count exceeds a u32.
         let journal_blocks = if self.feature.has_journal() {
-            self.inodes
-                .get(&JOURNAL_INO)
-                .map_or(0, |journal| journal.blocks / self.sectors_per_block())
+            self.journal_blocks.map_or(0, u64::from)
         } else {
             0
         };
+        // The blocks before the first group count as well: block 0 at a one-kibibyte block,
+        // where the superblock is block 1. Observed: the pinned `mke2fs` counts it.
         sb.overhead_clusters =
-            u32::try_from(l.overhead_blocks() + journal_blocks).unwrap_or(u32::MAX);
+            u32::try_from(l.overhead_blocks() + u64::from(l.first_data_block) + journal_blocks)
+                .unwrap_or(u32::MAX);
         sb
     }
 
@@ -2726,6 +2726,28 @@ journal_blocks 1024
             small.geometry_pin(),
             large.geometry_pin(),
             "two sizes pin the same geometry"
+        );
+    }
+
+    #[test]
+    fn a_source_too_large_for_the_size_is_refused_by_the_plan() {
+        // The plan places the model, so a format that cannot succeed fails before a
+        // destination is opened: a dry run reports it, and a caller writing over an existing
+        // file keeps the file. Thirty-two mebibytes of content do not fit in sixteen.
+        let time = Timestamp::from_secs(1_700_000_000);
+        let src = TreeBuilder::new().file(
+            b"/big".to_vec(),
+            vec![0xAB; 32 * MIB as usize],
+            crate::Metadata::new(0o644, time),
+        );
+        let planned = FormatPlan::new(src, 16 * MIB, pinned_options());
+        assert!(
+            matches!(
+                planned,
+                Err(FormatError::Alloc(AllocError::OutOfSpace { .. }))
+            ),
+            "{:?}",
+            planned.err()
         );
     }
 

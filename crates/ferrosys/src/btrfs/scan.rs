@@ -68,9 +68,12 @@ impl Category {
     }
 }
 
+crate::naming::serialize_as_name!(Category);
+
 /// One deviation a scan found: where it was, how serious it is, and what it was.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Anomaly {
     /// The part of the filesystem it was found in.
     pub category: Category,
@@ -216,6 +219,10 @@ pub(super) fn mirror_anomaly(state: Mirror, live: u64) -> Option<(Severity, &'st
             Severity::Integrity,
             "a copy of the superblock at the live generation differs from the live one outside \
              its checksum and its own location, so it is not a copy of it",
+        )),
+        Mirror::Foreign => Some((
+            Severity::Integrity,
+            "a copy of the superblock the device has room for belongs to another filesystem",
         )),
     }
 }

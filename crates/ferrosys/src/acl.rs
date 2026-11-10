@@ -80,7 +80,8 @@ pub enum AclError {
         /// Which kind of entry carried it: `named-user` or `named-group`.
         tag: &'static str,
     },
-    /// The encoded ACL was truncated or its version was not 1.
+    /// The encoded ACL was truncated, or its header names a version other than the 2 its
+    /// entries are read in.
     #[error("encoded ACL is malformed: {reason}")]
     #[non_exhaustive]
     Malformed {

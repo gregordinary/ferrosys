@@ -164,6 +164,39 @@ pub(crate) fn child_path(prefix: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     (path.len() <= MAX_PATH).then_some(path)
 }
 
+/// What marks a scan's label as the end of a path rather than the whole of one.
+#[cfg(any(feature = "fat", feature = "exfat", feature = "apfs"))]
+const ELIDED: &[u8] = "\u{2026}".as_bytes();
+
+/// What a scan calls `name` below `prefix`, which is the scan's own name for the directory
+/// holding it: the absolute path while that is at most [`MAX_PATH`] bytes, and past it an
+/// ellipsis and the path's last components, ending at `name`.
+///
+/// A scan reports what it finds by where it found it, and reads a tree however deep it nests:
+/// a tree whose paths outgrow the ones a walk hands out is one every format here holds, and
+/// one this crate's writers write. So a scan carries a label where a walk carries a path. A
+/// label is at most [`MAX_PATH`] bytes, so what one costs stays the same however deep the
+/// tree goes, where a path's cost grows with its depth and a deep tree's paths cost the scan
+/// their sum.
+#[cfg(any(feature = "fat", feature = "exfat", feature = "apfs"))]
+pub(crate) fn label(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut label = Vec::with_capacity(prefix.len() + 1 + name.len());
+    label.extend_from_slice(prefix);
+    label.push(b'/');
+    label.extend_from_slice(name);
+    if label.len() <= MAX_PATH {
+        return label;
+    }
+    // The last bytes the bound leaves room for beside the ellipsis, from the first separator
+    // among them, so an elided label begins at a component as a path does.
+    let tail = &label[label.len() - (MAX_PATH - ELIDED.len())..];
+    let from = tail.iter().position(|&b| b == b'/').unwrap_or(0);
+    let mut elided = Vec::with_capacity(ELIDED.len() + tail.len() - from);
+    elided.extend_from_slice(ELIDED);
+    elided.extend_from_slice(&tail[from..]);
+    elided
+}
+
 /// The frontier the names `entries` make below `path`: each joined to it, with what the
 /// family keeps to visit it later, in reverse order so a stack pops them in the order the
 /// directory stores them.
@@ -179,18 +212,44 @@ pub(crate) fn frontier<T, E>(
     hostile: impl Fn(Vec<u8>) -> E,
     too_long: impl Fn(Vec<u8>) -> E,
 ) -> Result<Vec<(Vec<u8>, T)>, E> {
+    frontier_by(path, entries, hostile, |path, name| {
+        child_path(path, name).ok_or_else(|| {
+            let mut long = path.to_vec();
+            long.push(b'/');
+            long.extend_from_slice(name);
+            too_long(long)
+        })
+    })
+}
+
+/// The frontier a scan makes of the names `entries` below the directory it calls `prefix`:
+/// [`frontier`]'s, with each name a [`label`] rather than a path, so no depth stops it.
+#[cfg(feature = "apfs")]
+pub(crate) fn labelled_frontier<T, E>(
+    prefix: &[u8],
+    entries: impl IntoIterator<Item = (Vec<u8>, T)>,
+    hostile: impl Fn(Vec<u8>) -> E,
+) -> Result<Vec<(Vec<u8>, T)>, E> {
+    frontier_by(prefix, entries, hostile, |prefix, name| {
+        Ok(label(prefix, name))
+    })
+}
+
+/// The frontier `entries` make below `prefix`, each name joined to it by `join`, refusing a
+/// name no directory can hold.
+#[cfg(any(feature = "btrfs", feature = "apfs"))]
+fn frontier_by<T, E>(
+    prefix: &[u8],
+    entries: impl IntoIterator<Item = (Vec<u8>, T)>,
+    hostile: impl Fn(Vec<u8>) -> E,
+    join: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, E>,
+) -> Result<Vec<(Vec<u8>, T)>, E> {
     let mut out = Vec::new();
     for (name, keep) in entries {
         if crate::path::is_hostile_component(&name) {
             return Err(hostile(name));
         }
-        let Some(child) = child_path(path, &name) else {
-            let mut long = path.to_vec();
-            long.push(b'/');
-            long.extend_from_slice(&name);
-            return Err(too_long(long));
-        };
-        out.push((child, keep));
+        out.push((join(prefix, &name)?, keep));
     }
     out.reverse();
     Ok(out)
@@ -280,6 +339,45 @@ mod tests {
             Ok(())
         });
         assert_eq!(refused, Err(b"/a/b".to_vec()));
+    }
+
+    #[cfg(any(feature = "fat", feature = "exfat", feature = "apfs"))]
+    #[test]
+    fn a_label_is_the_path_to_the_bound_and_the_end_of_it_past_the_bound() {
+        use super::{ELIDED, label};
+
+        assert_eq!(label(b"", b"etc"), b"/etc");
+        assert_eq!(label(b"/etc", b"hostname"), b"/etc/hostname");
+        // A label at the bound is the path itself, as a walk's path at the bound is.
+        let at = vec![b'a'; MAX_PATH - 1];
+        assert_eq!(label(b"", &at).len(), MAX_PATH);
+        assert!(!label(b"", &at).starts_with(ELIDED));
+
+        // Fifty levels of a hundred-byte name, and each label below the bound: the label is
+        // the path until the path passes it, and past it the path's last whole components.
+        let name = [b'n'; 100];
+        let mut path = Vec::new();
+        let mut labelled = Vec::new();
+        for _ in 0..50 {
+            path.push(b'/');
+            path.extend_from_slice(&name);
+            labelled = label(&labelled, &name);
+            assert!(labelled.len() <= MAX_PATH);
+            if path.len() <= MAX_PATH {
+                assert_eq!(labelled, path);
+            } else {
+                let rest = labelled.strip_prefix(ELIDED).expect("an elided label");
+                assert_eq!(
+                    rest.first(),
+                    Some(&b'/'),
+                    "an elided label begins at a component"
+                );
+                assert!(path.ends_with(rest));
+                // As many components as there is room for: one more would not fit.
+                assert!(rest.len() + 1 + name.len() > MAX_PATH - ELIDED.len());
+            }
+        }
+        assert_eq!(path.len(), 50 * 101);
     }
 
     #[test]

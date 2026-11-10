@@ -1,0 +1,15 @@
+[package]
+name = "ferrosys-ucd"
+description = "Unicode Character Database tables ferrosys compares APFS names with: canonical decompositions, combining classes, case foldings and code point ages, from Unicode 17.0.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The tables are the Unicode Character Database's data, distributed under the Unicode License
+# v3, whose copyright and permission notice `LICENSE-UNICODE` and the crate root carry.
+license = "Unicode-3.0"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["unicode", "ucd", "apfs", "normalization", "case-folding"]
+categories = ["text-processing", "no-std"]
+readme = "README.md"
+documentation = "https://docs.rs/ferrosys-ucd"

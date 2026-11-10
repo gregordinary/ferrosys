@@ -736,7 +736,7 @@ mod differential {
     use super::{Bpb, FatKind, SECTOR, available, read_at, tool};
     use ferrosys::TreeBuilder;
     use ferrosys::fat::{
-        BootCode, ClusterSize, FatType, FatTypeRequest, FormatOptions, PlanRequest,
+        BootCode, ClusterSize, DiskGeometry, FatType, FatTypeRequest, FormatOptions, PlanRequest,
         ReservedSectors, RootEntries, Timestamp, VolumeLabel, format, plan_layout,
     };
 
@@ -768,6 +768,9 @@ mod differential {
         /// directory — so a case that names one compares a directory entry as well as a
         /// header.
         label: Option<&'static str>,
+        /// The disk geometry as heads and sectors per track, `-g`'s order, or `None` for
+        /// the one each derives from the size.
+        geometry: Option<(u16, u16)>,
     }
 
     impl Case {
@@ -781,6 +784,7 @@ mod differential {
                 root_entries: None,
                 force: None,
                 label: None,
+                geometry: None,
             }
         }
 
@@ -789,7 +793,7 @@ mod differential {
         fn describe(&self) -> String {
             format!(
                 "{} MiB, {}-byte sectors, cluster {}, {} FATs, reserved {}, root {}, type {}, \
-                 label {}",
+                 label {}, geometry {}",
                 self.volume_bytes >> 20,
                 self.sector_size,
                 self.cluster.map_or("auto".into(), |c| c.to_string()),
@@ -798,6 +802,8 @@ mod differential {
                 self.root_entries.map_or("auto".into(), |r| r.to_string()),
                 self.force.map_or("auto", FatType::as_str),
                 self.label.unwrap_or("none"),
+                self.geometry
+                    .map_or("auto".into(), |(h, s)| format!("{h}/{s}")),
             )
         }
     }
@@ -851,6 +857,9 @@ mod differential {
         }
         if let Some(label) = case.label {
             cmd.args(["-n", label]);
+        }
+        if let Some((heads, sectors)) = case.geometry {
+            cmd.args(["-g", &format!("{heads}/{sectors}")]);
         }
         let out = cmd
             .arg(file.path())
@@ -1101,13 +1110,10 @@ mod differential {
         // sides of the range the two drivers dispute, which no coarser knob reaches.
         //
         // It runs at three geometries because the arithmetic under test has terms that only
-        // move with the sector size, the cluster size, and the table count. What it does
-        // *not* reach is the estimate inside the circular cluster computation: that estimate
-        // only seeds a table size, and the count is recomputed from the space the sized table
-        // actually left, so an estimate off by one is invisible here unless it also crosses a
-        // sector boundary in the table. Injecting such a defect and watching this sweep pass
-        // is what established that; the estimate is pinned against a second transcription of
-        // the reference formula instead, in the geometry module's own tests.
+        // move with the sector size, the cluster size, and the table count. The table size
+        // itself is held over every small space by the geometry module's own tests: the
+        // smallest table that holds its clusters, which a sweep this coarse reaches only
+        // where a table crosses a sector boundary.
         for (volume_sectors, cluster) in [(4160u64, 1u32), (66_080, 1), (131_072, 4)] {
             for fats in [1u32, 2] {
                 for reserved in 1..=64u32 {
@@ -1235,6 +1241,13 @@ mod differential {
         options.oem_name = oem;
         if let Some(label) = case.label {
             options = options.label(VolumeLabel::new(label).expect("a valid label"));
+        }
+        if let Some((heads, sectors)) = case.geometry {
+            let nonzero = |n| std::num::NonZeroU16::new(n).expect("a geometry of whole units");
+            options = options.disk_geometry(DiskGeometry::Exactly {
+                sectors_per_track: nonzero(sectors),
+                heads: nonzero(heads),
+            });
         }
         let volume = u64::from(bpb.total_sectors) * u64::from(case.sector_size);
         format(TreeBuilder::new(), volume, options)
@@ -1459,6 +1472,44 @@ mod differential {
             "the knob sweep compared only {compared} images, which is too few to be \
              exercising the parameters it names"
         );
+    }
+
+    #[test]
+    fn the_writer_is_byte_identical_at_every_disk_geometry() {
+        if !available("mkfs.fat") {
+            return;
+        }
+        // A stated geometry reaches the boot sector, and the FAT32 backup copy, as given.
+        // The baseline also rounds the volume down to whole tracks of the stated size, which
+        // the gate already isolates by comparing over the volume the baseline used.
+        let mut compared = 0;
+        for &mib in &[1u64, 64, 1024] {
+            for geometry in [
+                (1u16, 1u16),
+                (2, 16),
+                (255, 63),
+                (256, 63),
+                (16, 100),
+                (u16::MAX, u16::MAX),
+            ] {
+                // A volume shorter than one track rounds down to nothing.
+                if (mib << 20) / 512 < u64::from(geometry.1) {
+                    continue;
+                }
+                let case = Case {
+                    geometry: Some(geometry),
+                    label: Some("GEOMETRY"),
+                    ..Case::new(mib << 20)
+                };
+                assert!(
+                    compare_bytes(&case),
+                    "{}: the baseline refused",
+                    case.describe()
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 17);
     }
 
     #[test]
@@ -2210,6 +2261,58 @@ mod populated {
             found.len(),
             count
         );
+    }
+
+    #[test]
+    fn names_beyond_ascii_are_the_names_the_checker_and_mtools_read() {
+        if !available("fsck.fat") || !available("mdir") {
+            return;
+        }
+        let names = crate::util::names_beyond_ascii();
+        let m = |mode| Metadata::new(mode, TIME);
+        let mut tree = TreeBuilder::new()
+            .directory(b"/lower".to_vec(), m(0o755))
+            .directory(b"/upper".to_vec(), m(0o755));
+        for (path, bytes) in &names {
+            tree = tree.file(path.as_bytes().to_vec(), bytes.clone(), m(0o644));
+        }
+        let image = tempfile::NamedTempFile::new().expect("create a temporary image");
+        let options = FormatOptions::new(0x1234_abcd, TIME)
+            .accept_all_loss()
+            .plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat32)));
+        format_to(tree, 64 << 20, options, image.as_file()).expect("format");
+        fsck_fat_clean(image.path()).expect("fsck.fat accepts the names");
+
+        // Read back through this crate, each name by lookup and each file's bytes.
+        let mut r = ferrosys::fat::Reader::open(std::fs::File::open(image.path()).expect("open"))
+            .expect("a strict open");
+        for (path, bytes) in &names {
+            let node = r
+                .lookup(path.as_bytes())
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(&r.read_data(&node).expect("read"), bytes, "{path}");
+        }
+
+        // What mtools lists: every name inside the Basic Multilingual Plane as written. It
+        // renders each half of a surrogate pair as a placeholder, so those are the kernel
+        // tier's to read.
+        let out = tool("mdir")
+            .env("LC_ALL", "C.UTF-8")
+            .args(["-/", "-b", "-i"])
+            .arg(image.path())
+            .arg("::")
+            .output()
+            .expect("spawn mdir");
+        assert!(out.status.success(), "mdir refused the image");
+        let listing = String::from_utf8_lossy(&out.stdout);
+        for (path, _) in &names {
+            if path.chars().all(|c| u32::from(c) < 0x1_0000) {
+                assert!(
+                    listing.lines().any(|line| line == format!("::{path}")),
+                    "mdir does not list {path}:\n{listing}"
+                );
+            }
+        }
     }
 }
 

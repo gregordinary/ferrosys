@@ -675,20 +675,6 @@ pub enum UsageError {
         /// The filesystem the command line named.
         named: &'static str,
     },
-    /// `--size auto` was given to a format writing a family with no search behind it.
-    ///
-    /// Refused here rather than after the source is read, which is where the plan would find
-    /// out: a size that cannot be searched for is a property of the command line, and a run
-    /// that reads a whole archive before saying so has spent the caller's time to tell them
-    /// something it knew at the start.
-    #[error(
-        "format: --size auto finds the smallest filesystem that holds the contents, and \
-         {family} has no search behind it: name a size"
-    )]
-    NoFitForFamily {
-        /// The filesystem the command line named.
-        family: &'static str,
-    },
     /// Two `--subvol` directives named one identifier.
     ///
     /// Refused here rather than by the writer, because the UUID tree is keyed by that
@@ -1460,15 +1446,6 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
             });
         }
     }
-    // `--size auto` searches for the smallest filesystem that holds the contents, and the
-    // search is a family's own — a filesystem's free room follows from its size, so what is
-    // being solved is a fixed point rather than a formula. A family with no search says so
-    // here, before a source is read.
-    if fit && !fs_type.has_fit() {
-        return Err(UsageError::NoFitForFamily {
-            family: fs_type.name(),
-        });
-    }
     // `--size auto` and a named size are one setting; `--slack` modifies only the first,
     // since a size that was named has no room to find.
     let size = match (size, fit) {
@@ -1561,7 +1538,9 @@ fn format(args: &mut Args, source_date_epoch: Option<OsString>) -> Result<Comman
                 command: CMD,
                 flag: "--volume-id",
             })?;
+            // An empty label is no label: the volume is formatted without one.
             let label = match &label {
+                Some(bytes) if bytes.is_empty() => None,
                 Some(bytes) => Some(
                     VolumeLabel::from_bytes(bytes)
                         .map_err(|e| value_err("--label")(ValueError::from(e)))?,

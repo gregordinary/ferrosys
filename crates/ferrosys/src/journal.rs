@@ -173,21 +173,38 @@ pub enum JournalSize {
 /// filesystem blocks, or `None` when the filesystem is too small to hold even the
 /// minimum journal.
 ///
-/// The size grows in steps for small and medium filesystems and then scales as
-/// `num_blocks / 128`, bounded to `[16384, 262144]` blocks.
+/// The size steps with the block count, whatever the block size, and doubles at each step
+/// from 2^22 blocks to 2^25, where it stays. Each step is where the pinned `mke2fs` takes
+/// it (observed at 1, 2 and 4 KiB blocks):
+///
+/// | blocks | journal blocks |
+/// |---|---|
+/// | below 2,048 | none |
+/// | 2,048 to 32,767 | 1,024 |
+/// | 32,768 to 262,143 | 4,096 |
+/// | 262,144 to 524,287 | 8,192 |
+/// | 524,288 to 4,194,303 | 16,384 |
+/// | 4,194,304 to 8,388,607 | 32,768 |
+/// | 8,388,608 to 16,777,215 | 65,536 |
+/// | 16,777,216 to 33,554,431 | 131,072 |
+/// | 33,554,432 and up | 262,144 |
 #[must_use]
 pub fn default_journal_blocks(num_blocks: u64) -> Option<u32> {
-    if num_blocks < 2048 {
-        None
-    } else if num_blocks < 32_768 {
-        Some(1024)
-    } else if num_blocks < 262_144 {
-        Some(4096)
-    } else if num_blocks < 524_288 {
-        Some(8192)
-    } else {
-        Some((num_blocks / 128).clamp(16_384, 262_144) as u32)
-    }
+    const STEPS: [(u64, u32); 8] = [
+        (2048, 1024),
+        (32_768, 4096),
+        (262_144, 8192),
+        (524_288, 16_384),
+        (4_194_304, 32_768),
+        (8_388_608, 65_536),
+        (16_777_216, 131_072),
+        (33_554_432, 262_144),
+    ];
+    STEPS
+        .iter()
+        .rev()
+        .find(|&&(from, _)| num_blocks >= from)
+        .map(|&(_, blocks)| blocks)
 }
 
 /// What a journal superblock records: the log's geometry and the filesystem it serves.
@@ -346,10 +363,17 @@ mod tests {
         assert_eq!(default_journal_blocks(1_048_576), Some(16_384));
         assert_eq!(default_journal_blocks(1_572_864), Some(16_384));
         assert_eq!(default_journal_blocks(2_097_152), Some(16_384));
+        assert_eq!(default_journal_blocks(4_194_303), Some(16_384));
         assert_eq!(default_journal_blocks(4_194_304), Some(32_768));
+        assert_eq!(default_journal_blocks(6_291_456), Some(32_768)); // 24 GiB
         assert_eq!(default_journal_blocks(8_388_608), Some(65_536));
+        assert_eq!(default_journal_blocks(12_582_912), Some(65_536)); // 48 GiB
+        assert_eq!(default_journal_blocks(16_777_216), Some(131_072));
+        assert_eq!(default_journal_blocks(25_165_824), Some(131_072)); // 96 GiB
+        assert_eq!(default_journal_blocks(33_554_431), Some(131_072));
         assert_eq!(default_journal_blocks(33_554_432), Some(262_144));
-        assert_eq!(default_journal_blocks(67_108_864), Some(262_144)); // capped
+        assert_eq!(default_journal_blocks(67_108_864), Some(262_144));
+        assert_eq!(default_journal_blocks(1 << 30), Some(262_144)); // 4 TiB
     }
 
     #[test]

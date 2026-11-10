@@ -73,6 +73,87 @@ type Name = (String, NodeKind);
 /// One name that shares its node with another, and the identity they share.
 type Shared = (String, u64);
 
+/// Hold a lookup, a listing and a filesystem's room to its walk, through the shared surface
+/// alone.
+///
+/// Every name the walk reaches is found at its path, as the kind the walk gave it — a symbolic
+/// link aside, which a lookup follows to wherever it leads. Every directory lists exactly the
+/// names the walk reached directly below it, in byte order, each as the same kind. A path that
+/// names nothing is [`TreeError::NotFound`], a file is no directory to list, and the room the
+/// filesystem reports is some of it in use and none of it more than it holds.
+fn hold_lookup_and_listing_to_the_walk<T: FsTree>(tree: &mut T) {
+    let (names, _) = walk(tree);
+    let at = |path: &str| {
+        if path.is_empty() {
+            "/".to_string()
+        } else {
+            path.to_string()
+        }
+    };
+    let mut first_file = None;
+    for (path, kind) in &names {
+        if *kind == NodeKind::Symlink {
+            continue;
+        }
+        let found = tree
+            .find(at(path).as_bytes())
+            .unwrap_or_else(|e| panic!("{path} is found: {e}"));
+        assert_eq!(
+            &found.kind, kind,
+            "{path} is found as the kind the walk gave it"
+        );
+        let last = path.rsplit('/').next().unwrap_or("");
+        assert_eq!(found.name, last.as_bytes(), "{path}: the name it ends at");
+        if matches!(kind, NodeKind::File { .. }) && first_file.is_none() {
+            first_file = Some(found.node);
+        }
+    }
+    for (dir, kind) in &names {
+        if *kind != NodeKind::Directory {
+            continue;
+        }
+        let node = tree.find(at(dir).as_bytes()).expect("the directory").node;
+        let listed: Vec<(String, NodeKind)> = tree
+            .list(&node)
+            .unwrap_or_else(|e| panic!("{dir} lists: {e}"))
+            .into_iter()
+            .map(|child| {
+                (
+                    String::from_utf8_lossy(&child.name).into_owned(),
+                    child.kind,
+                )
+            })
+            .collect();
+        let mut below: Vec<(String, NodeKind)> = names
+            .iter()
+            .filter_map(|(path, kind)| {
+                let rest = path.strip_prefix(dir.as_str())?.strip_prefix('/')?;
+                (!rest.is_empty() && !rest.contains('/')).then(|| (rest.to_string(), *kind))
+            })
+            .collect();
+        below.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        assert_eq!(
+            listed, below,
+            "{dir}: the names the walk reached below it, in byte order"
+        );
+    }
+    assert!(matches!(
+        tree.find(b"/no/such/path"),
+        Err(TreeError::NotFound { .. })
+    ));
+    let file = first_file.expect("the tree holds a file");
+    assert!(
+        matches!(tree.list(&file), Err(TreeError::Malformed { .. })),
+        "a file is no directory to list"
+    );
+    let usage = tree.usage().expect("the filesystem's room");
+    assert!(usage.unit > 0, "{usage:?}");
+    assert!(
+        usage.free < usage.total,
+        "a formatted filesystem uses some of its room: {usage:?}"
+    );
+}
+
 /// Every name a walk reached, plus whichever of them share a node.
 fn walk<T: FsTree>(tree: &mut T) -> (Vec<Name>, Vec<Shared>) {
     let mut names: Vec<Name> = Vec::new();
@@ -87,6 +168,63 @@ fn walk<T: FsTree>(tree: &mut T) -> (Vec<Name>, Vec<Shared>) {
     })
     .expect("the walk succeeds");
     (names, shared)
+}
+
+/// A tree nested past the longest path a walk builds, 4,096 bytes: a hundred and twenty
+/// directories of 37-byte names, each inside the one before, and a file at the bottom.
+fn deep_tree() -> ferrosys::TreeBuilder {
+    let time = Timestamp::from_secs(1_700_000_000);
+    let mut source = ferrosys::TreeBuilder::new();
+    let mut path = Vec::new();
+    for level in 0..120 {
+        path.extend_from_slice(format!("/{level:03}-a-component-of-substantial-length").as_bytes());
+        source = source.directory(path.clone(), Metadata::new(0o755, time));
+    }
+    assert!(path.len() > 4096, "the tree reaches past the bound");
+    path.extend_from_slice(b"/bottom");
+    source.file(path, b"deep\n".to_vec(), Metadata::new(0o644, time))
+}
+
+/// Hold a filesystem holding [`deep_tree`]'s tree, and its scan, to what a tree that deep is:
+/// well-formed. A walk hands out paths to the bound and stops at the first past it, as a limit
+/// on the path rather than a verdict about the filesystem, and a scan reads the tree whole and
+/// finds nothing.
+fn hold_a_deep_tree_to_the_path_bound<T: FsTree>(tree: &mut T, scanned: &ferrosys::FindingReport) {
+    let mut longest = 0;
+    let walked = tree.walk_tree::<TreeError, _>(|_, entry: TreeEntry<T::Node>| {
+        longest = longest.max(entry.path.len());
+        Ok(())
+    });
+    assert!(
+        matches!(
+            walked,
+            Err(TreeError::LimitExceeded {
+                bound: ferrosys::Bound::PathBytes,
+                ..
+            })
+        ),
+        "{walked:?}"
+    );
+    assert!((4096 - 2 * 38..=4096).contains(&longest), "{longest}");
+    assert!(scanned.is_clean(), "{}", scanned.to_table());
+}
+
+#[test]
+fn a_tree_deeper_than_a_walk_builds_is_a_limit_to_the_walk_and_whole_to_the_scan() {
+    use ferrosys::ext::{FormatOptions, format};
+
+    let bytes = format(
+        deep_tree(),
+        16 << 20,
+        FormatOptions::new([0x33; 16], Timestamp::from_secs(1_700_000_000), [0; 16]),
+    )
+    .expect("format")
+    .into_bytes();
+    let FsReader::Ext(mut reader) = open(Cursor::new(&bytes)).expect("open") else {
+        panic!("the ext family claimed the image")
+    };
+    let scanned = reader.scan().to_report();
+    hold_a_deep_tree_to_the_path_bound(&mut reader, &scanned);
 }
 
 #[test]
@@ -169,6 +307,14 @@ fn a_walk_yields_the_root_first_and_then_the_tree_in_order() {
     assert_eq!(shared[0].1, shared[1].1, "both names name one node");
     let linked: Vec<&str> = shared.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(linked, ["/one", "/two"]);
+}
+
+#[test]
+fn a_lookup_a_listing_and_the_room_agree_with_the_walk() {
+    let FsReader::Ext(mut reader) = open(Cursor::new(image())).expect("opens") else {
+        panic!("an ext filesystem");
+    };
+    hold_lookup_and_listing_to_the_walk(&mut reader);
 }
 
 #[test]
@@ -691,6 +837,28 @@ mod fat {
     }
 
     #[test]
+    fn a_tree_deeper_than_a_walk_builds_is_a_limit_to_the_walk_and_whole_to_the_scan() {
+        use ferrosys::fat::{FatType, FatTypeRequest, FormatOptions, PlanRequest, format};
+
+        let options = FormatOptions::new(0x1234_abcd, Timestamp::from_secs(1_700_000_000))
+            .plan(PlanRequest::new(0).fat_type(FatTypeRequest::Exactly(FatType::Fat16)));
+        let bytes = format(super::deep_tree(), 16 << 20, options)
+            .expect("format")
+            .into_bytes();
+        let mut reader = reader(&bytes);
+        let scanned = reader.scan().to_report();
+        super::hold_a_deep_tree_to_the_path_bound(&mut reader, &scanned);
+    }
+
+    #[test]
+    fn a_lookup_a_listing_and_the_room_agree_with_the_walk() {
+        let FsReader::Fat(mut reader) = open(Cursor::new(image())).expect("opens") else {
+            panic!("a FAT volume");
+        };
+        super::hold_lookup_and_listing_to_the_walk(&mut reader);
+    }
+
+    #[test]
     fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
         let bytes = image();
         let handle = open(Cursor::new(&bytes)).expect("open");
@@ -1038,6 +1206,30 @@ mod exfat {
     }
 
     #[test]
+    fn a_tree_deeper_than_a_walk_builds_is_a_limit_to_the_walk_and_whole_to_the_scan() {
+        use ferrosys::exfat::{FormatOptions, format};
+
+        let bytes = format(
+            super::deep_tree(),
+            16 << 20,
+            FormatOptions::new(0x1234_abcd),
+        )
+        .expect("format")
+        .into_bytes();
+        let mut reader = reader(&bytes);
+        let scanned = reader.scan().to_report();
+        super::hold_a_deep_tree_to_the_path_bound(&mut reader, &scanned);
+    }
+
+    #[test]
+    fn a_lookup_a_listing_and_the_room_agree_with_the_walk() {
+        let FsReader::ExFat(mut reader) = open(Cursor::new(image())).expect("opens") else {
+            panic!("an exFAT volume");
+        };
+        super::hold_lookup_and_listing_to_the_walk(&mut reader);
+    }
+
+    #[test]
     fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
         let bytes = image();
         let handle = open(Cursor::new(&bytes)).expect("open");
@@ -1319,6 +1511,27 @@ mod btrfs {
     }
 
     #[test]
+    fn a_tree_deeper_than_a_walk_builds_is_a_limit_to_the_walk_and_whole_to_the_scan() {
+        use ferrosys::btrfs::{FormatOptions, format};
+
+        let options = FormatOptions::new([0x5b; 16], Timestamp::from_secs(1_700_000_000));
+        let bytes = format(super::deep_tree(), 128 << 20, options)
+            .expect("format")
+            .into_bytes();
+        let mut reader = reader(&bytes);
+        let scanned = reader.scan().to_report();
+        super::hold_a_deep_tree_to_the_path_bound(&mut reader, &scanned);
+    }
+
+    #[test]
+    fn a_lookup_a_listing_and_the_room_agree_with_the_walk() {
+        let FsReader::Btrfs(mut reader) = open(Cursor::new(image())).expect("opens") else {
+            panic!("a btrfs filesystem");
+        };
+        super::hold_lookup_and_listing_to_the_walk(&mut reader);
+    }
+
+    #[test]
     fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
         let bytes = image();
         let handle = open(Cursor::new(&bytes)).expect("open");
@@ -1558,6 +1771,28 @@ mod apfs {
     }
 
     #[test]
+    fn a_tree_deeper_than_a_walk_builds_is_a_limit_to_the_walk_and_whole_to_the_scan() {
+        use ferrosys::apfs::{FormatOptions, VolumeName, VolumeRequest, format};
+
+        let volume = VolumeRequest::new(VolumeName::new("seam").expect("a name"), [0x22; 16]);
+        let options = FormatOptions::new([0x11; 16], Timestamp::from_secs(1_700_000_000), volume);
+        let bytes = format(super::deep_tree(), 64 << 20, options)
+            .expect("format")
+            .into_bytes();
+        let mut reader = reader(&bytes);
+        let scanned = reader.scan().to_report();
+        super::hold_a_deep_tree_to_the_path_bound(&mut reader, &scanned);
+    }
+
+    #[test]
+    fn a_lookup_a_listing_and_the_room_agree_with_the_walk() {
+        let FsReader::Apfs(mut reader) = open(Cursor::new(image())).expect("opens") else {
+            panic!("an APFS volume");
+        };
+        super::hold_lookup_and_listing_to_the_walk(&mut reader);
+    }
+
+    #[test]
     fn opening_an_image_without_naming_a_family_hands_back_the_family_that_claimed_it() {
         let bytes = image();
         let handle = open(Cursor::new(&bytes)).expect("open");
@@ -1714,4 +1949,66 @@ mod apfs {
         let report = scan_through_a_failing_source(&image());
         assert_source_failures_held_apart(&report, Family::Apfs);
     }
+}
+
+/// A FAT16 volume whose file entry records a size and no cluster: the file declares 100 bytes
+/// and its storage yields none. A lenient read takes the volume as it is.
+#[cfg(all(feature = "tar", feature = "fat"))]
+fn short_file_volume() -> Vec<u8> {
+    use ferrosys::ext::{Metadata, Timestamp, TreeBuilder};
+    let time = Timestamp::from_secs(1_700_000_000);
+    let source = TreeBuilder::new()
+        .file(
+            b"/SHORT".to_vec(),
+            vec![b's'; 100],
+            Metadata::new(0o644, time),
+        )
+        .file(
+            b"/NEXT".to_vec(),
+            b"next".to_vec(),
+            Metadata::new(0o644, time),
+        );
+    let mut options = ferrosys::fat::FormatOptions::new(0x1234_5678, time);
+    options.accepted_loss = ferrosys::AcceptedLoss::ALL;
+    let mut bytes = ferrosys::fat::format(source, 32 << 20, options)
+        .expect("FAT formats it")
+        .into_bytes();
+    // The short entry: an eleven-byte name, `SHORT` padded, then its attribute byte. Its first
+    // cluster is the word at 26.
+    let at = bytes
+        .windows(11)
+        .position(|w| w == b"SHORT      ")
+        .expect("the entry");
+    bytes[at + 26..at + 28].fill(0);
+    bytes[at + 20..at + 22].fill(0);
+    bytes
+}
+
+#[cfg(all(feature = "tar", feature = "fat"))]
+#[test]
+fn an_archive_refuses_a_file_whose_storage_yields_less_than_its_length() {
+    // A tar member's header declares the length, and `tar` pads a body to what it copied, so
+    // a short body would leave every member after it read out of step. The archive is refused
+    // as an extraction to a directory refuses the same file.
+    use ferrosys::{ArchiveError, ArchiveSink};
+
+    let bytes = short_file_volume();
+    let mut reader = ferrosys::fat::Reader::open_with(
+        Cursor::new(bytes),
+        &ferrosys::fat::OpenOptions::new().policy(ferrosys::ReadPolicy::Lenient),
+    )
+    .expect("a lenient open");
+    let mut archive = Vec::new();
+    let result = ArchiveSink::new(&mut archive).write_tree(&mut reader);
+    assert!(
+        matches!(
+            result,
+            Err(ArchiveError::ShortRead {
+                size: 100,
+                got: 0,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
 }

@@ -28,7 +28,7 @@ mod util;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ferrosys::ext::{OpenOptions, Profile, ReadPolicy, Reader, Severity, Xattr};
+use ferrosys::ext::{OpenOptions, Profile, ReadError, ReadPolicy, Reader, Severity, Xattr};
 use ferrosys::{Acl, AclEntry, AclQualifier};
 use util::{available, e2fsck_clean, tool};
 
@@ -169,6 +169,24 @@ const BIG_INODE_EXT4: Case = Case {
     features: "",
 };
 
+const UNINIT_BG_EXT4: Case = Case {
+    what: "ext4 with uninit_bg in place of metadata_csum: the group descriptors carry a \
+           crc16, and groups past the first are marked uninitialized",
+    fs_type: "ext4",
+    block_size: 1024,
+    inode_size: 256,
+    features: "^metadata_csum,uninit_bg",
+};
+
+const BIGALLOC_EXT4: Case = Case {
+    what: "ext4 with bigalloc: blocks are allocated in clusters of sixteen, so a group's \
+           blocks are sixteen times what its block bitmap indexes",
+    fs_type: "ext4",
+    block_size: 4096,
+    inode_size: 256,
+    features: "bigalloc",
+};
+
 /// The matrix. Each case is here because it stresses a seam the others do not.
 const CASES: &[Case] = &[
     DEFAULT_EXT4,
@@ -177,6 +195,8 @@ const CASES: &[Case] = &[
     EXT3,
     NO_CSUM_EXT4,
     BIG_INODE_EXT4,
+    UNINIT_BG_EXT4,
+    BIGALLOC_EXT4,
 ];
 
 /// Build one case with `mke2fs -d` and return the image path (kept alive by `dir`).
@@ -424,6 +444,94 @@ fn the_scan_faults_a_corrupt_block_map() {
 }
 
 #[test]
+fn bigalloc_at_a_one_kibibyte_block_is_named_and_refused() {
+    // At a 1024-byte block, bigalloc puts the first data block at 0 and the descriptor table
+    // in block 2. Detection names the filesystem, and an open refuses the layout by name
+    // rather than calling a sound superblock malformed.
+    if !available("mke2fs") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("bigalloc-1k.img");
+    let out = tool("mke2fs")
+        .args([
+            "-q", "-F", "-t", "ext4", "-b", "1024", "-C", "16384", "-O", "bigalloc",
+        ])
+        .arg(&image)
+        .arg("64M")
+        .output()
+        .expect("spawn mke2fs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = std::fs::File::open(&image).expect("open the image");
+    assert_eq!(
+        ferrosys::detect(file).expect("detection"),
+        ferrosys::Filesystem::Ext(Profile::Ext4)
+    );
+    let file = std::fs::File::open(&image).expect("open the image");
+    assert!(matches!(
+        Reader::open_with(file, &OpenOptions::new().policy(ReadPolicy::Lenient)),
+        Err(ReadError::UnsupportedLayout { .. })
+    ));
+}
+
+#[test]
+fn an_uninit_bg_descriptor_is_held_to_its_crc16() {
+    // Under `uninit_bg` a descriptor's checksum is a crc16, and its flags are what say a
+    // group holds no inode in use. One flag set by a single flipped bit hides every inode of
+    // the group from a scan, so the checksum is what reports it.
+    if !available("mke2fs") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let tree = dir.path().join("tree");
+    build_tree(&tree).expect("build source tree");
+    let image = mke2fs(&UNINIT_BG_EXT4, &tree, dir.path());
+    let clean = std::fs::read(&image).expect("read the image");
+    let mut reader = Reader::open(std::io::Cursor::new(clean.clone())).expect("it opens");
+    assert_eq!(reader.verify_checksums(), Ok(()), "every crc16 holds");
+    // Group 0's descriptor opens the block after the superblock's, and `bg_flags` is the
+    // word at 0x12 of it. Group 0 holds the root, so it is never uninitialized.
+    let flags = 2048 + 0x12;
+    assert_eq!(clean[flags] & 1, 0, "group 0 is initialized");
+    let mut flipped = clean;
+    flipped[flags] |= 1;
+    let mut reader = Reader::open(std::io::Cursor::new(flipped)).expect("it opens");
+    assert!(
+        matches!(
+            reader.verify_checksums(),
+            Err(ReadError::ChecksumMismatch {
+                object: "group descriptor",
+                index: 0,
+                ..
+            })
+        ),
+        "the flipped flag breaks group 0's crc16"
+    );
+    let report = reader.scan();
+    let details: Vec<&str> = report
+        .anomalies()
+        .iter()
+        .map(|a| a.detail.as_str())
+        .collect();
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("group descriptor") && d.contains("checksum")),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("in a group its descriptor marks as holding no inode in use")),
+        "the root is in the group: {details:?}"
+    );
+}
+
+#[test]
 fn mke2fs_formatted_images_read_clean() {
     if !available("mke2fs") || !available("e2fsck") {
         return;
@@ -457,6 +565,29 @@ fn mke2fs_formatted_images_read_clean() {
         );
 
         read_back(&mut reader, what);
+
+        // The room the shared surface reports is the room the baseline's own reader reports.
+        let header = util::tool("dumpe2fs")
+            .arg("-h")
+            .arg(&image)
+            .output()
+            .expect("run dumpe2fs");
+        let header = String::from_utf8_lossy(&header.stdout).into_owned();
+        let field = |name: &str| -> u64 {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or_else(|| panic!("{what}: dumpe2fs reports `{name}`"))
+        };
+        // In bytes, since the unit is the cluster under bigalloc and dumpe2fs counts blocks.
+        let usage = ferrosys::FsTree::usage(&mut reader).expect("the room");
+        let block = u64::from(case.block_size);
+        assert_eq!(
+            (usage.unit * usage.total, usage.unit * usage.free),
+            (block * field("Block count:"), block * field("Free blocks:")),
+            "{what}: the bytes the filesystem holds and leaves free"
+        );
     }
 }
 
@@ -1196,15 +1327,15 @@ fn a_final_dir_entry_in_the_last_twelve_bytes_is_read() {
 /// A directory entry whose name a real ext4 filesystem could not hold — one carrying a
 /// path separator.
 ///
-/// The kernel's `ext4_check_dir_entry` forbids `/` and NUL in a name, so neither can
-/// appear on a filesystem it wrote. A crafted image can hold one anyway, and a reader
-/// that built a path from it would let `../../etc/cron.d/evil` out of the tree and into
-/// an extractor. The reader instead flags such a name as a structural anomaly and builds
+/// A filename holds neither `/` nor NUL (POSIX.1-2017, XBD 3.170 "Filename"), and the
+/// pinned `e2fsck` faults a directory entry holding either (asserted below). A crafted image
+/// can hold one anyway, and a reader that built a path from it would let
+/// `../../etc/cron.d/evil` out of the tree and into an extractor. The reader instead flags such a name as a structural anomaly and builds
 /// no path from it: `scan` reports it, and `walk` skips it. This crafts the name (mke2fs
 /// cannot write one) and checks both.
 #[test]
 fn a_directory_entry_name_that_traverses_is_flagged_and_never_walked() {
-    if !available("mke2fs") {
+    if !available("mke2fs") || !available("e2fsck") {
         return;
     }
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1250,6 +1381,24 @@ fn a_directory_entry_name_that_traverses_is_flagged_and_never_walked() {
         put_dirent(block, filler, 0, (block_size - filler) as u16, 0, b"");
     }
     std::fs::write(&image, &bytes).expect("write back");
+
+    // The pinned checker faults the name, and the same entry with a NUL in its place.
+    assert!(
+        e2fsck_clean(&image).is_err(),
+        "e2fsck accepts a name holding `/`"
+    );
+    {
+        let mut nul = bytes.clone();
+        let at = probe_block as usize * block_size + 24 + 8 + 1;
+        assert_eq!(nul[at], b'/');
+        nul[at] = 0;
+        let copy = dir.path().join("nul.img");
+        std::fs::write(&copy, &nul).expect("write the NUL copy");
+        assert!(
+            e2fsck_clean(&copy).is_err(),
+            "e2fsck accepts a name holding NUL"
+        );
+    }
 
     let file = std::fs::File::open(&image).expect("open");
     let mut r =
@@ -2024,4 +2173,118 @@ fn feature_incoherent_foreign_images_are_flagged() {
             case.what
         );
     }
+}
+
+/// A filesystem with multiple-mount protection reads, and what its block records is reported
+/// as the pinned `e2fsck` reads it.
+///
+/// The block's layout is the ext4 documentation's; the clean and checker sequences and the
+/// checksum's seed are what the pinned `mke2fs` writes and `e2fsck` judges (observed).
+#[test]
+fn a_filesystem_with_multiple_mount_protection_reads_and_reports_its_record() {
+    if !available("mke2fs") || !available("e2fsck") {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("d")).expect("mkdir");
+    std::fs::write(tree.join("d/f"), b"held\n").expect("write");
+    let image = dir.path().join("mmp.img");
+    let out = tool("mke2fs")
+        .args(["-q", "-F", "-t", "ext4", "-O", "mmp"])
+        .arg("-d")
+        .arg(&tree)
+        .args(["-U", "f0e17055-0000-4000-8000-000000000000"])
+        .arg(&image)
+        .arg("32M")
+        .output()
+        .expect("spawn mke2fs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let clean = std::fs::read(&image).expect("read the image");
+
+    let open = |bytes: &[u8]| Reader::open(std::io::Cursor::new(bytes.to_vec()));
+    let mut r = open(&clean).expect("a strict open of a clean mmp filesystem");
+    r.verify_checksums()
+        .expect("its checksums, the record's among them");
+    let (_, file) = r.lookup(b"/d/f").expect("the file");
+    assert_eq!(r.read_data(&file).unwrap(), b"held\n");
+    assert!(
+        r.scan().anomalies().is_empty(),
+        "{:?}",
+        r.scan().anomalies()
+    );
+
+    let sb = r.superblock().clone();
+    let block_size = r.feature().block_size as usize;
+    let at = sb.mmp_block as usize * block_size;
+    let seed = sb.checksum_seed;
+    // A copy of the image whose record is changed by `change` and resealed, or left unsealed.
+    let altered = |change: &dyn Fn(&mut [u8]), reseal: bool| {
+        let mut bytes = clean.clone();
+        let record = &mut bytes[at..at + 1024];
+        change(record);
+        if reseal {
+            let sum = ferrosys::crc32c(seed, &record[..0x3FC]);
+            record[0x3FC..].copy_from_slice(&sum.to_le_bytes());
+        }
+        bytes
+    };
+    let with_sequence = |sequence: u32| {
+        altered(
+            &|record: &mut [u8]| record[4..8].copy_from_slice(&sequence.to_le_bytes()),
+            true,
+        )
+    };
+
+    // A host's sequence and a checker's: a strict open goes on, and a scan names the state.
+    for (sequence, says) in [
+        (0x1234_5678u32, "a host had the filesystem open"),
+        (0xE24D_4D50, "a checker was running"),
+    ] {
+        let bytes = with_sequence(sequence);
+        let mut r = open(&bytes).expect("a strict open reads past the state");
+        r.verify_checksums().expect("the record is sound");
+        let findings = r.scan();
+        let found: Vec<_> = findings.anomalies().iter().collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].severity, Severity::Cosmetic);
+        assert!(found[0].detail.contains(says), "{}", found[0].detail);
+    }
+    // The pinned checker refuses the checker's sequence, which is what the state means.
+    let fsck = dir.path().join("fsck.img");
+    std::fs::write(&fsck, with_sequence(0xE24D_4D50)).expect("write");
+    assert!(
+        e2fsck_clean(&fsck).is_err(),
+        "e2fsck accepted a checker's sequence"
+    );
+
+    // A record without its magic, and one whose checksum does not match: damage.
+    let no_magic = altered(&|record: &mut [u8]| record[0] ^= 0xFF, true);
+    let mut r = open(&no_magic).expect("open");
+    assert!(matches!(
+        r.verify_checksums(),
+        Err(ReadError::BadMmpBlock { .. })
+    ));
+    assert!(
+        r.scan()
+            .anomalies()
+            .iter()
+            .any(|a| a.severity == Severity::Structural)
+    );
+    let unsealed = altered(&|record: &mut [u8]| record[0x20] ^= 0xFF, false);
+    let mut r = open(&unsealed).expect("open");
+    assert!(matches!(
+        r.verify_checksums(),
+        Err(ReadError::ChecksumMismatch { .. })
+    ));
+    assert!(
+        r.scan()
+            .anomalies()
+            .iter()
+            .any(|a| a.severity == Severity::Integrity)
+    );
 }

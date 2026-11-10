@@ -1,0 +1,19 @@
+[package]
+name = "ferrosys-lzfse"
+description = "LZVN and LZFSE decoders in safe Rust, derived from Apple's lzfse reference decoder, for the APFS reader in ferrosys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The decoders are derived from the ones in Apple's lzfse project and are distributed under its
+# license, whose text and copyright notices `LICENSE` carries.
+license = "BSD-3-Clause"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["lzfse", "lzvn", "decompression", "apfs"]
+categories = ["compression"]
+readme = "README.md"
+documentation = "https://docs.rs/ferrosys-lzfse"
+
+[dependencies]
+# Typed error enums. Build-time proc-macro only; no runtime footprint.
+thiserror = { workspace = true }

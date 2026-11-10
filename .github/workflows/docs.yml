@@ -73,7 +73,7 @@ jobs:
         run: mdbook build book   # renders to book/book (default build-dir)
 
       - name: Build API reference
-        run: cargo doc --no-deps --all-features   # include the `tar` archive source
+        run: cargo doc --no-deps --all-features   # every family, APFS included, and every source
         env:
           RUSTDOCFLAGS: "-D warnings"
 

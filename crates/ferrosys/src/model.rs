@@ -48,11 +48,11 @@ pub const FIRST_USER_INO: u32 = 12;
 /// target of this length or more is written to a data block.
 const FAST_SYMLINK_MAX: usize = 60;
 
-/// The most links ext4 records in an inode's `i_links_count`. A directory whose
-/// subdirectory count would exceed this stores `1` instead — the `dir_nlink`
-/// sentinel meaning the count is not tracked — and a file cannot hold more
-/// hard links than this.
-const EXT4_LINK_MAX: u16 = 65000;
+/// The most links an inode's `i_links_count` records: ext4 allows an inode no more than
+/// 65,000 hard links, so a directory no more than 64,998 subdirectories unless `dir_nlink`
+/// lets it store `1` instead, meaning the count is not known (the ext4 documentation's Index
+/// Nodes page, `i_links_count`).
+const MAX_LINKS: u16 = 65000;
 
 /// Refuse an entry carrying BSD flags, which ext holds none of.
 fn validate_darwin(path: &[u8], darwin: Option<&Darwin>) -> Result<(), ModelError> {
@@ -375,7 +375,8 @@ pub enum ModelError {
     /// addressable entry: empty (which an index-0 entry turns into the end-of-list
     /// terminator, hiding every attribute after it), carrying an embedded NUL (which the
     /// syscall boundary reads as the name's end), or duplicated within one entry's set
-    /// (a state `ext4_xattr_set` cannot produce). It is rejected rather than written
+    /// (a state `setxattr(2)` cannot produce: it replaces an attribute of the same name).
+    /// It is rejected rather than written
     /// into a set the kernel, `e2fsck`, and this crate's own reader would each misread.
     #[error(
         "entry {} has an invalid extended attribute name ({reason}): {}",
@@ -1017,17 +1018,17 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
     // Non-hard-link entries first: they create the inodes hard links later reference.
     let mut next_ino = config.first_user_inode;
     for n in &normalized {
-        if matches!(n.entry.kind, EntryKind::HardLink { .. }) {
-            continue;
-        }
-        let path_key = key(&n.parts);
         // `/lost+found` is the filesystem's own directory, so neither it nor anything
-        // beneath it may come from the source.
+        // beneath it may come from the source — a hard link's name no more than any other.
         if n.parts.first().map(Vec::as_slice) == Some(b"lost+found".as_slice()) {
             return Err(ModelError::ReservedPath {
                 path: n.entry.path.clone(),
             });
         }
+        if matches!(n.entry.kind, EntryKind::HardLink { .. }) {
+            continue;
+        }
+        let path_key = key(&n.parts);
         if path_ino.contains_key(&path_key) {
             return Err(ModelError::Duplicate {
                 path: n.entry.path.clone(),
@@ -1204,7 +1205,7 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         // An inode's link count is the number of names pointing at it, so it cannot be
         // capped without contradicting the directory entries. Past ext4's limit the
         // link is refused rather than overflowing the 16-bit field.
-        if target_inode.links_count >= EXT4_LINK_MAX {
+        if target_inode.links_count >= MAX_LINKS {
             return Err(ModelError::TooManyLinks {
                 path: n.entry.path.clone(),
                 target: target.clone(),
@@ -1253,12 +1254,12 @@ pub fn build_model(source: impl Source, config: ModelConfig) -> Result<FsModel, 
         // subdirectories, so an over-limit directory is rejected rather than given a
         // sentinel `e2fsck` would flag as inconsistent.
         let links = 2 + subdirs as u64;
-        let links_count = if links > u64::from(EXT4_LINK_MAX) {
+        let links_count = if links > u64::from(MAX_LINKS) {
             if !config.dir_nlink {
                 return Err(ModelError::DirectoryLinkCountOverflow {
                     path: build.path.clone(),
                     subdirs: subdirs as u64,
-                    limit: EXT4_LINK_MAX,
+                    limit: MAX_LINKS,
                 });
             }
             1
@@ -1782,7 +1783,7 @@ mod tests {
     fn a_directory_past_the_link_limit_requires_dir_nlink() {
         // A directory's link count is 2 (`.` and its name in the parent) plus one per
         // subdirectory (its `..`). 64_999 subdirectories reach 65_001, one past
-        // EXT4_LINK_MAX, where ext4 stores the `dir_nlink` sentinel `1` — but that sentinel
+        // MAX_LINKS, where ext4 stores the `dir_nlink` sentinel `1` — but that sentinel
         // means nothing without the feature, and the kernel could not have created this
         // many subdirectories without it either.
         let build = || {
@@ -1863,6 +1864,16 @@ mod tests {
         assert!(matches!(
             build_model(
                 TreeBuilder::new().directory(b"/lost+found".to_vec(), meta(0o700)),
+                config()
+            ),
+            Err(ModelError::ReservedPath { .. })
+        ));
+        // A hard link's name is a name the source supplies like any other.
+        assert!(matches!(
+            build_model(
+                TreeBuilder::new()
+                    .file(b"/a".to_vec(), b"1".to_vec(), meta(0o644))
+                    .hardlink(b"/lost+found/x".to_vec(), b"/a".to_vec(), meta(0o644)),
                 config()
             ),
             Err(ModelError::ReservedPath { .. })
@@ -2107,8 +2118,9 @@ mod tests {
     #[test]
     fn a_regular_file_past_the_large_file_bound_requires_the_feature() {
         // The rule is checked against a size rather than against bytes, so it is exercised
-        // here without materializing two gigabytes: the bound is what `e2fsck` applies
-        // (`ext2fs_needs_large_file_feature`), and it is inclusive.
+        // here without materializing two gigabytes. The bound is the documentation's
+        // RO_COMPAT_LARGE_FILE, and inclusive: without the feature the pinned `e2fsck`
+        // accepts a regular file of 2^31 - 1 bytes and faults one of 2^31 (observed).
         let with = config();
         let without = ModelConfig {
             large_file: false,

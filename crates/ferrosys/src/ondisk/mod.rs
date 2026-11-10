@@ -25,6 +25,7 @@ mod extent;
 mod group_desc;
 mod htree;
 mod inode;
+mod mmp;
 mod orphan;
 mod superblock;
 mod xattr;
@@ -48,6 +49,9 @@ pub use inode::{
     TIME_SECS_MAX, TIME_SECS_MIN, decode_time, encode_time, extra_isize_for, time_is_representable,
 };
 pub(crate) use inode::{decode_device, encode_device};
+pub(crate) use mmp::{
+    MMP_CHECKSUM_OFFSET, MMP_MAGIC, MMP_SEQ_CLEAN, MMP_SEQ_FSCK, MMP_SEQ_MAX, Mmp,
+};
 pub use orphan::{
     ORPHAN_BLOCK_MAGIC, ORPHAN_TAIL_LEN, orphan_entries_len, orphan_tail_bytes, read_orphan_tail,
 };
@@ -55,11 +59,13 @@ pub use superblock::{
     STATE_CLEAN, STATE_ERRORS, SUPERBLOCK_MAGIC, SuperBlock, superblock_checksum, unpadded,
 };
 pub(crate) use xattr::{
-    CHECKSUM_OFFSET as XATTR_CHECKSUM_OFFSET, block_len as xattr_block_len, encode_block,
-    encode_inline, has_empty_name, longest_stored_name, parse_block, parse_inline,
-    split_for_storage,
+    CHECKSUM_OFFSET as XATTR_CHECKSUM_OFFSET, Stored as StoredXattr, Value as XattrValue,
+    block_len as xattr_block_len, encode_block, encode_inline, has_empty_name, longest_stored_name,
+    parse_block_stored, parse_inline_stored, split_for_storage,
 };
 pub use xattr::{decode_acl, encode_acl};
+#[cfg(test)]
+pub(crate) use xattr::{parse_block, parse_inline};
 
 /// A failure parsing an on-disk structure from bytes.
 ///
@@ -105,7 +111,7 @@ pub enum ParseError {
 }
 
 pub(crate) use crate::bytes::{
-    get_arr, get_u8, get_u16, get_u32, put_arr, put_u8, put_u16, put_u32,
+    get_arr, get_u8, get_u16, get_u32, get_u64, put_arr, put_u8, put_u16, put_u32, put_u64,
 };
 
 /// Split a 64-bit value into `(lo, hi)` 32-bit halves for the split fields ext4

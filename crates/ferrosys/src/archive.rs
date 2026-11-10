@@ -120,6 +120,23 @@ pub enum ArchiveError {
     /// The filesystem being written out could not be read.
     #[error(transparent)]
     Read(#[from] crate::tree::TreeError),
+    /// A file's storage yielded fewer bytes than the length the image records for it, so
+    /// its member would be shorter than the header declares and every member after it read
+    /// out of step. The archive is refused rather than written mis-framed, as an extraction
+    /// to a directory refuses the same file.
+    #[error(
+        "{}: the image records {size} bytes and its storage yielded {got}",
+        crate::escape::printable(path)
+    )]
+    #[non_exhaustive]
+    ShortRead {
+        /// The entry's path within the image.
+        path: Vec<u8>,
+        /// The length the image records.
+        size: u64,
+        /// The bytes its storage yielded.
+        got: u64,
+    },
     /// The filesystem holds an entry a tar archive has no way to express: a socket, which
     /// has no entry type at all. It is a typed error rather than an archive quietly missing
     /// a file.
@@ -285,6 +302,24 @@ struct Pax {
     devminor: Option<u32>,
 }
 
+/// A header time field holding a negative number, or `None` for any other.
+///
+/// Observed: GNU tar 1.35, whose default format is `gnu`, writes a time before 1970 in the
+/// binary form a numeric field takes past its octal range — the field read as one big-endian
+/// two's-complement number, its leading byte `0xFF` for a negative one. The octal form and
+/// the binary form of a positive number are what the `tar` crate decodes; this is the one it
+/// decodes as unsigned.
+fn negative_header_time(field: &[u8; 12]) -> Option<i64> {
+    if field[0] != 0xFF {
+        return None;
+    }
+    let value = field
+        .iter()
+        .fold(0i128, |acc, &byte| (acc << 8) | i128::from(byte))
+        - (1i128 << 96);
+    i64::try_from(value).ok()
+}
+
 /// Parse one archive member into a [`SourceEntry`].
 ///
 /// `backing` is the open archive a located body is read from later, present only for a
@@ -331,9 +366,10 @@ fn parse_entry(
     // The header carries whole-second mtime; a PAX record refines it (and adds
     // sub-second precision). PAX atime/ctime fall back to the modification time. A
     // malformed header mtime is a typed error, not a silent fallback to the epoch.
-    let mtime = match pax.mtime {
-        Some(t) => t,
-        None => {
+    let mtime = match (pax.mtime, negative_header_time(&header.as_old().mtime)) {
+        (Some(t), _) => t,
+        (None, Some(secs)) => Timestamp::from_secs(secs),
+        (None, None) => {
             let secs = header.mtime().map_err(|_| ArchiveError::Bad {
                 path: path.clone(),
                 reason: "malformed modification time",

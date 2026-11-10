@@ -1,0 +1,15 @@
+#[non_exhaustive] pub enum ferrosys_lzfse::Error
+#[non_exhaustive] pub ferrosys_lzfse::Error::Malformed
+#[non_exhaustive] pub ferrosys_lzfse::Error::Overrun
+impl Clone for ferrosys_lzfse::Error
+impl Copy for ferrosys_lzfse::Error
+impl Debug for ferrosys_lzfse::Error
+impl Display for ferrosys_lzfse::Error
+impl Eq for ferrosys_lzfse::Error
+impl Error for ferrosys_lzfse::Error
+impl PartialEq for ferrosys_lzfse::Error
+pub ferrosys_lzfse::Error::Malformed::fault: &'static str
+pub ferrosys_lzfse::Error::Overrun::expected: usize
+pub fn ferrosys_lzfse::decompress_lzfse(input: &[u8], out: &mut [u8]) -> Result<usize, Error>
+pub fn ferrosys_lzfse::decompress_lzvn(input: &[u8], out: &mut [u8]) -> Result<usize, Error>
+pub mod ferrosys_lzfse
