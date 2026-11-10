@@ -12,10 +12,14 @@ env:
 permissions:
   contents: read
 
+# Every job names its runner image by forge. On GitHub the image is pinned, as the toolchain
+# and the oracles are: `ubuntu-latest` moves to a new release under an unchanged workflow, and
+# the pinned C oracles predate the C23 a newer image's compiler defaults to. A self-hosted
+# runner answers to `ubuntu-latest` with an image of its own, pinned where it is configured.
 jobs:
   check:
     name: fmt / clippy / test / doc
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     # Warnings are errors here (style guide: fmt/clippy/rustdoc clean). Scoped to
     # this job so the MSRV build check is not failed by version-specific lints.
     env:
@@ -467,7 +471,7 @@ jobs:
 
   deny:
     name: dependency advisories + licenses
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     env:
       # Pinned; bump deliberately, and update the digest with it. This step puts a binary
       # on PATH whose verdict decides whether the dependency graph is acceptable, so what
@@ -529,7 +533,7 @@ jobs:
 
   cross:
     name: cross-target check
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -575,7 +579,7 @@ jobs:
 
   public-api:
     name: public API surface
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     env:
       # Pinned; bump deliberately. rustdoc's JSON output is nightly-only and its schema
       # is versioned — ci/public-api.py asserts the version it was written against, so a
@@ -605,7 +609,7 @@ jobs:
 
   msrv:
     name: MSRV 1.88
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -620,7 +624,7 @@ jobs:
 
   book:
     name: mdbook build + test
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     env:
       # Pinned; bump deliberately. 0.5.x is required for `[rust] edition = 2024`.
       MDBOOK_VERSION: "0.5.4"

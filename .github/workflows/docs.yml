@@ -28,6 +28,10 @@ env:
   MDBOOK_SHA256_X86_64: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
   MDBOOK_SHA256_AARCH64: "753e5c5c363ee8a56972344dcf91466f005a51db84a7aeffe427ae3ef83d6d44"
 
+# Each job names its runner image by forge. On GitHub the image is pinned, as the toolchain
+# and the oracles are: `ubuntu-latest` moves to a new release under an unchanged workflow, and
+# the pinned C oracles predate the C23 a newer image's compiler defaults to. A self-hosted
+# runner answers to `ubuntu-latest` with an image of its own, pinned where it is configured.
 jobs:
   build:
     # Pages is GitHub's, and so are the actions that publish to it: `configure-pages`,
@@ -38,7 +42,7 @@ jobs:
     #
     # `deploy` needs this job, so it skips with it.
     if: github.server_url == 'https://github.com'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -98,7 +102,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
