@@ -7,7 +7,41 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version is below `1.0`, the minor version is the breaking axis: a
 breaking change bumps the minor, and the patch covers backward-compatible fixes.
 
-## [Unreleased]
+## [0.8.0] - 2026-11-10
+
+The library's default build compiles this project's code under MIT OR Apache-2.0 alone, and
+APFS is a feature a build names. The Unicode tables and the LZVN and LZFSE decoders APFS uses
+are crates of their own, `ferrosys-ucd` and `ferrosys-lzfse`, each under its own license. The
+ext reader reads filesystems with `encrypt`, `inline_data`, `ea_inode`, `casefold`,
+`large_dir`, `mmp` and `bigalloc`. The btrfs reader verifies every checksum algorithm the
+format defines, and `--size auto` sizes every family to its contents. `FsTree` answers `find`,
+`list` and `usage` on every family, and `serde` covers every family.
+
+A breaking release, and these are the changes a caller can see:
+
+- The default features are `ext`, `fat`, `exfat`, `btrfs`, `zlib`, `lzo` and `zstd`. A build
+  reading APFS names `apfs`, `lzvn`, `lzfse` and `lzbitmap`, and `detect` names an APFS
+  container in such a build. The `ferrosys` binary carries every family.
+- `ferrosys` and `ferrosys-cli` are licensed `MIT OR Apache-2.0`. The `apfs` feature compiles
+  `ferrosys-ucd`, licensed `Unicode-3.0`, and `lzvn` and `lzfse` compile `ferrosys-lzfse`,
+  licensed `BSD-3-Clause`.
+- `FsTree` has three required methods: `find`, `list` and `usage`.
+- `fat::Times::access` is an `Option`. `exfat::MIN_VOLUME_SECTORS` is
+  `exfat::MIN_VOLUME_BYTES`, and `btrfs::Pool::name` is `btrfs::Pool::as_str`.
+- `btrfs::Node` has a `stub` field. `fat::VolumeLabel::new("")` is `LabelError::Empty`.
+- Under `serde`, `fat::FatType`, `btrfs::Profile` and `btrfs::Pool` serialize as the words the
+  crate prints for them.
+- A walk past a 4,096-byte path is `TreeError::LimitExceeded` in every family. `extract` exits
+  8 for it, and for a read this build does not carry out, where it exited 4.
+- An image can differ from the one 0.7.0 wrote from the same inputs, under a fixed feature set
+  as well. Changed lists each difference.
+
+To migrate: a type implementing `FsTree` implements `find`, `list` and `usage`. A build that
+wants the 0.7 default names `features = ["apfs", "lzvn", "lzfse", "lzbitmap"]` beside the
+default ones. A read of `fat::Times::access` takes `None` as a date the entry leaves zero, and
+a `btrfs::Node` written out in full sets `stub: false`. `MIN_VOLUME_SECTORS` is
+`MIN_VOLUME_BYTES` over the sector size, and `Pool::name` is `Pool::as_str`. A reader of the
+`serde` output reads each closed set's word, as `"fat32"`, where it read the Rust variant name.
 
 ### Added
 
@@ -21,10 +55,11 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
 - **The ext reader reads four more features a Linux kernel writes.** `inline_data`: a file or
   directory kept in its inode reads from its block area and its `system.data` attribute,
   which is the file's content and not one of its attributes. `ea_inode`: an attribute value
-  kept in an inode of its own reads from that inode, held to carrying the flag that says it
-  holds one and to the length the entry declares. `casefold`: a case-folded directory is read
-  through its blocks and a name matches as it is stored, since folding a name needs Unicode
-  tables. `large_dir`: a directory index may have two interior levels. Each is followed by a
+  kept in an inode of its own reads from that inode, up to the 64 KiB an attribute value holds.
+  The inode is held to the flag that marks one and to the length the entry declares.
+  `casefold`: a case-folded directory is read through its blocks and a name matches as it is
+  stored, since folding a name needs Unicode tables. `large_dir`: a directory index may have
+  two interior levels, and a directory's size takes its high word. Each is followed by a
   strict open and checked by a scan; the new `ext::ReadError::BadInlineData` and
   `ext::ReadError::BadValueInode` name what does not hold together.
 - **The ext reader reads a filesystem with multiple-mount protection** (`mmp`). Its block is
@@ -90,10 +125,6 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   naming a subvolume crosses into it only where the subvolume's backref names that directory
   and name. Any other is an empty directory, `btrfs::Node::stub`, where a lookup and a walk
   read the nested subvolume's files before.
-- **An ext attribute value kept in an inode of its own is bounded.** It is read only where the
-  filesystem has `ea_inode`, and only up to the 64 KiB an attribute value holds, so a sparse
-  value inode claiming gigabytes costs a refusal. A scan checks such an inode without reading
-  its data, and reports one the filesystem lacks.
 - **Opening an ext filesystem that needs recovery is bounded by its image.** The journal spans
   at most the blocks the image holds, and a revoke block the log reaches many times revokes
   each block once.
@@ -135,9 +166,7 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   than overflowing it. `s_overhead_clusters` matches `mke2fs` at every block size, on ext3,
   and where the journal takes more than four extents.
   A fit stops at a refusal no size changes. A hard link named under `/lost+found` is refused.
-  A filesystem needing recovery with no journal is malformed. An inline file is held to the
-  read cap by a streamed read, and an inline link to `PATH_MAX`. A directory's size takes its
-  high word under `large_dir`.
+  A filesystem needing recovery with no journal is malformed.
 - **A layer replacing one name of a file with two leaves the other name its file.**
   `LayeredSource` replaces a name, so a hard link to the replaced entry goes on naming the
   file it named rather than the replacement.
@@ -186,8 +215,6 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
 - **The command line classifies exits by whose fault they are.** A symbolic-link loop is no
   such path, a read a cap stopped exits 8 without calling the filesystem malformed, and a short
   file exits 4. A closed standard error ends no command early.
-- **The `ferrosys` binary's notice reproduces the `ferrosys-lzfse` license whole,** both of
-  its copyright lines included.
 - **A tree nested past the longest path a walk builds reads as the well-formed tree it is, in
   every family.** A walk stops at the first path longer than 4,096 bytes as
   `TreeError::LimitExceeded`, where btrfs and APFS reported `TreeError::Malformed`; a btrfs walk
@@ -235,8 +262,6 @@ breaking change bumps the minor, and the patch covers backward-compatible fixes.
   whose `FormatOptions::label` is unset, and `format --label ""` formats one.
 - **`btrfs::Node` has a `stub` field,** true for the empty directory a snapshot holds in place
   of a nested subvolume.
-- **`ferrosys_lzfse::Error` and its variants are `#[non_exhaustive]`,** as every error the
-  workspace publishes is.
 - **An in-memory format refuses an image no allocator will provide** as
   `ImageTooLargeInMemory`, in every family, where it aborted the process.
 - **The CLI reports a read beyond this build as a command it could not carry out.** A
@@ -3087,6 +3112,7 @@ Initial release of the `ferrosys` library and the `ferrosys` command line.
   back out as a tar archive, one file's bytes, or a listing. Exit codes mirror
   `e2fsck`'s.
 
+[0.8.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.8.0
 [0.7.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.7.0
 [0.6.0]: https://github.com/gregordinary/ferrosys/releases/tag/v0.6.0
 [0.5.2]: https://github.com/gregordinary/ferrosys/releases/tag/v0.5.2
